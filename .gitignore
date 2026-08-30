@@ -1,0 +1,69 @@
+# Rust build artifacts
+/target/
+**/target/
+*.pdb
+
+# Cargo lock is intentionally committed for this workspace.
+# If you need to ignore it temporarily, comment out the line below.
+# /Cargo.lock
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / secrets
+.env
+.env.local
+
+# Face inference model binaries are large and reproducible from the manifest.
+# Keep manifest.toml and LICENSE.mediapipe.txt; ignore downloaded artifacts.
+# (gnm_head.npz is a 53 MB GNM weight archive downloaded by tools/xtask.)
+/assets/models/*.tflite
+/assets/models/*.onnx
+/assets/models/*.task
+/assets/models/*.binarypb
+*.npz
+
+# User-provided VRM models and runtime outputs
+*.vrm
+!/assets/**/*.vrm
+/assets/screenshots/
+/assets/recordings/
+
+# Application runtime / logs
+*.log
+/logs/
+/run/
+
+# NDI SDK/runtime staging is local release input, never normal repository data.
+/release/
+/target/ndi-package/
+/tools/ndi-sdk-staging/
+
+# Bevy / wgpu cached pipeline data (if generated locally)
+*.cached_pipeline
+
+# Development-only capture datasets and raw device frames stay outside the
+# repository (GNM #68.1 privacy boundary). Only derived numeric fixtures may
+# be committed.
+data/raw/**
+data/datasets/**
+*.teachercapture/
+# Stray capture artifacts that must never be committed even if they appear
+# outside data/raw/ (raw face video can reveal the capture location).
+/tmp_arkit_take/
+/*take_*.zip
+/data/**/*.zip
+/data/**/*.vrm
+
+# Python research tool artifacts
+__pycache__/
+*.pyc

@@ -1,0 +1,15 @@
+[package]
+name = "vtuber-gnm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Rust-only GNM Head v3 schema, sparse landmark evaluation, and model loading."
+
+[dependencies]
+zip = { version = "=6.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[lints]
+workspace = true

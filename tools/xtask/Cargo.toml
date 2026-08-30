@@ -1,0 +1,38 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Repository automation tasks for RusTuberV."
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+bevy = "=0.19.0"
+bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", rev = "f9593fd78136fb9e0507bcae111e09291ec9b82a", features = ["log"] }
+vtuber-core = { path = "../../crates/vtuber-core" }
+vtuber-camera = { path = "../../crates/vtuber-camera" }
+vtuber-app = { path = "../../crates/vtuber-app" }
+vtuber-avatar = { path = "../../crates/vtuber-avatar" }
+vtuber-inference = { path = "../../crates/vtuber-inference", features = ["legacy-face-stack"] }
+vtuber-tracking = { path = "../../crates/vtuber-tracking" }
+# Deterministic GNM baseline fit for the offline teacher replay (GNM #68.3).
+vtuber-gnm = { path = "../../crates/vtuber-gnm" }
+# JSON trace parsing for the temporal quality report (GNM #57.4); same
+# serde/serde_json versions already used by vtuber-app.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# JPEG input is needed only by the still-image detector diagnostic.
+image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
+mediapipe = { git = "https://github.com/nikicat/mediapipe-rs", rev = "527037fa0fe1339750140283930bbb9560460e9e", version = "=0.1.0" }
+sha2 = "=0.10.8"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+name = "bevy_vrm1"
+upstream = "https://github.com/not-elm/bevy_vrm1"
+base_revision = "f9593fd78136fb9e0507bcae111e09291ec9b82a"
+base_version = "0.9.1"
+license = "MIT OR Apache-2.0"
+vendored_for = "Q2-06-001 direct-pose BodyTracking, Q2-06-002 direct head-relative LookAt, and Epic 22 VRM generation normalization"
+
+[patch_scope]
+files = [
+  "Cargo.toml",
+  "src/vrm/body_tracking.rs",
+  "src/vrm/body_tracking/direct.rs",
+  "src/vrm/detach.rs",
+  "src/vrm/look_at.rs",
+  "src/vrm/gltf/extensions.rs",
+  "src/vrm/gltf/extensions/runtime_descriptor.rs",
+  "src/vrm/initialize.rs",
+  "src/vrm/detach.rs",
+  "src/vrm.rs",
+  "src/vrm/spring_bone/update.rs",
+  "src/system_set.rs",
+  "src/vrm.rs",
+]
+notes = "Q2-06-001 adds direct yaw/pitch/roll input, upperChest participation, per-axis weights, per-bone half-life, and an early direct-pose system. Q2-06-002 adds a target-free head-relative LookAt input, model range-map reuse, exclusive Bone/Expression output, additive eye animation composition, cleanup, and VRM 1.0 LookAt/Expression/Constraint/SpringBone ordering while preserving the legacy Cursor/Target path. Epic 22 adds a pure VRM 0.x/1.0 core descriptor parser without a second loader or ECS runtime. The dev-only bevy_test_helper dependency is pinned to the v0.18 branch revision observed when vendored."

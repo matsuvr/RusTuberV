@@ -1,0 +1,24 @@
+[package]
+name = "vtuber-camera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "OS camera backends and capture worker for RusTuberV."
+
+[dependencies]
+vtuber-core = { path = "../vtuber-core" }
+thiserror = "2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "=0.10.11", default-features = false, features = ["input-msmf", "decoding"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "=0.10.11", default-features = false, features = ["input-avfoundation", "decoding"] }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

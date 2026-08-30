@@ -1,0 +1,30 @@
+[package]
+name = "vtuber-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Desktop executable for RusTuberV."
+
+[[bin]]
+name = "vtuber-desktop"
+path = "src/main.rs"
+
+[dependencies]
+vtuber-app = { path = "../../crates/vtuber-app" }
+vtuber-avatar = { path = "../../crates/vtuber-avatar" }
+bevy = "=0.19.0"
+bevy_egui = { workspace = true }
+bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", rev = "f9593fd78136fb9e0507bcae111e09291ec9b82a", features = ["log"] }
+directories = "5"
+
+[features]
+dev-synthetic-input = ["vtuber-app/dev-synthetic-input"]
+ndi-output = ["vtuber-app/ndi-output"]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

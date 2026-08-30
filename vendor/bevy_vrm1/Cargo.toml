@@ -1,0 +1,60 @@
+[package]
+name = "bevy_vrm1"
+version = "0.9.1"
+edition = "2024"
+authors = ["notelm <elmprograminfo@gmail.com>"]
+description = "Allows you to use VRM and VRMA in Bevy"
+repository = "https://github.com/not-elm/bevy_vrm1"
+keywords = ["bevy", "game", "vrm", "vrma"]
+categories = ["games"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+exclude = ["assets/"]
+
+[dependencies]
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_render",
+    "bevy_window",
+    "bevy_asset",
+    "bevy_gltf",
+    "bevy_animation",
+    "gltf_animation",
+    "bevy_mesh",
+    "bevy_shader",
+    "bevy_pbr",
+] }
+serde = "1"
+serde_json = "1"
+anyhow = "1"
+bitflags = { version = "2.9" }
+paste = "1"
+indexmap = "2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+bevy = { version = "0.19" }
+bevy_test_helper = { git = "https://github.com/not-elm/bevy_test_helper", rev = "837d74b0ef325440a61662ed8d784100064bdcd9" }
+bevy_panorbit_camera = "0.35.0"
+
+[lints.clippy]
+type_complexity = "allow"
+doc_markdown = "warn"
+manual_let_else = "warn"
+undocumented_unsafe_blocks = "warn"
+redundant_else = "warn"
+match_same_arms = "warn"
+semicolon_if_nothing_returned = "warn"
+
+[features]
+default = []
+serde = ["bevy/serialize"]
+log = ["bevy/bevy_log"]
+develop = []
+
+#[lints.rust]
+#missing_docs = "warn"

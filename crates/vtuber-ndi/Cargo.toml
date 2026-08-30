@@ -1,0 +1,25 @@
+[package]
+name = "vtuber-ndi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Optional NDI video sender boundary for RusTuberV."
+
+[dependencies]
+vtuber-core = { path = "../vtuber-core" }
+grafton-ndi = { version = "=1.0.0", default-features = false, optional = true }
+
+[[bin]]
+name = "ndi-smoke"
+path = "src/bin/ndi_smoke.rs"
+required-features = ["ndi-sdk"]
+
+[features]
+default = []
+ndi-sdk = ["dep:grafton-ndi"]
+
+[lints]
+workspace = true

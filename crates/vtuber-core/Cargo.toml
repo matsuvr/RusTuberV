@@ -1,0 +1,16 @@
+[package]
+name = "vtuber-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Platform- and engine-independent data and synchronization contracts for RusTuberV."
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

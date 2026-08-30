@@ -1,0 +1,33 @@
+[package]
+name = "vtuber-inference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Face model loading, preprocessing, and pure-Rust inference for RusTuberV."
+
+[dependencies]
+vtuber-core = { path = "../vtuber-core" }
+mediapipe = { git = "https://github.com/nikicat/mediapipe-rs", rev = "527037fa0fe1339750140283930bbb9560460e9e", version = "=0.1.0" }
+tract-tflite = "=0.23.4"
+tract-onnx = { version = "=0.23.4", optional = true }
+tract-core = { version = "=0.23.4", optional = true }
+sha2 = "=0.10.8"
+hex = "=0.4.3"
+thiserror = "2"
+anyhow = "=1.0.103"
+
+[features]
+# The desktop application selects MediaPipe directly and must not compile the
+# legacy detector/crop/ONNX stack by default. The old stack remains available
+# only for explicitly named research and evaluation commands.
+default = []
+legacy-face-stack = ["onnx"]
+onnx = ["dep:tract-onnx", "dep:tract-core"]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

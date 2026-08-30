@@ -1,0 +1,69 @@
+[workspace]
+members = [
+  "crates/vtuber-core",
+  "crates/vtuber-camera",
+  "crates/vtuber-inference",
+  "crates/vtuber-gnm",
+  "crates/vtuber-tracking",
+  "crates/vtuber-avatar",
+  "crates/vtuber-ndi",
+  "crates/vtuber-app",
+  "apps/desktop",
+  "tools/xtask",
+]
+exclude = ["vendor/bevy_vrm1"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97.1"
+authors = ["RusTuberV contributors"]
+repository = "https://github.com/matsuvr/RusTuberV"
+
+[workspace.dependencies]
+bevy_egui = { version = "=0.41.1", default-features = false, features = ["default_fonts", "render"] }
+rfd = { version = "=0.17.2", default-features = false }
+
+[patch."https://github.com/not-elm/bevy_vrm1"]
+bevy_vrm1 = { path = "vendor/bevy_vrm1" }
+
+# Build artifact disk policy (AGENTS.md): full debug info in dev builds is
+# the single largest contributor to target/ size (tens of GiB). Line tables
+# keep panic backtraces readable with file/line numbers; do not restore
+# "debug = true" / 2.
+[profile.dev]
+debug = "line-tables-only"
+
+# Issue #148: the dense GNM solver's O(K³) Cholesky factorization and
+# normal-equation assembly dominate debug-profile wall-clock time for the
+# persistent-fitter, sequence-regression, and latest-frame-worker test
+# suites. Optimizing the numeric kernel crate keeps those suites near
+# release speed. Package-level override only: workspace dev-profile
+# settings (debug info, incremental compilation) stay governed by the
+# build artifact disk policy in AGENTS.md, and Rust floating-point
+# semantics are unchanged at opt-level 2.
+[profile.dev.package.vtuber-gnm]
+opt-level = 2
+
+[workspace.lints.rust]
+# Production code must be panic-free and unsafe-free (see AGENTS.md:
+# "Production Rust panic policy" / "Unsafe code").
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo_common_metadata = "allow"
+missing_panics_doc = "allow"
+# Production Rust panic policy (AGENTS.md). The workspace is now panic-free:
+# these lints are denied. Tests may opt out with module-level allows
+# (tests may panic per AGENTS.md); documented production invariants use
+# per-site #[allow] with an invariant comment.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"

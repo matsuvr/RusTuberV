@@ -1,0 +1,38 @@
+[package]
+name = "vtuber-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Orchestration, UI, settings, model import, and diagnostics for RusTuberV."
+
+[dependencies]
+vtuber-core = { path = "../vtuber-core" }
+vtuber-camera = { path = "../vtuber-camera" }
+vtuber-inference = { path = "../vtuber-inference", default-features = false }
+vtuber-tracking = { path = "../vtuber-tracking" }
+vtuber-avatar = { path = "../vtuber-avatar" }
+vtuber-ndi = { path = "../vtuber-ndi" }
+bevy = "=0.19.0"
+bevy_egui = { workspace = true }
+rfd = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+gltf = { version = "=1.4.1", default-features = false, features = ["extensions", "names", "import"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+toml = "0.9"
+directories = "5"
+
+[features]
+dev-synthetic-input = []
+ndi-output = ["vtuber-ndi/ndi-sdk"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

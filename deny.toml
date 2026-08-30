@@ -1,0 +1,65 @@
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = [
+    # Unmaintained transitive crates from upstream dependencies (Bevy, nokhwa).
+    # There is no safe upgrade available while pinned to Bevy 0.19.0.
+    "RUSTSEC-2026-0192", # ttf-parser unmaintained
+    "RUSTSEC-2024-0436", # paste unmaintained
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    # Embedded default UI font shipped transitively by epaint_default_fonts.
+    "Ubuntu-font-1.0",
+    # Mozilla CA root data shipped transitively by the pinned MediaPipe runtime.
+    "CDLA-Permissive-2.0",
+    "CC0-1.0",
+    "Zlib",
+    "IJG",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-git = [
+    # ADR-009 pins this source to revision 527037fa0fe1339750140283930bbb9560460e9e.
+    "https://github.com/nikicat/mediapipe-rs",
+]
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

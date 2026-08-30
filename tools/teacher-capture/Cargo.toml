@@ -1,0 +1,21 @@
+[package]
+name = "teacher-capture"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "Development-only ARKit teacher capture tool (GNM #68.2a). Standalone build; not a workspace member."
+
+# Intentionally standalone: the production workspace must not depend on or
+# build this tool (GNM #68.2a).
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The dataset record contracts mirror crates/vtuber-tracking/src/arkit_teacher.rs
+# but the tool is deliberately standalone: it must build without the Bevy
+# workspace so an iOS toolchain can compile it independently.
+
+[dev-dependencies]
+tempfile = "3"

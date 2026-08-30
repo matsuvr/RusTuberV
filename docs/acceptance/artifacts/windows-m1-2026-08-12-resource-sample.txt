@@ -1,0 +1,30 @@
+Windows M1 resource sample summary
+Date: 2026-08-12
+Binary: target/release/vtuber-desktop.exe
+PID: 32200
+Sampling: PowerShell Get-Process, 59 seconds, one sample per second while the
+release application was Running and tracking after camera reconnection.
+
+RSS / Working Set (MiB):
+- start: 888.14
+- end: 893.52
+- min: 888.14
+- max: 897.01
+- average: 890.66
+
+Private memory (MiB):
+- start: 1475.72
+- end: 1482.67
+- min: 1475.62
+- max: 1485.36
+- average: 1478.48
+
+Thread count:
+- start: 131
+- end: 129
+- min: 129
+- max: 131
+- average: 129.95
+
+All 59 samples reported Responding=True. This is a bounded resource sample,
+not the required once-per-minute 30-minute soak export.

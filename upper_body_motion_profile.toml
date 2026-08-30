@@ -1,0 +1,106 @@
+# Bevy/Rust upper-body motion defaults.
+# Units are meters, seconds, radians/degrees as named. Avatar-scaled quantities
+# must be multiplied by the normalized avatar scale exactly once.
+
+[profile]
+name = "webcam_upper_body_v1"
+version = 1
+source_kind = "project_default"
+
+[input]
+mirror_horizontal = true
+webcam_position_tau_s = 0.103
+webcam_rotation_tau_s = 0.103
+non_webcam_position_tau_s = 0.0467
+non_webcam_rotation_tau_s = 0.0467
+acquire_fade_s = 0.5
+lost_return_s = 4.0
+
+[scale]
+reference_neck_height_m = 1.2
+preferred_avatar_metric = "hips_to_head"
+apply_tracker_normalization_once = true
+apply_avatar_rescale_once = true
+
+[translation_soft_limit]
+x_threshold_scale = 0.15
+y_threshold_scale = 0.075
+z_threshold_scale = 0.15
+mid_segment_slope = 0.5
+outer_cap_multiplier = 1.5
+
+[root_split]
+follow_x = 0.0
+follow_y = 1.0
+follow_z = 1.0
+residual_y_ratio_of_avatar_height = 0.03
+residual_y_min_m = 0.035
+residual_y_max_m = 0.060
+max_root_yaw_deg = 15.0
+disable_z_movement = false
+
+[upper_body_solver]
+iterations = 3
+head_position_weight = 1.0
+head_rotation_weight = 1.0
+body_position_stiffness = 0.0
+body_rotation_stiffness = 0.1
+neck_stiffness = 0.0
+pelvis_position_weight = 0.0
+move_body_back_when_crouching = 0.5
+plant_feet = true
+locomotion_weight = 0.0
+
+[untracked_hands]
+anchor_parent = "hips"
+left_x_m = -0.215
+right_x_m = 0.215
+y_m = -0.150
+z_m = 0.0
+position_weight = 1.0
+rotation_weight = 1.0
+cached_positions = 10
+return_position_rate_per_s = 1.25
+return_rotation_rate_per_s = 2.0
+tracking_weight_rate_per_s = 2.5
+head_x_follow = 0.75
+head_y_follow = 0.0
+head_z_follow = 1.0
+
+[elbows]
+bend_goal_x_offset_m = 0.2
+bend_goal_weight = 0.2
+left_outer_swivel_deg = -15.0
+right_outer_swivel_deg = 15.0
+inner_transition_width_m = 0.15
+
+[forearm_twist]
+weight = 0.7
+parent_child_crossfade = 0.9
+twist_angle_offset_deg = 0.0
+implementation = "swing_twist_decomposition"
+
+[shoulders]
+left_elevation_trim = 0.0
+right_elevation_trim = 0.0
+preserve_hand_target = true
+rerun_arm_ik_iterations = 1
+
+[lost_idle]
+target_interval_s = 2.5
+position_x_max_m = 0.015
+position_y_max_m = 0.0
+position_z_max_m = 0.030
+pitch_max_deg = 4.0
+yaw_max_deg = 4.0
+roll_max_deg = 0.0
+position_follow_rate_per_s = 0.4
+rotation_follow_rate_per_s = 0.8
+
+[diagnostics]
+record_head_target = true
+record_root_split = true
+record_head_position_error = true
+record_head_rotation_error = true
+record_hand_target_error = true
+record_foot_slide = true
