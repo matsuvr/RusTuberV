@@ -297,76 +297,136 @@ fn expression_integration_one_event_per_frame() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-domain Perfect Sync fallback
+// Perfect Sync 51ch vs standard eye/mouth: exactly one path per frame
 // ---------------------------------------------------------------------------
 
+fn required_perfect_sync_names() -> Vec<&'static str> {
+    ArkitBlendshape::ALL
+        .into_iter()
+        .filter(|channel| *channel != ArkitBlendshape::TongueOut)
+        .map(ArkitBlendshape::canonical_name)
+        .collect()
+}
+
+fn perfect_sync_caps(names: &[&str]) -> AvatarCapabilities {
+    let mut caps = full_caps();
+    caps.perfect_sync = PerfectSyncCapabilities::from_names(names.iter().copied());
+    caps
+}
+
+type CoarseWeights = (Vec<(String, f32)>, Vec<(String, f32)>, Vec<(String, f32)>);
+
+const COARSE_WEIGHTS: [(&str, f32); 3] = [("blinkLeft", 0.7), ("aa", 0.8), ("lookLeft", 0.9)];
+
+fn coarse_weights() -> CoarseWeights {
+    (
+        vec![("blinkLeft".to_owned(), 0.7)],
+        vec![("aa".to_owned(), 0.8)],
+        vec![("lookLeft".to_owned(), 0.9)],
+    )
+}
+
+/// Asserts that a command list is exactly the standard path: the supplied
+/// coarse weights and no ARKit custom Expression.
+fn assert_standard_path(commands: &[ExpressionCommand]) {
+    assert_eq!(commands.len(), COARSE_WEIGHTS.len());
+    for (command, (name, weight)) in commands.iter().zip(COARSE_WEIGHTS) {
+        assert_eq!(command.name, name);
+        assert!((command.weight - weight).abs() < f32::EPSILON);
+    }
+}
+
 #[test]
-fn expression_integration_full_52_owns_all_coarse_domains() {
-    let caps = all_perfect_sync_caps();
+fn expression_integration_all_51_channels_uses_the_detailed_path() {
+    let caps = perfect_sync_caps(&required_perfect_sync_names());
     let coefficients = detailed_coefficients(&[(ArkitBlendshape::JawOpen, 0.4)]);
+    let (blink, mouth, gaze) = coarse_weights();
     let commands = build_face_commands(
         Some(&coefficients),
         &caps,
-        &[("blinkLeft".to_owned(), 0.7)],
-        &[("aa".to_owned(), 0.8)],
-        &[("lookLeft".to_owned(), 0.9)],
+        &blink,
+        &mouth,
+        &gaze,
         detailed_name,
     );
 
-    assert_eq!(commands.len(), ARKIT52_CHANNEL_COUNT);
+    // 51 required commands, no TongueOut, and no coarse writer in the frame.
+    assert_eq!(commands.len(), ARKIT52_CHANNEL_COUNT - 1);
     assert!(commands.iter().any(|command| {
         command.name == "JawOpen" && (command.weight - 0.4).abs() < f32::EPSILON
     }));
+    assert!(!commands.iter().any(|command| command.name == "TongueOut"));
     assert!(!commands.iter().any(|command| command.name == "blinkLeft"));
     assert!(!commands.iter().any(|command| command.name == "aa"));
     assert!(!commands.iter().any(|command| command.name == "lookLeft"));
 }
 
 #[test]
-fn expression_integration_tongue_only_keeps_coarse_blink_and_mouth() {
-    let mut caps = full_caps();
-    caps.perfect_sync = PerfectSyncCapabilities::from_names(["TongueOut"]);
+fn expression_integration_tongue_out_is_not_required_for_the_detailed_path() {
+    let caps = all_perfect_sync_caps();
     let coefficients = detailed_coefficients(&[(ArkitBlendshape::TongueOut, 1.0)]);
+    let (blink, mouth, gaze) = coarse_weights();
     let commands = build_face_commands(
         Some(&coefficients),
         &caps,
-        &[("blinkLeft".to_owned(), 0.7)],
-        &[("aa".to_owned(), 0.8)],
-        &[],
+        &blink,
+        &mouth,
+        &gaze,
         detailed_name,
     );
 
-    assert!(commands.iter().any(|command| command.name == "TongueOut"));
-    assert!(commands.iter().any(|command| command.name == "blinkLeft"));
-    assert!(commands.iter().any(|command| command.name == "aa"));
+    // The model also has TongueOut, but it is effective-only metadata: no
+    // TongueOut command is ever sent.
+    assert_eq!(commands.len(), ARKIT52_CHANNEL_COUNT - 1);
+    assert!(!commands.iter().any(|command| command.name == "TongueOut"));
 }
 
 #[test]
-fn expression_integration_one_eye_look_channel_falls_back_to_existing_gaze() {
-    let mut caps = full_caps();
-    caps.perfect_sync = PerfectSyncCapabilities::from_names(["EyeLookUpLeft"]);
-    let coefficients = detailed_coefficients(&[(ArkitBlendshape::EyeLookUpLeft, 1.0)]);
+fn expression_integration_missing_one_required_channel_uses_the_standard_path() {
+    let names: Vec<&str> = required_perfect_sync_names()
+        .into_iter()
+        .filter(|name| *name != "JawOpen")
+        .collect();
+    let caps = perfect_sync_caps(&names);
+    let coefficients = detailed_coefficients(&[(ArkitBlendshape::JawOpen, 0.4)]);
+    let (blink, mouth, gaze) = coarse_weights();
     let commands = build_face_commands(
         Some(&coefficients),
         &caps,
-        &[],
-        &[],
-        &[("lookLeft".to_owned(), 0.9)],
+        &blink,
+        &mouth,
+        &gaze,
         detailed_name,
     );
 
-    assert!(commands.iter().any(|command| command.name == "lookLeft"));
-    assert!(
-        !commands
-            .iter()
-            .any(|command| command.name == "EyeLookUpLeft")
-    );
+    assert_standard_path(&commands);
 }
 
 #[test]
-fn expression_integration_complete_eye_look_coverage_replaces_existing_gaze() {
+fn expression_integration_named_but_unbound_channel_uses_the_standard_path() {
     let mut caps = full_caps();
-    caps.perfect_sync = PerfectSyncCapabilities::from_names([
+    let statuses: Vec<(&str, bool)> = required_perfect_sync_names()
+        .into_iter()
+        .map(|name| (name, name != "JawOpen"))
+        .collect();
+    caps.perfect_sync = PerfectSyncCapabilities::from_named_statuses(statuses);
+    let coefficients = detailed_coefficients(&[(ArkitBlendshape::JawOpen, 0.4)]);
+    let (blink, mouth, gaze) = coarse_weights();
+    let commands = build_face_commands(
+        Some(&coefficients),
+        &caps,
+        &blink,
+        &mouth,
+        &gaze,
+        detailed_name,
+    );
+
+    assert_standard_path(&commands);
+}
+
+#[test]
+fn expression_integration_partial_arkit_names_never_emit_detailed_commands() {
+    let caps = perfect_sync_caps(&[
         "EyeLookDownLeft",
         "EyeLookDownRight",
         "EyeLookInLeft",
@@ -377,21 +437,43 @@ fn expression_integration_complete_eye_look_coverage_replaces_existing_gaze() {
         "EyeLookUpRight",
     ]);
     let coefficients = detailed_coefficients(&[(ArkitBlendshape::EyeLookUpLeft, 1.0)]);
+    let (blink, mouth, gaze) = coarse_weights();
     let commands = build_face_commands(
         Some(&coefficients),
         &caps,
-        &[],
-        &[],
-        &[("lookLeft".to_owned(), 0.9)],
+        &blink,
+        &mouth,
+        &gaze,
         detailed_name,
     );
 
-    assert!(
-        commands
-            .iter()
-            .any(|command| command.name == "EyeLookUpLeft")
+    assert_standard_path(&commands);
+}
+
+#[test]
+fn expression_integration_tongue_only_model_uses_the_standard_path() {
+    let caps = perfect_sync_caps(&["TongueOut"]);
+    let coefficients = detailed_coefficients(&[(ArkitBlendshape::TongueOut, 1.0)]);
+    let (blink, mouth, gaze) = coarse_weights();
+    let commands = build_face_commands(
+        Some(&coefficients),
+        &caps,
+        &blink,
+        &mouth,
+        &gaze,
+        detailed_name,
     );
-    assert!(!commands.iter().any(|command| command.name == "lookLeft"));
+
+    assert_standard_path(&commands);
+}
+
+#[test]
+fn expression_integration_without_detailed_face_uses_the_standard_path() {
+    let caps = all_perfect_sync_caps();
+    let (blink, mouth, gaze) = coarse_weights();
+    let commands = build_face_commands(None, &caps, &blink, &mouth, &gaze, detailed_name);
+
+    assert_standard_path(&commands);
 }
 
 #[test]
