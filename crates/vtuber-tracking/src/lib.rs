@@ -147,9 +147,9 @@ pub use expressions::{
     map_mediapipe_raw_expressions, observe_mediapipe_gaze, parse_mediapipe_blendshapes,
 };
 pub use filter::{
-    ExpressionCalibration, ExpressionCalibrationError, ExpressionChannel, ExpressionFilter,
-    ExpressionFilterParams, ExpressionRange, GazeFilter, GazeFilterParams, HeadFilterParams,
-    HeadRotationFilter, MissingChannelFallback, MissingChannelPolicy,
+    DetailedExpressionFilter, ExpressionCalibration, ExpressionCalibrationError, ExpressionChannel,
+    ExpressionFilter, ExpressionFilterParams, ExpressionRange, GazeFilter, GazeFilterParams,
+    HeadFilterParams, HeadRotationFilter, MissingChannelFallback, MissingChannelPolicy,
 };
 pub use gnm_arkit_projector::{
     Arkit52DecodeResult, BrowCheekNoseProjection, EyeGazeProjection, JawCoreMouthProjection,
