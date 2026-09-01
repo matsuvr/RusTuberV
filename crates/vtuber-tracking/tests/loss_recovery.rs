@@ -63,12 +63,24 @@ fn rotation_angle_from_identity(pose: HeadPose) -> f32 {
     semantic_pose_to_quaternion(pose).angle()
 }
 
-fn detailed_frame(seq: u64, coefficient: f32) -> AvatarControlFrame {
+/// A tracked frame whose `TongueOut` is zero, matching the coefficients the
+/// detailed expression filter publishes.
+fn detailed_frame(seq: u64, jaw_open: f32) -> AvatarControlFrame {
     let mut values = [0.0; ARKIT52_CHANNEL_COUNT];
-    values[ArkitBlendshape::TongueOut.index()] = coefficient;
+    values[ArkitBlendshape::JawOpen.index()] = jaw_open;
+    values[ArkitBlendshape::MouthSmileLeft.index()] = jaw_open * 0.5;
     let mut frame = frame(seq, 0.2, -0.1, 0.05, 0.4);
     frame.detailed_face = Some(Arkit52Coefficients::try_from_array(values).unwrap());
     frame
+}
+
+/// Absolute value of one channel, or `0.0` when the frame carries no
+/// detailed coefficients.
+fn detailed_value(frame: &AvatarControlFrame, channel: ArkitBlendshape) -> f32 {
+    frame
+        .detailed_face
+        .as_ref()
+        .map_or(0.0, |coefficients| coefficients.get(channel).abs())
 }
 
 #[test]
@@ -245,14 +257,14 @@ fn loss_recovery_reacquire_limits_jump() {
 }
 
 #[test]
-fn loss_recovery_drops_detailed_face_when_returning_to_neutral() {
+fn loss_recovery_holds_detailed_face_during_loss_hold() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
     let tracked = detailed_frame(11, 0.8);
 
     let _ = recovery.update(
         TrackingState::Tracking,
         Duration::from_millis(16),
-        Some(tracked),
+        Some(tracked.clone()),
         MonoTimeNs(16_000_000),
     );
     let held = recovery
@@ -263,20 +275,209 @@ fn loss_recovery_drops_detailed_face_when_returning_to_neutral() {
             MonoTimeNs(66_000_000),
         )
         .expect("glide should preserve the last detailed face state");
-    assert!(held.detailed_face.is_some());
 
+    let held = held.detailed_face.expect("detailed face is held");
+    assert!((held.get(ArkitBlendshape::JawOpen) - 0.8).abs() < 1.0e-6);
+    assert_eq!(held.get(ArkitBlendshape::TongueOut), 0.0);
+}
+
+#[test]
+fn loss_recovery_decays_detailed_face_monotonically_toward_zero() {
+    let mut recovery = LossRecovery::new(test_params()).unwrap();
+    let tracked = detailed_frame(11, 0.8);
+
+    let _ = recovery.update(
+        TrackingState::Tracking,
+        Duration::from_millis(16),
+        Some(tracked),
+        MonoTimeNs(16_000_000),
+    );
+    // Spend the glide window so the next update starts the decay.
+    let _ = recovery.update(
+        TrackingState::LostHold,
+        Duration::from_millis(50),
+        None,
+        MonoTimeNs(66_000_000),
+    );
+
+    let mut previous = f32::INFINITY;
+    let mut decaying = 0usize;
+    for step in 1..=4u64 {
+        let frame = recovery
+            .update(
+                TrackingState::ReturningNeutral,
+                Duration::from_millis(20),
+                None,
+                MonoTimeNs(66_000_000 + step * 20_000_000),
+            )
+            .expect("decay should emit a frame");
+
+        // The decay must never snap `Some` straight to `None`.
+        assert!(
+            frame.detailed_face.is_some(),
+            "step {step} dropped the detailed face mid-decay"
+        );
+        assert!(!recovery.is_returning() || frame.detailed_face.is_some());
+
+        let jaw = detailed_value(&frame, ArkitBlendshape::JawOpen);
+        let smile = detailed_value(&frame, ArkitBlendshape::MouthSmileLeft);
+        assert!(jaw <= previous + 1.0e-6, "step {step} grew: {jaw}");
+        assert!(smile <= previous + 1.0e-6, "step {step} grew: {smile}");
+        assert_eq!(
+            detailed_value(&frame, ArkitBlendshape::TongueOut),
+            0.0,
+            "tongue stays zero"
+        );
+        if recovery.is_returning() {
+            decaying += 1;
+        }
+        previous = jaw;
+    }
+    assert!(decaying > 0, "the decay should still be in progress");
+}
+
+#[test]
+fn loss_recovery_publishes_zero_detailed_face_before_dropping_it() {
+    let mut recovery = LossRecovery::new(test_params()).unwrap();
+    let tracked = detailed_frame(11, 0.8);
+
+    let _ = recovery.update(
+        TrackingState::Tracking,
+        Duration::from_millis(16),
+        Some(tracked),
+        MonoTimeNs(16_000_000),
+    );
+    let _ = recovery.update(
+        TrackingState::LostHold,
+        Duration::from_millis(50),
+        None,
+        MonoTimeNs(66_000_000),
+    );
+    // The first returning update hands the glide over to the decay.
+    let _ = recovery.update(
+        TrackingState::ReturningNeutral,
+        Duration::from_millis(200),
+        None,
+        MonoTimeNs(266_000_000),
+    );
     let neutral = recovery
         .update(
             TrackingState::ReturningNeutral,
             Duration::from_millis(200),
             None,
-            MonoTimeNs(266_000_000),
+            MonoTimeNs(466_000_000),
         )
         .expect("neutral transition should emit a frame");
+
+    // The last decay frame publishes exact zeros for every channel.
+    let neutral = neutral
+        .detailed_face
+        .expect("the final decay frame still carries coefficients");
+    assert_eq!(neutral, Arkit52Coefficients::default());
+
+    // Once neutral is reached the coefficients are dropped, and the tracker
+    // in the avatar adapter has already seen the zeros.
+    let after = recovery
+        .update(
+            TrackingState::Searching,
+            Duration::from_millis(16),
+            None,
+            MonoTimeNs(482_000_000),
+        )
+        .expect("searching should keep emitting neutral frames");
     assert!(
-        neutral.detailed_face.is_none(),
-        "tracking loss must not retain stale ARKit52 coefficients"
+        after.detailed_face.is_none(),
+        "searching frames must not retain ARKit52 coefficients"
     );
+}
+
+#[test]
+fn loss_recovery_reacquire_blends_detailed_face_continuously() {
+    let mut recovery = LossRecovery::new(test_params()).unwrap();
+    let tracked = detailed_frame(11, 0.8);
+
+    let _ = recovery.update(
+        TrackingState::Tracking,
+        Duration::from_millis(16),
+        Some(tracked.clone()),
+        MonoTimeNs(16_000_000),
+    );
+    // Fully decay to neutral: the coefficients are dropped.
+    let _ = recovery.update(
+        TrackingState::LostHold,
+        Duration::from_millis(50),
+        None,
+        MonoTimeNs(66_000_000),
+    );
+    let _ = recovery.update(
+        TrackingState::ReturningNeutral,
+        Duration::from_millis(200),
+        None,
+        MonoTimeNs(266_000_000),
+    );
+    let _ = recovery.update(
+        TrackingState::ReturningNeutral,
+        Duration::from_millis(200),
+        None,
+        MonoTimeNs(466_000_000),
+    );
+    let _ = recovery.update(
+        TrackingState::Searching,
+        Duration::from_millis(16),
+        None,
+        MonoTimeNs(482_000_000),
+    );
+
+    // Reacquire a face whose jaw is open again.
+    let reacquired = detailed_frame(12, 0.6);
+    let first = recovery
+        .update(
+            TrackingState::Tracking,
+            Duration::from_millis(16),
+            Some(reacquired.clone()),
+            MonoTimeNs(298_000_000),
+        )
+        .expect("reacquire should emit a frame");
+
+    let first_jaw = detailed_value(&first, ArkitBlendshape::JawOpen);
+    assert!(
+        first_jaw < 0.6,
+        "reacquisition must ramp in, got {first_jaw}"
+    );
+    let second = recovery
+        .update(
+            TrackingState::Tracking,
+            Duration::from_millis(16),
+            Some(reacquired.clone()),
+            MonoTimeNs(314_000_000),
+        )
+        .expect("reacquire should emit a frame");
+    let second_jaw = detailed_value(&second, ArkitBlendshape::JawOpen);
+    assert!(
+        second_jaw > first_jaw,
+        "blend must keep moving toward the target: {first_jaw} then {second_jaw}"
+    );
+    assert_eq!(
+        detailed_value(&second, ArkitBlendshape::TongueOut),
+        0.0,
+        "tongue stays zero across reacquisition"
+    );
+
+    // The blend finishes within the configured recovery duration.
+    let mut last = second_jaw;
+    for step in 1..=6u64 {
+        let frame = recovery
+            .update(
+                TrackingState::Tracking,
+                Duration::from_millis(20),
+                Some(reacquired.clone()),
+                MonoTimeNs(314_000_000 + step * 20_000_000),
+            )
+            .expect("recovery frame");
+        last = detailed_value(&frame, ArkitBlendshape::JawOpen);
+    }
+    assert!((last - 0.6).abs() < 1.0e-3, "recovery should reach {last}");
+    assert!(!recovery.is_recovering());
 }
 
 #[test]

@@ -562,6 +562,47 @@ fn expression_integration_generation_reset() {
     assert_eq!(tracker.generation(), 2);
 }
 
+#[test]
+fn expression_integration_avatar_generation_change_drops_previous_model_commands() {
+    let mut tracker = ExpressionStateTracker::new();
+    // Model A is a Perfect Sync model: 51 custom names were sent.
+    let model_a = vec![
+        ExpressionCommand {
+            name: "JawOpen".to_owned(),
+            weight: 0.6,
+        },
+        ExpressionCommand {
+            name: "MouthSmileLeft".to_owned(),
+            weight: 0.3,
+        },
+    ];
+    let first = tracker.compute_commands(&model_a, 1).expect("first send");
+    assert_eq!(first.len(), 2);
+
+    // Model B replaces it. The tracker clears its history for the new
+    // generation, so none of A's custom names are re-sent or zeroed for B.
+    let model_b = vec![ExpressionCommand {
+        name: "aa".to_owned(),
+        weight: 0.5,
+    }];
+    let second = tracker
+        .compute_commands(&model_b, 2)
+        .expect("generation change should force a send");
+    assert_eq!(tracker.generation(), 2);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].name, "aa");
+    assert!(
+        !second.iter().any(|command| command.name == "JawOpen"),
+        "model A commands must not reach model B"
+    );
+    assert!(
+        !second
+            .iter()
+            .any(|command| command.name == "MouthSmileLeft"),
+        "model A commands must not reach model B"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Missing capability doesn't panic
 // ---------------------------------------------------------------------------

@@ -24,11 +24,11 @@ use std::time::Duration;
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 use thiserror::Error;
 
-use vtuber_core::Arkit52Coefficients;
 use vtuber_core::types::{
     AvatarControlFrame, ExpressionCoefficients, GazeSignal, GazeTrackingState, HeadPose,
     HeadTranslationSignal, HeadTranslationState, MonoTimeNs, TrackingState,
 };
+use vtuber_core::{ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape};
 
 use crate::pose::{quaternion_to_semantic_pose, semantic_pose_to_quaternion};
 
@@ -756,10 +756,12 @@ fn advance_return(
 ) -> (RecoveryState, Option<AvatarControlFrame>) {
     let elapsed = elapsed.saturating_add(dt);
     if elapsed >= params.decay_duration {
-        (
-            RecoveryState::Idle,
-            Some(neutral_frame(&from, produced_at, state)),
-        )
+        // The last decay frame publishes exact zeros so the avatar releases
+        // every Perfect Sync morph before the coefficients are dropped on the
+        // following frames.
+        let mut neutral = neutral_frame(&from, produced_at, state);
+        neutral.detailed_face = from.detailed_face.map(|_| Arkit52Coefficients::default());
+        (RecoveryState::Idle, Some(neutral))
     } else {
         let blended = blend_to_neutral(
             &from,
@@ -984,7 +986,9 @@ fn blend_to_neutral(
         ),
         gaze: blend_gaze(from.gaze, GazeSignal::degraded(0.0, 0.0, 0.0), t),
         expressions: blend_expressions(&from.expressions, &ExpressionCoefficients::default(), t),
-        detailed_face: None,
+        detailed_face: from
+            .detailed_face
+            .map(|coefficients| scale_detailed_face(coefficients, 1.0 - t)),
     }
 }
 
@@ -1000,27 +1004,45 @@ fn zeroed_head_translation(signal: HeadTranslationSignal) -> HeadTranslationSign
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+/// Blends two optional coefficient sets.
+///
+/// A missing side means "no detailed coefficients", which is zero, so both
+/// acquiring and releasing Perfect Sync stay continuous across the blend.
+/// `TongueOut` is zero on both sides and therefore stays zero.
 fn blend_detailed_face(
     from: Option<Arkit52Coefficients>,
     to: Option<Arkit52Coefficients>,
     t: f32,
 ) -> Option<Arkit52Coefficients> {
+    let t = t.clamp(0.0, 1.0);
     match (from, to) {
+        (None, None) => None,
         (Some(from), Some(to)) => {
-            let t = t.clamp(0.0, 1.0);
-            let values = std::array::from_fn(|index| {
-                from.as_array()[index] + (to.as_array()[index] - from.as_array()[index]) * t
-            });
-            Arkit52Coefficients::try_from_array(values).ok()
+            let mut values = [0.0; ARKIT52_CHANNEL_COUNT];
+            for (slot, channel) in values.iter_mut().zip(ArkitBlendshape::ALL) {
+                *slot = from.get(channel) + (to.get(channel) - from.get(channel)) * t;
+            }
+            Some(finish_detailed_face(values))
         }
-        (Some(value), None) if t < 1.0 => Some(value),
-        (None, Some(value)) if t >= 1.0 => Some(value),
-        (_, value) => value,
+        (Some(value), None) => Some(scale_detailed_face(value, 1.0 - t)),
+        (None, Some(value)) => Some(scale_detailed_face(value, t)),
     }
+}
+
+/// Scales every channel toward zero, keeping `TongueOut` at zero.
+fn scale_detailed_face(coefficients: Arkit52Coefficients, factor: f32) -> Arkit52Coefficients {
+    let mut values = [0.0; ARKIT52_CHANNEL_COUNT];
+    for (slot, channel) in values.iter_mut().zip(ArkitBlendshape::ALL) {
+        *slot = coefficients.get(channel) * factor;
+    }
+    finish_detailed_face(values)
+}
+
+// Invariant: every stored coefficient is validated to `[0, 1]` and callers
+// clamp their blend factor, so the result stays within `[0, 1]`.
+#[allow(clippy::expect_used)]
+fn finish_detailed_face(values: [f32; ARKIT52_CHANNEL_COUNT]) -> Arkit52Coefficients {
+    Arkit52Coefficients::try_from_array(values).expect("detailed blend stays within [0, 1]")
 }
 
 fn blend_gaze(from: GazeSignal, to: GazeSignal, t: f32) -> GazeSignal {
