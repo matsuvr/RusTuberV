@@ -242,152 +242,6 @@ pub struct PerfectSyncCapabilities {
     pub unknown_names: Vec<String>,
 }
 
-const MOUTH_LOWER_FACE_CHANNELS: [ArkitBlendshape; 27] = [
-    ArkitBlendshape::JawForward,
-    ArkitBlendshape::JawLeft,
-    ArkitBlendshape::JawOpen,
-    ArkitBlendshape::JawRight,
-    ArkitBlendshape::MouthClose,
-    ArkitBlendshape::MouthDimpleLeft,
-    ArkitBlendshape::MouthDimpleRight,
-    ArkitBlendshape::MouthFrownLeft,
-    ArkitBlendshape::MouthFrownRight,
-    ArkitBlendshape::MouthFunnel,
-    ArkitBlendshape::MouthLeft,
-    ArkitBlendshape::MouthLowerDownLeft,
-    ArkitBlendshape::MouthLowerDownRight,
-    ArkitBlendshape::MouthPressLeft,
-    ArkitBlendshape::MouthPressRight,
-    ArkitBlendshape::MouthPucker,
-    ArkitBlendshape::MouthRight,
-    ArkitBlendshape::MouthRollLower,
-    ArkitBlendshape::MouthRollUpper,
-    ArkitBlendshape::MouthShrugLower,
-    ArkitBlendshape::MouthShrugUpper,
-    ArkitBlendshape::MouthSmileLeft,
-    ArkitBlendshape::MouthSmileRight,
-    ArkitBlendshape::MouthStretchLeft,
-    ArkitBlendshape::MouthStretchRight,
-    ArkitBlendshape::MouthUpperUpLeft,
-    ArkitBlendshape::MouthUpperUpRight,
-];
-
-const EYE_LOOK_CHANNELS: [ArkitBlendshape; 8] = [
-    ArkitBlendshape::EyeLookDownLeft,
-    ArkitBlendshape::EyeLookDownRight,
-    ArkitBlendshape::EyeLookInLeft,
-    ArkitBlendshape::EyeLookInRight,
-    ArkitBlendshape::EyeLookOutLeft,
-    ArkitBlendshape::EyeLookOutRight,
-    ArkitBlendshape::EyeLookUpLeft,
-    ArkitBlendshape::EyeLookUpRight,
-];
-
-/// Coarse-expression domain that a detailed Perfect Sync channel can replace.
-///
-/// Channels in [`Supplemental`] have no existing coarse writer in the avatar
-/// adapter and therefore remain usable even when a coarse-replacement domain
-/// is only partially covered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PerfectSyncFaceDomain {
-    /// Per-eye blink expressions.
-    Blink,
-    /// Jaw and lip/mouth expressions represented by the coarse mouth path.
-    MouthLowerFace,
-    /// Eight bilateral eye-look directions represented by VRM LookAt.
-    EyeLook,
-    /// A detailed expression with no corresponding coarse writer.
-    Supplemental,
-}
-
-impl PerfectSyncFaceDomain {
-    /// Classifies an ARKit52 channel by the coarse path it may replace.
-    #[must_use]
-    pub const fn for_channel(channel: ArkitBlendshape) -> Self {
-        match channel {
-            ArkitBlendshape::EyeBlinkLeft | ArkitBlendshape::EyeBlinkRight => Self::Blink,
-            ArkitBlendshape::EyeLookDownLeft
-            | ArkitBlendshape::EyeLookDownRight
-            | ArkitBlendshape::EyeLookInLeft
-            | ArkitBlendshape::EyeLookInRight
-            | ArkitBlendshape::EyeLookOutLeft
-            | ArkitBlendshape::EyeLookOutRight
-            | ArkitBlendshape::EyeLookUpLeft
-            | ArkitBlendshape::EyeLookUpRight => Self::EyeLook,
-            ArkitBlendshape::JawForward
-            | ArkitBlendshape::JawLeft
-            | ArkitBlendshape::JawOpen
-            | ArkitBlendshape::JawRight
-            | ArkitBlendshape::MouthClose
-            | ArkitBlendshape::MouthDimpleLeft
-            | ArkitBlendshape::MouthDimpleRight
-            | ArkitBlendshape::MouthFrownLeft
-            | ArkitBlendshape::MouthFrownRight
-            | ArkitBlendshape::MouthFunnel
-            | ArkitBlendshape::MouthLeft
-            | ArkitBlendshape::MouthLowerDownLeft
-            | ArkitBlendshape::MouthLowerDownRight
-            | ArkitBlendshape::MouthPressLeft
-            | ArkitBlendshape::MouthPressRight
-            | ArkitBlendshape::MouthPucker
-            | ArkitBlendshape::MouthRight
-            | ArkitBlendshape::MouthRollLower
-            | ArkitBlendshape::MouthRollUpper
-            | ArkitBlendshape::MouthShrugLower
-            | ArkitBlendshape::MouthShrugUpper
-            | ArkitBlendshape::MouthSmileLeft
-            | ArkitBlendshape::MouthSmileRight
-            | ArkitBlendshape::MouthStretchLeft
-            | ArkitBlendshape::MouthStretchRight
-            | ArkitBlendshape::MouthUpperUpLeft
-            | ArkitBlendshape::MouthUpperUpRight => Self::MouthLowerFace,
-            // TongueOut, brows, cheeks, eyelid detail, and nose detail have no
-            // equivalent writer in the existing coarse blink/mouth/gaze paths.
-            _ => Self::Supplemental,
-        }
-    }
-}
-
-/// Per-domain authority for detailed Perfect Sync application.
-///
-/// Authority is deliberately stricter than `effective_count()`: a detailed
-/// domain may suppress its coarse writer only when its complete replacement
-/// coverage is effective. This prevents a partial model from disabling an
-/// otherwise usable blink, mouth, or VRM LookAt path.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct PerfectSyncFaceAuthority {
-    /// Both left and right detailed blink channels are effective.
-    pub blink: bool,
-    /// All jaw/lip channels that replace the coarse mouth path are effective.
-    pub mouth_lower_face: bool,
-    /// All eight bilateral eye-look channels are effective.
-    pub eye_look: bool,
-}
-
-impl PerfectSyncFaceAuthority {
-    /// Authority with every coarse-replacement domain selected.
-    #[must_use]
-    pub const fn all() -> Self {
-        Self {
-            blink: true,
-            mouth_lower_face: true,
-            eye_look: true,
-        }
-    }
-
-    /// Returns whether a detailed channel is allowed to be emitted without
-    /// also emitting its coarse replacement.
-    #[must_use]
-    pub const fn allows_detailed(self, channel: ArkitBlendshape) -> bool {
-        match PerfectSyncFaceDomain::for_channel(channel) {
-            PerfectSyncFaceDomain::Blink => self.blink,
-            PerfectSyncFaceDomain::MouthLowerFace => self.mouth_lower_face,
-            PerfectSyncFaceDomain::EyeLook => self.eye_look,
-            PerfectSyncFaceDomain::Supplemental => true,
-        }
-    }
-}
-
 impl Default for PerfectSyncCapabilities {
     fn default() -> Self {
         Self {
@@ -496,46 +350,26 @@ impl PerfectSyncCapabilities {
         self.present_channels.iter().filter(|&&value| value).count()
     }
 
-    /// Computes detailed authority independently for each coarse-expression
-    /// domain. Every channel in a replacement domain must be effective.
+    /// Returns `true` when every required Perfect Sync channel has a resolved
+    /// morph bind.
+    ///
+    /// The 51 channels other than `TongueOut` are required. `TongueOut` is
+    /// excluded because MediaPipe never tracks the tongue, so a model without
+    /// a tongue expression still drives the detailed path. A channel that is
+    /// merely named in metadata is not enough; it must resolve to at least
+    /// one morph bind.
     #[must_use]
-    pub fn face_authority(&self) -> PerfectSyncFaceAuthority {
-        PerfectSyncFaceAuthority {
-            blink: self.is_effective(ArkitBlendshape::EyeBlinkLeft)
-                && self.is_effective(ArkitBlendshape::EyeBlinkRight),
-            mouth_lower_face: MOUTH_LOWER_FACE_CHANNELS
-                .iter()
-                .all(|&channel| self.is_effective(channel)),
-            eye_look: EYE_LOOK_CHANNELS
-                .iter()
-                .all(|&channel| self.is_effective(channel)),
-        }
+    pub fn supports_perfect_sync(&self) -> bool {
+        ArkitBlendshape::ALL
+            .into_iter()
+            .filter(|&channel| channel != ArkitBlendshape::TongueOut)
+            .all(|channel| self.is_effective(channel))
     }
 
     /// Returns true only when all 52 canonical semantics are present.
     #[must_use]
     pub fn complete_names(&self) -> bool {
         self.present_count() == ARKIT52_CHANNEL_COUNT
-    }
-
-    /// Returns true when the TongueOut channel has an effective binding.
-    #[must_use]
-    pub const fn tongue_out_available(&self) -> bool {
-        self.is_effective(ArkitBlendshape::TongueOut)
-    }
-
-    /// Returns whether Perfect Sync can safely replace both eyes' VRM LookAt
-    /// coverage. A single effective direction is intentionally insufficient.
-    #[must_use]
-    pub const fn eye_look_available(&self) -> bool {
-        self.is_effective(ArkitBlendshape::EyeLookDownLeft)
-            && self.is_effective(ArkitBlendshape::EyeLookDownRight)
-            && self.is_effective(ArkitBlendshape::EyeLookInLeft)
-            && self.is_effective(ArkitBlendshape::EyeLookInRight)
-            && self.is_effective(ArkitBlendshape::EyeLookOutLeft)
-            && self.is_effective(ArkitBlendshape::EyeLookOutRight)
-            && self.is_effective(ArkitBlendshape::EyeLookUpLeft)
-            && self.is_effective(ArkitBlendshape::EyeLookUpRight)
     }
 }
 
@@ -914,7 +748,7 @@ mod tests {
         assert_eq!(caps.present_count(), 52);
         assert_eq!(caps.effective_count(), 52);
         assert!(caps.complete_names());
-        assert!(caps.tongue_out_available());
+        assert!(caps.is_effective(ArkitBlendshape::TongueOut));
         assert!(caps.unknown_names.is_empty());
     }
 
@@ -929,7 +763,7 @@ mod tests {
         assert_eq!(caps.present_count(), 2);
         assert_eq!(caps.effective_count(), 1);
         assert!(caps.is_effective(ArkitBlendshape::JawOpen));
-        assert!(!caps.tongue_out_available());
+        assert!(!caps.is_effective(ArkitBlendshape::TongueOut));
         assert_eq!(caps.unknown_names, vec!["customExtra"]);
     }
 
@@ -948,25 +782,50 @@ mod tests {
         assert!(!caps.is_effective(ArkitBlendshape::TongueOut));
     }
 
+    fn required_perfect_sync_names() -> impl Iterator<Item = &'static str> {
+        ArkitBlendshape::ALL
+            .into_iter()
+            .filter(|channel| *channel != ArkitBlendshape::TongueOut)
+            .map(ArkitBlendshape::canonical_name)
+    }
+
     #[test]
-    fn perfect_sync_full_52_has_authority_for_each_coarse_domain() {
-        let caps = PerfectSyncCapabilities::from_names(
+    fn perfect_sync_requires_all_51_channels_except_tongue_out() {
+        let all_52 = PerfectSyncCapabilities::from_names(
             ArkitBlendshape::ALL
                 .into_iter()
                 .map(ArkitBlendshape::canonical_name),
         );
+        assert!(all_52.supports_perfect_sync());
 
-        assert_eq!(caps.face_authority(), PerfectSyncFaceAuthority::all());
-        assert!(caps.eye_look_available());
+        // TongueOut is not required: a model without a tongue expression is
+        // still a complete Perfect Sync model.
+        let without_tongue = PerfectSyncCapabilities::from_names(required_perfect_sync_names());
+        assert!(without_tongue.supports_perfect_sync());
+
+        let missing_one = PerfectSyncCapabilities::from_names(
+            required_perfect_sync_names().filter(|name| *name != "JawOpen"),
+        );
+        assert!(!missing_one.supports_perfect_sync());
     }
 
     #[test]
-    fn perfect_sync_eye_look_needs_bilateral_complete_coverage() {
-        let one_channel = PerfectSyncCapabilities::from_named_statuses([("EyeLookUpLeft", true)]);
-        assert!(!one_channel.eye_look_available());
-        assert!(!one_channel.face_authority().eye_look);
+    fn perfect_sync_needs_resolved_binds_not_just_names() {
+        let statuses = required_perfect_sync_names()
+            .map(|name| (name, name != "JawOpen"))
+            .collect::<Vec<_>>();
+        let caps = PerfectSyncCapabilities::from_named_statuses(statuses);
 
-        let all_eye_look = PerfectSyncCapabilities::from_names([
+        assert_eq!(caps.present_count(), 51);
+        assert_eq!(caps.effective_count(), 50);
+        assert!(caps.is_present(ArkitBlendshape::JawOpen));
+        assert!(!caps.is_effective(ArkitBlendshape::JawOpen));
+        assert!(!caps.supports_perfect_sync());
+    }
+
+    #[test]
+    fn perfect_sync_partial_channel_sets_are_not_supported() {
+        let eye_look = PerfectSyncCapabilities::from_names([
             "EyeLookDownLeft",
             "EyeLookDownRight",
             "EyeLookInLeft",
@@ -976,30 +835,20 @@ mod tests {
             "EyeLookUpLeft",
             "EyeLookUpRight",
         ]);
-        assert!(all_eye_look.eye_look_available());
+        assert!(!eye_look.supports_perfect_sync());
+
+        let tongue_only = PerfectSyncCapabilities::from_names(["TongueOut"]);
+        assert!(!tongue_only.supports_perfect_sync());
     }
 
     #[test]
-    fn perfect_sync_tongue_is_supplemental_to_coarse_mouth_domain() {
-        let caps = PerfectSyncCapabilities::from_names(["TongueOut"]);
-        let authority = caps.face_authority();
-
-        assert!(!authority.mouth_lower_face);
-        assert_eq!(
-            PerfectSyncFaceDomain::for_channel(ArkitBlendshape::TongueOut),
-            PerfectSyncFaceDomain::Supplemental
-        );
-        assert!(authority.allows_detailed(ArkitBlendshape::TongueOut));
-    }
-
-    #[test]
-    fn perfect_sync_metadata_without_resolved_bind_has_no_domain_authority() {
+    fn perfect_sync_metadata_without_resolved_bind_is_not_supported() {
         let map = make_map(&["TongueOut", "EyeLookUpLeft"]);
         let caps = PerfectSyncCapabilities::from_map_with_effective(Some(&map), |_| false);
 
         assert_eq!(caps.present_count(), 2);
         assert_eq!(caps.effective_count(), 0);
-        assert_eq!(caps.face_authority(), PerfectSyncFaceAuthority::default());
+        assert!(!caps.supports_perfect_sync());
     }
 
     #[test]
