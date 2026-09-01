@@ -143,8 +143,8 @@ pub use confidence::{
 };
 pub use expressions::{
     BinocularGazeObservation, PerEyeGazeObservation, fuse_binocular_gaze,
-    map_mediapipe_expressions, map_mediapipe_gaze, map_mediapipe_raw_expressions,
-    observe_mediapipe_gaze, parse_mediapipe_blendshapes,
+    map_mediapipe_expressions, map_mediapipe_gaze, map_mediapipe_perfect_sync,
+    map_mediapipe_raw_expressions, observe_mediapipe_gaze, parse_mediapipe_blendshapes,
 };
 pub use filter::{
     ExpressionCalibration, ExpressionCalibrationError, ExpressionChannel, ExpressionFilter,

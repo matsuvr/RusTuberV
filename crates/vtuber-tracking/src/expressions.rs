@@ -6,8 +6,9 @@
 //! into tracking or avatar code.
 
 use vtuber_core::{
-    ExpressionCoefficients, FaceBlendshapeSet, FaceTrackingContractError, GazeSignal,
-    MediaPipeBlendshape, RawExpressionObservation,
+    ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape, ExpressionCoefficients,
+    FaceBlendshapeSet, FaceTrackingContractError, GazeSignal, MediaPipeBlendshape,
+    RawExpressionObservation,
 };
 
 /// Parses exactly the official MediaPipe 52-category set.
@@ -62,6 +63,88 @@ pub fn map_mediapipe_expressions(values: &FaceBlendshapeSet) -> ExpressionCoeffi
         sad: frown.max(brow_inner_up),
         relaxed: value(values, MediaPipeBlendshape::Neutral),
         surprised: jaw_open.max(eye_wide),
+    }
+}
+
+/// Converts a typed MediaPipe set into the ARKit52 Perfect Sync contract.
+///
+/// MediaPipe's 51 expression categories share their semantics with the ARKit
+/// channels of the same name, so they are copied by semantic rather than by
+/// array position.  MediaPipe's `_neutral` category has no ARKit semantic and
+/// is dropped.  MediaPipe publishes no tongue category, so `TongueOut`, the
+/// one ARKit channel without a MediaPipe source, stays `0.0`.
+// Invariant: `FaceBlendshapeSet` rejects non-finite scores and scores outside
+// `[0, 1]`, and every slot without a MediaPipe source is a literal `0.0`, so
+// the ARKit52 validation cannot reject this vector.
+#[allow(clippy::expect_used)]
+#[must_use]
+pub fn map_mediapipe_perfect_sync(values: &FaceBlendshapeSet) -> Arkit52Coefficients {
+    let mut coefficients = [0.0; ARKIT52_CHANNEL_COUNT];
+    for (slot, channel) in coefficients.iter_mut().zip(ArkitBlendshape::ALL) {
+        *slot = mediapipe_channel(channel).map_or(0.0, |category| value(values, category));
+    }
+    Arkit52Coefficients::try_from_array(coefficients)
+        .expect("MediaPipe scores are validated to be finite and within [0, 1]")
+}
+
+/// Returns the MediaPipe category that carries one ARKit semantic.
+///
+/// `TongueOut` is the only channel without a MediaPipe source; a missing
+/// source makes the channel `0.0` instead of inventing a value.
+const fn mediapipe_channel(channel: ArkitBlendshape) -> Option<MediaPipeBlendshape> {
+    match channel {
+        ArkitBlendshape::TongueOut => None,
+        ArkitBlendshape::BrowDownLeft => Some(MediaPipeBlendshape::BrowDownLeft),
+        ArkitBlendshape::BrowDownRight => Some(MediaPipeBlendshape::BrowDownRight),
+        ArkitBlendshape::BrowInnerUp => Some(MediaPipeBlendshape::BrowInnerUp),
+        ArkitBlendshape::BrowOuterUpLeft => Some(MediaPipeBlendshape::BrowOuterUpLeft),
+        ArkitBlendshape::BrowOuterUpRight => Some(MediaPipeBlendshape::BrowOuterUpRight),
+        ArkitBlendshape::CheekPuff => Some(MediaPipeBlendshape::CheekPuff),
+        ArkitBlendshape::CheekSquintLeft => Some(MediaPipeBlendshape::CheekSquintLeft),
+        ArkitBlendshape::CheekSquintRight => Some(MediaPipeBlendshape::CheekSquintRight),
+        ArkitBlendshape::EyeBlinkLeft => Some(MediaPipeBlendshape::EyeBlinkLeft),
+        ArkitBlendshape::EyeBlinkRight => Some(MediaPipeBlendshape::EyeBlinkRight),
+        ArkitBlendshape::EyeLookDownLeft => Some(MediaPipeBlendshape::EyeLookDownLeft),
+        ArkitBlendshape::EyeLookDownRight => Some(MediaPipeBlendshape::EyeLookDownRight),
+        ArkitBlendshape::EyeLookInLeft => Some(MediaPipeBlendshape::EyeLookInLeft),
+        ArkitBlendshape::EyeLookInRight => Some(MediaPipeBlendshape::EyeLookInRight),
+        ArkitBlendshape::EyeLookOutLeft => Some(MediaPipeBlendshape::EyeLookOutLeft),
+        ArkitBlendshape::EyeLookOutRight => Some(MediaPipeBlendshape::EyeLookOutRight),
+        ArkitBlendshape::EyeLookUpLeft => Some(MediaPipeBlendshape::EyeLookUpLeft),
+        ArkitBlendshape::EyeLookUpRight => Some(MediaPipeBlendshape::EyeLookUpRight),
+        ArkitBlendshape::EyeSquintLeft => Some(MediaPipeBlendshape::EyeSquintLeft),
+        ArkitBlendshape::EyeSquintRight => Some(MediaPipeBlendshape::EyeSquintRight),
+        ArkitBlendshape::EyeWideLeft => Some(MediaPipeBlendshape::EyeWideLeft),
+        ArkitBlendshape::EyeWideRight => Some(MediaPipeBlendshape::EyeWideRight),
+        ArkitBlendshape::JawForward => Some(MediaPipeBlendshape::JawForward),
+        ArkitBlendshape::JawLeft => Some(MediaPipeBlendshape::JawLeft),
+        ArkitBlendshape::JawOpen => Some(MediaPipeBlendshape::JawOpen),
+        ArkitBlendshape::JawRight => Some(MediaPipeBlendshape::JawRight),
+        ArkitBlendshape::MouthClose => Some(MediaPipeBlendshape::MouthClose),
+        ArkitBlendshape::MouthDimpleLeft => Some(MediaPipeBlendshape::MouthDimpleLeft),
+        ArkitBlendshape::MouthDimpleRight => Some(MediaPipeBlendshape::MouthDimpleRight),
+        ArkitBlendshape::MouthFrownLeft => Some(MediaPipeBlendshape::MouthFrownLeft),
+        ArkitBlendshape::MouthFrownRight => Some(MediaPipeBlendshape::MouthFrownRight),
+        ArkitBlendshape::MouthFunnel => Some(MediaPipeBlendshape::MouthFunnel),
+        ArkitBlendshape::MouthLeft => Some(MediaPipeBlendshape::MouthLeft),
+        ArkitBlendshape::MouthLowerDownLeft => Some(MediaPipeBlendshape::MouthLowerDownLeft),
+        ArkitBlendshape::MouthLowerDownRight => Some(MediaPipeBlendshape::MouthLowerDownRight),
+        ArkitBlendshape::MouthPressLeft => Some(MediaPipeBlendshape::MouthPressLeft),
+        ArkitBlendshape::MouthPressRight => Some(MediaPipeBlendshape::MouthPressRight),
+        ArkitBlendshape::MouthPucker => Some(MediaPipeBlendshape::MouthPucker),
+        ArkitBlendshape::MouthRight => Some(MediaPipeBlendshape::MouthRight),
+        ArkitBlendshape::MouthRollLower => Some(MediaPipeBlendshape::MouthRollLower),
+        ArkitBlendshape::MouthRollUpper => Some(MediaPipeBlendshape::MouthRollUpper),
+        ArkitBlendshape::MouthShrugLower => Some(MediaPipeBlendshape::MouthShrugLower),
+        ArkitBlendshape::MouthShrugUpper => Some(MediaPipeBlendshape::MouthShrugUpper),
+        ArkitBlendshape::MouthSmileLeft => Some(MediaPipeBlendshape::MouthSmileLeft),
+        ArkitBlendshape::MouthSmileRight => Some(MediaPipeBlendshape::MouthSmileRight),
+        ArkitBlendshape::MouthStretchLeft => Some(MediaPipeBlendshape::MouthStretchLeft),
+        ArkitBlendshape::MouthStretchRight => Some(MediaPipeBlendshape::MouthStretchRight),
+        ArkitBlendshape::MouthUpperUpLeft => Some(MediaPipeBlendshape::MouthUpperUpLeft),
+        ArkitBlendshape::MouthUpperUpRight => Some(MediaPipeBlendshape::MouthUpperUpRight),
+        ArkitBlendshape::NoseSneerLeft => Some(MediaPipeBlendshape::NoseSneerLeft),
+        ArkitBlendshape::NoseSneerRight => Some(MediaPipeBlendshape::NoseSneerRight),
     }
 }
 
@@ -225,6 +308,83 @@ mod tests {
             })
             .collect();
         parse_mediapipe_blendshapes(&pairs).expect("official set is complete")
+    }
+
+    #[test]
+    fn perfect_sync_mapping_copies_shared_semantics_by_name() {
+        let values = set(&[
+            (MediaPipeBlendshape::JawOpen, 0.7),
+            (MediaPipeBlendshape::EyeBlinkLeft, 0.8),
+            (MediaPipeBlendshape::EyeBlinkRight, 0.6),
+            (MediaPipeBlendshape::BrowInnerUp, 0.3),
+            (MediaPipeBlendshape::BrowDownLeft, 0.55),
+            (MediaPipeBlendshape::CheekPuff, 0.45),
+            (MediaPipeBlendshape::MouthSmileLeft, 0.4),
+            (MediaPipeBlendshape::MouthSmileRight, 0.2),
+            (MediaPipeBlendshape::EyeLookUpLeft, 0.15),
+            (MediaPipeBlendshape::NoseSneerRight, 0.9),
+        ]);
+        let coefficients = map_mediapipe_perfect_sync(&values);
+        assert!((coefficients.get(ArkitBlendshape::JawOpen) - 0.7).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::EyeBlinkLeft) - 0.8).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::EyeBlinkRight) - 0.6).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::BrowInnerUp) - 0.3).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::BrowDownLeft) - 0.55).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::CheekPuff) - 0.45).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::MouthSmileLeft) - 0.4).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::MouthSmileRight) - 0.2).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::EyeLookUpLeft) - 0.15).abs() < 1.0e-6);
+        assert!((coefficients.get(ArkitBlendshape::NoseSneerRight) - 0.9).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn perfect_sync_mapping_covers_51_unique_mediapipe_categories() {
+        let mut sources = Vec::new();
+        for channel in ArkitBlendshape::ALL {
+            let Some(source) = mediapipe_channel(channel) else {
+                continue;
+            };
+            assert_eq!(
+                source.as_str(),
+                channel.lower_camel_alias(),
+                "semantic mismatch for {channel:?}"
+            );
+            assert!(
+                !sources.contains(&source),
+                "MediaPipe category {source:?} is mapped more than once"
+            );
+            sources.push(source);
+        }
+        assert_eq!(sources.len(), ARKIT52_CHANNEL_COUNT - 1);
+        for category in MediaPipeBlendshape::ALL {
+            if category != MediaPipeBlendshape::Neutral {
+                assert!(
+                    sources.contains(&category),
+                    "unmapped category {category:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn perfect_sync_mapping_ignores_neutral_and_pins_tongue_out() {
+        let neutral_only = set(&[(MediaPipeBlendshape::Neutral, 1.0)]);
+        let coefficients = map_mediapipe_perfect_sync(&neutral_only);
+        assert_eq!(coefficients, Arkit52Coefficients::default());
+
+        let full_scale = set(&MediaPipeBlendshape::ALL
+            .into_iter()
+            .map(|category| (category, 1.0))
+            .collect::<Vec<_>>());
+        let coefficients = map_mediapipe_perfect_sync(&full_scale);
+        assert_eq!(coefficients.get(ArkitBlendshape::TongueOut), 0.0);
+        assert_eq!(coefficients.get(ArkitBlendshape::JawOpen), 1.0);
+        assert!(
+            coefficients
+                .as_array()
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        );
     }
 
     #[test]
