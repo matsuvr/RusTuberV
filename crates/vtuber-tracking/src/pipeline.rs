@@ -25,7 +25,7 @@ use vtuber_core::types::{
     AvatarControlFrame, FrameSeq, GazeSignal, HeadPose, HeadTranslationSignal, Landmark3,
     LandmarkSchemaId, MonoTimeNs, NamedCoefficient, RawFaceObservation, TrackingState,
 };
-use vtuber_core::{CameraFaceTransform, FaceTrackingSample, NormalizedRect};
+use vtuber_core::{Arkit52Coefficients, CameraFaceTransform, FaceTrackingSample, NormalizedRect};
 
 use crate::calibration::{GazeNeutralBaseline, NeutralProfile, NeutralValidationSettings};
 use crate::confidence::{
@@ -33,11 +33,13 @@ use crate::confidence::{
     ConfidencePolicies, synthesize,
 };
 use crate::expressions::{
-    fuse_binocular_gaze, map_mediapipe_raw_expressions, observe_mediapipe_gaze,
+    fuse_binocular_gaze, map_mediapipe_perfect_sync, map_mediapipe_raw_expressions,
+    observe_mediapipe_gaze,
 };
 use crate::filter::{
-    ExpressionCalibration, ExpressionCalibrationError, ExpressionFilter, ExpressionFilterParams,
-    ExpressionRange, GazeFilter, GazeFilterParams, HeadFilterParams, HeadRotationFilter,
+    DetailedExpressionFilter, ExpressionCalibration, ExpressionCalibrationError, ExpressionFilter,
+    ExpressionFilterParams, ExpressionRange, GazeFilter, GazeFilterParams, HeadFilterParams,
+    HeadRotationFilter,
 };
 use crate::loss_recovery::{LossRecovery, LossRecoveryParams};
 use crate::pose::mediapipe::{mediapipe_to_application_basis, relative_transform};
@@ -437,6 +439,7 @@ pub struct TrackingPipeline {
     config: PipelineConfig,
     profile: Option<NeutralProfile>,
     expression_filter: ExpressionFilter,
+    detailed_expression_filter: DetailedExpressionFilter,
     head_filter: HeadRotationFilter,
     gaze_filter: GazeFilter,
     confidence_gate: ConfidenceGate,
@@ -453,6 +456,7 @@ impl TrackingPipeline {
     pub fn new(config: PipelineConfig) -> Result<Self, PipelineConfigError> {
         let expression_filter =
             ExpressionFilter::new(default_expression_calibration(), config.expression_filter);
+        let detailed_expression_filter = DetailedExpressionFilter::new(config.expression_filter);
         let head_filter = HeadRotationFilter::new(config.head_filter);
         let gaze_filter = GazeFilter::new(config.gaze_filter);
         let confidence_gate = ConfidenceGate::new(config.confidence_gate)
@@ -466,6 +470,7 @@ impl TrackingPipeline {
             config,
             profile: None,
             expression_filter,
+            detailed_expression_filter,
             head_filter,
             gaze_filter,
             confidence_gate,
@@ -500,6 +505,7 @@ impl TrackingPipeline {
         let calibration = expression_calibration_from_profile(&profile)
             .map_err(|_| PipelineConfigError::ExpressionCalibration)?;
         self.expression_filter = ExpressionFilter::new(calibration, self.config.expression_filter);
+        self.detailed_expression_filter.reset();
         self.head_filter.reset();
         self.gaze_filter.reset();
         self.profile = Some(profile);
@@ -515,6 +521,7 @@ impl TrackingPipeline {
             default_expression_calibration(),
             self.config.expression_filter,
         );
+        self.detailed_expression_filter.reset();
     }
 
     /// Resets filters and tracking state without changing calibration.
@@ -525,6 +532,7 @@ impl TrackingPipeline {
         self.head_filter.reset();
         self.gaze_filter.reset();
         self.expression_filter.reset();
+        self.detailed_expression_filter.reset();
         self.confidence_gate.reset();
         self.state_machine = TrackingStateMachine::new(self.config.state_machine)
             .expect("config was validated in constructor");
@@ -565,6 +573,7 @@ impl TrackingPipeline {
         self.update_with_pose(
             observation,
             None,
+            None,
             now,
             dt,
             pose_result,
@@ -589,6 +598,10 @@ impl TrackingPipeline {
     ) -> PipelineUpdate {
         let observation = sample.map(media_pipe_sample_to_observation);
         let gaze = sample.map(|sample| calibrated_mediapipe_gaze(sample, gaze_baseline));
+        let detailed = sample.map(|sample| {
+            let coefficients = map_mediapipe_perfect_sync(&sample.blendshapes);
+            self.detailed_expression_filter.update(&coefficients, now)
+        });
         let pose_result = match (sample, neutral) {
             (Some(sample), Some(neutral)) => Some(media_pipe_pose_frame(sample, neutral, now)),
             _ => None,
@@ -596,6 +609,7 @@ impl TrackingPipeline {
         self.update_with_pose(
             observation.as_ref(),
             gaze,
+            detailed,
             now,
             dt,
             pose_result,
@@ -603,10 +617,12 @@ impl TrackingPipeline {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_with_pose(
         &mut self,
         observation: Option<&RawFaceObservation>,
         direct_gaze: Option<GazeSignal>,
+        detailed_face: Option<Arkit52Coefficients>,
         now: MonoTimeNs,
         dt: Duration,
         pose_result: Option<Result<HeadPoseFrame, HeadPoseFailure>>,
@@ -639,6 +655,7 @@ impl TrackingPipeline {
                 crate::state_machine::TrackingAction::ResetFilters => {
                     self.head_filter.reset();
                     self.expression_filter.reset();
+                    self.detailed_expression_filter.reset();
                     self.gaze_filter.reset();
                 }
                 crate::state_machine::TrackingAction::StartHold
@@ -672,7 +689,7 @@ impl TrackingPipeline {
                 head_translation: translation,
                 gaze: filtered_gaze,
                 expressions,
-                detailed_face: None,
+                detailed_face,
             }
         });
 
@@ -1346,7 +1363,9 @@ mod assembly {
     use approx::assert_relative_eq;
     use std::sync::Arc;
     use vtuber_core::types::{NormalizedRect, RawExpressionObservation};
-    use vtuber_core::{FaceBlendshapeSet, FaceLandmark, FaceTrackingQuality, MediaPipeBlendshape};
+    use vtuber_core::{
+        ArkitBlendshape, FaceBlendshapeSet, FaceLandmark, FaceTrackingQuality, MediaPipeBlendshape,
+    };
 
     fn observation(
         seq: u64,
@@ -1721,6 +1740,86 @@ mod assembly {
         assert!(center_frame.gaze.is_available());
         assert!(center_frame.gaze.horizontal < right_frame.gaze.horizontal);
         assert_eq!(center_frame.gaze.vertical, 0.0);
+    }
+
+    fn track_mediapipe(
+        pipeline: &mut TrackingPipeline,
+        sample: &FaceTrackingSample,
+        now: MonoTimeNs,
+    ) -> Option<AvatarControlFrame> {
+        pipeline
+            .update_mediapipe(
+                Some(sample),
+                Some(CameraFaceTransform::identity()),
+                None,
+                now,
+                Duration::from_millis(33),
+            )
+            .frame
+    }
+
+    #[test]
+    fn mediapipe_sample_publishes_detailed_face_and_standard_expressions() {
+        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let sample = mediapipe_sample(&[
+            (MediaPipeBlendshape::JawOpen, 0.8),
+            (MediaPipeBlendshape::MouthSmileLeft, 0.6),
+        ]);
+
+        // The first sample acquires; the second one is a tracked frame.
+        let _ = track_mediapipe(&mut pipeline, &sample, MonoTimeNs(33_333_333));
+        let frame = track_mediapipe(&mut pipeline, &sample, MonoTimeNs(66_666_666)).expect("frame");
+
+        let detailed = frame.detailed_face.expect("detailed coefficients");
+        assert!(
+            detailed.get(ArkitBlendshape::JawOpen) > 0.7,
+            "jaw={}",
+            detailed.get(ArkitBlendshape::JawOpen)
+        );
+        assert!(
+            detailed.get(ArkitBlendshape::MouthSmileLeft) > 0.5,
+            "smile={}",
+            detailed.get(ArkitBlendshape::MouthSmileLeft)
+        );
+        assert_eq!(detailed.get(ArkitBlendshape::TongueOut), 0.0);
+        assert!(
+            frame.expressions.aa > 0.0,
+            "standard mouth expression still runs"
+        );
+    }
+
+    #[test]
+    fn legacy_observation_leaves_detailed_face_empty() {
+        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        pipeline.apply_calibration(neutral_profile()).unwrap();
+
+        let obs = observation(1, neutral_profile().landmarks.clone(), relaxed_expression());
+        let frame = pipeline
+            .update(
+                Some(&obs),
+                MonoTimeNs(33_333_333),
+                Duration::from_millis(33),
+            )
+            .frame
+            .expect("frame");
+        assert!(frame.detailed_face.is_none());
+    }
+
+    #[test]
+    fn reset_drops_detailed_face_state() {
+        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let open = mediapipe_sample(&[(MediaPipeBlendshape::JawOpen, 1.0)]);
+        let closed = mediapipe_sample(&[]);
+
+        let _ = track_mediapipe(&mut pipeline, &open, MonoTimeNs(33_333_333));
+        let _ = track_mediapipe(&mut pipeline, &open, MonoTimeNs(66_666_666));
+        pipeline.reset();
+
+        // A closed face straight after `reset` must not inherit the open jaw.
+        let frame = track_mediapipe(&mut pipeline, &closed, MonoTimeNs(99_999_999))
+            .expect("frame after reset");
+        let detailed = frame.detailed_face.expect("detailed coefficients");
+        assert_eq!(detailed.get(ArkitBlendshape::JawOpen), 0.0);
     }
 
     #[test]
