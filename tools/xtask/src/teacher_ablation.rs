@@ -47,6 +47,7 @@ pub struct Options {
     expected_dt_micros: u64,
     gap_tolerance: f64,
     correction_bound: f32,
+    person_count: u32,
 }
 
 impl Options {
@@ -60,6 +61,7 @@ impl Options {
         let mut expected_dt_micros = 33_367_u64;
         let mut gap_tolerance = 1.5_f64;
         let mut correction_bound = 1.0_f32;
+        let mut person_count = 1_u32;
         let mut index = 0;
         while index < args.len() {
             let next = |index: &mut usize, flag: &str| -> Result<String, String> {
@@ -102,6 +104,14 @@ impl Options {
                         .parse()
                         .map_err(|_| "--correction-bound must be a float")?;
                 }
+                "--person-count" => {
+                    person_count = next(&mut index, "--person-count")?
+                        .parse()
+                        .map_err(|_| "--person-count must be a positive integer")?;
+                    if person_count == 0 {
+                        return Err("--person-count must be a positive integer".to_owned());
+                    }
+                }
                 other => return Err(format!("unknown option {other}")),
             }
             index += 1;
@@ -119,7 +129,23 @@ impl Options {
             expected_dt_micros,
             gap_tolerance,
             correction_bound,
+            person_count,
         })
+    }
+}
+
+/// Generalization note derived from the number of distinct people whose data
+/// was used for fitting the evaluated artifact.
+fn generalization_note(person_count: u32) -> String {
+    if person_count == 1 {
+        "Single person in the training data, same device and room; results do not \
+         generalize across people or capture conditions."
+            .to_owned()
+    } else {
+        format!(
+            "{person_count} people in the training data, same device and room; results \
+             do not generalize beyond these people or capture conditions."
+        )
     }
 }
 
@@ -130,7 +156,7 @@ pub fn print_help() {
          *                   [--train-take <id> ...] [--output <dir>]\n\
          *                   [--history-len 4] [--max-gap-micros 100000]\n\
          *                   [--expected-dt-micros 33367] [--gap-tolerance 1.5]\n\
-         *                   [--correction-bound 1.0]\n\
+         *                   [--correction-bound 1.0] [--person-count 1]\n\
          *   Held-out ablation (#112): scores direct / gnm-no-temporal / learned-prior\n\
          *   against the ARKit teacher on the same timeline (value, velocity,\n\
          *   acceleration, jerk, jitter, onset/rise/pulse timing). Eval takes must be\n\
@@ -793,7 +819,7 @@ struct OverallReport {
 struct Constraints {
     person_count: u32,
     capture_device: &'static str,
-    generalization_note: &'static str,
+    generalization_note: String,
     not_verified: Vec<&'static str>,
 }
 
@@ -876,10 +902,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             learned_prior_temporal: overall_prior.temporal_metrics(),
         },
         constraints: Constraints {
-            person_count: 1,
+            person_count: options.person_count,
             capture_device: "iPhone front camera via the GNM #68.2 capture app",
-            generalization_note: "Single person, same device and room; results do not \
-                generalize across people or capture conditions.",
+            generalization_note: generalization_note(options.person_count),
             not_verified: vec![
                 "head pose comparison (MediaPipe head transform is not stored in the trace)",
                 "per-frame inference latency",

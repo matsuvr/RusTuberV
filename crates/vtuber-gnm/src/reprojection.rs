@@ -3422,7 +3422,10 @@ fn analytic_expression_columns(
     entries: &mut [f32],
 ) -> Result<(), GnmReprojectionError> {
     let camera = CachedCameraRotation::new(projection);
-    let mut offsets = vec![[0.0f32; 3]; retained.len()];
+    // One skinning derivative slot per mapped point (not per retained row):
+    // `expression_point_offsets` writes every mapped point and the loop below
+    // selects each retained row by its mapping index.
+    let mut offsets = vec![[0.0f32; 3]; skinning.len()];
     let active_columns = skinning.active_expression_columns(model);
     for parameter in 0..parameter_count {
         if !active_columns.get(parameter).copied().unwrap_or(false) {
@@ -3431,9 +3434,13 @@ fn analytic_expression_columns(
             continue;
         }
         skinning.expression_point_offsets(model, parameter, &mut offsets)?;
-        for (point_row, (&mapping_index, offset)) in retained.iter().zip(offsets.iter()).enumerate()
-        {
-            if *offset == [0.0; 3] {
+        for (point_row, &mapping_index) in retained.iter().enumerate() {
+            // Mapping indices are constructed against the same mapped-point
+            // table the skinning derivatives were built from, so every
+            // retained index is inside `offsets`.
+            #[allow(clippy::indexing_slicing)]
+            let offset = offsets[mapping_index];
+            if offset == [0.0; 3] {
                 continue;
             }
             #[allow(clippy::indexing_slicing)]
@@ -4655,6 +4662,142 @@ mod tests {
             max_abs_diff < 1.0e-3,
             "expression Jacobian parity failed: max |finite_difference - analytic| \
              = {max_abs_diff} (max entry magnitude {max_abs_entry})"
+        );
+    }
+
+    #[test]
+    fn expression_jacobian_parity_with_partial_observation() {
+        // Regression: with dropped mapping rows the retained point list is a
+        // strict subset of the mapped points, so the analytic expression block
+        // must size its skinning-derivative buffer by mapped-point count and
+        // select each retained row by mapping index (not by retained position).
+        let model = ej_model();
+        let vertex_count = model.vertex_count();
+        let rows: Vec<MediaPipeGnmDenseCorrespondence> = (0..24)
+            .map(|index| MediaPipeGnmDenseCorrespondence {
+                mediapipe_index: index,
+                target: GnmSurfacePointRef::Vertex {
+                    vertex_index: index % vertex_count,
+                },
+                region: if index % 3 == 0 {
+                    FaceRegion::Nose
+                } else if index % 3 == 1 {
+                    FaceRegion::Contour
+                } else {
+                    FaceRegion::Other
+                },
+                anatomical_side: AnatomicalSide::Midline,
+                base_weight: 1.0,
+                provenance: CorrespondenceProvenance::RepositoryValidated,
+                reliability: CorrespondenceReliability::High,
+            })
+            .collect();
+        let mapping = DenseCorrespondenceSet::new(version(), rows, &model).unwrap();
+        let identity = model.neutral_identity();
+        let expression = ej_expression(0.35, 0.25);
+        let joints = GnmJointState::new(vec![[0.21, -0.13, 0.09]], [0.01, -0.02, 0.03], 1).unwrap();
+        let observation = synthesize_observation_from_projection(
+            &model,
+            &identity,
+            &expression,
+            &joints,
+            &mapping,
+            &truth_projection(),
+            SynthesisOptions::default(),
+            DenseCoveragePolicy::new(2, 0.75).unwrap(),
+            |row_index, _| row_index % 5 == 0,
+        )
+        .unwrap();
+        let config = DenseReprojectionConfig::default();
+        let steps = LinearizationStepSizes::default();
+
+        let linearization = linearize_dense_reprojection(
+            &model,
+            &identity,
+            &expression,
+            &joints,
+            &mapping,
+            &observation,
+            &truth_projection(),
+            config,
+            steps,
+        )
+        .unwrap();
+        let analytic = linearization.block(ReprojectionBlock::Expression).unwrap();
+
+        let report = evaluate_dense_reprojection(
+            &model,
+            &identity,
+            &expression,
+            &joints,
+            &mapping,
+            &observation,
+            &truth_projection(),
+            config,
+        )
+        .unwrap();
+        let retained: Vec<usize> = report
+            .residuals()
+            .iter()
+            .map(|residual| residual.mapping_index)
+            .collect();
+        assert!(
+            retained.len() < mapping.len(),
+            "observation must retain a strict subset of the mapped points"
+        );
+        assert_eq!(analytic.row_count, 2 * retained.len());
+        let baseline_projected: Vec<[f32; 2]> = report
+            .residuals()
+            .iter()
+            .map(|residual| residual.projected_xy)
+            .collect();
+        let mut baseline_surface = GnmSparseVertices::with_len(mapping.len());
+        mapping
+            .evaluate_surface(
+                &model,
+                &identity,
+                &expression,
+                &joints,
+                &mut baseline_surface,
+            )
+            .unwrap();
+        let baseline_surface = baseline_surface.values().to_vec();
+        let prepared = model
+            .prepare_sparse_vertices(&identity, &expression, &joints, mapping.surface_landmarks())
+            .unwrap();
+
+        let mut max_abs_diff = 0.0f32;
+        let mut max_abs_entry = 0.0f32;
+        for parameter in 0..analytic.parameter_count {
+            let column = perturbed_residuals(
+                &model,
+                &identity,
+                &expression,
+                &joints,
+                &mapping,
+                &truth_projection(),
+                &baseline_surface,
+                &baseline_projected,
+                &prepared,
+                ReprojectionBlock::Expression,
+                parameter,
+                steps,
+                &retained,
+            )
+            .unwrap();
+            for (point_row, delta) in column.iter().enumerate() {
+                for (component, expected) in delta.iter().copied().enumerate() {
+                    let actual = analytic.get(2 * point_row + component, parameter).unwrap();
+                    max_abs_diff = max_abs_diff.max((expected - actual).abs());
+                    max_abs_entry = max_abs_entry.max(expected.abs().max(actual.abs()));
+                }
+            }
+        }
+        assert!(
+            max_abs_diff < 1.0e-3,
+            "partial-observation expression Jacobian parity failed: \
+             max |finite_difference - analytic| = {max_abs_diff} \
+             (max entry magnitude {max_abs_entry})"
         );
     }
 

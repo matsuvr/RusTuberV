@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-基準日: 2026-08-29
+基準日: 2026-09-01
 
 | ID | Status | Decision |
 |---|---|---|
@@ -22,5 +22,6 @@
 | ADR-019 | Accepted for Issue #167 | Position-aware upper-body solve / root-body motion writer (vendored `bevy_vrm1` extension) |
 | ADR-020 | Accepted | Idle motion policy; legacy procedural breathing writer retired |
 | ADR-021 | Accepted | 長時間tracking喪失時のdefault pose復帰とloss-scoped breathing（micro-motion層） |
+| ADR-022 | Accepted | Perfect Sync 52はMediaPipe直接駆動とする（学習動的prior不採用） |
 
 番号は再利用しない。採用済み判断を変更するときは元ADRを削除せず、Statusを`Superseded`へ変更し、新しいADRから参照する。

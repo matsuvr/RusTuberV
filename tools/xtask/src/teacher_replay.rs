@@ -668,7 +668,14 @@ fn fit_frame_gnm(
     // against the neutral state first (same initialization as the production
     // reinitialize-dynamic-state path); a raw neutral projection makes the
     // cold-start crawl and miss its convergence budget.
-    let recovered = vtuber_gnm::recover_rigid_projection(
+    //
+    // A recovery failure here is a per-frame numeric degeneracy (the config is
+    // fixed at compile time and coverage was already checked), not a data
+    // integrity problem: record it as a per-frame fit rejection so the rest of
+    // the take still produces a trace, mirroring the invalid cold-start outcome
+    // path below. Manifest/timestamp contradictions keep aborting fail-closed
+    // at the dataset validation layer.
+    let recovered = match vtuber_gnm::recover_rigid_projection(
         &context.model,
         context.identity.state(),
         &context.model.neutral_expression(),
@@ -677,8 +684,14 @@ fn fit_frame_gnm(
         &observation,
         context.neutral_projection,
         vtuber_gnm::RigidRecoveryConfig::default(),
-    )
-    .map_err(|error| format!("frame {frame_seq}: rigid recovery: {error}"))?;
+    ) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            return Ok(GnmFrameOutcome::FitRejected(format!(
+                "frame {frame_seq}: rigid recovery diverged: {error}"
+            )));
+        }
+    };
     let outcome = fit_single_frame_cold_start(
         &context.model,
         context.identity.state(),
