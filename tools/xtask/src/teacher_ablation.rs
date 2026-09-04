@@ -1061,9 +1061,10 @@ fn evaluate_take(
             }
         };
         let teacher_frame = to_frame(teacher.coefficients.as_array());
-        errors
-            .direct
-            .push(to_frame(direct.as_array()), &teacher_frame);
+        errors.direct.push(
+            to_frame(direct.direct_coefficients.as_array()),
+            &teacher_frame,
+        );
         errors.gnm.push(
             to_frame(gnm_state.projected_coefficients.as_array()),
             &teacher_frame,
@@ -1116,7 +1117,7 @@ fn evaluate_take(
             let value = sample
                 .mediapipe_observation
                 .as_ref()
-                .map(|values| values.as_array()[channel_index]);
+                .map(|values| values.direct_coefficients.as_array()[channel_index]);
             value.map(f64::from)
         });
         let gnm_series = ScalarSeries::build(&trace.samples, |sample| {

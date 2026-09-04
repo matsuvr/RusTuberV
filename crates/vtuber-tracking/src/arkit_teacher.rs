@@ -18,10 +18,14 @@
 
 use std::path::PathBuf;
 
-use vtuber_core::{ARKIT52_CHANNEL_COUNT, Arkit52Coefficients};
+use vtuber_core::face_tracking::{
+    CameraFaceTransform, FaceTrackingQuality, MEDIAPIPE_FACE_LANDMARK_COUNT,
+};
+use vtuber_core::{ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape};
+use vtuber_gnm::{GnmNonTongueExpression, GnmRegionFitRecord};
 
 /// Schema version of the teacher dataset contracts in this module.
-pub const ARKIT_TEACHER_DATASET_SCHEMA_VERSION: u32 = 1;
+pub const ARKIT_TEACHER_DATASET_SCHEMA_VERSION: u32 = 2;
 
 /// Fixed coordinate convention recorded with every head transform so units
 /// and handedness can never be silently reinterpreted downstream.
@@ -145,13 +149,142 @@ impl ArkitTeacherFrame {
     }
 }
 
-/// Deterministic GNM baseline state saved beside the observation.
+/// MediaPipe inputs retained for trace-v2 research without pixel payloads.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DeterministicGnmState {
+pub struct MediaPipeTeacherObservation {
+    /// Exactly 478 normalized image-space `(x, y)` points; z is excluded.
+    pub landmarks_xy: Vec<[f32; 2]>,
+    /// Validated camera-to-face transform copied from inference.
+    pub camera_to_face: CameraFaceTransform,
+    /// Direct non-tongue coefficients with TongueOut fixed to zero.
+    pub direct_coefficients: Arkit52Coefficients,
+    /// Existing validated MediaPipe observation quality.
+    pub quality: FaceTrackingQuality,
+}
+
+impl MediaPipeTeacherObservation {
+    fn validate(&self) -> Result<(), TeacherDatasetError> {
+        if self.landmarks_xy.len() != MEDIAPIPE_FACE_LANDMARK_COUNT {
+            return Err(TeacherDatasetError::InvalidFieldShape {
+                field: "mediapipe landmarks_xy",
+                expected: MEDIAPIPE_FACE_LANDMARK_COUNT,
+                actual: self.landmarks_xy.len(),
+            });
+        }
+        if self
+            .landmarks_xy
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+            || !self.camera_to_face.is_valid()
+            || self
+                .quality
+                .landmark_presence_median
+                .is_some_and(|value| !value.is_finite())
+            || !self.quality.matrix_orthogonality_error.is_finite()
+            || !self.quality.matrix_determinant.is_finite()
+        {
+            return Err(TeacherDatasetError::NonFinite {
+                field: "mediapipe observation",
+            });
+        }
+        if self.direct_coefficients.get(ArkitBlendshape::TongueOut) != 0.0 {
+            return Err(TeacherDatasetError::NonZeroTongue);
+        }
+        Ok(())
+    }
+}
+
+/// Raw fitted GNM state retained before the hand-designed ARKit projection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GnmTeacherStateRecord {
+    /// Fixed Head-v3 expression vector with the tongue block removed.
+    pub expression: GnmNonTongueExpression,
+    /// Existing head/eye joint axis-angle rotations.
+    pub joint_rotations: Vec<[f32; 3]>,
+    /// Fitted rigid yaw, pitch, and roll.
+    pub rigid_yaw_pitch_roll: [f32; 3],
+    /// Fitted camera translation.
+    pub camera_translation: [f32; 3],
+    /// Fitted normalized-image focal length.
+    pub camera_focal: f32,
+    /// Fitted normalized-image principal point.
+    pub camera_principal_point: [f32; 2],
     /// GNM-projected canonical coefficients for the exact frame.
     pub projected_coefficients: Arkit52Coefficients,
-    /// Solver residual of the deterministic fit.
-    pub residual: f32,
+    /// Solver objective of the deterministic fit.
+    pub objective: f32,
+    /// Diagnostic per-region fit quality; does not alter fit acceptance.
+    pub region_fits: Vec<GnmRegionFitRecord>,
+}
+
+impl GnmTeacherStateRecord {
+    fn validate(&self) -> Result<(), TeacherDatasetError> {
+        if self
+            .joint_rotations
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+            || self
+                .rigid_yaw_pitch_roll
+                .iter()
+                .chain(&self.camera_translation)
+                .chain(&self.camera_principal_point)
+                .any(|value| !value.is_finite())
+            || !self.camera_focal.is_finite()
+            || !self.objective.is_finite()
+            || self
+                .region_fits
+                .iter()
+                .any(|record| !record.weighted_rms.is_finite())
+        {
+            return Err(TeacherDatasetError::NonFinite {
+                field: "gnm teacher state",
+            });
+        }
+        if self.projected_coefficients.get(ArkitBlendshape::TongueOut) != 0.0 {
+            return Err(TeacherDatasetError::NonZeroTongue);
+        }
+        Ok(())
+    }
+}
+
+/// Compatibility name for the deterministic teacher state.
+pub type DeterministicGnmState = GnmTeacherStateRecord;
+
+#[cfg(test)]
+pub(crate) fn test_gnm_state(
+    projected_coefficients: Arkit52Coefficients,
+    objective: f32,
+) -> GnmTeacherStateRecord {
+    GnmTeacherStateRecord {
+        expression: GnmNonTongueExpression::try_from_values(vec![0.0; 351])
+            .expect("valid compact Head v3 expression"),
+        joint_rotations: Vec::new(),
+        rigid_yaw_pitch_roll: [0.0; 3],
+        camera_translation: [0.0, 0.0, 1.0],
+        camera_focal: 1.0,
+        camera_principal_point: [0.5; 2],
+        projected_coefficients,
+        objective,
+        region_fits: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_mediapipe_observation(
+    direct_coefficients: Arkit52Coefficients,
+) -> MediaPipeTeacherObservation {
+    MediaPipeTeacherObservation {
+        landmarks_xy: vec![[0.5; 2]; MEDIAPIPE_FACE_LANDMARK_COUNT],
+        camera_to_face: CameraFaceTransform::identity(),
+        direct_coefficients,
+        quality: FaceTrackingQuality {
+            landmark_presence_median: Some(1.0),
+            matrix_orthogonality_error: 0.0,
+            matrix_determinant: 1.0,
+        },
+    }
 }
 
 /// A fully paired temporal sample separating all four evidence sources.
@@ -161,8 +294,8 @@ pub struct PairedTemporalSample {
     pub frame_seq: u64,
     /// Monotonic session timestamp in microseconds.
     pub timestamp_micros: u64,
-    /// MediaPipe-derived dense/aux observation coefficients, when replayed.
-    pub mediapipe_observation: Option<Arkit52Coefficients>,
+    /// MediaPipe-derived trace-v2 observation, when replayed.
+    pub mediapipe_observation: Option<MediaPipeTeacherObservation>,
     /// Deterministic GNM state, when replayed.
     pub gnm_state: Option<DeterministicGnmState>,
     /// Baseline output that production would have published this frame.
@@ -176,6 +309,17 @@ pub struct PairedTemporalSample {
 /// Typed validation failures for teacher datasets.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TeacherDatasetError {
+    /// A fixed-size trace-v2 field had the wrong number of values.
+    InvalidFieldShape {
+        /// Field name.
+        field: &'static str,
+        /// Required value count.
+        expected: usize,
+        /// Encountered value count.
+        actual: usize,
+    },
+    /// A direct or projected TongueOut value was not fixed to zero.
+    NonZeroTongue,
     /// Frame sequence numbers must be strictly increasing without duplicates.
     NonIncreasingFrameSeq {
         /// Previous sequence.
@@ -281,6 +425,12 @@ pub fn validate_paired_samples(
                 });
             }
             rgb.validate()?;
+        }
+        if let Some(observation) = &sample.mediapipe_observation {
+            observation.validate()?;
+        }
+        if let Some(state) = &sample.gnm_state {
+            state.validate()?;
         }
         if !sample
             .baseline_output

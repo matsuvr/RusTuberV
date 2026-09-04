@@ -10,9 +10,9 @@
 //! - RGB references and teacher records are joined by exact `frame_seq` and
 //!   identical timestamps only; missing, duplicate, or mismatched frames are
 //!   rejected instead of nearest-repaired.
-//! - The trace stores the MediaPipe-derived ARKit52 observation, the
-//!   deterministic GNM state (projected ARKit52 + solver residual), and the
-//!   baseline output production would have published.
+//! - Trace v2 stores MediaPipe 478-point XY geometry, camera/quality values,
+//!   the compact non-tongue fitted GNM state, and the baseline output
+//!   production would have published.
 //! - Every input file and the derived trace bytes are hashed (SHA-256), so a
 //!   re-run over the same inputs/config regenerates byte-identical outputs.
 //! - Raw RGB payloads stay outside version control (GNM #68.1); the trace
@@ -34,22 +34,27 @@ use std::sync::Arc;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use vtuber_core::face_tracking::{FaceTrackingOutcome, MediaPipeBlendshape};
+use vtuber_core::face_tracking::{
+    CameraFaceTransform, FaceTrackingOutcome, FaceTrackingQuality, FaceTrackingSample,
+    MediaPipeBlendshape,
+};
 use vtuber_core::types::{FrameSeq, MonoTimeNs, PixelFormat, VideoFrame};
 use vtuber_core::{Arkit52Coefficients, ArkitBlendshape};
 use vtuber_gnm::{
     DenseCorrespondenceSet, DenseCoveragePolicy, DenseObservationStatus, DenseProjection,
-    DenseRegionGroups, FixedGnmIdentity, GnmIdentityCalibration, GnmJointState, GnmModel,
-    GnmSparseVertices, IdentityFitDiagnostics, NeutralPoseDiversity, SingleFrameFitConfig,
+    DenseRegionGroups, FaceRegion, FixedGnmIdentity, GnmIdentityCalibration, GnmJointState,
+    GnmModel, GnmNonTongueExpression, GnmRegionFitRecord, GnmSparseVertices,
+    IdentityFitDiagnostics, NeutralPoseDiversity, SingleFrameFitConfig,
     compute_gnm_facial_features, fit_single_frame_cold_start, fitting_projection, load_gnm_head_v3,
-    normalization_scales_from_mapping, repository_dense_mapping,
+    normalization_scales_from_mapping, region_fit_records, repository_dense_mapping,
 };
 use vtuber_inference::backend::mediapipe::MediaPipeRuntime;
 use vtuber_inference::runtime::FaceTrackingInference;
 use vtuber_tracking::arkit_teacher::HEAD_TRANSFORM_CONVENTION;
 use vtuber_tracking::{
-    ArkitTeacherFrame, DeterministicGnmState, HeadTransform, PairedTemporalSample,
-    RgbFrameReference, decode_gnm_arkit52, validate_paired_samples,
+    ARKIT_TEACHER_DATASET_SCHEMA_VERSION, ArkitTeacherFrame, GnmCameraBlock, GnmDynamicState,
+    GnmRigidPoseBlock, GnmTeacherStateRecord, HeadTransform, MediaPipeTeacherObservation,
+    PairedTemporalSample, RgbFrameReference, decode_gnm_arkit52, validate_paired_samples,
 };
 
 /// `tools/teacher-capture` `TIMESTAMP_DOMAIN` mirror (standalone crate).
@@ -380,7 +385,7 @@ fn check_strict_identity<I: Iterator<Item = (u64, u64)>>(
 pub struct TraceRow {
     pub frame_seq: u64,
     pub timestamp_micros: u64,
-    pub mediapipe_observation: Option<Vec<f32>>,
+    pub mediapipe_observation: Option<TraceMediaPipeObservation>,
     pub gnm_state: Option<TraceGnmState>,
     pub baseline_output: Vec<f32>,
     pub teacher: Option<TraceTeacher>,
@@ -390,8 +395,35 @@ pub struct TraceRow {
 /// Serialized `DeterministicGnmState`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TraceGnmState {
+    pub expression: Vec<f32>,
+    pub joint_rotations: Vec<[f32; 3]>,
+    pub rigid_yaw_pitch_roll: [f32; 3],
+    pub camera_translation: [f32; 3],
+    pub camera_focal: f32,
+    pub camera_principal_point: [f32; 2],
     pub projected_coefficients: Vec<f32>,
-    pub residual: f32,
+    pub objective: f32,
+    pub region_fits: Vec<TraceRegionFit>,
+}
+
+/// Serialized MediaPipe trace-v2 observation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TraceMediaPipeObservation {
+    pub landmarks_xy: Vec<[f32; 2]>,
+    pub camera_to_face_rotation_xyzw: [f32; 4],
+    pub camera_to_face_translation_xyz: [f32; 3],
+    pub direct_coefficients: Vec<f32>,
+    pub landmark_presence_median: Option<f32>,
+    pub matrix_orthogonality_error: f32,
+    pub matrix_determinant: f32,
+}
+
+/// Serialized per-region GNM fit quality.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TraceRegionFit {
+    pub region: String,
+    pub valid_points: usize,
+    pub weighted_rms: f32,
 }
 
 /// Serialized `ArkitTeacherFrame`.
@@ -427,13 +459,35 @@ pub fn trace_row(sample: &PairedTemporalSample) -> TraceRow {
     TraceRow {
         frame_seq: sample.frame_seq,
         timestamp_micros: sample.timestamp_micros,
-        mediapipe_observation: sample
-            .mediapipe_observation
-            .as_ref()
-            .map(|values| values.as_array().to_vec()),
+        mediapipe_observation: sample.mediapipe_observation.as_ref().map(|observation| {
+            TraceMediaPipeObservation {
+                landmarks_xy: observation.landmarks_xy.clone(),
+                camera_to_face_rotation_xyzw: observation.camera_to_face.rotation_xyzw,
+                camera_to_face_translation_xyz: observation.camera_to_face.translation_xyz,
+                direct_coefficients: observation.direct_coefficients.as_array().to_vec(),
+                landmark_presence_median: observation.quality.landmark_presence_median,
+                matrix_orthogonality_error: observation.quality.matrix_orthogonality_error,
+                matrix_determinant: observation.quality.matrix_determinant,
+            }
+        }),
         gnm_state: sample.gnm_state.as_ref().map(|state| TraceGnmState {
+            expression: state.expression.values().to_vec(),
+            joint_rotations: state.joint_rotations.clone(),
+            rigid_yaw_pitch_roll: state.rigid_yaw_pitch_roll,
+            camera_translation: state.camera_translation,
+            camera_focal: state.camera_focal,
+            camera_principal_point: state.camera_principal_point,
             projected_coefficients: state.projected_coefficients.as_array().to_vec(),
-            residual: state.residual,
+            objective: state.objective,
+            region_fits: state
+                .region_fits
+                .iter()
+                .map(|record| TraceRegionFit {
+                    region: face_region_name(record.region).to_owned(),
+                    valid_points: record.valid_points,
+                    weighted_rms: record.weighted_rms,
+                })
+                .collect(),
         }),
         baseline_output: sample.baseline_output.as_array().to_vec(),
         teacher: sample.teacher.as_ref().map(|teacher| TraceTeacher {
@@ -465,14 +519,55 @@ pub fn sample_from_row(row: &TraceRow) -> Result<PairedTemporalSample, String> {
     Ok(PairedTemporalSample {
         frame_seq: row.frame_seq,
         timestamp_micros: row.timestamp_micros,
-        mediapipe_observation: coefficients_from_row(&row.mediapipe_observation)?,
+        mediapipe_observation: row
+            .mediapipe_observation
+            .as_ref()
+            .map(
+                |observation| -> Result<MediaPipeTeacherObservation, String> {
+                    Ok(MediaPipeTeacherObservation {
+                        landmarks_xy: observation.landmarks_xy.clone(),
+                        camera_to_face: CameraFaceTransform {
+                            rotation_xyzw: observation.camera_to_face_rotation_xyzw,
+                            translation_xyz: observation.camera_to_face_translation_xyz,
+                        },
+                        direct_coefficients: coefficients_from_slice(
+                            &observation.direct_coefficients,
+                            "mediapipe direct_coefficients",
+                        )?,
+                        quality: FaceTrackingQuality {
+                            landmark_presence_median: observation.landmark_presence_median,
+                            matrix_orthogonality_error: observation.matrix_orthogonality_error,
+                            matrix_determinant: observation.matrix_determinant,
+                        },
+                    })
+                },
+            )
+            .transpose()?,
         gnm_state: match &row.gnm_state {
-            Some(state) => Some(DeterministicGnmState {
+            Some(state) => Some(GnmTeacherStateRecord {
+                expression: GnmNonTongueExpression::try_from_values(state.expression.clone())
+                    .map_err(|error| format!("gnm expression: {error}"))?,
+                joint_rotations: state.joint_rotations.clone(),
+                rigid_yaw_pitch_roll: state.rigid_yaw_pitch_roll,
+                camera_translation: state.camera_translation,
+                camera_focal: state.camera_focal,
+                camera_principal_point: state.camera_principal_point,
                 projected_coefficients: coefficients_from_slice(
                     &state.projected_coefficients,
                     "gnm projected_coefficients",
                 )?,
-                residual: state.residual,
+                objective: state.objective,
+                region_fits: state
+                    .region_fits
+                    .iter()
+                    .map(|record| {
+                        Ok(GnmRegionFitRecord {
+                            region: parse_face_region(&record.region)?,
+                            valid_points: record.valid_points,
+                            weighted_rms: record.weighted_rms,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
             }),
             None => None,
         },
@@ -505,11 +600,29 @@ pub fn sample_from_row(row: &TraceRow) -> Result<PairedTemporalSample, String> {
     })
 }
 
-fn coefficients_from_row(values: &Option<Vec<f32>>) -> Result<Option<Arkit52Coefficients>, String> {
-    values
-        .as_ref()
-        .map(|values| coefficients_from_slice(values, "mediapipe_observation"))
-        .transpose()
+fn face_region_name(region: FaceRegion) -> &'static str {
+    match region {
+        FaceRegion::Contour => "contour",
+        FaceRegion::Brow => "brow",
+        FaceRegion::Eye => "eye",
+        FaceRegion::Nose => "nose",
+        FaceRegion::Mouth => "mouth",
+        FaceRegion::Iris => "iris",
+        FaceRegion::Other => "other",
+    }
+}
+
+fn parse_face_region(value: &str) -> Result<FaceRegion, String> {
+    match value {
+        "contour" => Ok(FaceRegion::Contour),
+        "brow" => Ok(FaceRegion::Brow),
+        "eye" => Ok(FaceRegion::Eye),
+        "nose" => Ok(FaceRegion::Nose),
+        "mouth" => Ok(FaceRegion::Mouth),
+        "iris" => Ok(FaceRegion::Iris),
+        "other" => Ok(FaceRegion::Other),
+        other => Err(format!("unknown GNM face region {other}")),
+    }
 }
 
 fn coefficients_from_slice(values: &[f32], field: &str) -> Result<Arkit52Coefficients, String> {
@@ -641,9 +754,51 @@ fn build_gnm_context(
 }
 
 enum GnmFrameOutcome {
-    Solved(DeterministicGnmState),
+    Solved(Box<GnmTeacherStateRecord>),
     InsufficientCoverage,
     FitRejected(String),
+}
+
+/// Copies a validated inference sample into the pixel-free trace-v2 schema.
+#[must_use]
+pub fn record_mediapipe_teacher_observation(
+    sample: &FaceTrackingSample,
+    direct_coefficients: Arkit52Coefficients,
+) -> MediaPipeTeacherObservation {
+    MediaPipeTeacherObservation {
+        landmarks_xy: sample
+            .landmarks
+            .iter()
+            .map(|point| [point.x, point.y])
+            .collect(),
+        camera_to_face: sample.camera_to_face,
+        direct_coefficients,
+        quality: sample.quality,
+    }
+}
+
+/// Copies the fitted pre-projection GNM state into the compact trace-v2 schema.
+///
+/// # Errors
+///
+/// Returns a typed model error when the fitted expression is not Head v3.
+pub fn record_gnm_teacher_state(
+    dynamic: &GnmDynamicState,
+    projected_coefficients: Arkit52Coefficients,
+    objective: f32,
+    region_fits: Vec<GnmRegionFitRecord>,
+) -> Result<GnmTeacherStateRecord, vtuber_gnm::GnmModelError> {
+    Ok(GnmTeacherStateRecord {
+        expression: GnmNonTongueExpression::try_from_full(&dynamic.expression)?,
+        joint_rotations: dynamic.joints.rotations().to_vec(),
+        rigid_yaw_pitch_roll: dynamic.rigid_pose.yaw_pitch_roll(),
+        camera_translation: dynamic.camera.translation(),
+        camera_focal: dynamic.camera.focal(),
+        camera_principal_point: dynamic.camera.principal_point(),
+        projected_coefficients,
+        objective,
+        region_fits,
+    })
 }
 
 fn fit_frame_gnm(
@@ -724,10 +879,49 @@ fn fit_frame_gnm(
     .map_err(|error| format!("frame {frame_seq}: facial features: {error}"))?;
     let decoded = decode_gnm_arkit52(&features)
         .map_err(|error| format!("frame {frame_seq}: ARKit52 decode: {error:?}"))?;
-    Ok(GnmFrameOutcome::Solved(DeterministicGnmState {
-        projected_coefficients: decoded.coefficients,
-        residual: outcome.objective(),
-    }))
+    let mut fitted_surface = GnmSparseVertices::with_len(context.mapping.len());
+    context
+        .mapping
+        .evaluate_surface(
+            &context.model,
+            context.identity.state(),
+            outcome.expression(),
+            outcome.joints(),
+            &mut fitted_surface,
+        )
+        .map_err(|error| format!("frame {frame_seq}: evaluate fitted surface: {error}"))?;
+    let projected_points: Vec<[f32; 2]> = fitted_surface
+        .values()
+        .iter()
+        .map(|point| {
+            outcome
+                .projection()
+                .project(*point)
+                .unwrap_or([f32::NAN; 2])
+        })
+        .collect();
+    let region_fits = region_fit_records(&context.mapping, &observation, &projected_points)
+        .map_err(|error| format!("frame {frame_seq}: region fit records: {error}"))?;
+    let dynamic = GnmDynamicState {
+        expression: outcome.expression().clone(),
+        joints: outcome.joints().clone(),
+        rigid_pose: GnmRigidPoseBlock::new(outcome.projection().yaw_pitch_roll())
+            .map_err(|error| format!("frame {frame_seq}: record rigid pose: {error}"))?,
+        camera: GnmCameraBlock::new(
+            outcome.projection().translation(),
+            outcome.projection().focal(),
+            outcome.projection().principal_point(),
+        )
+        .map_err(|error| format!("frame {frame_seq}: record camera: {error}"))?,
+    };
+    let state = record_gnm_teacher_state(
+        &dynamic,
+        decoded.coefficients,
+        outcome.objective(),
+        region_fits,
+    )
+    .map_err(|error| format!("frame {frame_seq}: record GNM state: {error}"))?;
+    Ok(GnmFrameOutcome::Solved(Box::new(state)))
 }
 
 // ---------------------------------------------------------------------------
@@ -974,12 +1168,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 if first_face.is_none() {
                     first_face = Some(frame_seq);
                 }
-                let observation = mediapipe_to_arkit52(&sample.blendshapes)
+                let direct_coefficients = mediapipe_to_arkit52(&sample.blendshapes)
                     .map_err(|error| format!("frame {frame_seq}: {error}"))?;
+                let observation =
+                    record_mediapipe_teacher_observation(&sample, direct_coefficients);
                 match fit_frame_gnm(&gnm, frame_seq, timestamp_micros, &sample)? {
                     GnmFrameOutcome::Solved(state) => {
                         counts.solved += 1;
-                        (Some(observation), Some(state))
+                        (Some(observation), Some(*state))
                     }
                     GnmFrameOutcome::InsufficientCoverage => {
                         counts.observation_insufficient += 1;
@@ -1003,7 +1199,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         samples.push(PairedTemporalSample {
             frame_seq,
             timestamp_micros,
-            baseline_output: mediapipe_observation.unwrap_or_default(),
+            baseline_output: mediapipe_observation
+                .as_ref()
+                .map_or_else(Arkit52Coefficients::default, |observation| {
+                    observation.direct_coefficients
+                }),
             mediapipe_observation,
             gnm_state,
             teacher: Some(
@@ -1172,7 +1372,7 @@ fn write_trace(
         .map_err(|error| format!("write {}: {error}", trace_path.display()))?;
 
     let metadata = ReplayMetadata {
-        schema_version: 1,
+        schema_version: ARKIT_TEACHER_DATASET_SCHEMA_VERSION,
         tool: "xtask teacher-replay",
         xtask_version: env!("CARGO_PKG_VERSION").to_owned(),
         source_dataset: SourceDatasetMetadata {
@@ -1313,19 +1513,41 @@ mod tests {
     }
 
     #[test]
-    fn trace_rows_round_trip_through_json() {
+    fn trace_v2_round_trip_and_hash_are_deterministic() {
         let mut coefficients = [0.0_f32; 52];
         coefficients[ArkitBlendshape::JawOpen.index()] = 0.4;
         let sample = PairedTemporalSample {
             frame_seq: 7,
             timestamp_micros: 231_000,
-            mediapipe_observation: Some(
-                Arkit52Coefficients::try_from_array(coefficients).expect("valid"),
-            ),
-            gnm_state: Some(DeterministicGnmState {
+            mediapipe_observation: Some(MediaPipeTeacherObservation {
+                landmarks_xy: vec![[0.25, 0.75]; 478],
+                camera_to_face: CameraFaceTransform {
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    translation_xyz: [0.0, 0.0, 0.5],
+                },
+                direct_coefficients: Arkit52Coefficients::try_from_array(coefficients)
+                    .expect("valid"),
+                quality: FaceTrackingQuality {
+                    landmark_presence_median: Some(0.95),
+                    matrix_orthogonality_error: 0.001,
+                    matrix_determinant: 1.0,
+                },
+            }),
+            gnm_state: Some(GnmTeacherStateRecord {
+                expression: GnmNonTongueExpression::try_from_values(vec![0.0; 351]).expect("valid"),
+                joint_rotations: vec![[0.01, 0.02, 0.03]],
+                rigid_yaw_pitch_roll: [0.1, 0.2, 0.3],
+                camera_translation: [0.0, 0.0, 2.0],
+                camera_focal: 1.2,
+                camera_principal_point: [0.5, 0.5],
                 projected_coefficients: Arkit52Coefficients::try_from_array(coefficients)
                     .expect("valid"),
-                residual: 0.125,
+                objective: 0.125,
+                region_fits: vec![GnmRegionFitRecord {
+                    region: FaceRegion::Mouth,
+                    valid_points: 40,
+                    weighted_rms: 0.012,
+                }],
             }),
             baseline_output: Arkit52Coefficients::default(),
             teacher: Some(ArkitTeacherFrame {
@@ -1349,6 +1571,13 @@ mod tests {
         let row = trace_row(&sample);
         let json = serde_json::to_string(&row).expect("serialize");
         let parsed: TraceRow = serde_json::from_str(&json).expect("deserialize");
+        assert!(!json.contains("\"z\""));
+        assert!(!json.contains("tongue"));
+        let repeated_json = serde_json::to_string(&trace_row(&sample)).expect("serialize again");
+        assert_eq!(
+            sha256_hex_bytes(json.as_bytes()),
+            sha256_hex_bytes(repeated_json.as_bytes())
+        );
         assert_eq!(parsed, row);
         let rebuilt = sample_from_row(&parsed).expect("rebuild");
         assert_eq!(rebuilt, sample);

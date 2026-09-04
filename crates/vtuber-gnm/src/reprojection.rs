@@ -289,6 +289,76 @@ pub struct DenseReprojectionReport {
     effective_weight_sum: f32,
 }
 
+/// Per-region fit quality recorded in teacher replay traces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GnmRegionFitRecord {
+    /// Fixed facial region.
+    pub region: FaceRegion,
+    /// Number of observation points with a finite projected counterpart.
+    pub valid_points: usize,
+    /// Static mapping-weighted 2D RMS for the region.
+    pub weighted_rms: f32,
+}
+
+/// Computes diagnostic region RMS values without changing fit acceptance.
+///
+/// # Errors
+///
+/// Returns a typed configuration error when projected points are not aligned
+/// to the dense mapping rows.
+#[allow(clippy::indexing_slicing)]
+pub fn region_fit_records(
+    mapping: &DenseCorrespondenceSet,
+    observation: &GnmDenseObservation,
+    projected_points: &[[f32; 2]],
+) -> Result<Vec<GnmRegionFitRecord>, GnmReprojectionError> {
+    if projected_points.len() != mapping.len() {
+        return Err(GnmReprojectionError::InvalidConfig(
+            "projected points must match dense mapping rows",
+        ));
+    }
+    let regions = [
+        FaceRegion::Contour,
+        FaceRegion::Brow,
+        FaceRegion::Eye,
+        FaceRegion::Nose,
+        FaceRegion::Mouth,
+        FaceRegion::Iris,
+        FaceRegion::Other,
+    ];
+    let mut records = Vec::with_capacity(regions.len());
+    for region in regions {
+        let mut valid_points = 0;
+        let mut weighted_squared_sum = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
+        for point in observation
+            .points()
+            .iter()
+            .filter(|point| point.region == region)
+        {
+            let projected = projected_points[point.mapping_index];
+            if !projected.iter().all(|value| value.is_finite()) {
+                continue;
+            }
+            let dx = point.normalized_xy[0] - projected[0];
+            let dy = point.normalized_xy[1] - projected[1];
+            weighted_squared_sum += f64::from(point.weight * (dx * dx + dy * dy));
+            weight_sum += f64::from(point.weight);
+            valid_points += 1;
+        }
+        records.push(GnmRegionFitRecord {
+            region,
+            valid_points,
+            weighted_rms: if weight_sum > 0.0 {
+                (weighted_squared_sum / weight_sum).sqrt() as f32
+            } else {
+                0.0
+            },
+        });
+    }
+    Ok(records)
+}
+
 impl DenseReprojectionReport {
     /// Returns valid residuals in observation order.
     pub fn residuals(&self) -> &[DenseReprojectionResidual] {
@@ -3595,6 +3665,44 @@ mod tests {
         let projected = rolled.project([1.0, 0.0, 2.0]).unwrap();
         assert!((projected[0] - 0.5).abs() < 1.0e-6);
         assert!(projected[1] < 0.5);
+    }
+
+    #[test]
+    fn region_fit_records_cover_every_fixed_region_without_affecting_acceptance() {
+        let model = spread_model(3);
+        let mapping = mapping_for(&model, 3);
+        let mut landmarks = vec![[f32::NAN; 2]; MEDIAPIPE_FACE_LANDMARK_COUNT];
+        let projected = [[0.10, 0.20], [0.30, 0.40], [0.50, 0.60]];
+        for (row, point) in mapping.rows().iter().zip(projected) {
+            landmarks[row.mediapipe_index] = point;
+        }
+        let observation = GnmDenseObservation::from_mediapipe_xy(
+            1,
+            1_000,
+            &landmarks,
+            &mapping,
+            DenseCoveragePolicy::new(2, 0.5).unwrap(),
+        )
+        .unwrap();
+
+        let records = region_fit_records(&mapping, &observation, &projected).unwrap();
+        assert_eq!(records.len(), 7);
+        for region in [FaceRegion::Nose, FaceRegion::Contour, FaceRegion::Other] {
+            let record = records
+                .iter()
+                .find(|record| record.region == region)
+                .unwrap();
+            assert_eq!(record.valid_points, 1);
+            assert_eq!(record.weighted_rms, 0.0);
+        }
+        assert_eq!(
+            records
+                .iter()
+                .find(|record| record.region == FaceRegion::Mouth)
+                .unwrap()
+                .valid_points,
+            0
+        );
     }
 
     #[test]
