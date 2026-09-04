@@ -32,10 +32,10 @@ mod single_frame_temporal;
 mod temporal_regularization;
 
 pub use aux_geometry::{
-    BrowAuxFeatures, BrowSideAuxFeatures, EyeApertureFeature, EyeAuxFeatures, GnmAuxGeometryError,
-    GnmFacialFeatures, IrisAuxFeatures, IrisSideAuxFeature, MouthAuxFeatures,
-    compute_brow_aux_features, compute_eye_aperture_features, compute_gnm_facial_features,
-    compute_mouth_aux_features,
+    BrowAuxFeatures, BrowSideAuxFeatures, CheekAuxFeatures, EyeApertureFeature, EyeAuxFeatures,
+    GnmAuxGeometryError, GnmFacialFeatures, IrisAuxFeatures, IrisSideAuxFeature, MouthAuxFeatures,
+    compute_brow_aux_features, compute_cheek_aux_features, compute_eye_aperture_features,
+    compute_gnm_facial_features, compute_mouth_aux_features,
 };
 pub use dense::{
     AnatomicalSide, CorrespondenceProvenance, CorrespondenceReliability, DenseCorrespondenceSet,

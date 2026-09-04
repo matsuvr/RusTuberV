@@ -414,6 +414,22 @@ fn mean_of_present(values: impl IntoIterator<Item = Option<f32>>) -> Option<f32>
     }
 }
 
+/// Contour-widening delta magnitude, in mouth-width-scale units, that
+/// saturates the `CheekPuff` estimate.
+const CHEEK_SATURATION: f32 = 0.08;
+
+/// Provisional `CheekPuff` gate thresholds, in mouth-width-scale units.
+///
+/// The three-condition AND reproduces the lecture's geometric rule
+/// (lower-jaw contour outward + mouth not widened + chin tip not out) in
+/// neutral-relative, rigid-invariant deltas. Values are provisional until
+/// the hold-based cheek evaluation calibrates the middle of the flat
+/// interval; they are deliberately conservative to prefer misses over
+/// false positives on talk/smile/purse.
+const CHEEK_OUTWARD_MIN: f32 = 0.02;
+const CHEEK_MOUTH_WIDTH_MAX: f32 = 0.02;
+const CHEEK_JAW_FORWARD_MIN: f32 = -0.02;
+
 /// Projects the brow, cheek, and nose ARKit channels from one facial feature
 /// snapshot.
 ///
@@ -425,10 +441,13 @@ fn mean_of_present(values: impl IntoIterator<Item = Option<f32>>) -> Option<f32>
 ///   `brow_lower > 0` drives `BrowDownLeft`/`Right`, `outer_rise > 0`
 ///   drives `BrowOuterUpLeft`/`Right`, and the positive part of the mean
 ///   `inner_rise` drives the midline `BrowInnerUp` channel.
-/// - `CheekPuff`, `CheekSquintLeft`/`Right`, and `NoseSneerLeft`/`Right`
-///   have no dedicated observation in the current snapshot, so they are
-///   permanently [`ProjectedSupport::Unsupported`] with value `0.0` rather
-///   than being inferred from weak proxies.
+/// - `CheekPuff` is [`ProjectedSupport::Experimental`] only when all three
+///   hold: the lower-cheek contour sits outward versus neutral, the mouth
+///   is not widened, and the chin tip is not pushed forward. Any missing
+///   evidence fails closed to [`ProjectedSupport::Unsupported`].
+/// - `CheekSquintLeft`/`Right` and `NoseSneerLeft`/`Right` have no dedicated
+///   observation in the current snapshot, so they stay permanently
+///   [`ProjectedSupport::Unsupported`] with value `0.0`.
 /// - No projector in this module ever produces a tongue coefficient;
 ///   `TongueOut` has no dedicated observation and stays fabricated-free.
 ///
@@ -454,12 +473,38 @@ pub fn project_brow_cheek_nose_channels(features: &GnmFacialFeatures) -> BrowChe
         brow_inner_up: brow_channel(inner_up),
         brow_outer_up_left: brow_channel(features.brows.left.outer_rise),
         brow_outer_up_right: brow_channel(features.brows.right.outer_rise),
-        cheek_puff: ProjectedChannel::UNSUPPORTED,
+        cheek_puff: cheek_puff_channel(features),
         cheek_squint_left: ProjectedChannel::UNSUPPORTED,
         cheek_squint_right: ProjectedChannel::UNSUPPORTED,
         nose_sneer_left: ProjectedChannel::UNSUPPORTED,
         nose_sneer_right: ProjectedChannel::UNSUPPORTED,
     }
+}
+
+/// Evaluates the three-condition `CheekPuff` gate.
+///
+/// All inputs are neutral-relative distance deltas, so a rigid head
+/// transform alone cannot fire the channel. A `None` in any condition
+/// means the mapping lacks the rows to judge it and fails closed.
+fn cheek_puff_channel(features: &GnmFacialFeatures) -> ProjectedChannel {
+    let (Some(outward), Some(width), Some(forward)) = (
+        features.cheeks.contour_outward,
+        features.mouth_jaw.width_delta,
+        features.mouth_jaw.jaw_forward,
+    ) else {
+        return ProjectedChannel::UNSUPPORTED;
+    };
+    if !(outward.is_finite() && width.is_finite() && forward.is_finite()) {
+        return ProjectedChannel::UNSUPPORTED;
+    }
+    if outward <= CHEEK_OUTWARD_MIN
+        || width > CHEEK_MOUTH_WIDTH_MAX
+        || forward < CHEEK_JAW_FORWARD_MIN
+    {
+        return ProjectedChannel::UNSUPPORTED;
+    }
+    bounded_ratio(outward - CHEEK_OUTWARD_MIN, CHEEK_SATURATION)
+        .map_or(ProjectedChannel::UNSUPPORTED, ProjectedChannel::experimental)
 }
 
 /// Corner-lift delta magnitude, in mouth-width-scale units, that saturates
@@ -1122,6 +1167,7 @@ mod tests {
                 left: left_iris,
             },
             mouth_jaw: MouthAuxFeatures::default(),
+            cheeks: vtuber_gnm::CheekAuxFeatures::default(),
             brows: BrowAuxFeatures {
                 right: brow(AnatomicalSide::Right),
                 left: brow(AnatomicalSide::Left),
@@ -2064,15 +2110,15 @@ mod tests {
     }
 
     #[test]
-    fn cheek_and_nose_channels_are_deterministically_unsupported() {
-        // Even with full brow evidence present, cheek/nose channels never fire:
-        // the snapshot carries no dedicated observation for them.
+    fn cheek_squint_and_nose_are_deterministically_unsupported() {
+        // Even with full brow evidence present, squint/nose channels never
+        // fire: the snapshot carries no dedicated observation for them.
+        // `CheekPuff` is excluded here; it has its own geometric gate below.
         let projection = project_brow_cheek_nose_channels(&snapshot_with_brows(
             brow(AnatomicalSide::Right, Some(0.1), Some(0.1), Some(0.1)),
             brow(AnatomicalSide::Left, Some(0.1), Some(0.1), Some(0.1)),
         ));
         for channel in [
-            projection.cheek_puff,
             projection.cheek_squint_left,
             projection.cheek_squint_right,
             projection.nose_sneer_left,
@@ -2080,6 +2126,75 @@ mod tests {
         ] {
             assert_eq!(channel.support, ProjectedSupport::Unsupported);
             assert_eq!(channel.value, 0.0);
+        }
+        // Without cheek/mouth evidence the puff gate also stays closed.
+        assert_eq!(projection.cheek_puff.support, ProjectedSupport::Unsupported);
+        assert_eq!(projection.cheek_puff.value, 0.0);
+    }
+
+    fn snapshot_with_cheek(
+        outward: Option<f32>,
+        width: Option<f32>,
+        forward: Option<f32>,
+    ) -> GnmFacialFeatures {
+        let mut base = neutral_snapshot_with_irises(false);
+        base.cheeks = vtuber_gnm::CheekAuxFeatures {
+            contour_outward: outward,
+        };
+        base.mouth_jaw = vtuber_gnm::MouthAuxFeatures {
+            width_delta: width,
+            jaw_forward: forward,
+            ..vtuber_gnm::MouthAuxFeatures::default()
+        };
+        base
+    }
+
+    #[test]
+    fn cheek_puff_fires_only_on_three_condition_and() {
+        let puffed = project_brow_cheek_nose_channels(&snapshot_with_cheek(
+            Some(0.06),
+            Some(0.0),
+            Some(0.0),
+        ));
+        assert_eq!(puffed.cheek_puff.support, ProjectedSupport::Experimental);
+        assert!(puffed.cheek_puff.value > 0.0);
+
+        // Mouth widened (smile-like) blocks the gate.
+        let smiled = project_brow_cheek_nose_channels(&snapshot_with_cheek(
+            Some(0.06),
+            Some(0.10),
+            Some(0.0),
+        ));
+        assert_eq!(smiled.cheek_puff.support, ProjectedSupport::Unsupported);
+
+        // Contour inward (purse/blow-like) blocks the gate.
+        let pursed = project_brow_cheek_nose_channels(&snapshot_with_cheek(
+            Some(-0.05),
+            Some(0.0),
+            Some(0.0),
+        ));
+        assert_eq!(pursed.cheek_puff.support, ProjectedSupport::Unsupported);
+
+        // Chin pushed forward blocks the gate.
+        let pushed = project_brow_cheek_nose_channels(&snapshot_with_cheek(
+            Some(0.06),
+            Some(0.0),
+            Some(-0.10),
+        ));
+        assert_eq!(pushed.cheek_puff.support, ProjectedSupport::Unsupported);
+    }
+
+    #[test]
+    fn cheek_puff_missing_or_non_finite_evidence_fails_closed() {
+        for snapshot in [
+            snapshot_with_cheek(None, Some(0.0), Some(0.0)),
+            snapshot_with_cheek(Some(0.06), None, Some(0.0)),
+            snapshot_with_cheek(Some(0.06), Some(0.0), None),
+            snapshot_with_cheek(Some(f32::NAN), Some(0.0), Some(0.0)),
+        ] {
+            let projection = project_brow_cheek_nose_channels(&snapshot);
+            assert_eq!(projection.cheek_puff.support, ProjectedSupport::Unsupported);
+            assert_eq!(projection.cheek_puff.value, 0.0);
         }
     }
 

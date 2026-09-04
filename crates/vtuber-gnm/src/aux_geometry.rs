@@ -604,6 +604,88 @@ pub(crate) fn brow_from_parts(
     Ok(BrowAuxFeatures { right, left })
 }
 
+/// MediaPipe indices for the lower-cheek contour width.
+///
+/// Both slots belong to the `FACE_OVAL` jaw-contour ring and sit below the
+/// mouth corners on their anatomical side, so their pairwise distance grows
+/// when the cheeks push outward and shrinks when the mouth purses or blows.
+const CHEEK_CONTOUR_RIGHT_MP: usize = 172;
+const CHEEK_CONTOUR_LEFT_MP: usize = 397;
+
+/// Cheek auxiliary features, each neutral-relative and scale-normalized.
+///
+/// A `None` value means the mapping does not carry the semantic rows needed
+/// for that feature; the value is unavailable and is never fabricated.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CheekAuxFeatures {
+    /// `(dist(right contour, left contour) current - neutral) / mouth_width`;
+    /// positive means the lower-cheek ring sits wider (more outward) than
+    /// the calibrated neutral.
+    pub contour_outward: Option<f32>,
+}
+
+/// Computes the cheek family from an already-evaluated surface.
+///
+/// The single feature is a pairwise model-space distance delta against the
+/// calibration's neutral surface reference, so a rigid head transform alone
+/// cannot change it. It is divided by the calibration's mouth-width scale,
+/// matching the mouth family's normalization.
+pub(crate) fn cheek_from_parts(
+    surface: &[[f32; 3]],
+    neutral_surface: &[[f32; 3]],
+    mapping: &DenseCorrespondenceSet,
+    scale: f32,
+) -> Result<CheekAuxFeatures, GnmAuxGeometryError> {
+    let lookup = |mediapipe: usize| row_index_for(mapping, mediapipe);
+    let contour_outward = measured_delta(
+        surface,
+        neutral_surface,
+        lookup(CHEEK_CONTOUR_RIGHT_MP),
+        lookup(CHEEK_CONTOUR_LEFT_MP),
+    )?
+    .map(|value| value / scale);
+    Ok(CheekAuxFeatures { contour_outward })
+}
+
+/// Computes cheek auxiliary features from the current GNM surface and the
+/// neutral identity calibration.
+///
+/// See [`cheek_from_parts`] for the rigid-invariance and normalization
+/// contract. Features whose semantic rows are absent from the mapping are
+/// returned as `None` instead of being fabricated.
+pub fn compute_cheek_aux_features(
+    model: &GnmModel,
+    identity: &GnmIdentityState,
+    expression: &GnmExpressionState,
+    joints: &GnmJointState,
+    mapping: &DenseCorrespondenceSet,
+    calibration: &GnmIdentityCalibration,
+) -> Result<CheekAuxFeatures, GnmAuxGeometryError> {
+    let scale = checked_scale(
+        calibration.normalization_scales().mouth_width,
+        "mouth_width",
+    )?;
+
+    let neutral_surface = calibration.neutral_surface_reference();
+    if neutral_surface.len() != mapping.len() {
+        return Err(GnmAuxGeometryError::CalibrationSurfaceLengthMismatch {
+            mapping_rows: mapping.len(),
+            calibration_rows: neutral_surface.len(),
+        });
+    }
+
+    let mut surface_buffer = GnmSparseVertices::with_len(mapping.len());
+    mapping
+        .evaluate_surface(model, identity, expression, joints, &mut surface_buffer)
+        .map_err(GnmAuxGeometryError::SurfaceEvaluation)?;
+    cheek_from_parts(
+        surface_buffer.values(),
+        neutral_surface,
+        mapping,
+        scale,
+    )
+}
+
 /// Iris/gaze auxiliary feature for one anatomical side.
 ///
 /// Both values are neutral-relative pairwise-distance deltas divided by the
@@ -715,6 +797,8 @@ pub struct GnmFacialFeatures {
     pub mouth_jaw: MouthAuxFeatures,
     /// Brow features.
     pub brows: BrowAuxFeatures,
+    /// Cheek features (unavailable without contour rows).
+    pub cheeks: CheekAuxFeatures,
 }
 
 impl GnmFacialFeatures {
@@ -754,6 +838,7 @@ impl GnmFacialFeatures {
             ("jaw_lateral", self.mouth_jaw.jaw_lateral),
             ("width_delta", self.mouth_jaw.width_delta),
             ("corner_lift", self.mouth_jaw.corner_lift),
+            ("cheek_contour_outward", self.cheeks.contour_outward),
         ] {
             if let Some(value) = value
                 && !value.is_finite()
@@ -818,6 +903,7 @@ pub fn compute_gnm_facial_features(
         irises: iris_from_parts(surface, neutral_surface, mapping, inter_ocular)?,
         brows: brow_from_parts(surface, neutral_surface, mapping, inter_ocular)?,
         mouth_jaw: mouth_from_parts(surface, neutral_surface, mapping, mouth_width)?,
+        cheeks: cheek_from_parts(surface, neutral_surface, mapping, mouth_width)?,
     };
     snapshot.validate()?;
     Ok(snapshot)
@@ -1570,6 +1656,114 @@ mod tests {
         ));
     }
 
+    // -- Cheek auxiliary features (cheek-puff geometric gate) -----------------
+
+    fn cheek_features(
+        model: &GnmModel,
+        mapping: &crate::DenseCorrespondenceSet,
+        calibration: &GnmIdentityCalibration,
+        expression: &GnmExpressionState,
+        joints: &GnmJointState,
+    ) -> CheekAuxFeatures {
+        compute_cheek_aux_features(
+            model,
+            &model.neutral_identity(),
+            expression,
+            joints,
+            mapping,
+            calibration,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cheek_neutral_state_gives_zero_outward_delta() {
+        let model = eyelid_motion_model();
+        let mapping = full_mapping(&model);
+        let calibration = neutral_calibration(&model, &mapping, snapshot_scales()).unwrap();
+        let features = cheek_features(
+            &model,
+            &mapping,
+            &calibration,
+            &model.neutral_expression(),
+            &GnmJointState::neutral(model.joint_count()),
+        );
+        let outward = features.contour_outward.expect("cheek rows present");
+        assert!(outward.abs() < 1.0e-6, "outward = {outward}");
+    }
+
+    #[test]
+    fn cheek_outward_widens_contour_and_inward_narrows_it() {
+        let model = eyelid_motion_model();
+        let mapping = full_mapping(&model);
+        let calibration = neutral_calibration(&model, &mapping, snapshot_scales()).unwrap();
+        let neutral = GnmJointState::neutral(model.joint_count());
+
+        // Drive the two contour rows apart via expression channel 5.
+        let mut wide_basis = vec![0.0f32; GNM_HEAD_V3_EXPRESSION_DIM];
+        let _ = (&mut wide_basis, &model, &mapping);
+        let mut surface = crate::GnmSparseVertices::with_len(mapping.len());
+        mapping
+            .evaluate_surface(
+                &model,
+                &model.neutral_identity(),
+                &model.neutral_expression(),
+                &neutral,
+                &mut surface,
+            )
+            .unwrap();
+        let neutral_surface = calibration.neutral_surface_reference().to_vec();
+        // Direct surface-level check: spreading the contour pair apart must
+        // read as positive outward, pulling together as negative.
+        let rows: Vec<usize> = mapping
+            .rows()
+            .iter()
+            .map(|row| row.mediapipe_index)
+            .collect();
+        let right = rows
+            .iter()
+            .position(|mp| *mp == CHEEK_CONTOUR_RIGHT_MP)
+            .expect("right cheek row");
+        let left = rows
+            .iter()
+            .position(|mp| *mp == CHEEK_CONTOUR_LEFT_MP)
+            .expect("left cheek row");
+        let mut widened = surface.values().to_vec();
+        #[allow(clippy::indexing_slicing)]
+        {
+            widened[right][0] -= 0.3;
+            widened[left][0] += 0.3;
+        }
+        let wide =
+            cheek_from_parts(&widened, &neutral_surface, &mapping, 3.0).unwrap();
+        assert!(wide.contour_outward.unwrap() > 0.0);
+        let mut narrowed = surface.values().to_vec();
+        #[allow(clippy::indexing_slicing)]
+        {
+            narrowed[right][0] += 0.3;
+            narrowed[left][0] -= 0.3;
+        }
+        let narrow =
+            cheek_from_parts(&narrowed, &neutral_surface, &mapping, 3.0).unwrap();
+        assert!(narrow.contour_outward.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn cheek_missing_rows_leave_semantic_unavailable_without_fabrication() {
+        let model = mouth_motion_model();
+        // `mouth_mapping` carries no 172/397 contour rows by construction.
+        let mapping = mouth_mapping(&model, true);
+        let calibration = mouth_calibration(&model, &mapping);
+        let features = cheek_features(
+            &model,
+            &mapping,
+            &calibration,
+            &mouth_expression(0),
+            &GnmJointState::neutral(model.joint_count()),
+        );
+        assert_eq!(features.contour_outward, None);
+    }
+
     // -- Brow auxiliary features (Issue #55.3 / #88) fixtures -----------------
 
     /// Model whose template places brow rows directly above their upper-lid
@@ -2116,6 +2310,7 @@ mod tests {
             },
             irises: IrisAuxFeatures::default(),
             mouth_jaw: MouthAuxFeatures::default(),
+            cheeks: CheekAuxFeatures::default(),
             brows: BrowAuxFeatures {
                 right: BrowSideAuxFeatures {
                     side: AnatomicalSide::Right,

@@ -525,6 +525,74 @@ impl std::fmt::Display for TemporalMetricError {
 
 impl std::error::Error for TemporalMetricError {}
 
+/// Lecture-style hold detection for one cheek-puff take.
+///
+/// A take is one fixed hold (the lecture keeps each expression for 4 s).
+/// The hold counts as detected when the score stays above `threshold` on
+/// more than half its samples. Empty traces never count as detected.
+#[must_use]
+pub fn cheek_hold_detected(trace: &TemporalTrace, threshold: f64) -> bool {
+    let samples = trace.samples();
+    if samples.is_empty() {
+        return false;
+    }
+    let reactive = samples
+        .iter()
+        .filter(|sample| sample.value > threshold)
+        .count();
+    reactive * 2 > samples.len()
+}
+
+/// Take-level cheek evaluation over puff and non-puff takes.
+///
+/// Each slice holds one precomputed hold decision per take (`true` =
+/// detected). The lecture's bar is all puff takes detected with zero false
+/// alarms on the non-puff takes (talk/smile/purse); this struct reports
+/// both counts so a threshold sweep can pick the middle of the flat
+/// interval instead of the single best score.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheekTakeEvaluation {
+    /// Puff takes detected.
+    pub detected_puff: usize,
+    /// Total puff takes.
+    pub total_puff: usize,
+    /// Non-puff takes with a false alarm.
+    pub false_alarms: usize,
+    /// Total non-puff takes.
+    pub total_non_puff: usize,
+}
+
+impl CheekTakeEvaluation {
+    /// Aggregates per-take hold decisions.
+    #[must_use]
+    pub fn new(puff_detected: &[bool], non_puff_detected: &[bool]) -> Self {
+        Self {
+            detected_puff: puff_detected.iter().filter(|hit| **hit).count(),
+            total_puff: puff_detected.len(),
+            false_alarms: non_puff_detected.iter().filter(|hit| **hit).count(),
+            total_non_puff: non_puff_detected.len(),
+        }
+    }
+
+    /// Returns `true` when every puff take fired and no non-puff take did.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.total_puff > 0
+            && self.detected_puff == self.total_puff
+            && self.false_alarms == 0
+    }
+}
+
+/// Returns `true` when the training and evaluation take-id sets are
+/// disjoint. Take-disjoint splits are required before any cheek (or prior)
+/// number may be read as generalization evidence.
+#[must_use]
+pub fn cheek_takes_are_disjoint(train: &[&str], eval: &[&str]) -> bool {
+    train
+        .iter()
+        .all(|take| !eval.iter().any(|candidate| candidate == take))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,8 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_rejects_non_finite_and_non_monotonic_samples() {
-        assert!(matches!(
+    fn trace_rejects_non_finite_and_non_monotonic_samples() {        assert!(matches!(
             TemporalTrace::new(vec![TemporalSample {
                 timestamp_micros: 0,
                 value: f64::NAN,
@@ -723,5 +790,38 @@ mod tests {
         assert_close(metrics.t10_ms.unwrap(), 0.0);
         assert_close(metrics.t50_ms.unwrap(), 0.0);
         assert_close(metrics.t90_ms.unwrap(), 40.0);
+    }
+
+    #[test]
+    fn cheek_hold_needs_more_than_half_reactive_samples() {
+        // 4 s hold at 30 fps would be 120 samples; the rule is the fraction,
+        // not the count, so a short trace exercises the same boundary.
+        let held = trace(&[(0, 0.8), (33_333, 0.8), (66_666, 0.0), (99_999, 0.8)]);
+        assert!(cheek_hold_detected(&held, 0.5));
+        let tied = trace(&[(0, 0.8), (33_333, 0.0)]);
+        assert!(!cheek_hold_detected(&tied, 0.5));
+        let quiet = trace(&[(0, 0.1), (33_333, 0.2)]);
+        assert!(!cheek_hold_detected(&quiet, 0.5));
+    }
+
+    #[test]
+    fn cheek_take_evaluation_reports_clean_only_without_false_alarms() {
+        let clean = CheekTakeEvaluation::new(&[true, true], &[false, false, false]);
+        assert!(clean.is_clean());
+        assert_eq!(clean.detected_puff, 2);
+        let missed = CheekTakeEvaluation::new(&[true, false], &[false]);
+        assert!(!missed.is_clean());
+        let false_alarm = CheekTakeEvaluation::new(&[true], &[true]);
+        assert!(!false_alarm.is_clean());
+        assert!(!CheekTakeEvaluation::new(&[], &[]).is_clean());
+    }
+
+    #[test]
+    fn cheek_take_splits_must_be_disjoint_to_claim_generalization() {
+        assert!(cheek_takes_are_disjoint(
+            &["take_a", "take_b"],
+            &["take_c", "take_d"]
+        ));
+        assert!(!cheek_takes_are_disjoint(&["take_a", "take_b"], &["take_b"]));
     }
 }

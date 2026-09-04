@@ -394,6 +394,7 @@ mod tests {
             },
             irises: IrisAuxFeatures::default(),
             mouth_jaw: MouthAuxFeatures::default(),
+            cheeks: CheekAuxFeatures::default(),
             brows: BrowAuxFeatures {
                 right: BrowSideAuxFeatures {
                     side: AnatomicalSide::Right,

@@ -204,9 +204,10 @@ pub use state_machine::{
     TrackingStateMachine, TransitionInput,
 };
 pub use temporal_metrics::{
-    PulseResponseMetrics, PulseResponseSpec, StepResponseMetrics, StepResponseSpec,
-    TemporalMetricError, TemporalNoiseMetrics, TemporalSample, TemporalTrace,
-    pulse_response_metrics, step_response_metrics, temporal_noise_metrics,
+    CheekTakeEvaluation, PulseResponseMetrics, PulseResponseSpec, StepResponseMetrics,
+    StepResponseSpec, TemporalMetricError, TemporalNoiseMetrics, TemporalSample, TemporalTrace,
+    cheek_hold_detected, cheek_takes_are_disjoint, pulse_response_metrics, step_response_metrics,
+    temporal_noise_metrics,
 };
 pub use temporal_report::{
     BackendTemporalQuality, ChannelTemporalQuality, TemporalChannelSpecs, backend_temporal_quality,

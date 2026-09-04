@@ -76,7 +76,8 @@ impl FaceTrackingBackendSelection {
     pub fn to_runtime_mode(self) -> FaceTrackingMode {
         match self {
             Self::DirectMediaPipe => FaceTrackingMode::DirectMediaPipe,
-            Self::GnmTemporal | Self::GnmShadow => FaceTrackingMode::GnmTemporal,
+            Self::GnmTemporal => FaceTrackingMode::GnmTemporal,
+            Self::GnmShadow => FaceTrackingMode::GnmTemporalShadow,
         }
     }
 }
@@ -194,7 +195,7 @@ mod tests {
         // Shadow evaluates GNM but never takes avatar authority by request.
         assert_eq!(
             FaceTrackingBackendSelection::GnmShadow.to_runtime_mode(),
-            FaceTrackingMode::GnmTemporal
+            FaceTrackingMode::GnmTemporalShadow
         );
     }
 

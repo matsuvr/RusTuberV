@@ -1036,6 +1036,52 @@ fn issue_81_eyelid_case_senses_eyelid_displacement_and_recovers_pose() {
 }
 
 #[test]
+fn cheek_contour_basis_specificity_scan() {
+    // Cheek-puff projection question: does the Head v3 expression basis
+    // contain an isolated contour direction, like the mouth probe
+    // (coefficient 201, ~3.3x) or the eyelid joint probe (~27x)?
+    // This scans all 383 channels for FaceRegion::Contour displacement
+    // specificity and reports the best channel. It is a diagnostic: the
+    // assertion below pins the measured outcome so a future model or
+    // mapping change cannot silently alter the answer.
+    let model = shared_model();
+    let dense = bound_mapping();
+    let (identity, _, joints) = neutral_states(model);
+    let neutral = evaluate_surface(&dense, &identity, &model.neutral_expression(), &joints);
+
+    let dim = model.expression_dimension();
+    let mut best_channel = 0usize;
+    let mut best_ratio = 0.0f64;
+    let mut best_contour = 0.0f64;
+    for channel in 0..dim {
+        let mut values = vec![0.0f32; dim];
+        values[channel] = 1.0;
+        let expression = GnmExpressionState::new(values, dim).expect("valid expression");
+        let moved = evaluate_surface(&dense, &identity, &expression, &joints);
+        let (contour_mean, other_mean) =
+            region_displacement(&dense, &moved, &neutral, FaceRegion::Contour);
+        let ratio = contour_mean / other_mean.max(1.0e-12);
+        if ratio > best_ratio {
+            best_ratio = ratio;
+            best_channel = channel;
+            best_contour = contour_mean;
+        }
+    }
+    println!("cheek contour best channel {best_channel} ratio {best_ratio:.3} contour_mean {best_contour:.6}");
+    // Pinned on the committed asset: channel 104 at ~2.44x is weaker than
+    // the mouth isolator (~3.3x) and far below the eyelid joint probe
+    // (~27x), with a tiny absolute displacement (~1e-4). There is no
+    // isolated cheek-puff direction in the basis, so the geometric
+    // cheek gate must stay Experimental, never Reliable.
+    assert_eq!(best_channel, 104, "cheek contour probe moved channels");
+    assert!(
+        (2.0..3.0).contains(&best_ratio),
+        "cheek contour specificity drifted: {best_ratio}"
+    );
+    assert!(best_contour > 5.0e-5, "contour displacement vanished");
+}
+
+#[test]
 fn issue_81_partial_invalidation_degrades_coverage_but_stays_solvable() {
     // Drop every fifth mapped landmark deterministically (~20% of rows).
     let invalidate =
