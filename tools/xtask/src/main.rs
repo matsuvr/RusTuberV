@@ -25,6 +25,7 @@ mod mediapipe_face_smoke;
 mod mediapipe_pose_probe;
 mod ndi;
 mod ndi_output_render;
+mod perfect_sync_morph;
 mod teacher_ablation;
 mod teacher_fit_aligned_basis;
 mod teacher_fit_gnm_decoder;
@@ -35,6 +36,7 @@ mod teacher_fit_prior;
 mod teacher_fit_residual;
 mod teacher_replay;
 mod teacher_residual_ablation;
+mod teacher_unified_gnm_ablation;
 mod temporal_report;
 mod vrm_compatibility;
 mod vrm_managed_compatibility;
@@ -78,6 +80,7 @@ fn main() {
         );
         println!("  teacher-fit-landmark-basis <opts> Fit teacher-aligned landmark basis (#18)");
         println!("  teacher-fit-landmark-decoder <opts> Fit landmark L or HL decoder (#18)");
+        println!("  teacher-unified-gnm-ablation <opts> Evaluate D/G0/G1/L/H/HL (#19)");
         println!(
             "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
         );
@@ -205,6 +208,13 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-fit-landmark-decoder failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-unified-gnm-ablation" => match teacher_unified_gnm_ablation::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-unified-gnm-ablation failed: {error}");
                 process::exit(1);
             }
         },
