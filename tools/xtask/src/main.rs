@@ -26,6 +26,7 @@ mod mediapipe_pose_probe;
 mod ndi;
 mod ndi_output_render;
 mod teacher_ablation;
+mod teacher_fit_observable_basis;
 mod teacher_fit_prior;
 mod teacher_fit_residual;
 mod teacher_replay;
@@ -61,6 +62,9 @@ fn main() {
         );
         println!(
             "  teacher-fit-prior <opts>  Fit/export the causal linear prior from derived traces (GNM #68.4)"
+        );
+        println!(
+            "  teacher-fit-observable-basis <opts> Fit geometric non-tongue GNM basis (Issue #15)"
         );
         println!(
             "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
@@ -154,6 +158,13 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-fit-prior failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-fit-observable-basis" => match teacher_fit_observable_basis::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-fit-observable-basis failed: {error}");
                 process::exit(1);
             }
         },

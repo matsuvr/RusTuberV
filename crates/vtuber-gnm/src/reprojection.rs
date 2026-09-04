@@ -22,9 +22,10 @@ use crate::single_frame_temporal::{
     CandidateTemporalScratch, SingleFrameTemporalPenalty, candidate_state_view,
 };
 use crate::{
-    AnatomicalSide, DenseCorrespondenceSet, DenseCoveragePolicy, FaceRegion, GnmDenseError,
+    AnatomicalSide, DenseCorrespondenceSet, DenseCoveragePolicy, FaceRegion,
+    GNM_HEAD_V3_IRIS_EXPRESSION_INDEX, GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM, GnmDenseError,
     GnmDenseObservation, GnmExpressionState, GnmIdentityState, GnmJointState, GnmModel,
-    GnmModelError, GnmSparseVertices, MEDIAPIPE_FACE_LANDMARK_COUNT,
+    GnmModelError, GnmNonTongueExpression, GnmSparseVertices, MEDIAPIPE_FACE_LANDMARK_COUNT,
     MediaPipeGnmDenseCorrespondence, SparsePreparedVertices, SparseSkinningDerivatives,
     TemporalRegularizationError,
 };
@@ -298,6 +299,156 @@ pub struct GnmRegionFitRecord {
     pub valid_points: usize,
     /// Static mapping-weighted 2D RMS for the region.
     pub weighted_rms: f32,
+}
+
+/// Analytic projection Jacobian for the fixed 351-dimensional non-tongue state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NonTongueProjectionJacobian {
+    /// Number of x/y rows retained from valid mapped observations.
+    pub row_count: usize,
+    /// Always [`GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM`].
+    pub column_count: usize,
+    /// Projection derivatives in row-major order.
+    pub values_row_major: Vec<f64>,
+    /// Mapping base weight for each x/y row.
+    pub row_weights: Vec<f64>,
+}
+
+/// Builds the analytic 2D projection Jacobian for non-tongue Head-v3 expression.
+///
+/// # Errors
+///
+/// Returns a typed model/reprojection error for incompatible state, mapping,
+/// or projection inputs, or when no observation row can be projected.
+#[allow(clippy::too_many_arguments, clippy::indexing_slicing)]
+pub fn non_tongue_projection_jacobian(
+    model: &GnmModel,
+    identity: &GnmIdentityState,
+    expression: &GnmNonTongueExpression,
+    joints: &GnmJointState,
+    mapping: &DenseCorrespondenceSet,
+    observation: &GnmDenseObservation,
+    projection: &DenseProjection,
+) -> Result<NonTongueProjectionJacobian, GnmReprojectionError> {
+    let full_expression = expression.expand_with_zero_tongue()?;
+    let prepared = model.prepare_sparse_vertices(
+        identity,
+        &full_expression,
+        joints,
+        mapping.surface_landmarks(),
+    )?;
+    let surface = prepared.skin(model, identity, joints, mapping.surface_landmarks())?;
+    let report = evaluate_report_from_surface(
+        observation,
+        projection,
+        DenseReprojectionConfig::default(),
+        &surface,
+    )?;
+    let retained: Vec<usize> = report
+        .residuals()
+        .iter()
+        .map(|residual| residual.mapping_index)
+        .collect();
+    let row_count = 2 * retained.len();
+    let column_count = GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM;
+    let mut values_row_major = vec![0.0; row_count * column_count];
+    let row_weights = report
+        .residuals()
+        .iter()
+        .flat_map(|residual| [f64::from(residual.base_weight); 2])
+        .collect();
+    let skinning =
+        model.sparse_skinning_derivatives(identity, joints, mapping.surface_landmarks())?;
+    let active_columns = skinning.active_expression_columns(model);
+    let camera = CachedCameraRotation::new(projection);
+    let mut offsets = vec![[0.0; 3]; skinning.len()];
+    for compact_column in 0..column_count {
+        let model_column = if compact_column + 1 == column_count {
+            GNM_HEAD_V3_IRIS_EXPRESSION_INDEX
+        } else {
+            compact_column
+        };
+        if !active_columns[model_column] {
+            continue;
+        }
+        skinning.expression_point_offsets(model, model_column, &mut offsets)?;
+        for (point_row, &mapping_index) in retained.iter().enumerate() {
+            let offset = offsets[mapping_index];
+            if offset == [0.0; 3] {
+                continue;
+            }
+            let Some(projected_derivative) = camera.projection_jacobian(surface[mapping_index])
+            else {
+                return Err(GnmReprojectionError::InsufficientObservation);
+            };
+            values_row_major[(2 * point_row) * column_count + compact_column] =
+                projected_derivative[0][0] * f64::from(offset[0])
+                    + projected_derivative[0][1] * f64::from(offset[1])
+                    + projected_derivative[0][2] * f64::from(offset[2]);
+            values_row_major[(2 * point_row + 1) * column_count + compact_column] =
+                projected_derivative[1][0] * f64::from(offset[0])
+                    + projected_derivative[1][1] * f64::from(offset[1])
+                    + projected_derivative[1][2] * f64::from(offset[2]);
+        }
+    }
+    Ok(NonTongueProjectionJacobian {
+        row_count,
+        column_count,
+        values_row_major,
+        row_weights,
+    })
+}
+
+/// Adds `J^T W J` to a caller-owned packed lower-triangle buffer.
+///
+/// # Errors
+///
+/// Returns a typed configuration error for inconsistent dimensions or a
+/// non-finite Jacobian, weight, or accumulated Gram entry.
+#[allow(clippy::indexing_slicing)]
+pub fn accumulate_observability_gram(
+    jacobian: &NonTongueProjectionJacobian,
+    gram_lower_triangle: &mut [f64],
+) -> Result<(), GnmReprojectionError> {
+    let expected_values = jacobian.row_count * jacobian.column_count;
+    let expected_gram = jacobian.column_count * (jacobian.column_count + 1) / 2;
+    if jacobian.values_row_major.len() != expected_values
+        || jacobian.row_weights.len() != jacobian.row_count
+        || gram_lower_triangle.len() != expected_gram
+    {
+        return Err(GnmReprojectionError::InvalidConfig(
+            "observability Jacobian or Gram dimensions disagree",
+        ));
+    }
+    for row in 0..jacobian.row_count {
+        let weight = jacobian.row_weights[row];
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(GnmReprojectionError::InvalidConfig(
+                "observability row weights must be finite and positive",
+            ));
+        }
+        let row_start = row * jacobian.column_count;
+        for lower_row in 0..jacobian.column_count {
+            let left = jacobian.values_row_major[row_start + lower_row];
+            if !left.is_finite() {
+                return Err(GnmReprojectionError::NonFiniteLinearization {
+                    block: "non_tongue_expression",
+                });
+            }
+            let triangle_start = lower_row * (lower_row + 1) / 2;
+            for column in 0..=lower_row {
+                let right = jacobian.values_row_major[row_start + column];
+                let slot = &mut gram_lower_triangle[triangle_start + column];
+                *slot += weight * left * right;
+                if !slot.is_finite() {
+                    return Err(GnmReprojectionError::NonFiniteLinearization {
+                        block: "observability_gram",
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Computes diagnostic region RMS values without changing fit acceptance.
@@ -4771,6 +4922,99 @@ mod tests {
             "expression Jacobian parity failed: max |finite_difference - analytic| \
              = {max_abs_diff} (max entry magnitude {max_abs_entry})"
         );
+    }
+
+    #[test]
+    fn non_tongue_projection_jacobian_matches_central_difference() {
+        let model = ej_model();
+        let mapping = mapping_for(&model, 24);
+        let identity = model.neutral_identity();
+        let full = ej_expression(0.35, 0.25);
+        let compact = GnmNonTongueExpression::try_from_full(&full).unwrap();
+        let joints = GnmJointState::neutral(model.joint_count());
+        let projection = truth_projection();
+        let observation = synthesize_observation_from_projection(
+            &model,
+            &identity,
+            &full,
+            &joints,
+            &mapping,
+            &projection,
+            SynthesisOptions::default(),
+            DenseCoveragePolicy::new(2, 0.75).unwrap(),
+            |_, _| false,
+        )
+        .unwrap();
+        let analytic = non_tongue_projection_jacobian(
+            &model,
+            &identity,
+            &compact,
+            &joints,
+            &mapping,
+            &observation,
+            &projection,
+        )
+        .unwrap();
+        assert_eq!(analytic.column_count, GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM);
+        assert_eq!(analytic.row_count, 2 * mapping.len());
+
+        let step = 1.0e-3_f32;
+        let mut maximum_relative_error = 0.0_f64;
+        for column in [0_usize, 1] {
+            let mut plus = compact.values().to_vec();
+            let mut minus = compact.values().to_vec();
+            plus[column] += step;
+            minus[column] -= step;
+            let plus = GnmNonTongueExpression::try_from_values(plus)
+                .unwrap()
+                .expand_with_zero_tongue()
+                .unwrap();
+            let minus = GnmNonTongueExpression::try_from_values(minus)
+                .unwrap()
+                .expand_with_zero_tongue()
+                .unwrap();
+            let mut plus_surface = GnmSparseVertices::with_len(mapping.len());
+            let mut minus_surface = GnmSparseVertices::with_len(mapping.len());
+            mapping
+                .evaluate_surface(&model, &identity, &plus, &joints, &mut plus_surface)
+                .unwrap();
+            mapping
+                .evaluate_surface(&model, &identity, &minus, &joints, &mut minus_surface)
+                .unwrap();
+            for point in 0..mapping.len() {
+                let plus_xy = projection.project(plus_surface.values()[point]).unwrap();
+                let minus_xy = projection.project(minus_surface.values()[point]).unwrap();
+                for axis in 0..2 {
+                    let finite_difference =
+                        f64::from((plus_xy[axis] - minus_xy[axis]) / (2.0 * step));
+                    let actual = analytic.values_row_major
+                        [(2 * point + axis) * analytic.column_count + column];
+                    let relative =
+                        (actual - finite_difference).abs() / finite_difference.abs().max(1.0e-6);
+                    maximum_relative_error = maximum_relative_error.max(relative);
+                }
+            }
+        }
+        assert!(maximum_relative_error < 1.0e-2, "{maximum_relative_error}");
+    }
+
+    #[test]
+    fn observability_gram_accumulation_is_finite_symmetric_and_psd() {
+        let jacobian = NonTongueProjectionJacobian {
+            row_count: 3,
+            column_count: 2,
+            values_row_major: vec![1.0, 2.0, -1.0, 0.5, 0.25, -3.0],
+            row_weights: vec![1.0, 2.0, 0.5],
+        };
+        let mut packed = vec![0.0; 3];
+        accumulate_observability_gram(&jacobian, &mut packed).unwrap();
+        assert!(packed.iter().all(|value| value.is_finite()));
+        let gram = [[packed[0], packed[1]], [packed[1], packed[2]]];
+        for vector in [[1.0, 0.0], [0.0, 1.0], [2.0, -3.0]] {
+            let quadratic = vector[0] * (gram[0][0] * vector[0] + gram[0][1] * vector[1])
+                + vector[1] * (gram[1][0] * vector[0] + gram[1][1] * vector[1]);
+            assert!(quadratic >= 0.0);
+        }
     }
 
     #[test]

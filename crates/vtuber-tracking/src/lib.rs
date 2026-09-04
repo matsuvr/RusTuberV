@@ -66,6 +66,8 @@ pub mod gnm_shadow;
 pub mod loss_recovery;
 /// Bounded procedural micro-motion after tracking loss (Issue #172).
 pub mod micro_motion;
+/// Observable non-tongue GNM expression basis artifacts (Issue #15).
+pub mod observable_basis;
 /// Neutral-relative head pose generation and tracking pipeline stages.
 pub mod pipeline;
 /// Placeholder for tracking subsystem.
@@ -187,6 +189,11 @@ pub use loss_recovery::{
 pub use micro_motion::{
     IdleTarget, MicroMotionBlender, MicroMotionProfile, MicroMotionProfileError,
     blended_idle_target, idle_target, is_tracked_state,
+};
+pub use observable_basis::{
+    OBSERVABLE_GNM_BASIS_SCHEMA_VERSION, ObservableBasisError, ObservableBasisProvenance,
+    ObservableGnmBasisArtifact, fit_observable_gnm_basis, project_non_tongue_expression,
+    reconstruct_non_tongue_expression,
 };
 pub use pipeline::{
     HeadPoseFailure, HeadPoseFrame, PipelineConfig, PipelineConfigError, PipelineUpdate,
