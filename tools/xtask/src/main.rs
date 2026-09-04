@@ -27,6 +27,7 @@ mod ndi;
 mod ndi_output_render;
 mod perfect_sync_morph;
 mod teacher_ablation;
+mod teacher_benchmark_reduced_gnm;
 mod teacher_fit_aligned_basis;
 mod teacher_fit_gnm_decoder;
 mod teacher_fit_landmark_basis;
@@ -81,6 +82,7 @@ fn main() {
         println!("  teacher-fit-landmark-basis <opts> Fit teacher-aligned landmark basis (#18)");
         println!("  teacher-fit-landmark-decoder <opts> Fit landmark L or HL decoder (#18)");
         println!("  teacher-unified-gnm-ablation <opts> Evaluate D/G0/G1/L/H/HL (#19)");
+        println!("  teacher-benchmark-reduced-gnm <opts> Benchmark full/reduced GNM (#20)");
         println!(
             "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
         );
@@ -215,6 +217,13 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-unified-gnm-ablation failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-benchmark-reduced-gnm" => match teacher_benchmark_reduced_gnm::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-benchmark-reduced-gnm failed: {error}");
                 process::exit(1);
             }
         },

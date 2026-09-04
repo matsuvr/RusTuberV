@@ -206,6 +206,141 @@ impl GnmNonTongueExpression {
     }
 }
 
+/// Orthonormal column basis over the fixed 351 non-tongue expression values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GnmReducedExpressionBasis {
+    rank: usize,
+    values_row_major: Vec<f32>,
+}
+
+impl GnmReducedExpressionBasis {
+    /// Creates a finite column-orthonormal `[351, rank]` basis.
+    pub fn new(rank: usize, values_row_major: Vec<f32>) -> Result<Self, GnmModelError> {
+        if rank == 0 || rank > GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM {
+            return Err(GnmModelError::InvalidValue {
+                field: "reduced_expression_basis.rank".to_owned(),
+                reason: "rank must be within 1..=351".to_owned(),
+            });
+        }
+        let expected = GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM * rank;
+        if values_row_major.len() != expected {
+            return Err(GnmModelError::Shape {
+                field: "reduced_expression_basis".to_owned(),
+                expected: format!("[{GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM}, {rank}]"),
+                actual: format!("{} values", values_row_major.len()),
+            });
+        }
+        validate_finite("reduced_expression_basis", &values_row_major)?;
+        // The low-level solver relies on B^T B = I for projection and the
+        // neutral-pull prior. Validate the serialized f32 basis directly.
+        #[allow(clippy::indexing_slicing)]
+        for left in 0..rank {
+            for right in left..rank {
+                let dot = (0..GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM)
+                    .map(|row| {
+                        f64::from(values_row_major[row * rank + left])
+                            * f64::from(values_row_major[row * rank + right])
+                    })
+                    .sum::<f64>();
+                let expected_dot = if left == right { 1.0 } else { 0.0 };
+                if (dot - expected_dot).abs() > 1.0e-3 {
+                    return Err(GnmModelError::InvalidValue {
+                        field: "reduced_expression_basis".to_owned(),
+                        reason: "columns must be orthonormal".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(Self {
+            rank,
+            values_row_major,
+        })
+    }
+
+    /// Returns the reduced rank.
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// Returns the `[351, rank]` row-major coefficients.
+    pub fn values_row_major(&self) -> &[f32] {
+        &self.values_row_major
+    }
+}
+
+/// Coefficients in a [`GnmReducedExpressionBasis`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct GnmReducedExpressionState(Vec<f32>);
+
+impl GnmReducedExpressionState {
+    /// Creates a finite state matching `rank`.
+    pub fn new(values: Vec<f32>, rank: usize) -> Result<Self, GnmModelError> {
+        validate_state("reduced_expression", values.len(), rank)?;
+        validate_finite("reduced_expression", &values)?;
+        Ok(Self(values))
+    }
+
+    /// Creates the zero state for a validated basis rank.
+    pub fn neutral(rank: usize) -> Self {
+        Self(vec![0.0; rank])
+    }
+
+    /// Returns reduced coefficients.
+    pub fn values(&self) -> &[f32] {
+        &self.0
+    }
+}
+
+/// Expands `B q` and inserts 32 fixed zero tongue values.
+pub fn expand_reduced_expression(
+    basis: &GnmReducedExpressionBasis,
+    reduced: &GnmReducedExpressionState,
+) -> Result<GnmExpressionState, GnmModelError> {
+    if reduced.values().len() != basis.rank() {
+        return Err(GnmModelError::Shape {
+            field: "reduced_expression".to_owned(),
+            expected: format!("{} values", basis.rank()),
+            actual: format!("{} values", reduced.values().len()),
+        });
+    }
+    let non_tongue = basis
+        .values_row_major()
+        .chunks_exact(basis.rank())
+        .map(|row| {
+            row.iter()
+                .zip(reduced.values())
+                .map(|(basis, coefficient)| basis * coefficient)
+                .sum::<f32>()
+        })
+        .collect::<Vec<_>>();
+    GnmNonTongueExpression::try_from_values(non_tongue)?.expand_with_zero_tongue()
+}
+
+/// Orthogonally projects one non-tongue expression as `B^T expression`.
+pub fn project_to_reduced_expression(
+    basis: &GnmReducedExpressionBasis,
+    expression: &GnmNonTongueExpression,
+) -> Result<GnmReducedExpressionState, GnmModelError> {
+    if expression.values().len() != GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM {
+        return Err(GnmModelError::Shape {
+            field: "non_tongue_expression".to_owned(),
+            expected: format!("{GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM} values"),
+            actual: format!("{} values", expression.values().len()),
+        });
+    }
+    let mut reduced = vec![0.0; basis.rank()];
+    for (value, row) in expression
+        .values()
+        .iter()
+        .zip(basis.values_row_major().chunks_exact(basis.rank()))
+    {
+        for (output, coefficient) in reduced.iter_mut().zip(row) {
+            *output += value * coefficient;
+        }
+    }
+    GnmReducedExpressionState::new(reduced, basis.rank())
+}
+
 /// Optional joint pose state. Rotations are axis-angle vectors in radians.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GnmJointState {
