@@ -1,8 +1,11 @@
 //! Same-frame teacher-minus-Direct residual dataset and linear decoder.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use vtuber_core::{ARKIT_NON_TONGUE_CHANNEL_COUNT, arkit_non_tongue_values};
+use vtuber_core::{
+    ARKIT_NON_TONGUE_CHANNEL_COUNT, Arkit52Coefficients, Arkit52ValueError,
+    arkit_non_tongue_values, arkit52_with_zero_tongue,
+};
 
 use crate::arkit_teacher::{PairedTemporalSample, TeacherDatasetError};
 use crate::causal_prior::{
@@ -73,6 +76,40 @@ pub struct TeacherResidualDataset {
     pub rows: Vec<TeacherResidualRow>,
     /// Aggregated typed exclusions.
     pub exclusions: Vec<(TeacherResidualExclusion, usize)>,
+}
+
+/// Reusable per-frame feature lookup built by the canonical dataset builder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TeacherResidualHistory {
+    rows: BTreeMap<(u64, u64), Vec<f32>>,
+}
+
+impl TeacherResidualHistory {
+    /// Builds causal features once for offline evaluation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the canonical dataset error when source pairing is invalid.
+    pub fn build(
+        take_id: &str,
+        samples: &[PairedTemporalSample],
+        config: TeacherResidualFeatureConfig,
+    ) -> Result<Self, TeacherDatasetError> {
+        let dataset = build_teacher_residual_rows(take_id, samples, config)?;
+        Ok(Self {
+            rows: dataset
+                .rows
+                .into_iter()
+                .map(|row| ((row.frame_seq, row.timestamp_micros), row.features))
+                .collect(),
+        })
+    }
+
+    fn features(&self, sample: &PairedTemporalSample) -> Option<&[f32]> {
+        self.rows
+            .get(&(sample.frame_seq, sample.timestamp_micros))
+            .map(Vec::as_slice)
+    }
 }
 
 impl TeacherResidualDataset {
@@ -240,6 +277,116 @@ pub struct TeacherResidualDecoderArtifact {
     pub linear_map: NormalizedLinearMapArtifact,
     /// Stable hash of every preceding semantic field.
     pub content_hash: u64,
+}
+
+/// Validated residual decoder ready for offline prediction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadedTeacherResidualDecoder {
+    artifact: TeacherResidualDecoderArtifact,
+}
+
+impl LoadedTeacherResidualDecoder {
+    /// Validates schema, hash, order, and dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed load error when the artifact is incompatible.
+    pub fn load(
+        artifact: TeacherResidualDecoderArtifact,
+        expected_feature_order: &str,
+    ) -> Result<Self, LinearPriorLoadError> {
+        if artifact.feature_order != expected_feature_order {
+            return Err(LinearPriorLoadError::FeatureOrderMismatch {
+                expected: expected_feature_order.to_owned(),
+                found: artifact.feature_order.clone(),
+            });
+        }
+        let features = vec![0.0; artifact.history_len * HISTORY_SLOT_WIDTH + VELOCITY_WIDTH + 1];
+        let _ = predict_teacher_residual(&artifact, &features)?;
+        Ok(Self { artifact })
+    }
+
+    fn predict(
+        &self,
+        features: &[f32],
+    ) -> Result<[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT], LinearPriorLoadError> {
+        predict_teacher_residual(&self.artifact, features)
+    }
+}
+
+/// D/G0/H0 values aligned to one existing trace frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExistingTraceResidualVariants {
+    /// MediaPipe Direct coefficients.
+    pub direct: Arkit52Coefficients,
+    /// Existing hand-projected GNM coefficients.
+    pub gnm_projected: Arkit52Coefficients,
+    /// Direct plus the learned residual, clamped only at this final boundary.
+    pub hybrid_projected_residual: Arkit52Coefficients,
+}
+
+/// Typed failure while producing aligned offline ablation variants.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResidualAblationError {
+    /// The frame has no Direct coefficients.
+    MissingDirect,
+    /// The frame has no projected GNM state.
+    MissingGnmState,
+    /// The canonical history builder emitted no row for this frame.
+    MissingHistory,
+    /// Decoder validation or prediction failed.
+    Decoder(LinearPriorLoadError),
+    /// Final ARKit52 reconstruction failed.
+    InvalidOutput(Arkit52ValueError),
+}
+
+/// Adds a signed residual to the non-tongue Direct values and clamps the final output.
+///
+/// # Errors
+///
+/// Returns a typed ARKit value error for non-finite inputs.
+pub fn apply_non_tongue_residual(
+    direct: &Arkit52Coefficients,
+    residual: [f32; ARKIT_NON_TONGUE_CHANNEL_COUNT],
+) -> Result<Arkit52Coefficients, Arkit52ValueError> {
+    let mut values = arkit_non_tongue_values(direct);
+    for (value, correction) in values.iter_mut().zip(residual) {
+        *value = (*value + correction).clamp(0.0, 1.0);
+    }
+    arkit52_with_zero_tongue(values)
+}
+
+/// Produces aligned D/G0/H0 variants using the canonical #12 feature builder.
+///
+/// # Errors
+///
+/// Returns a typed error for missing aligned inputs, features, or invalid prediction.
+pub fn existing_trace_residual_variants(
+    sample: &PairedTemporalSample,
+    history: &TeacherResidualHistory,
+    decoder: &LoadedTeacherResidualDecoder,
+) -> Result<ExistingTraceResidualVariants, ResidualAblationError> {
+    let direct = sample
+        .mediapipe_observation
+        .as_ref()
+        .ok_or(ResidualAblationError::MissingDirect)?;
+    let gnm = sample
+        .gnm_state
+        .as_ref()
+        .ok_or(ResidualAblationError::MissingGnmState)?;
+    let features = history
+        .features(sample)
+        .ok_or(ResidualAblationError::MissingHistory)?;
+    let residual = decoder
+        .predict(features)
+        .map_err(ResidualAblationError::Decoder)?;
+    let hybrid_projected_residual = apply_non_tongue_residual(direct, residual)
+        .map_err(ResidualAblationError::InvalidOutput)?;
+    Ok(ExistingTraceResidualVariants {
+        direct: *direct,
+        gnm_projected: gnm.projected_coefficients,
+        hybrid_projected_residual,
+    })
 }
 
 /// Fits a residual decoder using only explicitly selected takes.
@@ -549,5 +696,49 @@ mod tests {
         let prediction = predict_teacher_residual(&artifact, &[0.25]).unwrap();
         assert!((prediction[0] - 0.0).abs() < 1e-3);
         assert!(prediction.iter().skip(1).all(|value| value.abs() < 1e-6));
+    }
+
+    #[test]
+    fn residual_application_clamps_and_zeroes_tongue() {
+        let mut residual = [0.0; ARKIT_NON_TONGUE_CHANNEL_COUNT];
+        residual[ArkitBlendshape::JawOpen.index()] = 0.4;
+        residual[ArkitBlendshape::EyeBlinkLeft.index()] = -0.8;
+        let output = apply_non_tongue_residual(&coefficients(0.8), residual).unwrap();
+        assert_eq!(output.get(ArkitBlendshape::JawOpen), 1.0);
+        assert_eq!(output.get(ArkitBlendshape::EyeBlinkLeft), 0.0);
+        assert_eq!(output.get(ArkitBlendshape::TongueOut), 0.0);
+    }
+
+    #[test]
+    fn aligned_variants_use_the_canonical_history_features() {
+        let samples = vec![
+            sample(1, 0.1, 0.2, 0.3),
+            sample(2, 0.2, 0.4, 0.1),
+            sample(3, 0.3, 0.1, 0.8),
+            sample(4, 0.4, 0.5, 0.2),
+        ];
+        let rows = build_teacher_residual_rows("train", &samples, config())
+            .unwrap()
+            .rows;
+        let artifact = fit_teacher_residual_decoder(
+            &rows,
+            &BTreeSet::from(["train".to_owned()]),
+            config(),
+            LinearPriorTrainingConfig::default(),
+            TEACHER_RESIDUAL_FEATURE_ORDER,
+        )
+        .unwrap();
+        let decoder =
+            LoadedTeacherResidualDecoder::load(artifact, TEACHER_RESIDUAL_FEATURE_ORDER).unwrap();
+        let history = TeacherResidualHistory::build("train", &samples, config()).unwrap();
+        let variants = existing_trace_residual_variants(&samples[0], &history, &decoder).unwrap();
+        assert_eq!(variants.direct, coefficients(0.1));
+        assert_eq!(variants.gnm_projected, coefficients(0.2));
+        assert_eq!(
+            variants
+                .hybrid_projected_residual
+                .get(ArkitBlendshape::TongueOut),
+            0.0
+        );
     }
 }

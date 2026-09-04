@@ -29,6 +29,7 @@ mod teacher_ablation;
 mod teacher_fit_prior;
 mod teacher_fit_residual;
 mod teacher_replay;
+mod teacher_residual_ablation;
 mod temporal_report;
 mod vrm_compatibility;
 mod vrm_managed_compatibility;
@@ -64,6 +65,7 @@ fn main() {
         println!(
             "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
         );
+        println!("  teacher-residual-ablation <opts> Evaluate D/G0/H0 on held-out traces (#13)");
         println!(
             "  teacher-ablation <opts>   Held-out no-prior/learned-prior ablation evaluation (GNM #68.5)"
         );
@@ -159,6 +161,13 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-fit-residual failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-residual-ablation" => match teacher_residual_ablation::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-residual-ablation failed: {error}");
                 process::exit(1);
             }
         },
