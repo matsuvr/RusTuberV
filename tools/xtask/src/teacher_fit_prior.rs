@@ -117,6 +117,8 @@ pub(crate) struct LoadedTrace {
     pub(crate) take_id: String,
     pub(crate) samples: Vec<PairedTemporalSample>,
     pub(crate) expected_solved: usize,
+    pub(crate) model_sha256: String,
+    pub(crate) mapping_schema_revision: u32,
 }
 
 /// Loads one replay-output directory into validated samples.
@@ -144,6 +146,26 @@ pub(crate) fn load_trace(directory: &Path) -> Result<LoadedTrace, String> {
         .pointer("/counts/solved")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_default() as usize;
+    let model_sha256 = metadata
+        .pointer("/config/gnm_model_sha256")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "{}: missing config.gnm_model_sha256",
+                metadata_path.display()
+            )
+        })?;
+    let mapping_schema_revision = metadata
+        .pointer("/config/dense_mapping_schema_revision")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            format!(
+                "{}: missing or invalid config.dense_mapping_schema_revision",
+                metadata_path.display()
+            )
+        })?;
 
     let trace_path = directory.join("derived-trace.jsonl");
     let text = fs::read_to_string(&trace_path)
@@ -180,6 +202,8 @@ pub(crate) fn load_trace(directory: &Path) -> Result<LoadedTrace, String> {
         take_id,
         samples,
         expected_solved: solved,
+        model_sha256,
+        mapping_schema_revision,
     })
 }
 

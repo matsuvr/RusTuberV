@@ -240,7 +240,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
-fn sha256_hex(path: &Path) -> Result<String, String> {
+pub(crate) fn sha256_hex(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("hash {}: {error}", path.display()))?;
     Ok(Sha256::digest(&bytes)
         .iter()
