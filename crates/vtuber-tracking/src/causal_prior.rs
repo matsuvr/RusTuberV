@@ -58,6 +58,16 @@ pub enum LinearPriorFitError {
     InconsistentDimensions,
 }
 
+/// Normalized multi-output ridge result shared by the two research decoders.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NormalizedLinearMap {
+    pub(crate) feature_mean: Vec<f32>,
+    pub(crate) feature_std: Vec<f32>,
+    pub(crate) target_mean: Vec<f32>,
+    pub(crate) target_std: Vec<f32>,
+    pub(crate) weights: Vec<Vec<f32>>,
+}
+
 /// Versioned, self-describing linear prior artifact.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinearPriorArtifact {
@@ -101,9 +111,6 @@ pub fn fit_linear_prior(
     config: LinearPriorTrainingConfig,
     feature_order: &str,
 ) -> Result<LinearPriorArtifact, LinearPriorFitError> {
-    if !(config.ridge_lambda.is_finite() && config.ridge_lambda > 0.0) {
-        return Err(LinearPriorFitError::NonFiniteInput);
-    }
     let training: Vec<&CausalRow> = rows
         .iter()
         .filter(|row| training_takes.contains(&row.take_id))
@@ -112,35 +119,72 @@ pub fn fit_linear_prior(
         return Err(LinearPriorFitError::EmptyTrainingSet);
     }
 
-    let feature_dim = training[0].features.len();
-    let target_dim = training[0].target.len();
-    if feature_dim == 0 || target_dim == 0 {
+    let features: Vec<Vec<f32>> = training.iter().map(|row| row.features.clone()).collect();
+    let targets: Vec<Vec<f32>> = training.iter().map(|row| row.target.clone()).collect();
+    let linear_map = fit_normalized_multi_output_ridge(&features, &targets, config)?;
+
+    let mut artifact = LinearPriorArtifact {
+        schema_version: LINEAR_PRIOR_SCHEMA_VERSION,
+        model_version: 1,
+        seed: config.seed,
+        ridge_lambda: config.ridge_lambda,
+        feature_order: feature_order.to_owned(),
+        feature_mean: linear_map.feature_mean,
+        feature_std: linear_map.feature_std,
+        target_mean: linear_map.target_mean,
+        target_std: linear_map.target_std,
+        weights: linear_map.weights,
+        content_hash: 0,
+    };
+    artifact.content_hash = hash_artifact(&artifact);
+    Ok(artifact)
+}
+
+/// Fits the normalized ridge kernel shared by causal-prior research artifacts.
+#[allow(clippy::indexing_slicing)]
+pub(crate) fn fit_normalized_multi_output_ridge(
+    features: &[Vec<f32>],
+    targets: &[Vec<f32>],
+    config: LinearPriorTrainingConfig,
+) -> Result<NormalizedLinearMap, LinearPriorFitError> {
+    if !(config.ridge_lambda.is_finite() && config.ridge_lambda > 0.0) {
+        return Err(LinearPriorFitError::NonFiniteInput);
+    }
+    if features.is_empty() {
+        return Err(LinearPriorFitError::EmptyTrainingSet);
+    }
+    if features.len() != targets.len() {
         return Err(LinearPriorFitError::InconsistentDimensions);
     }
-    if training
-        .iter()
-        .any(|row| row.features.len() != feature_dim || row.target.len() != target_dim)
+    let feature_dim = features[0].len();
+    let target_dim = targets[0].len();
+    if feature_dim == 0
+        || target_dim == 0
+        || features.iter().any(|row| row.len() != feature_dim)
+        || targets.iter().any(|row| row.len() != target_dim)
     {
         return Err(LinearPriorFitError::InconsistentDimensions);
     }
 
     let mut feature_sum = vec![0.0_f64; feature_dim];
     let mut target_sum = vec![0.0_f64; target_dim];
-    for row in &training {
-        for (index, value) in row.features.iter().enumerate() {
+    for row in features {
+        for (index, value) in row.iter().enumerate() {
             if !value.is_finite() {
                 return Err(LinearPriorFitError::NonFiniteInput);
             }
             feature_sum[index] += f64::from(*value);
         }
-        for (index, value) in row.target.iter().enumerate() {
+    }
+    for row in targets {
+        for (index, value) in row.iter().enumerate() {
             if !value.is_finite() {
                 return Err(LinearPriorFitError::NonFiniteInput);
             }
             target_sum[index] += f64::from(*value);
         }
     }
-    let count = training.len() as f64;
+    let count = features.len() as f64;
     let feature_mean: Vec<f32> = feature_sum
         .iter()
         .map(|sum| (*sum / count) as f32)
@@ -149,12 +193,14 @@ pub fn fit_linear_prior(
 
     let mut feature_m2 = vec![0.0_f64; feature_dim];
     let mut target_m2 = vec![0.0_f64; target_dim];
-    for row in &training {
-        for (index, value) in row.features.iter().enumerate() {
+    for row in features {
+        for (index, value) in row.iter().enumerate() {
             let centered = f64::from(*value) - f64::from(feature_mean[index]);
             feature_m2[index] += centered * centered;
         }
-        for (index, value) in row.target.iter().enumerate() {
+    }
+    for row in targets {
+        for (index, value) in row.iter().enumerate() {
             let centered = f64::from(*value) - f64::from(target_mean[index]);
             target_m2[index] += centered * centered;
         }
@@ -169,13 +215,15 @@ pub fn fit_linear_prior(
         .collect();
 
     // Normalized design matrix X (rows x features), targets Y (rows x targets).
-    let mut x = vec![vec![0.0_f64; feature_dim]; training.len()];
-    let mut y = vec![vec![0.0_f64; target_dim]; training.len()];
-    for (row_index, row) in training.iter().enumerate() {
-        for (index, value) in row.features.iter().enumerate() {
+    let mut x = vec![vec![0.0_f64; feature_dim]; features.len()];
+    let mut y = vec![vec![0.0_f64; target_dim]; targets.len()];
+    for (row_index, row) in features.iter().enumerate() {
+        for (index, value) in row.iter().enumerate() {
             x[row_index][index] = f64::from((*value - feature_mean[index]) / feature_std[index]);
         }
-        for (index, value) in row.target.iter().enumerate() {
+    }
+    for (row_index, row) in targets.iter().enumerate() {
+        for (index, value) in row.iter().enumerate() {
             y[row_index][index] = f64::from((*value - target_mean[index]) / target_std[index]);
         }
     }
@@ -191,19 +239,10 @@ pub fn fit_linear_prior(
         a[i][i] += f64::from(config.ridge_lambda);
     }
 
-    let mut weights_normalized = vec![vec![0.0_f64; dim]; target_dim];
-    for (target_index, weights) in weights_normalized.iter_mut().enumerate() {
-        let mut b = cross_covariance_rhs(&x, &y, target_index);
-        let solution = gauss_solve(&a, &mut b, config.pivot_epsilon)?;
-        *weights = solution;
-    }
+    let rhs = cross_covariance_rhs(&x, &y);
+    let weights_normalized = gauss_solve_multi_output(&a, &rhs, config.pivot_epsilon)?;
 
-    let mut artifact = LinearPriorArtifact {
-        schema_version: LINEAR_PRIOR_SCHEMA_VERSION,
-        model_version: 1,
-        seed: config.seed,
-        ridge_lambda: config.ridge_lambda,
-        feature_order: feature_order.to_owned(),
+    Ok(NormalizedLinearMap {
         feature_mean,
         feature_std,
         target_mean,
@@ -212,21 +251,19 @@ pub fn fit_linear_prior(
             .iter()
             .map(|row| row.iter().map(|value| *value as f32).collect())
             .collect(),
-        content_hash: 0,
-    };
-    artifact.content_hash = hash_artifact(&artifact);
-    Ok(artifact)
+    })
 }
 
-// `fit_linear_prior` validates equal, non-empty row dimensions before this
-// function is called, so the target index and first-row access are in bounds.
+// The shared fit validates equal, non-empty row dimensions before this
+// function is called, so all indexed access is in bounds.
 #[allow(clippy::indexing_slicing)]
-fn cross_covariance_rhs(x: &[Vec<f64>], y: &[Vec<f64>], target_index: usize) -> Vec<f64> {
-    let mut rhs = vec![0.0; x[0].len()];
+fn cross_covariance_rhs(x: &[Vec<f64>], y: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let mut rhs = vec![vec![0.0; y[0].len()]; x[0].len()];
     for (x_row, y_row) in x.iter().zip(y) {
-        let target = y_row[target_index];
-        for (sum, feature) in rhs.iter_mut().zip(x_row) {
-            *sum += feature * target;
+        for (feature_index, feature) in x_row.iter().enumerate() {
+            for (target_index, target) in y_row.iter().enumerate() {
+                rhs[feature_index][target_index] += feature * target;
+            }
         }
     }
     rhs
@@ -235,13 +272,15 @@ fn cross_covariance_rhs(x: &[Vec<f64>], y: &[Vec<f64>], target_index: usize) -> 
 // Bounds are guaranteed by construction: square matrices sized `dim`;
 // see AGENTS.md panic policy.
 #[allow(clippy::indexing_slicing)]
-fn gauss_solve(
+fn gauss_solve_multi_output(
     matrix: &[Vec<f64>],
-    rhs: &mut [f64],
+    rhs: &[Vec<f64>],
     pivot_epsilon: f32,
-) -> Result<Vec<f64>, LinearPriorFitError> {
+) -> Result<Vec<Vec<f64>>, LinearPriorFitError> {
     let dim = rhs.len();
+    let target_dim = rhs[0].len();
     let mut work = matrix.to_vec();
+    let mut solved_rhs = rhs.to_vec();
     for column in 0..dim {
         let mut pivot_row = column;
         for candidate in (column + 1)..dim {
@@ -255,25 +294,30 @@ fn gauss_solve(
             });
         }
         work.swap(column, pivot_row);
-        rhs.swap(column, pivot_row);
+        solved_rhs.swap(column, pivot_row);
         let pivot = work[column][column];
+        let pivot_rhs = solved_rhs[column].clone();
         for row in (column + 1)..dim {
             let factor = work[row][column] / pivot;
             let pivot_row_values = work[column][column..].to_vec();
             for (offset, value) in pivot_row_values.into_iter().enumerate() {
                 work[row][column + offset] -= factor * value;
             }
-            rhs[row] -= factor * rhs[column];
+            for target in 0..target_dim {
+                solved_rhs[row][target] -= factor * pivot_rhs[target];
+            }
         }
     }
-    let mut solution = vec![0.0_f64; dim];
-    for row in (0..dim).rev() {
-        let tail: f64 = (row + 1..dim)
-            .map(|inner| work[row][inner] * solution[inner])
-            .sum();
-        solution[row] = (rhs[row] - tail) / work[row][row];
+    let mut solutions = vec![vec![0.0_f64; dim]; target_dim];
+    for target in 0..target_dim {
+        for row in (0..dim).rev() {
+            let tail: f64 = (row + 1..dim)
+                .map(|inner| work[row][inner] * solutions[target][inner])
+                .sum();
+            solutions[target][row] = (solved_rhs[row][target] - tail) / work[row][row];
+        }
     }
-    Ok(solution)
+    Ok(solutions)
 }
 
 /// Stable FNV-1a hash over the artifact's semantic fields.

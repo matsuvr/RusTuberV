@@ -27,6 +27,7 @@ mod ndi;
 mod ndi_output_render;
 mod teacher_ablation;
 mod teacher_fit_prior;
+mod teacher_fit_residual;
 mod teacher_replay;
 mod temporal_report;
 mod vrm_compatibility;
@@ -59,6 +60,9 @@ fn main() {
         );
         println!(
             "  teacher-fit-prior <opts>  Fit/export the causal linear prior from derived traces (GNM #68.4)"
+        );
+        println!(
+            "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
         );
         println!(
             "  teacher-ablation <opts>   Held-out no-prior/learned-prior ablation evaluation (GNM #68.5)"
@@ -148,6 +152,13 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-fit-prior failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-fit-residual" => match teacher_fit_residual::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-fit-residual failed: {error}");
                 process::exit(1);
             }
         },

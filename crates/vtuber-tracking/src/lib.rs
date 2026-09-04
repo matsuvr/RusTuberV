@@ -75,6 +75,8 @@ pub mod pose;
 pub mod same_frame_fanout;
 /// Explicit tracking state machine and transition table.
 pub mod state_machine;
+/// Same-frame teacher-minus-Direct residual dataset and decoder.
+pub mod teacher_residual;
 /// Timestamp-aware pure metrics for temporal tracking quality.
 pub mod temporal_metrics;
 /// Direct/GNM temporal quality report composition over the metric kernels.
@@ -202,6 +204,12 @@ pub use same_frame_fanout::{SameFrameFanOut, SameFrameFanOutError, fan_out_same_
 pub use state_machine::{
     StateMachineConfigError, StateMachineParams, StateTransitionResult, TrackingAction,
     TrackingStateMachine, TransitionInput,
+};
+pub use teacher_residual::{
+    NormalizedLinearMapArtifact, TEACHER_RESIDUAL_DECODER_SCHEMA_VERSION,
+    TEACHER_RESIDUAL_FEATURE_ORDER, TeacherResidualDataset, TeacherResidualDecoderArtifact,
+    TeacherResidualExclusion, TeacherResidualFeatureConfig, TeacherResidualRow,
+    build_teacher_residual_rows, fit_teacher_residual_decoder, predict_teacher_residual,
 };
 pub use temporal_metrics::{
     CheekTakeEvaluation, PulseResponseMetrics, PulseResponseSpec, StepResponseMetrics,
