@@ -440,12 +440,12 @@ struct ValueMetrics {
 
 /// Temporal derivative metrics for one variant.
 #[derive(Serialize, Clone, Copy, Debug, Default)]
-struct TemporalMetrics {
-    velocity_mae: f64,
-    acceleration_mae: f64,
-    jerk_mae: f64,
-    variant_jitter_velocity_rms: f64,
-    teacher_jitter_velocity_rms: f64,
+pub(crate) struct TemporalMetrics {
+    pub(crate) velocity_mae: f64,
+    pub(crate) acceleration_mae: f64,
+    pub(crate) jerk_mae: f64,
+    pub(crate) variant_jitter_velocity_rms: f64,
+    pub(crate) teacher_jitter_velocity_rms: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -683,14 +683,15 @@ fn score_event(event: &TeacherEvent, series: &ScalarSeries) -> Result<EventScore
 
 /// Per-variant event timing aggregates.
 #[derive(Serialize, Clone, Copy, Debug, Default)]
-struct EventTimingMetrics {
-    step_events: u64,
-    mean_onset_delay_ms: f64,
-    mean_rise_time_ms: f64,
-    pulse_events: u64,
-    mean_peak_attenuation: f64,
-    mean_peak_timing_error_ms: f64,
-    events_unmeasurable: u64,
+pub(crate) struct EventTimingMetrics {
+    pub(crate) step_events: u64,
+    pub(crate) mean_onset_delay_ms: f64,
+    pub(crate) mean_rise_time_ms: f64,
+    pub(crate) pulse_events: u64,
+    pub(crate) pulse_events_detected: u64,
+    pub(crate) mean_peak_attenuation: f64,
+    pub(crate) mean_peak_timing_error_ms: f64,
+    pub(crate) events_unmeasurable: u64,
 }
 
 /// Accumulates step and pulse scores for one variant.
@@ -702,6 +703,7 @@ struct EventAggregates {
     step_rise_count: u64,
     pulse_attenuation_sum: f64,
     pulse_attenuation_count: u64,
+    pulse_detected: u64,
     pulse_timing_sum: f64,
     pulse_timing_count: u64,
     unmeasurable: u64,
@@ -726,6 +728,9 @@ impl EventAggregates {
         if let Some(value) = attenuation {
             self.pulse_attenuation_sum += value;
             self.pulse_attenuation_count += 1;
+            if value <= 0.7 {
+                self.pulse_detected += 1;
+            }
         }
         if let Some(value) = timing {
             self.pulse_timing_sum += value.abs();
@@ -742,6 +747,7 @@ impl EventAggregates {
             mean_onset_delay_ms: self.step_onset_sum / self.step_onset_count.max(1) as f64,
             mean_rise_time_ms: self.step_rise_sum / self.step_rise_count.max(1) as f64,
             pulse_events: self.pulse_attenuation_count,
+            pulse_events_detected: self.pulse_detected,
             mean_peak_attenuation: self.pulse_attenuation_sum
                 / self.pulse_attenuation_count.max(1) as f64,
             mean_peak_timing_error_ms: self.pulse_timing_sum
@@ -1189,6 +1195,182 @@ struct EventAggregatesSet {
     prior: EventAggregates,
 }
 
+/// One D/G0/H0 frame aligned to the same teacher frame.
+pub(crate) struct AlignedResidualFrame {
+    pub(crate) timestamp_micros: u64,
+    pub(crate) teacher: [f64; CHANNEL_COUNT],
+    pub(crate) direct: [f64; CHANNEL_COUNT],
+    pub(crate) gnm: [f64; CHANNEL_COUNT],
+    pub(crate) hybrid: [f64; CHANNEL_COUNT],
+}
+
+#[derive(Serialize, Clone)]
+pub(crate) struct ChannelErrorMetrics {
+    pub(crate) channel: &'static str,
+    pub(crate) mae: f64,
+    pub(crate) rmse: f64,
+    pub(crate) ccc: f64,
+}
+
+#[derive(Serialize, Clone)]
+pub(crate) struct ResidualVariantMetrics {
+    pub(crate) frames: u64,
+    pub(crate) micro_mae: f64,
+    pub(crate) micro_rmse: f64,
+    pub(crate) macro_mae: f64,
+    pub(crate) macro_rmse: f64,
+    pub(crate) neutral_bias: f64,
+    pub(crate) left_right_difference_mae: f64,
+    pub(crate) channels: Vec<ChannelErrorMetrics>,
+    pub(crate) temporal: TemporalMetrics,
+    pub(crate) blink_events: EventTimingMetrics,
+}
+
+#[derive(Serialize, Clone)]
+pub(crate) struct ResidualMetricsSet {
+    pub(crate) direct: ResidualVariantMetrics,
+    pub(crate) gnm_projected: ResidualVariantMetrics,
+    pub(crate) hybrid_projected_residual: ResidualVariantMetrics,
+}
+
+/// Scores D/G0/H0 through the existing value, derivative, and event kernels.
+pub(crate) fn score_residual_frames(
+    frames: &[AlignedResidualFrame],
+) -> Result<ResidualMetricsSet, String> {
+    Ok(ResidualMetricsSet {
+        direct: score_residual_variant(frames, |frame| &frame.direct)?,
+        gnm_projected: score_residual_variant(frames, |frame| &frame.gnm)?,
+        hybrid_projected_residual: score_residual_variant(frames, |frame| &frame.hybrid)?,
+    })
+}
+
+#[allow(clippy::indexing_slicing)]
+fn score_residual_variant(
+    frames: &[AlignedResidualFrame],
+    values: fn(&AlignedResidualFrame) -> &[f64; CHANNEL_COUNT],
+) -> Result<ResidualVariantMetrics, String> {
+    let mut errors = VariantErrors::default();
+    let mut sum_variant = [0.0; CHANNEL_COUNT];
+    let mut sum_teacher = [0.0; CHANNEL_COUNT];
+    let mut sum_variant_sq = [0.0; CHANNEL_COUNT];
+    let mut sum_teacher_sq = [0.0; CHANNEL_COUNT];
+    let mut sum_cross = [0.0; CHANNEL_COUNT];
+    let mut neutral_error = 0.0;
+    let mut neutral_count = 0_u64;
+    for frame in frames {
+        let variant = values(frame);
+        errors.push(
+            FrameValues {
+                timestamp_micros: frame.timestamp_micros,
+                values: *variant,
+            },
+            &FrameValues {
+                timestamp_micros: frame.timestamp_micros,
+                values: frame.teacher,
+            },
+        );
+        for channel in 0..CHANNEL_COUNT {
+            let predicted = variant[channel];
+            let teacher = frame.teacher[channel];
+            sum_variant[channel] += predicted;
+            sum_teacher[channel] += teacher;
+            sum_variant_sq[channel] += predicted * predicted;
+            sum_teacher_sq[channel] += teacher * teacher;
+            sum_cross[channel] += predicted * teacher;
+            if teacher <= 0.1 {
+                neutral_error += predicted - teacher;
+                neutral_count += 1;
+            }
+        }
+    }
+    let count = frames.len().max(1) as f64;
+    let mut channels = Vec::with_capacity(CHANNEL_COUNT);
+    for channel in 0..CHANNEL_COUNT {
+        let mean_variant = sum_variant[channel] / count;
+        let mean_teacher = sum_teacher[channel] / count;
+        let variance_variant = sum_variant_sq[channel] / count - mean_variant * mean_variant;
+        let variance_teacher = sum_teacher_sq[channel] / count - mean_teacher * mean_teacher;
+        let covariance = sum_cross[channel] / count - mean_variant * mean_teacher;
+        let denominator = variance_variant
+            + variance_teacher
+            + (mean_variant - mean_teacher) * (mean_variant - mean_teacher);
+        channels.push(ChannelErrorMetrics {
+            channel: ArkitBlendshape::ALL[channel].canonical_name(),
+            mae: errors.per_channel_abs[channel] / count,
+            rmse: (errors.per_channel_sq[channel] / count).sqrt(),
+            ccc: if denominator > 0.0 {
+                2.0 * covariance / denominator
+            } else {
+                0.0
+            },
+        });
+    }
+    let pairs = [
+        (0, 1),
+        (3, 4),
+        (6, 7),
+        (8, 9),
+        (10, 11),
+        (12, 13),
+        (14, 15),
+        (16, 17),
+        (18, 19),
+        (20, 21),
+        (23, 25),
+        (27, 28),
+        (29, 30),
+        (33, 34),
+        (35, 36),
+        (43, 44),
+        (45, 46),
+        (47, 48),
+        (49, 50),
+    ];
+    let pair_error: f64 = frames
+        .iter()
+        .flat_map(|frame| {
+            pairs.iter().map(move |(left, right)| {
+                ((values(frame)[*left] - values(frame)[*right])
+                    - (frame.teacher[*left] - frame.teacher[*right]))
+                    .abs()
+            })
+        })
+        .sum();
+    let pair_count = (frames.len() * pairs.len()).max(1) as f64;
+
+    let mut blink = EventAggregates::default();
+    for channel in [
+        ArkitBlendshape::EyeBlinkLeft,
+        ArkitBlendshape::EyeBlinkRight,
+    ] {
+        let index = channel.index();
+        let times: Vec<u64> = frames.iter().map(|frame| frame.timestamp_micros).collect();
+        let teacher_values: Vec<f64> = frames.iter().map(|frame| frame.teacher[index]).collect();
+        let variant_series = ScalarSeries {
+            sample_indices: (0..frames.len()).collect(),
+            times: times.clone(),
+            values: frames.iter().map(|frame| values(frame)[index]).collect(),
+        };
+        for event in detect_events(channel, &times, &teacher_values, 30) {
+            let score = score_event(&event, &variant_series)?;
+            blink.add(score.0, score.1, score.2, score.3);
+        }
+    }
+    let aggregate = errors.value_metrics();
+    Ok(ResidualVariantMetrics {
+        frames: aggregate.frames,
+        micro_mae: aggregate.mae,
+        micro_rmse: aggregate.rmse,
+        macro_mae: channels.iter().map(|channel| channel.mae).sum::<f64>() / CHANNEL_COUNT as f64,
+        macro_rmse: channels.iter().map(|channel| channel.rmse).sum::<f64>() / CHANNEL_COUNT as f64,
+        neutral_bias: neutral_error / neutral_count.max(1) as f64,
+        left_right_difference_mae: pair_error / pair_count,
+        channels,
+        temporal: errors.temporal_metrics(),
+        blink_events: blink.metrics(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,6 +1404,26 @@ mod tests {
         let value_metrics = errors.value_metrics();
         assert_eq!(value_metrics.mae, 0.0);
         assert_eq!(value_metrics.rmse, 0.0);
+    }
+
+    #[test]
+    fn residual_variants_are_scored_on_the_same_frames() {
+        let frames: Vec<AlignedResidualFrame> = (0..4)
+            .map(|index| AlignedResidualFrame {
+                timestamp_micros: index * 20_000,
+                teacher: [0.5; CHANNEL_COUNT],
+                direct: [0.5; CHANNEL_COUNT],
+                gnm: [0.4; CHANNEL_COUNT],
+                hybrid: [0.6; CHANNEL_COUNT],
+            })
+            .collect();
+        let metrics = score_residual_frames(&frames).unwrap();
+        assert_eq!(metrics.direct.frames, 4);
+        assert_eq!(metrics.gnm_projected.frames, 4);
+        assert_eq!(metrics.hybrid_projected_residual.frames, 4);
+        assert_eq!(metrics.direct.micro_mae, 0.0);
+        assert!((metrics.gnm_projected.micro_mae - 0.1).abs() < 1e-9);
+        assert!((metrics.hybrid_projected_residual.micro_mae - 0.1).abs() < 1e-9);
     }
 
     #[test]

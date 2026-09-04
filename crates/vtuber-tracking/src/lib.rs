@@ -206,10 +206,12 @@ pub use state_machine::{
     TrackingStateMachine, TransitionInput,
 };
 pub use teacher_residual::{
-    NormalizedLinearMapArtifact, TEACHER_RESIDUAL_DECODER_SCHEMA_VERSION,
-    TEACHER_RESIDUAL_FEATURE_ORDER, TeacherResidualDataset, TeacherResidualDecoderArtifact,
-    TeacherResidualExclusion, TeacherResidualFeatureConfig, TeacherResidualRow,
-    build_teacher_residual_rows, fit_teacher_residual_decoder, predict_teacher_residual,
+    ExistingTraceResidualVariants, LoadedTeacherResidualDecoder, NormalizedLinearMapArtifact,
+    ResidualAblationError, TEACHER_RESIDUAL_DECODER_SCHEMA_VERSION, TEACHER_RESIDUAL_FEATURE_ORDER,
+    TeacherResidualDataset, TeacherResidualDecoderArtifact, TeacherResidualExclusion,
+    TeacherResidualFeatureConfig, TeacherResidualHistory, TeacherResidualRow,
+    apply_non_tongue_residual, build_teacher_residual_rows, existing_trace_residual_variants,
+    fit_teacher_residual_decoder, predict_teacher_residual,
 };
 pub use temporal_metrics::{
     CheekTakeEvaluation, PulseResponseMetrics, PulseResponseSpec, StepResponseMetrics,
