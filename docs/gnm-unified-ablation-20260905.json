@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "issue": 19,
+  "primary_split": "A+B train -> A+B held-out",
+  "common_frames": 1184,
+  "candidate_grid_size": 48,
+  "selected": { "rank": 16, "history_len": 1, "ridge_lambda": 0.1 },
+  "dataset_hashes": {
+    "outer_train": "6F256CDE995E5443B54DA08B45DD37B9040147DBA35516963C86F0A2F4A4F26E",
+    "outer_eval": "68A8A23F2598FE8B23BEEB00618109AAB1F653A2368058E6255DD10C357CE560"
+  },
+  "perfect_sync_vrm_sha256": "AFD51E320E97B398DB5DBA738E19C3BAE01263E0ACCEB4EFB2CCEC22D78576EE",
+  "variants": {
+    "D":  { "macro_mae": 0.09981295766921698, "macro_rmse": 0.14081272211708334, "missed_blinks": 11, "morph_rms": 0.0008390391702507548 },
+    "G0": { "macro_mae": 0.20260954811984408, "macro_rmse": 0.2700244199997946, "missed_blinks": 37, "morph_rms": 0.0016919634249352175 },
+    "G1": { "macro_mae": 0.07347754469378698, "macro_rmse": 0.1051754518857974, "missed_blinks": 12, "morph_rms": 0.0007048099004971943 },
+    "L":  { "macro_mae": 0.0832031280399304, "macro_rmse": 0.12341267969410585, "missed_blinks": 4, "morph_rms": 0.0007156807394575733 },
+    "H":  { "macro_mae": 0.07423504175543451, "macro_rmse": 0.11429606764057955, "missed_blinks": 2, "morph_rms": 0.0007445681347526452 },
+    "HL": { "macro_mae": 0.08464813048297835, "macro_rmse": 0.1261883670098601, "missed_blinks": 2, "morph_rms": 0.0007743969232703904 }
+  },
+  "heldout_h_minus_d": {
+    "person_a": -0.033406517416069176,
+    "person_b": -0.015088208750620788,
+    "a_train_to_unseen_b": 0.09673549243484054
+  },
+  "success_criteria": {
+    "h_below_d_mae_rmse": true,
+    "h_below_l_mae_rmse": true,
+    "h_missed_blinks_no_greater_than_d": true,
+    "h_onset_peak_timing_no_greater_than_d": true,
+    "h_peak_attenuation_no_greater_than_d": true,
+    "numeric_availability_without_fill": true,
+    "a_and_b_heldout_deltas_reported": true
+  },
+  "promotion_pass": true,
+  "generalization_limit": "A-only training fails on unseen person B; no unseen-person claim."
+}

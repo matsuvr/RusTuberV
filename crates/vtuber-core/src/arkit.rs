@@ -13,6 +13,82 @@ pub const ARKIT52_CHANNEL_COUNT: usize = 52;
 /// Number of ARKit face-tracking channels excluding `TongueOut`.
 pub const ARKIT_NON_TONGUE_CHANNEL_COUNT: usize = 51;
 
+/// Real bilateral non-tongue semantic pairs used by asymmetry metrics.
+///
+/// Mutually exclusive directional channels such as `JawLeft`/`JawRight` and
+/// `MouthLeft`/`MouthRight` are deliberately excluded.
+pub const ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS: &[(ArkitBlendshape, ArkitBlendshape)] = &[
+    (
+        ArkitBlendshape::BrowDownLeft,
+        ArkitBlendshape::BrowDownRight,
+    ),
+    (
+        ArkitBlendshape::BrowOuterUpLeft,
+        ArkitBlendshape::BrowOuterUpRight,
+    ),
+    (
+        ArkitBlendshape::CheekSquintLeft,
+        ArkitBlendshape::CheekSquintRight,
+    ),
+    (
+        ArkitBlendshape::EyeBlinkLeft,
+        ArkitBlendshape::EyeBlinkRight,
+    ),
+    (
+        ArkitBlendshape::EyeLookDownLeft,
+        ArkitBlendshape::EyeLookDownRight,
+    ),
+    (
+        ArkitBlendshape::EyeLookInLeft,
+        ArkitBlendshape::EyeLookInRight,
+    ),
+    (
+        ArkitBlendshape::EyeLookOutLeft,
+        ArkitBlendshape::EyeLookOutRight,
+    ),
+    (
+        ArkitBlendshape::EyeLookUpLeft,
+        ArkitBlendshape::EyeLookUpRight,
+    ),
+    (
+        ArkitBlendshape::EyeSquintLeft,
+        ArkitBlendshape::EyeSquintRight,
+    ),
+    (ArkitBlendshape::EyeWideLeft, ArkitBlendshape::EyeWideRight),
+    (
+        ArkitBlendshape::MouthDimpleLeft,
+        ArkitBlendshape::MouthDimpleRight,
+    ),
+    (
+        ArkitBlendshape::MouthFrownLeft,
+        ArkitBlendshape::MouthFrownRight,
+    ),
+    (
+        ArkitBlendshape::MouthLowerDownLeft,
+        ArkitBlendshape::MouthLowerDownRight,
+    ),
+    (
+        ArkitBlendshape::MouthPressLeft,
+        ArkitBlendshape::MouthPressRight,
+    ),
+    (
+        ArkitBlendshape::MouthSmileLeft,
+        ArkitBlendshape::MouthSmileRight,
+    ),
+    (
+        ArkitBlendshape::MouthStretchLeft,
+        ArkitBlendshape::MouthStretchRight,
+    ),
+    (
+        ArkitBlendshape::MouthUpperUpLeft,
+        ArkitBlendshape::MouthUpperUpRight,
+    ),
+    (
+        ArkitBlendshape::NoseSneerLeft,
+        ArkitBlendshape::NoseSneerRight,
+    ),
+];
+
 /// Stable semantic order for the ARKit 52 blendshape channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -510,6 +586,24 @@ mod tests {
     fn contract_has_exactly_52_stable_entries() {
         assert_eq!(ArkitBlendshape::ALL.len(), ARKIT52_CHANNEL_COUNT);
         assert_eq!(ArkitBlendshape::TongueOut.index(), 51);
+    }
+
+    #[test]
+    fn bilateral_pairs_are_real_non_tongue_semantics() {
+        assert!(ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS.contains(&(
+            ArkitBlendshape::EyeBlinkLeft,
+            ArkitBlendshape::EyeBlinkRight
+        )));
+        assert!(
+            !ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS
+                .contains(&(ArkitBlendshape::JawLeft, ArkitBlendshape::JawRight))
+        );
+        assert!(
+            ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS
+                .iter()
+                .all(|(left, right)| *left != ArkitBlendshape::TongueOut
+                    && *right != ArkitBlendshape::TongueOut)
+        );
     }
 
     #[test]

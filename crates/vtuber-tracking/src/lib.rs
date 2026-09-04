@@ -93,6 +93,8 @@ pub mod temporal_report;
 pub mod translation;
 /// Scale-aware soft-cap and dt-aware filtering for translation (Issue #164).
 pub mod translation_shaping;
+/// Exact-common coefficient and avatar-space metrics for Issue #19.
+pub mod unified_ablation;
 
 pub use ab_backend::{
     AbBackendError, AlignedBackendOutputs, AlignedLatencyComparison, BackendLatencyMetrics,
@@ -267,4 +269,11 @@ pub use translation::{
 pub use translation_shaping::{
     FilterConfigError, ShapingProfileError, TranslationFilter, TranslationShapingProfile,
     shape_translation, soft_cap_scalar,
+};
+pub use unified_ablation::{
+    AvatarMorphDelta, AvatarVertexKey, BlinkEventMetrics, GnmResearchVariant,
+    LeftRightDifferenceMetrics, NonTongueChannelMetrics, NonTongueTemporalMetrics,
+    NonTongueVariantMetrics, PerfectSyncMorphResponse, UnifiedAblationError, VariantFrame,
+    avatar_space_rms_error, avatar_space_rms_errors, evaluate_blink_events,
+    evaluate_non_tongue_variant, exact_common_variant_frames, paired_absolute_error_delta,
 };

@@ -13,7 +13,7 @@ use vtuber_tracking::{
     ObservableBasisProvenance, fit_observable_gnm_basis, project_non_tongue_expression,
 };
 
-use crate::teacher_fit_prior::load_trace;
+use crate::teacher_fit_prior::{LoadedTrace, load_trace};
 use crate::teacher_replay::sha256_hex;
 
 pub struct Options {
@@ -82,50 +82,27 @@ pub fn print_help() {
     );
 }
 
-/// Runs the trace-v2 observable-basis fit.
-///
-/// # Errors
-///
-/// Returns a descriptive failure for invalid options, trace/model mismatch,
-/// numeric fitting failure, or output I/O.
-pub fn run(args: &[String]) -> Result<(), String> {
-    if args
-        .first()
-        .is_some_and(|arg| arg == "-h" || arg == "--help")
-    {
-        print_help();
-        return Ok(());
-    }
-    let options = Options::parse(args)?;
-    let model = load_gnm_head_v3(&options.gnm_model)
-        .map_err(|error| format!("load {}: {error}", options.gnm_model.display()))?;
+pub(crate) fn fit_observable_basis(
+    traces: &[LoadedTrace],
+    train_takes: &BTreeSet<String>,
+    rank: usize,
+    gnm_model: &std::path::Path,
+) -> Result<(vtuber_tracking::ObservableGnmBasisArtifact, usize), String> {
+    let model = load_gnm_head_v3(gnm_model)
+        .map_err(|error| format!("load {}: {error}", gnm_model.display()))?;
     let mapping = repository_dense_mapping()
         .bind(&model)
         .map_err(|error| format!("bind dense mapping: {error}"))?;
     let identity = FixedGnmIdentity::new(model.neutral_identity(), &model)
         .map_err(|error| error.to_string())?;
-    let model_sha256 = sha256_hex(&options.gnm_model)?;
+    let model_sha256 = sha256_hex(gnm_model)?;
     let coverage = DenseCoveragePolicy::new(2, 0.75).map_err(|error| error.to_string())?;
     let triangle_len =
         GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM * (GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM + 1) / 2;
     let mut gram = vec![0.0_f64; triangle_len];
-    let mut traces = options
-        .traces
-        .iter()
-        .map(|directory| load_trace(directory))
-        .collect::<Result<Vec<_>, _>>()?;
-    traces.sort_by(|left, right| left.take_id.cmp(&right.take_id));
-    let available: BTreeSet<&str> = traces.iter().map(|trace| trace.take_id.as_str()).collect();
-    if !options
-        .train_takes
-        .iter()
-        .all(|take| available.contains(take.as_str()))
-    {
-        return Err("--train-take names a take not supplied by --trace".to_owned());
-    }
     for trace in traces
         .iter()
-        .filter(|trace| options.train_takes.contains(&trace.take_id))
+        .filter(|trace| train_takes.contains(&trace.take_id))
     {
         if trace.model_sha256 != model_sha256
             || trace.mapping_schema_revision != mapping.version().schema_revision
@@ -139,7 +116,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut frame_count = 0_usize;
     for trace in traces
         .iter()
-        .filter(|trace| options.train_takes.contains(&trace.take_id))
+        .filter(|trace| train_takes.contains(&trace.take_id))
     {
         for sample in &trace.samples {
             let (Some(observation), Some(state)) =
@@ -192,14 +169,52 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let artifact = fit_observable_gnm_basis(
         &gram,
         frame_count,
-        options.rank,
+        rank,
         ObservableBasisProvenance {
             model_sha256,
             mapping_schema_revision: mapping.version().schema_revision,
-            training_takes: options.train_takes.into_iter().collect(),
+            training_takes: train_takes.iter().cloned().collect(),
         },
     )
     .map_err(|error| error.to_string())?;
+    Ok((artifact, frame_count))
+}
+
+/// Runs the trace-v2 observable-basis fit.
+///
+/// # Errors
+///
+/// Returns a descriptive failure for invalid options, trace/model mismatch,
+/// numeric fitting failure, or output I/O.
+pub fn run(args: &[String]) -> Result<(), String> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "-h" || arg == "--help")
+    {
+        print_help();
+        return Ok(());
+    }
+    let options = Options::parse(args)?;
+    let mut traces = options
+        .traces
+        .iter()
+        .map(|directory| load_trace(directory))
+        .collect::<Result<Vec<_>, _>>()?;
+    traces.sort_by(|left, right| left.take_id.cmp(&right.take_id));
+    let available: BTreeSet<&str> = traces.iter().map(|trace| trace.take_id.as_str()).collect();
+    if !options
+        .train_takes
+        .iter()
+        .all(|take| available.contains(take.as_str()))
+    {
+        return Err("--train-take names a take not supplied by --trace".to_owned());
+    }
+    let (artifact, frame_count) = fit_observable_basis(
+        &traces,
+        &options.train_takes,
+        options.rank,
+        &options.gnm_model,
+    )?;
     let neutral = vtuber_gnm::GnmNonTongueExpression::try_from_values(vec![
         0.0;
         GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM
