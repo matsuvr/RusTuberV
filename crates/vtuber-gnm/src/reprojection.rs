@@ -3610,21 +3610,19 @@ fn fit_single_frame_reduced_impl(
             }
             None => 0.0,
         };
-        let temporal_energy = temporal
-            .map(|(history, temporal_config)| {
-                evaluate_reduced_temporal_regularization(
-                    basis,
-                    reduced,
-                    history.previous,
-                    history.previous_previous,
-                    history.timing,
-                    &history.normalization,
-                    temporal_config,
-                )
-                .map(|regularization| regularization.energy)
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let temporal_energy = match temporal {
+            Some((history, temporal_config)) => evaluate_reduced_temporal_regularization(
+                basis,
+                reduced,
+                history.previous,
+                history.previous_previous,
+                history.timing,
+                &history.normalization,
+                temporal_config,
+            )
+            .map(|regularization| regularization.energy)?,
+            None => 0.0,
+        };
         Ok((
             f64::from(report.weighted_rms()) + auxiliary_loss + temporal_energy,
             report,

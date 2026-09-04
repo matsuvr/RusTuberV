@@ -120,7 +120,7 @@ struct SourceFrame {
     teacher: Arkit52Coefficients,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct MetricSummary {
     frame_count: usize,
     macro_mae: f64,
@@ -163,13 +163,26 @@ struct TuningReport {
     render_sample_rate_hz: f64,
     temporal_history_resets: usize,
     prediction_horizon_micros: Distribution,
-    candidates: Vec<TemporalCandidateMetrics>,
+    candidates: Vec<CandidateValidation>,
     selected_eye_preset: AlphaBetaGain,
     selected_lower_face_preset: AlphaBetaGain,
     source_direct: MetricSummary,
     source_hybrid: MetricSummary,
     render_hybrid: MetricSummary,
     q_kinematics: QKinematics,
+}
+
+#[derive(Clone, Serialize)]
+struct CandidateFoldMetrics {
+    held_out_take: String,
+    direct: MetricSummary,
+    hybrid: MetricSummary,
+}
+
+#[derive(Clone, Serialize)]
+struct CandidateValidation {
+    aggregate: TemporalCandidateMetrics,
+    folds: Vec<CandidateFoldMetrics>,
 }
 
 struct CandidateReplay {
@@ -296,29 +309,51 @@ fn solve_sources(
         let projection =
             seed_gnm_projection_rotation(&observation.camera_to_face, &base_projection)
                 .map_err(|error| error.to_string())?;
-        let reset = previous.as_ref().is_some_and(|(timestamp, _)| {
-            sample.timestamp_micros.saturating_sub(*timestamp) > 100_000
-        });
+        let reset = match previous.as_ref() {
+            Some((timestamp, _)) => {
+                sample
+                    .timestamp_micros
+                    .checked_sub(*timestamp)
+                    .ok_or("source timestamp regressed during reduced solve")?
+                    > 100_000
+            }
+            None => false,
+        };
         if reset {
             previous_previous = None;
             previous = None;
             joints = GnmJointState::neutral(model.joint_count());
             resets += 1;
         }
-        let history = previous.as_ref().map(|(timestamp, state)| {
-            let dt_micros = sample.timestamp_micros.saturating_sub(*timestamp);
-            ReducedTemporalHistory {
-                previous: state,
-                previous_previous: previous_previous.as_ref().map(|(_, state)| state),
-                timing: TemporalHistoryTiming {
-                    dt_seconds: dt_micros as f64 / 1_000_000.0,
-                    previous_dt_seconds: previous_previous
+        let history = previous
+            .as_ref()
+            .map(
+                |(timestamp, state)| -> Result<ReducedTemporalHistory<'_>, String> {
+                    let dt_micros = sample
+                        .timestamp_micros
+                        .checked_sub(*timestamp)
+                        .ok_or("source timestamp regressed during reduced history")?;
+                    let previous_dt_seconds = previous_previous
                         .as_ref()
-                        .map(|(older, _)| timestamp.saturating_sub(*older) as f64 / 1_000_000.0),
+                        .map(|(older, _)| {
+                            timestamp
+                                .checked_sub(*older)
+                                .map(|dt| dt as f64 / 1_000_000.0)
+                                .ok_or("source timestamp regressed in reduced history")
+                        })
+                        .transpose()?;
+                    Ok(ReducedTemporalHistory {
+                        previous: state,
+                        previous_previous: previous_previous.as_ref().map(|(_, state)| state),
+                        timing: TemporalHistoryTiming {
+                            dt_seconds: dt_micros as f64 / 1_000_000.0,
+                            previous_dt_seconds,
+                        },
+                        normalization,
+                    })
                 },
-                normalization,
-            }
-        });
+            )
+            .transpose()?;
         let initial = previous.as_ref().map_or_else(
             || GnmReducedExpressionState::neutral(basis.rank()),
             |(_, state)| state.clone(),
@@ -481,8 +516,11 @@ fn replay_candidate(
             horizon,
         )
         .map_err(|error| error.to_string())?;
-        let next = sources.get(consumed).unwrap_or(current);
-        let teacher = interpolate_teacher(current, next, timestamp)?;
+        let teacher = match sources.get(consumed) {
+            Some(next) => interpolate_teacher(current, next, timestamp)?,
+            None if timestamp == current.timestamp_micros => current.teacher,
+            None => return Err("render timestamp extends past the final teacher sample".to_owned()),
+        };
         let semantic = GnmSemanticFrame {
             frame_seq: render_seq as u64,
             timestamp_micros: timestamp,
@@ -524,7 +562,11 @@ fn replay_candidate(
             output: hybrid,
         });
         q_samples.push((timestamp, sampled.values().to_vec()));
-        horizons.push(timestamp.saturating_sub(current.timestamp_micros) as f64);
+        horizons.push(
+            timestamp
+                .checked_sub(current.timestamp_micros)
+                .ok_or("render timestamp precedes the current source")? as f64,
+        );
     }
     Ok(CandidateReplay {
         direct: direct_frames,
@@ -591,8 +633,6 @@ fn candidate_metrics(replay: &CandidateReplay) -> Result<TemporalCandidateMetric
     let h = evaluate_non_tongue_variant(&replay.hybrid).map_err(|error| error.to_string())?;
     let hb = evaluate_blink_events(&replay.hybrid).map_err(|error| error.to_string())?;
     let db = evaluate_blink_events(&replay.direct).map_err(|error| error.to_string())?;
-    let required =
-        |value: Option<f64>, field: &str| value.ok_or_else(|| format!("missing {field}"));
     Ok(TemporalCandidateMetrics {
         eye_preset: AlphaBetaGain {
             alpha: 0.0,
@@ -605,13 +645,32 @@ fn candidate_metrics(replay: &CandidateReplay) -> Result<TemporalCandidateMetric
         h_macro_mae: h.macro_mae,
         h_missed_blinks: hb.missed_events,
         d_missed_blinks: db.missed_events,
-        h_onset_error_ms: required(hb.median_absolute_onset_error_ms, "H onset metric")?,
-        d_onset_error_ms: required(db.median_absolute_onset_error_ms, "D onset metric")?,
-        h_peak_error_ms: required(hb.median_absolute_peak_error_ms, "H peak metric")?,
-        d_peak_error_ms: required(db.median_absolute_peak_error_ms, "D peak metric")?,
-        h_peak_attenuation: required(hb.median_absolute_peak_attenuation, "H attenuation")?,
-        d_peak_attenuation: required(db.median_absolute_peak_attenuation, "D attenuation")?,
+        h_onset_error_ms: hb.median_absolute_onset_error_ms,
+        d_onset_error_ms: db.median_absolute_onset_error_ms,
+        h_peak_error_ms: hb.median_absolute_peak_error_ms,
+        d_peak_error_ms: db.median_absolute_peak_error_ms,
+        h_peak_attenuation: hb.median_absolute_peak_attenuation,
+        d_peak_attenuation: db.median_absolute_peak_attenuation,
     })
+}
+
+fn aggregate_candidate_metrics(
+    eye_preset: AlphaBetaGain,
+    lower_face_preset: AlphaBetaGain,
+    mut pooled: TemporalCandidateMetrics,
+    folds: &[CandidateFoldMetrics],
+) -> Result<TemporalCandidateMetrics, String> {
+    if folds.is_empty() {
+        return Err("candidate has no leave-one-take-out folds".to_owned());
+    }
+    // Fixed gain candidates have no fold-fitted parameters. Value error is
+    // macro-averaged over held-out takes; blink metrics stay pooled across the
+    // out-of-fold predictions because a single take may contain no blink event.
+    let count = folds.len() as f64;
+    pooled.eye_preset = eye_preset;
+    pooled.lower_face_preset = lower_face_preset;
+    pooled.h_macro_mae = folds.iter().map(|fold| fold.hybrid.macro_mae).sum::<f64>() / count;
+    Ok(pooled)
 }
 
 fn metric_summary(frames: &[VariantFrame]) -> Result<MetricSummary, String> {
@@ -646,7 +705,10 @@ fn distribution(values: &[f64]) -> Result<Distribution, String> {
     Ok(Distribution {
         p50: at(50),
         p95: at(95),
-        max: sorted.last().copied().unwrap_or_default(),
+        max: sorted
+            .last()
+            .copied()
+            .ok_or("empty distribution after validation")?,
     })
 }
 
@@ -696,16 +758,15 @@ fn q_kinematics(samples: &[(u64, Vec<f32>)]) -> Result<QKinematics, String> {
     })
 }
 
-fn rate(frames: &[SourceFrame]) -> f64 {
-    let duration = frames
-        .last()
-        .map(|frame| frame.timestamp_micros)
-        .unwrap_or_default()
-        - frames
-            .first()
-            .map(|frame| frame.timestamp_micros)
-            .unwrap_or_default();
-    (frames.len().saturating_sub(1)) as f64 * 1_000_000.0 / duration as f64
+fn rate(frames: &[SourceFrame]) -> Result<f64, String> {
+    let first = frames.first().ok_or("source-rate take is empty")?;
+    let last = frames.last().ok_or("source-rate take is empty")?;
+    let duration = last
+        .timestamp_micros
+        .checked_sub(first.timestamp_micros)
+        .filter(|duration| *duration > 0)
+        .ok_or("source-rate take has no positive duration")?;
+    Ok((frames.len() - 1) as f64 * 1_000_000.0 / duration as f64)
 }
 
 /// Runs training-only fixed-grid tuning and writes artifact/report files.
@@ -752,6 +813,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     let mut candidates = Vec::new();
+    let mut candidate_validations = Vec::new();
     let mut replays = Vec::new();
     for (eye, lower) in reduced_temporal_gain_grid() {
         let mut combined = CandidateReplay {
@@ -760,6 +822,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             q_samples: Vec::new(),
             horizons: Vec::new(),
         };
+        let mut folds = Vec::new();
         for sources in &solved_takes {
             let replay = replay_candidate(
                 sources,
@@ -769,21 +832,30 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 lower,
                 options.max_prediction_horizon_micros,
             )?;
+            let held_out_take = sources
+                .first()
+                .map(|source| source.take_id.clone())
+                .ok_or("leave-one-take-out fold is empty")?;
+            folds.push(CandidateFoldMetrics {
+                held_out_take,
+                direct: metric_summary(&replay.direct)?,
+                hybrid: metric_summary(&replay.hybrid)?,
+            });
             combined.direct.extend(replay.direct);
             combined.hybrid.extend(replay.hybrid);
             combined.q_samples.extend(replay.q_samples);
             combined.horizons.extend(replay.horizons);
         }
-        let mut metrics = candidate_metrics(&combined)?;
-        metrics.eye_preset = eye;
-        metrics.lower_face_preset = lower;
-        candidates.push(metrics);
+        let pooled = candidate_metrics(&combined)?;
+        let aggregate = aggregate_candidate_metrics(eye, lower, pooled, &folds)?;
+        candidates.push(aggregate.clone());
+        candidate_validations.push(CandidateValidation { aggregate, folds });
         replays.push(combined);
     }
     fs::create_dir_all(&options.output)
         .map_err(|error| format!("create {}: {error}", options.output.display()))?;
     let candidate_json =
-        serde_json::to_string_pretty(&candidates).map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&candidate_validations).map_err(|error| error.to_string())?;
     fs::write(
         options.output.join("candidate-grid.json"),
         format!("{candidate_json}\n"),
@@ -818,8 +890,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
         source_hybrid.extend(hybrid);
     }
     let source_count = solved_takes.iter().map(Vec::len).sum();
-    let source_rate =
-        solved_takes.iter().map(|take| rate(take)).sum::<f64>() / solved_takes.len() as f64;
+    let source_rate = solved_takes
+        .iter()
+        .map(|take| rate(take))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .sum::<f64>()
+        / solved_takes.len() as f64;
     let report = TuningReport {
         schema_version: 1,
         basis_content_hash: basis_artifact.content_hash,
@@ -833,7 +910,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         render_sample_rate_hz: RENDER_RATE as f64,
         temporal_history_resets: resets,
         prediction_horizon_micros: distribution(&selected.horizons)?,
-        candidates: candidates.clone(),
+        candidates: candidate_validations,
         selected_eye_preset: artifact.eye_preset,
         selected_lower_face_preset: artifact.lower_face_preset,
         source_direct: metric_summary(&source_direct)?,
@@ -900,5 +977,57 @@ mod tests {
                 .map(|f| f.reduced.values())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn candidate_metrics_are_macro_averaged_across_held_out_takes() {
+        let preset = AlphaBetaGain {
+            alpha: 0.9,
+            beta: 0.2,
+        };
+        let summary = |mae| MetricSummary {
+            frame_count: 1,
+            macro_mae: mae,
+            macro_rmse: 0.0,
+            velocity_mae: 0.0,
+            acceleration_mae: 0.0,
+            jitter: 0.0,
+            peak_jerk_mae: 0.0,
+            missed_blinks: 0,
+            onset_error_ms: None,
+            peak_error_ms: None,
+            peak_attenuation: None,
+        };
+        let fold = |held_out_take: &str, mae: f64| CandidateFoldMetrics {
+            held_out_take: held_out_take.to_owned(),
+            direct: summary(0.0),
+            hybrid: summary(mae),
+        };
+        let pooled = TemporalCandidateMetrics {
+            eye_preset: preset,
+            lower_face_preset: preset,
+            h_macro_mae: 99.0,
+            h_missed_blinks: 5,
+            d_missed_blinks: 7,
+            h_onset_error_ms: Some(2.0),
+            d_onset_error_ms: Some(3.0),
+            h_peak_error_ms: Some(4.0),
+            d_peak_error_ms: Some(5.0),
+            h_peak_attenuation: Some(0.4),
+            d_peak_attenuation: Some(0.2),
+        };
+        let metrics = aggregate_candidate_metrics(
+            preset,
+            preset,
+            pooled,
+            &[fold("take-a", 1.0), fold("take-b", 3.0)],
+        )
+        .unwrap();
+
+        assert_eq!(metrics.h_macro_mae, 2.0);
+        assert_eq!(metrics.h_missed_blinks, 5);
+        assert_eq!(metrics.d_missed_blinks, 7);
+        assert_eq!(metrics.h_onset_error_ms, Some(2.0));
+        assert_eq!(metrics.d_peak_attenuation, Some(0.2));
     }
 }

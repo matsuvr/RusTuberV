@@ -88,27 +88,45 @@ pub struct TemporalCandidateMetrics {
     pub h_missed_blinks: usize,
     /// Direct missed blink count on the same validation frames.
     pub d_missed_blinks: usize,
-    /// Hybrid median absolute onset timing error in frames.
-    pub h_onset_error_ms: f64,
+    /// Hybrid median absolute onset timing error in milliseconds.
+    pub h_onset_error_ms: Option<f64>,
     /// Direct counterpart.
-    pub d_onset_error_ms: f64,
-    /// Hybrid median absolute peak timing error in frames.
-    pub h_peak_error_ms: f64,
+    pub d_onset_error_ms: Option<f64>,
+    /// Hybrid median absolute peak timing error in milliseconds.
+    pub h_peak_error_ms: Option<f64>,
     /// Direct counterpart.
-    pub d_peak_error_ms: f64,
+    pub d_peak_error_ms: Option<f64>,
     /// Hybrid median absolute peak attenuation.
-    pub h_peak_attenuation: f64,
+    pub h_peak_attenuation: Option<f64>,
     /// Direct counterpart.
-    pub d_peak_attenuation: f64,
+    pub d_peak_attenuation: Option<f64>,
 }
 
 impl TemporalCandidateMetrics {
     /// Returns whether all four mandatory blink constraints hold.
     pub fn admissible(&self) -> bool {
+        let (
+            Some(h_onset),
+            Some(d_onset),
+            Some(h_peak),
+            Some(d_peak),
+            Some(h_attenuation),
+            Some(d_attenuation),
+        ) = (
+            self.h_onset_error_ms,
+            self.d_onset_error_ms,
+            self.h_peak_error_ms,
+            self.d_peak_error_ms,
+            self.h_peak_attenuation,
+            self.d_peak_attenuation,
+        )
+        else {
+            return false;
+        };
         self.h_missed_blinks <= self.d_missed_blinks
-            && self.h_onset_error_ms <= self.d_onset_error_ms
-            && self.h_peak_error_ms <= self.d_peak_error_ms
-            && self.h_peak_attenuation <= self.d_peak_attenuation
+            && h_onset <= d_onset
+            && h_peak <= d_peak
+            && h_attenuation <= d_attenuation
     }
 }
 
@@ -412,17 +430,18 @@ fn fixed_grid(candidates: &[TemporalCandidateMetrics]) -> bool {
 }
 
 fn finite_metrics(candidate: &TemporalCandidateMetrics) -> bool {
-    [
-        candidate.h_macro_mae,
-        candidate.h_onset_error_ms,
-        candidate.d_onset_error_ms,
-        candidate.h_peak_error_ms,
-        candidate.d_peak_error_ms,
-        candidate.h_peak_attenuation,
-        candidate.d_peak_attenuation,
-    ]
-    .into_iter()
-    .all(f64::is_finite)
+    candidate.h_macro_mae.is_finite()
+        && [
+            candidate.h_onset_error_ms,
+            candidate.d_onset_error_ms,
+            candidate.h_peak_error_ms,
+            candidate.d_peak_error_ms,
+            candidate.h_peak_attenuation,
+            candidate.d_peak_attenuation,
+        ]
+        .into_iter()
+        .flatten()
+        .all(f64::is_finite)
 }
 
 fn hash_artifact(artifact: &ReducedTemporalArtifact) -> u64 {
@@ -455,7 +474,13 @@ fn hash_artifact(artifact: &ReducedTemporalArtifact) -> u64 {
             candidate.h_peak_attenuation,
             candidate.d_peak_attenuation,
         ] {
-            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+            match value {
+                Some(value) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+                None => bytes.push(0),
+            }
         }
     }
     bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
@@ -600,12 +625,12 @@ mod tests {
             h_macro_mae: mae,
             h_missed_blinks: 0,
             d_missed_blinks: 0,
-            h_onset_error_ms: 0.0,
-            d_onset_error_ms: 0.0,
-            h_peak_error_ms: 0.0,
-            d_peak_error_ms: 0.0,
-            h_peak_attenuation: 0.0,
-            d_peak_attenuation: 0.0,
+            h_onset_error_ms: Some(0.0),
+            d_onset_error_ms: Some(0.0),
+            h_peak_error_ms: Some(0.0),
+            d_peak_error_ms: Some(0.0),
+            h_peak_attenuation: Some(0.0),
+            d_peak_attenuation: Some(0.0),
         }
     }
 
@@ -643,5 +668,13 @@ mod tests {
             ),
             Err(ReducedTemporalError::NoAdmissibleTemporalGains)
         ));
+    }
+
+    #[test]
+    fn candidate_with_missing_event_metric_is_not_admissible() {
+        let mut candidate = candidate(RESPONSIVE_GAIN, RESPONSIVE_GAIN, 0.1);
+        candidate.h_onset_error_ms = None;
+
+        assert!(!candidate.admissible());
     }
 }
