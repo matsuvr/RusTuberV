@@ -27,7 +27,8 @@ use crate::teacher_replay::{TraceRow, sample_from_row};
 
 /// Feature-order string pinned into every exported artifact; must never
 /// change semantics without a model-version bump.
-pub const FEATURE_ORDER: &str = "newest-first-history+velocity+residual";
+pub const FEATURE_ORDER: &str =
+    "v2:newest-first-history(non-tongue-51+residual)+velocity(non-tongue-51)";
 
 /// Parsed CLI options for `teacher-fit-prior`.
 pub struct Options {

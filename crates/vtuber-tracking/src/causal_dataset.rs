@@ -3,8 +3,8 @@
 //!
 //! Turns a [`PairedTemporalSample`](crate::arkit_teacher::PairedTemporalSample)
 //! sequence into training rows whose features reference only the current and
-//! past frames (GNM dynamic state, velocity, observation quality, residual)
-//! and whose target is the next step's GNM state. Model fitting happens in
+//! past frames (GNM projected state, velocity, residual) and whose target is
+//! the next step's projected state. Model fitting happens in
 //! later issues; this module only produces exact, inspectable rows.
 //!
 //! History resets at every sequence boundary: a gap in `frame_seq`, a
@@ -13,6 +13,7 @@
 //! discontinuity and future leakage is impossible by construction.
 
 use crate::arkit_teacher::{PairedTemporalSample, TeacherDatasetError};
+use vtuber_core::{ARKIT_NON_TONGUE_CHANNEL_COUNT, arkit_non_tongue_values};
 
 /// Configuration for causal row generation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,23 +40,22 @@ impl CausalFeatureConfig {
         Ok(())
     }
 
-    /// Per-slot width: 52 coefficients plus residual and quality entries.
+    /// Per-slot width: 51 non-tongue coefficients plus one residual.
     #[must_use]
     pub const fn feature_dims() -> usize {
-        // Per history slot: 52 coefficients + 1 residual + 1 quality flag.
-        54
+        ARKIT_NON_TONGUE_CHANNEL_COUNT + 1
     }
 
     /// Feature vector width: `history_len` slots plus one velocity slot.
     #[must_use]
     pub fn feature_width(&self) -> usize {
-        self.history_len * Self::feature_dims() + 52
+        self.history_len * Self::feature_dims() + ARKIT_NON_TONGUE_CHANNEL_COUNT
     }
 
-    /// Target width: the next-step GNM coefficients.
+    /// Target width: the next-step non-tongue GNM coefficients.
     #[must_use]
     pub const fn target_width() -> usize {
-        52
+        ARKIT_NON_TONGUE_CHANNEL_COUNT
     }
 }
 
@@ -127,7 +127,8 @@ pub fn build_causal_dataset(
     crate::arkit_teacher::validate_paired_samples(samples)?;
 
     let mut dataset = CausalDataset::default();
-    let mut history: Vec<[f32; 52]> = Vec::with_capacity(config.history_len);
+    let mut history: Vec<[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT]> =
+        Vec::with_capacity(config.history_len);
     let mut last_identity: Option<(u64, u64)> = None;
 
     for window in samples.windows(2) {
@@ -148,34 +149,35 @@ pub fn build_causal_dataset(
         }
 
         let previous_coefficients = history.last().copied();
-        let mut run: Vec<[f32; 52]> = history.clone();
-        run.push(*current_state.projected_coefficients.as_array());
+        let current_coefficients = arkit_non_tongue_values(&current_state.projected_coefficients);
+        let mut run: Vec<[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT]> = history.clone();
+        run.push(current_coefficients);
         let start = run.len().saturating_sub(config.history_len);
-        let window: Vec<[f32; 52]> = run[start.min(run.len())..].to_vec();
+        let window: Vec<[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT]> =
+            run[start.min(run.len())..].to_vec();
 
         let mut features = vec![0.0_f32; config.feature_width()];
-        // Newest slot first so features[slot..slot+52] is always the current
-        // frame's own coefficients.
+        // Newest slot first so the slot prefix is always the current frame's
+        // own non-tongue coefficients.
         let slot_width = CausalFeatureConfig::feature_dims();
         for (slot_index, snapshot) in window.iter().rev().enumerate() {
             let base = slot_index * slot_width;
-            features[base..base + 52].copy_from_slice(snapshot);
+            features[base..base + ARKIT_NON_TONGUE_CHANNEL_COUNT].copy_from_slice(snapshot);
         }
         // Residual rides in the newest slot's tail entry.
         let residual_base = slot_width - 1;
         features[residual_base] = current_state.residual;
         fill_velocity_features(
             &mut features[config.history_len * CausalFeatureConfig::feature_dims()..],
-            &current_state.projected_coefficients.as_array()[..52],
+            &current_coefficients,
             previous_coefficients,
             current
                 .timestamp_micros
                 .saturating_sub(last_identity.map_or(current.timestamp_micros, |(_, time)| time)),
-            current_state.residual,
         );
         if features.iter().any(|value| !value.is_finite()) {
             dataset.record_exclusion(ExclusionReason::NonFiniteFeature);
-            history.push(*current_state.projected_coefficients.as_array());
+            history.push(current_coefficients);
             history.truncate(config.history_len);
             last_identity = Some((current.frame_seq, current.timestamp_micros));
             continue;
@@ -189,7 +191,7 @@ pub fn build_causal_dataset(
         if crosses_boundary {
             dataset.record_exclusion(ExclusionReason::SequenceBoundary);
             history.clear();
-            history.push(*current_state.projected_coefficients.as_array());
+            history.push(current_coefficients);
             history.truncate(config.history_len);
             last_identity = Some((current.frame_seq, current.timestamp_micros));
             continue;
@@ -202,13 +204,13 @@ pub fn build_causal_dataset(
                     frame_seq: current.frame_seq,
                     timestamp_micros: current.timestamp_micros,
                     features,
-                    target: next_state.projected_coefficients.as_array().to_vec(),
+                    target: arkit_non_tongue_values(&next_state.projected_coefficients).to_vec(),
                 });
             }
             None => dataset.record_exclusion(ExclusionReason::MissingTargetState),
         }
 
-        history.push(*current_state.projected_coefficients.as_array());
+        history.push(current_coefficients);
         history.truncate(config.history_len);
         last_identity = Some((current.frame_seq, current.timestamp_micros));
     }
@@ -219,9 +221,8 @@ pub fn build_causal_dataset(
 fn fill_velocity_features(
     velocity_slot: &mut [f32],
     current: &[f32],
-    previous: Option<[f32; 52]>,
+    previous: Option<[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT]>,
     dt_micros: u64,
-    residual: f32,
 ) {
     let Some(previous) = previous else {
         return;
@@ -230,13 +231,8 @@ fn fill_velocity_features(
     if dt_seconds <= 0.0 || !dt_seconds.is_finite() {
         return;
     }
-    let bounded = 52.min(velocity_slot.len());
-    for (index, slot_value) in velocity_slot[..bounded].iter_mut().enumerate() {
+    for (index, slot_value) in velocity_slot.iter_mut().enumerate() {
         *slot_value = (current[index] - previous[index]) / dt_seconds;
-    }
-    // Residual rides in the velocity slot tail when present.
-    if velocity_slot.len() > 52 && residual.is_finite() {
-        velocity_slot[52] = residual;
     }
 }
 
@@ -347,6 +343,24 @@ mod tests {
         let samples = [sample(1, 0.1, 0.01), sample(2, 0.5, 0.01)];
         let dataset = build_causal_dataset("take-42", &samples, config()).expect("builds");
         assert!(dataset.rows.iter().all(|row| row.take_id == "take-42"));
+    }
+
+    #[test]
+    fn layout_contains_only_51_channels_residual_and_velocity() {
+        assert_eq!(CausalFeatureConfig::feature_dims(), 52);
+        assert_eq!(config().feature_width(), 155);
+        assert_eq!(CausalFeatureConfig::target_width(), 51);
+
+        let dataset = build_causal_dataset(
+            "take-a",
+            &[sample(1, 0.1, 0.25), sample(2, 0.2, 0.5)],
+            config(),
+        )
+        .expect("builds");
+        let row = &dataset.rows[0];
+        assert_eq!(row.features.len(), 155);
+        assert_eq!(row.target.len(), 51);
+        assert_eq!(row.features[ARKIT_NON_TONGUE_CHANNEL_COUNT], 0.25);
     }
 
     #[test]

@@ -218,7 +218,9 @@ mod tests {
     use crate::causal_dataset::{CausalFeatureConfig, build_causal_dataset};
     use crate::causal_prior::{LinearPriorTrainingConfig, fit_linear_prior};
     use std::collections::BTreeSet;
-    use vtuber_core::{ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape};
+    use vtuber_core::{
+        ARKIT_NON_TONGUE_CHANNEL_COUNT, ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape,
+    };
 
     fn sample(seq: u64, jaw_open: f32) -> PairedTemporalSample {
         let mut values = [0.0_f32; ARKIT52_CHANNEL_COUNT];
@@ -270,7 +272,7 @@ mod tests {
             groups: vec![CorrectionGroup {
                 name: "all".to_owned(),
                 channel_start: 0,
-                channel_end: ARKIT52_CHANNEL_COUNT,
+                channel_end: ARKIT_NON_TONGUE_CHANNEL_COUNT,
                 max_abs_correction: 0.05,
             }],
             expected_dt_micros,
@@ -279,9 +281,9 @@ mod tests {
     }
 
     fn features(value: f32) -> Vec<f32> {
-        // Same layout as #130 with history_len 2: 2 slots x (52 + residual +
-        // quality) plus the velocity slot of 52.
-        vec![value; CausalFeatureConfig::feature_dims() * 2 + 52]
+        // Two history slots of 51 coefficients + residual, then 51 velocity
+        // entries.
+        vec![value; CausalFeatureConfig::feature_dims() * 2 + ARKIT_NON_TONGUE_CHANNEL_COUNT]
     }
 
     #[test]

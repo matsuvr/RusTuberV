@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use crate::causal_dataset::CausalRow;
 
 /// Schema version of exported artifacts.
-pub const LINEAR_PRIOR_SCHEMA_VERSION: u32 = 1;
+pub const LINEAR_PRIOR_SCHEMA_VERSION: u32 = 2;
 
 /// Explicit, re-runnable training configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -192,16 +192,10 @@ pub fn fit_linear_prior(
     }
 
     let mut weights_normalized = vec![vec![0.0_f64; dim]; target_dim];
-    for target_index in 0..target_dim {
-        let mut b: Vec<f64> = (0..dim)
-            .map(|i| {
-                x.iter()
-                    .map(|row| row[i] * y.iter().map(|yr| yr[target_index]).sum::<f64>())
-                    .sum()
-            })
-            .collect();
+    for (target_index, weights) in weights_normalized.iter_mut().enumerate() {
+        let mut b = cross_covariance_rhs(&x, &y, target_index);
         let solution = gauss_solve(&a, &mut b, config.pivot_epsilon)?;
-        weights_normalized[target_index] = solution;
+        *weights = solution;
     }
 
     let mut artifact = LinearPriorArtifact {
@@ -222,6 +216,20 @@ pub fn fit_linear_prior(
     };
     artifact.content_hash = hash_artifact(&artifact);
     Ok(artifact)
+}
+
+// `fit_linear_prior` validates equal, non-empty row dimensions before this
+// function is called, so the target index and first-row access are in bounds.
+#[allow(clippy::indexing_slicing)]
+fn cross_covariance_rhs(x: &[Vec<f64>], y: &[Vec<f64>], target_index: usize) -> Vec<f64> {
+    let mut rhs = vec![0.0; x[0].len()];
+    for (x_row, y_row) in x.iter().zip(y) {
+        let target = y_row[target_index];
+        for (sum, feature) in rhs.iter_mut().zip(x_row) {
+            *sum += feature * target;
+        }
+    }
+    rhs
 }
 
 // Bounds are guaranteed by construction: square matrices sized `dim`;
@@ -422,6 +430,52 @@ mod tests {
         assert!(artifact.target_std.iter().all(|std| *std >= 1e-6));
         assert_eq!(artifact.feature_order, "order");
         assert_eq!(artifact.schema_version, LINEAR_PRIOR_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn ridge_recovers_known_multi_output_linear_map() {
+        let inputs = [
+            [-2.0_f32, -1.0_f32],
+            [-1.0, 1.0],
+            [0.0, -2.0],
+            [1.0, 0.0],
+            [2.0, 2.0],
+        ];
+        let rows: Vec<CausalRow> = inputs
+            .into_iter()
+            .enumerate()
+            .map(|(index, [x0, x1])| CausalRow {
+                take_id: "known-map".to_owned(),
+                frame_seq: index as u64,
+                timestamp_micros: index as u64,
+                features: vec![x0, x1],
+                target: vec![2.0 * x0 - 3.0 * x1, -x0 + 0.5 * x1],
+            })
+            .collect();
+        let takes = BTreeSet::from(["known-map".to_owned()]);
+        let artifact = fit_linear_prior(
+            &rows,
+            &takes,
+            LinearPriorTrainingConfig {
+                ridge_lambda: 1.0e-6,
+                ..LinearPriorTrainingConfig::default()
+            },
+            "known-map-v2",
+        )
+        .expect("fit succeeds");
+        let model =
+            crate::causal_prior_inference::LoadedLinearPrior::load(artifact, "known-map-v2")
+                .expect("artifact loads");
+
+        let held_out = [0.25_f32, -0.4_f32];
+        let prediction = model.predict(&held_out).expect("predicts");
+        let expected = [
+            2.0 * held_out[0] - 3.0 * held_out[1],
+            -held_out[0] + 0.5 * held_out[1],
+        ];
+        for (actual, expected) in prediction.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-3);
+        }
     }
 
     #[test]
