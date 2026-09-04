@@ -37,6 +37,7 @@ mod teacher_fit_prior;
 mod teacher_fit_residual;
 mod teacher_replay;
 mod teacher_residual_ablation;
+mod teacher_tune_reduced_temporal;
 mod teacher_unified_gnm_ablation;
 mod temporal_report;
 mod vrm_compatibility;
@@ -83,6 +84,7 @@ fn main() {
         println!("  teacher-fit-landmark-decoder <opts> Fit landmark L or HL decoder (#18)");
         println!("  teacher-unified-gnm-ablation <opts> Evaluate D/G0/G1/L/H/HL (#19)");
         println!("  teacher-benchmark-reduced-gnm <opts> Benchmark full/reduced GNM (#20)");
+        println!("  teacher-tune-reduced-temporal <opts> Tune causal reduced 60 Hz sampling (#21)");
         println!(
             "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
         );
@@ -224,6 +226,13 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-benchmark-reduced-gnm failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-tune-reduced-temporal" => match teacher_tune_reduced_temporal::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-tune-reduced-temporal failed: {error}");
                 process::exit(1);
             }
         },
