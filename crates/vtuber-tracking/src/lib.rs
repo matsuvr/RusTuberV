@@ -58,6 +58,8 @@ pub mod gnm_latest_frame_worker;
 /// Persistent fitter warm-start glue between lifecycle directives and the
 /// bounded single-frame solver.
 pub mod gnm_persistent_fitter;
+/// Reduced-GNM semantic decoder datasets and artifacts (Issue #17).
+pub mod gnm_semantic_decoder;
 /// Deterministic synthetic-sequence regression harness for the persistent
 /// GNM fitter (test infrastructure; see issue #94).
 pub mod gnm_sequence_regression;
@@ -177,6 +179,13 @@ pub use gnm_latest_frame_worker::{
 pub use gnm_persistent_fitter::{
     GnmSolvedFrameReport, GnmValidatedDynamicFrame, PersistentGnmFitter, PersistentGnmFitterError,
     PersistentGnmFrameOutcome,
+};
+pub use gnm_semantic_decoder::{
+    GNM_DIAGNOSTIC_REGION_ORDER, GNM_SEMANTIC_DECODER_SCHEMA_VERSION, GnmSemanticDatasetError,
+    GnmSemanticDecoderArtifact, GnmSemanticDecoderKind, GnmSemanticFeatureConfig,
+    GnmSemanticFitError, GnmSemanticFrame, GnmSemanticRow, build_gnm_semantic_features,
+    build_gnm_semantic_rows, fit_gnm_semantic_decoder, gnm_only_prediction_to_arkit52,
+    gnm_semantic_feature_order, gnm_semantic_frame_from_sample, predict_gnm_semantic_raw,
 };
 pub use gnm_sequence_regression::{synthetic_head_model, synthetic_mapping};
 pub use gnm_shadow::{

@@ -27,6 +27,7 @@ mod ndi;
 mod ndi_output_render;
 mod teacher_ablation;
 mod teacher_fit_aligned_basis;
+mod teacher_fit_gnm_decoder;
 mod teacher_fit_observable_basis;
 mod teacher_fit_prior;
 mod teacher_fit_residual;
@@ -69,6 +70,9 @@ fn main() {
         );
         println!(
             "  teacher-fit-aligned-basis <opts> Fit teacher-aligned observable GNM basis (Issue #16)"
+        );
+        println!(
+            "  teacher-fit-gnm-decoder <opts> Fit GNM-only or hybrid reduced-GNM decoder (Issue #17)"
         );
         println!(
             "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
@@ -176,6 +180,13 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-fit-aligned-basis failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-fit-gnm-decoder" => match teacher_fit_gnm_decoder::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-fit-gnm-decoder failed: {error}");
                 process::exit(1);
             }
         },
