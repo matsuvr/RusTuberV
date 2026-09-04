@@ -317,7 +317,7 @@ mod tests {
         ));
 
         let mut bad_schema = artifact.clone();
-        bad_schema.schema_version += 1;
+        bad_schema.schema_version = 1;
         assert!(matches!(
             LoadedLinearPrior::load(bad_schema, "history+velocity"),
             Err(LinearPriorLoadError::UnsupportedSchemaVersion { .. })

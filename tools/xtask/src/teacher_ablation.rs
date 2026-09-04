@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use vtuber_core::ArkitBlendshape;
+use vtuber_core::{ARKIT_NON_TONGUE_CHANNEL_COUNT, ArkitBlendshape};
 use vtuber_tracking::{
     CausalFeatureConfig, CorrectionGroup, LinearPriorArtifact, PairedTemporalSample,
     PriorInference, PriorRuntime, PriorRuntimeConfig, PulseResponseSpec, StepResponseSpec,
@@ -34,7 +34,7 @@ use vtuber_tracking::{
 
 use crate::teacher_fit_prior::{FEATURE_ORDER, load_trace};
 
-const CHANNEL_COUNT: usize = 52;
+const CHANNEL_COUNT: usize = ARKIT_NON_TONGUE_CHANNEL_COUNT;
 
 /// Parsed CLI options for `teacher-ablation`.
 pub struct Options {
@@ -175,7 +175,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 // Streaming error accumulation
 // ---------------------------------------------------------------------------
 
-/// One evaluated frame's 52-channel values for one series.
+/// One evaluated frame's 51 non-tongue channel values for one series.
 struct FrameValues {
     timestamp_micros: u64,
     values: [f64; CHANNEL_COUNT],
@@ -247,7 +247,7 @@ impl VariantErrors {
             let mut velocity_variant = [0.0_f64; CHANNEL_COUNT];
             let mut velocity_teacher = [0.0_f64; CHANNEL_COUNT];
             for channel in 0..CHANNEL_COUNT {
-                // Bounds: fixed 52-channel arrays.
+                // Bounds: fixed non-tongue channel arrays.
                 #[allow(clippy::indexing_slicing)]
                 {
                     velocity_variant[channel] =
@@ -277,7 +277,7 @@ impl VariantErrors {
                 let mut accel_variant = [0.0_f64; CHANNEL_COUNT];
                 let mut accel_teacher = [0.0_f64; CHANNEL_COUNT];
                 for channel in 0..CHANNEL_COUNT {
-                    // Bounds: fixed 52-channel arrays.
+                    // Bounds: fixed non-tongue channel arrays.
                     #[allow(clippy::indexing_slicing)]
                     {
                         let previous_velocity_variant =
@@ -305,7 +305,7 @@ impl VariantErrors {
                     .max(1) as f64
                         / 1.0e6;
                     for channel in 0..CHANNEL_COUNT {
-                        // Bounds: fixed 52-channel arrays.
+                        // Bounds: fixed non-tongue channel arrays.
                         #[allow(clippy::indexing_slicing)]
                         {
                             let previous_velocity_variant =
@@ -336,7 +336,7 @@ impl VariantErrors {
         }
 
         for channel in 0..CHANNEL_COUNT {
-            // Bounds: fixed 52-channel arrays.
+            // Bounds: fixed non-tongue channel arrays.
             #[allow(clippy::indexing_slicing)]
             {
                 let error = frame.values[channel] - teacher.values[channel];
@@ -360,7 +360,7 @@ impl VariantErrors {
     fn merge_from(&mut self, other: &VariantErrors) {
         self.frames += other.frames;
         for channel in 0..CHANNEL_COUNT {
-            // Bounds: fixed 52-channel arrays.
+            // Bounds: fixed non-tongue channel arrays.
             #[allow(clippy::indexing_slicing)]
             {
                 self.per_channel_abs[channel] += other.per_channel_abs[channel];
@@ -389,7 +389,7 @@ impl VariantErrors {
         let mut worst_channel = 0_usize;
         let mut worst_channel_mae = 0.0_f64;
         for channel in 0..CHANNEL_COUNT {
-            // Bounds: fixed 52-channel arrays.
+            // Bounds: fixed non-tongue channel arrays.
             #[allow(clippy::indexing_slicing)]
             {
                 total_abs += self.per_channel_abs[channel];
@@ -1092,7 +1092,7 @@ fn evaluate_take(
     ];
     for (channel, max_events) in event_channels {
         let channel_index = channel.index();
-        // Bounds: `ArkitBlendshape::index()` < 52 by contract.
+        // Bounds: every event channel is one of the 51 non-tongue channels.
         #[allow(clippy::indexing_slicing)]
         let teacher_series = ScalarSeries::build(&trace.samples, |sample| {
             #[allow(clippy::indexing_slicing)]
@@ -1121,7 +1121,7 @@ fn evaluate_take(
                 .map(|state| state.projected_coefficients.as_array()[channel_index]);
             value.map(f64::from)
         });
-        // Bounds: channel_index < 52 by contract.
+        // Bounds: event channels exclude `TongueOut` by construction.
         #[allow(clippy::indexing_slicing)]
         let prior_channel_series = &prior_series[channel_index];
         let prior_series_scalar = ScalarSeries {

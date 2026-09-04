@@ -10,6 +10,9 @@ use std::fmt;
 /// Number of ARKit face-tracking channels in the fixed v1 contract.
 pub const ARKIT52_CHANNEL_COUNT: usize = 52;
 
+/// Number of ARKit face-tracking channels excluding `TongueOut`.
+pub const ARKIT_NON_TONGUE_CHANNEL_COUNT: usize = 51;
+
 /// Stable semantic order for the ARKit 52 blendshape channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -399,6 +402,30 @@ impl Arkit52Coefficients {
     }
 }
 
+/// Extracts the stable ARKit channel order without `TongueOut`.
+#[must_use]
+pub fn arkit_non_tongue_values(
+    coefficients: &Arkit52Coefficients,
+) -> [f32; ARKIT_NON_TONGUE_CHANNEL_COUNT] {
+    let mut values = [0.0; ARKIT_NON_TONGUE_CHANNEL_COUNT];
+    values.copy_from_slice(&coefficients.as_array()[..ARKIT_NON_TONGUE_CHANNEL_COUNT]);
+    values
+}
+
+/// Restores the ARKit52 compatibility boundary with `TongueOut` fixed to zero.
+///
+/// # Errors
+///
+/// Returns [`Arkit52ValueError`] when a non-tongue value is not finite or is
+/// outside `[0, 1]`.
+pub fn arkit52_with_zero_tongue(
+    values: [f32; ARKIT_NON_TONGUE_CHANNEL_COUNT],
+) -> Result<Arkit52Coefficients, Arkit52ValueError> {
+    let mut coefficients = [0.0; ARKIT52_CHANNEL_COUNT];
+    coefficients[..ARKIT_NON_TONGUE_CHANNEL_COUNT].copy_from_slice(&values);
+    Arkit52Coefficients::try_from_array(coefficients)
+}
+
 fn validate_value(channel: ArkitBlendshape, value: f32) -> Result<(), Arkit52ValueError> {
     if !value.is_finite() {
         return Err(Arkit52ValueError::NonFinite { channel, value });
@@ -483,6 +510,22 @@ mod tests {
     fn contract_has_exactly_52_stable_entries() {
         assert_eq!(ArkitBlendshape::ALL.len(), ARKIT52_CHANNEL_COUNT);
         assert_eq!(ArkitBlendshape::TongueOut.index(), 51);
+    }
+
+    #[test]
+    fn non_tongue_boundary_excludes_and_zeroes_tongue_out() {
+        let mut values = [0.0; ARKIT52_CHANNEL_COUNT];
+        values[ArkitBlendshape::JawOpen.index()] = 0.4;
+        values[ArkitBlendshape::TongueOut.index()] = 0.9;
+        let coefficients = Arkit52Coefficients::try_from_array(values).expect("valid");
+
+        let non_tongue = arkit_non_tongue_values(&coefficients);
+        assert_eq!(non_tongue.len(), ARKIT_NON_TONGUE_CHANNEL_COUNT);
+        assert_eq!(non_tongue[ArkitBlendshape::JawOpen.index()], 0.4);
+
+        let restored = arkit52_with_zero_tongue(non_tongue).expect("valid");
+        assert_eq!(restored.get(ArkitBlendshape::JawOpen), 0.4);
+        assert_eq!(restored.get(ArkitBlendshape::TongueOut), 0.0);
     }
 
     #[test]
