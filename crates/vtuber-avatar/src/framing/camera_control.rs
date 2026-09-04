@@ -514,9 +514,7 @@ mod tests {
 
         assert_eq!(after.transform(), before.transform());
         assert_eq!(after.target(), focus);
-        assert!(
-            (after.distance() - before.transform().translation.distance(focus)).abs() < 1e-5
-        );
+        assert!((after.distance() - before.transform().translation.distance(focus)).abs() < 1e-5);
 
         let orbited = geometry::orbit(after, 0.7, -0.25).expect("orbit after retarget is valid");
         assert_eq!(orbited.target(), focus);

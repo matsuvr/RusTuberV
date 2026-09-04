@@ -577,9 +577,7 @@ impl CheekTakeEvaluation {
     /// Returns `true` when every puff take fired and no non-puff take did.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.total_puff > 0
-            && self.detected_puff == self.total_puff
-            && self.false_alarms == 0
+        self.total_puff > 0 && self.detected_puff == self.total_puff && self.false_alarms == 0
     }
 }
 
@@ -618,7 +616,8 @@ mod tests {
     }
 
     #[test]
-    fn trace_rejects_non_finite_and_non_monotonic_samples() {        assert!(matches!(
+    fn trace_rejects_non_finite_and_non_monotonic_samples() {
+        assert!(matches!(
             TemporalTrace::new(vec![TemporalSample {
                 timestamp_micros: 0,
                 value: f64::NAN,
@@ -822,6 +821,9 @@ mod tests {
             &["take_a", "take_b"],
             &["take_c", "take_d"]
         ));
-        assert!(!cheek_takes_are_disjoint(&["take_a", "take_b"], &["take_b"]));
+        assert!(!cheek_takes_are_disjoint(
+            &["take_a", "take_b"],
+            &["take_b"]
+        ));
     }
 }

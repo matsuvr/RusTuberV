@@ -493,10 +493,8 @@ fn ui_render_system(
     // into the drawer geometry. `show_collapsible` slides the drawer in and
     // out toward the left edge with egui's built-in easing.
     let mut viewport_ui = root_viewport_ui(ctx);
-    let drawer_shown = control_drawer_panel().show_collapsible(
-        &mut viewport_ui,
-        &mut drawer_open,
-        |ui| {
+    let drawer_shown =
+        control_drawer_panel().show_collapsible(&mut viewport_ui, &mut drawer_open, |ui| {
             drawer_header(ui, &mut hide_requested);
             drawer_navigation(ui, &view_model, &mut ui_state);
 
@@ -523,8 +521,7 @@ fn ui_render_system(
                     ),
                     Screen::Diagnostics => render_diagnostics_screen(ui, &view_model, &diagnostics),
                 });
-        },
-    );
+        });
 
     ui_state.control_drawer.open = drawer_open && !hide_requested;
 
