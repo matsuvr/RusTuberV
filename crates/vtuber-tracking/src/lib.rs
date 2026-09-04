@@ -77,6 +77,8 @@ pub mod pose;
 pub mod same_frame_fanout;
 /// Explicit tracking state machine and transition table.
 pub mod state_machine;
+/// Teacher-residual-aligned observable GNM basis artifacts (Issue #16).
+pub mod teacher_aligned_basis;
 /// Same-frame teacher-minus-Direct residual dataset and decoder.
 pub mod teacher_residual;
 /// Timestamp-aware pure metrics for temporal tracking quality.
@@ -212,6 +214,12 @@ pub use same_frame_fanout::{SameFrameFanOut, SameFrameFanOutError, fan_out_same_
 pub use state_machine::{
     StateMachineConfigError, StateMachineParams, StateTransitionResult, TrackingAction,
     TrackingStateMachine, TransitionInput,
+};
+pub use teacher_aligned_basis::{
+    TEACHER_ALIGNED_GNM_BASIS_SCHEMA_VERSION, TeacherAlignedBasisError,
+    TeacherAlignedGnmBasisArtifact, TeacherAlignmentSample, build_teacher_alignment_samples,
+    fit_teacher_aligned_gnm_basis, project_teacher_aligned_expression,
+    reconstruct_teacher_aligned_expression,
 };
 pub use teacher_residual::{
     ExistingTraceResidualVariants, LoadedTeacherResidualDecoder, NormalizedLinearMapArtifact,

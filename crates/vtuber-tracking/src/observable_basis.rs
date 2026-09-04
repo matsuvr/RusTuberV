@@ -59,8 +59,13 @@ pub enum ObservableBasisError {
     #[error("invalid observable basis numeric value: {0}")]
     InvalidNumeric(&'static str),
     /// Artifact hash does not match its contents.
-    #[error("observable basis content hash mismatch")]
-    HashMismatch,
+    #[error("observable basis content hash mismatch: expected {expected}, computed {actual}")]
+    HashMismatch {
+        /// Hash stored in the artifact.
+        expected: u64,
+        /// Hash recomputed from decoded fields.
+        actual: u64,
+    },
     /// Compact expression validation failed.
     #[error(transparent)]
     Expression(#[from] vtuber_gnm::GnmModelError),
@@ -215,8 +220,12 @@ fn validate_artifact(basis: &ObservableGnmBasisArtifact) -> Result<(), Observabl
     {
         return Err(ObservableBasisError::InvalidShape("artifact"));
     }
-    if observable_basis_hash(basis) != basis.content_hash {
-        return Err(ObservableBasisError::HashMismatch);
+    let actual = observable_basis_hash(basis);
+    if actual != basis.content_hash {
+        return Err(ObservableBasisError::HashMismatch {
+            expected: basis.content_hash,
+            actual,
+        });
     }
     Ok(())
 }
@@ -239,11 +248,16 @@ fn observable_basis_hash(artifact: &ObservableGnmBasisArtifact) -> u64 {
         update(&[0xff]);
     }
     for value in &artifact.eigenvalues_descending {
-        update(&value.to_bits().to_le_bytes());
+        update(&(*value as f32).to_bits().to_le_bytes());
     }
-    update(&artifact.retained_energy_fraction.to_bits().to_le_bytes());
+    update(
+        &(artifact.retained_energy_fraction as f32)
+            .to_bits()
+            .to_le_bytes(),
+    );
     for value in &artifact.basis_row_major {
-        update(&value.to_bits().to_le_bytes());
+        let canonical = if *value == 0.0 { 0.0 } else { *value };
+        update(&canonical.to_bits().to_le_bytes());
     }
     hash
 }
@@ -314,5 +328,18 @@ mod tests {
         assert_eq!(reconstructed.values()[0], 2.0);
         assert_eq!(reconstructed.values()[1], -3.0);
         assert_eq!(reconstructed.values()[2], 0.0);
+    }
+
+    #[test]
+    fn json_round_trip_preserves_content_hash_when_basis_contains_negative_zero() {
+        let mut artifact =
+            fit_observable_gnm_basis(&diagonal_gram(&[9.0, 4.0]), 2, 2, provenance()).unwrap();
+        artifact.basis_row_major[2] = -0.0;
+        artifact.eigenvalues_descending[0] = 1.562_487_917_078_665_9;
+        artifact.retained_energy_fraction = 0.983_849_456_123_456_7;
+        artifact.content_hash = observable_basis_hash(&artifact);
+        let json = serde_json::to_vec(&artifact).unwrap();
+        let loaded: ObservableGnmBasisArtifact = serde_json::from_slice(&json).unwrap();
+        validate_artifact(&loaded).unwrap();
     }
 }
