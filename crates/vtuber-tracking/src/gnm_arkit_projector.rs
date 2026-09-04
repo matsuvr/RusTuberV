@@ -503,8 +503,10 @@ fn cheek_puff_channel(features: &GnmFacialFeatures) -> ProjectedChannel {
     {
         return ProjectedChannel::UNSUPPORTED;
     }
-    bounded_ratio(outward - CHEEK_OUTWARD_MIN, CHEEK_SATURATION)
-        .map_or(ProjectedChannel::UNSUPPORTED, ProjectedChannel::experimental)
+    bounded_ratio(outward - CHEEK_OUTWARD_MIN, CHEEK_SATURATION).map_or(
+        ProjectedChannel::UNSUPPORTED,
+        ProjectedChannel::experimental,
+    )
 }
 
 /// Corner-lift delta magnitude, in mouth-width-scale units, that saturates

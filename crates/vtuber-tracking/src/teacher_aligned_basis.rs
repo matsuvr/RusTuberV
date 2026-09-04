@@ -618,6 +618,29 @@ mod tests {
     }
 
     #[test]
+    fn runtime_basis_loader_requires_exact_model_mapping_and_hash() {
+        let samples = vec![
+            alignment_sample("train", 1, -1.0, 0.0),
+            alignment_sample("train", 2, 1.0, 0.0),
+        ];
+        let artifact = fit_teacher_aligned_gnm_basis(
+            &observable(2),
+            &samples,
+            &BTreeSet::from(["train".to_owned()]),
+            1,
+        )
+        .unwrap();
+        let loaded = crate::load_reduced_gnm_basis(&artifact, "MODEL", 7).unwrap();
+        assert_eq!(loaded.rank(), 1);
+        assert_eq!(loaded.values_row_major(), artifact.basis_row_major);
+        assert!(crate::load_reduced_gnm_basis(&artifact, "OTHER", 7).is_err());
+        assert!(crate::load_reduced_gnm_basis(&artifact, "MODEL", 8).is_err());
+        let mut tampered = artifact;
+        tampered.basis_row_major[0] += 0.1;
+        assert!(crate::load_reduced_gnm_basis(&tampered, "MODEL", 7).is_err());
+    }
+
+    #[test]
     fn rank_above_cross_covariance_limit_is_typed_error() {
         let error = fit_teacher_aligned_gnm_basis(
             &observable(52),

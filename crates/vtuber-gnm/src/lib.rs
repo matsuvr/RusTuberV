@@ -73,8 +73,9 @@ pub use model::{
     DenseArray, GNM_HEAD_V3_EXPRESSION_DIM, GNM_HEAD_V3_IDENTITY_DIM,
     GNM_HEAD_V3_IRIS_EXPRESSION_INDEX, GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM,
     GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE, GNM_HEAD_V3_VERSION, GnmExpressionState, GnmIdentityState,
-    GnmJointState, GnmModel, GnmModelData, GnmNonTongueExpression, GnmSparseVertices, GnmVariant,
-    GnmVersion, SparsePreparedVertices, SparseSkinningDerivatives,
+    GnmJointState, GnmModel, GnmModelData, GnmNonTongueExpression, GnmReducedExpressionBasis,
+    GnmReducedExpressionState, GnmSparseVertices, GnmVariant, GnmVersion, SparsePreparedVertices,
+    SparseSkinningDerivatives, expand_reduced_expression, project_to_reduced_expression,
 };
 pub use npz::{GNM_DATA_SCHEMA_KEYS, load_gnm_head_v3};
 pub use reprojection::{
@@ -83,13 +84,15 @@ pub use reprojection::{
     DenseLinearization, DenseProjection, DenseReprojectionConfig, DenseReprojectionReport,
     DenseReprojectionResidual, DenseRigidStepConfig, DenseRigidStepOutcome, GnmRegionFitRecord,
     GnmReprojectionError, LinearizationStepSizes, MAX_SINGLE_FRAME_FIT_ITERATIONS,
-    NonTongueProjectionJacobian, ReprojectionBlock, RigidRecoveryConfig, RigidRecoveryOutcome,
-    SingleFrameFitConfig, SingleFrameFitOutcome, SingleFrameFitStatus, SynthesisOptions,
-    SyntheticCase, accumulate_observability_gram, compare_conditioning,
-    evaluate_dense_reprojection, fit_single_frame_cold_start, fit_single_frame_with_temporal,
+    NonTongueProjectionJacobian, ReducedProjectionJacobian, ReducedSingleFrameFitOutcome,
+    ReprojectionBlock, RigidRecoveryConfig, RigidRecoveryOutcome, SingleFrameFitConfig,
+    SingleFrameFitOutcome, SingleFrameFitStatus, SynthesisOptions, SyntheticCase,
+    accumulate_observability_gram, compare_conditioning, evaluate_dense_reprojection,
+    fit_single_frame_cold_start, fit_single_frame_reduced, fit_single_frame_with_temporal,
     fitting_projection, linearize_dense_reprojection, non_tongue_projection_jacobian,
-    recover_rigid_projection, region_fit_records, synthesize_observation_from_projection,
-    take_dense_expression_joint_step, take_dense_rigid_step,
+    recover_rigid_projection, reduce_projection_jacobian, region_fit_records,
+    synthesize_observation_from_projection, take_dense_expression_joint_step,
+    take_dense_rigid_step,
 };
 pub use single_frame_temporal::{
     CandidateTemporalScratch, SingleFrameTemporalPenalty, TemporalGroupLinearization,

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "take_id": "20260828T053203Z_take_01_c85aaf92",
+  "trace_sha256": "0DCBA109852F0D95EBC53E11F43904FFD90203E73968DE5B56D259BAE305020C",
+  "model_sha256": "1DFF6A319C2FA28377D7669C30AA533CC0799B45E6049AF18E709B0CB8F122DB",
+  "mapping_schema_revision": 1,
+  "basis_content_hash": 6587812130543453725,
+  "basis_rank": 16,
+  "requested_max_frames": 120,
+  "benchmarked_frames": 120,
+  "full": {
+    "valid_frames": 120,
+    "rejected_frames": 0,
+    "wall_milliseconds": {
+      "p50": 117.8204,
+      "p95": 173.68,
+      "max": 1629.5921
+    },
+    "iterations": {
+      "p50": 2.0,
+      "p95": 3.0,
+      "max": 28.0
+    },
+    "weighted_rms": {
+      "p50": 0.006971224211156368,
+      "p95": 0.008424937725067139,
+      "max": 0.008684799075126648
+    },
+    "final_objective": {
+      "p50": 0.006971224211156368,
+      "p95": 0.008424937725067139,
+      "max": 0.008684799075126648
+    }
+  },
+  "reduced": {
+    "valid_frames": 120,
+    "rejected_frames": 0,
+    "wall_milliseconds": {
+      "p50": 102.5585,
+      "p95": 116.0153,
+      "max": 1368.3192
+    },
+    "iterations": {
+      "p50": 2.0,
+      "p95": 2.0,
+      "max": 27.0
+    },
+    "weighted_rms": {
+      "p50": 0.008559487760066986,
+      "p95": 0.009581927210092545,
+      "max": 0.009781387634575367
+    },
+    "final_objective": {
+      "p50": 0.008559487760066986,
+      "p95": 0.009581927210092545,
+      "max": 0.009781387634575367
+    }
+  },
+  "reconstruction_expression_difference": {
+    "p50": 0.9567344948377293,
+    "p95": 1.362588700098414,
+    "max": 1.4113239593787283
+  },
+  "tongue_max_abs": 0.0
+}

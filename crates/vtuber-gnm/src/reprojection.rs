@@ -25,9 +25,10 @@ use crate::{
     AnatomicalSide, DenseCorrespondenceSet, DenseCoveragePolicy, FaceRegion,
     GNM_HEAD_V3_IRIS_EXPRESSION_INDEX, GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM, GnmDenseError,
     GnmDenseObservation, GnmExpressionState, GnmIdentityState, GnmJointState, GnmModel,
-    GnmModelError, GnmNonTongueExpression, GnmSparseVertices, MEDIAPIPE_FACE_LANDMARK_COUNT,
-    MediaPipeGnmDenseCorrespondence, SparsePreparedVertices, SparseSkinningDerivatives,
-    TemporalRegularizationError,
+    GnmModelError, GnmNonTongueExpression, GnmReducedExpressionBasis, GnmReducedExpressionState,
+    GnmSparseVertices, MEDIAPIPE_FACE_LANDMARK_COUNT, MediaPipeGnmDenseCorrespondence,
+    SparsePreparedVertices, SparseSkinningDerivatives, TemporalRegularizationError,
+    expand_reduced_expression,
 };
 
 /// Typed failure from reprojection evaluation or rigid recovery.
@@ -312,6 +313,60 @@ pub struct NonTongueProjectionJacobian {
     pub values_row_major: Vec<f64>,
     /// Mapping base weight for each x/y row.
     pub row_weights: Vec<f64>,
+}
+
+/// Analytic projection Jacobian chained onto a reduced expression basis.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReducedProjectionJacobian {
+    /// Number of retained projection rows.
+    pub row_count: usize,
+    /// Reduced expression rank.
+    pub rank: usize,
+    /// Row-major `J_q = J_non_tongue B` values.
+    pub values_row_major: Vec<f64>,
+    /// Row weights copied unchanged from the full non-tongue Jacobian.
+    pub row_weights: Vec<f64>,
+}
+
+/// Computes `J_q = J_non_tongue B` without model reevaluation.
+///
+/// # Errors
+///
+/// Rejects inconsistent Jacobian or basis dimensions and non-finite products.
+#[allow(clippy::indexing_slicing)]
+pub fn reduce_projection_jacobian(
+    full: &NonTongueProjectionJacobian,
+    basis: &GnmReducedExpressionBasis,
+) -> Result<ReducedProjectionJacobian, GnmReprojectionError> {
+    if full.column_count != GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM
+        || full.values_row_major.len() != full.row_count * full.column_count
+        || full.row_weights.len() != full.row_count
+    {
+        return Err(GnmReprojectionError::InvalidConfig(
+            "non-tongue Jacobian dimensions disagree",
+        ));
+    }
+    let mut reduced = vec![0.0; full.row_count * basis.rank()];
+    for row in 0..full.row_count {
+        for source in 0..full.column_count {
+            let derivative = full.values_row_major[row * full.column_count + source];
+            for column in 0..basis.rank() {
+                reduced[row * basis.rank() + column] += derivative
+                    * f64::from(basis.values_row_major()[source * basis.rank() + column]);
+            }
+        }
+    }
+    if reduced.iter().any(|value| !value.is_finite()) {
+        return Err(GnmReprojectionError::NonFiniteLinearization {
+            block: "reduced_expression",
+        });
+    }
+    Ok(ReducedProjectionJacobian {
+        row_count: full.row_count,
+        rank: basis.rank(),
+        values_row_major: reduced,
+        row_weights: full.row_weights.clone(),
+    })
 }
 
 /// Builds the analytic 2D projection Jacobian for non-tongue Head-v3 expression.
@@ -3089,6 +3144,449 @@ fn fit_single_frame_cold_start_impl(
     })
 }
 
+/// Result of a single-frame fit whose expression unknown is the rank-k state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReducedSingleFrameFitOutcome {
+    reduced_expression: GnmReducedExpressionState,
+    expression: GnmExpressionState,
+    joints: GnmJointState,
+    projection: DenseProjection,
+    status: SingleFrameFitStatus,
+    iterations: usize,
+    objective: f32,
+    final_report: DenseReprojectionReport,
+}
+
+impl ReducedSingleFrameFitOutcome {
+    /// Returns whether the bounded solve converged.
+    pub fn valid(&self) -> bool {
+        self.status == SingleFrameFitStatus::Converged
+    }
+
+    /// Returns the reduced expression state.
+    pub fn reduced_expression(&self) -> &GnmReducedExpressionState {
+        &self.reduced_expression
+    }
+
+    /// Returns the reconstructed full expression with zero tongue values.
+    pub fn expression(&self) -> &GnmExpressionState {
+        &self.expression
+    }
+
+    /// Returns the final joint state.
+    pub fn joints(&self) -> &GnmJointState {
+        &self.joints
+    }
+
+    /// Returns the final projection.
+    pub fn projection(&self) -> &DenseProjection {
+        &self.projection
+    }
+
+    /// Returns the completion classification.
+    pub fn status(&self) -> SingleFrameFitStatus {
+        self.status
+    }
+
+    /// Returns the number of completed block-coordinate iterations.
+    pub fn iterations(&self) -> usize {
+        self.iterations
+    }
+
+    /// Returns the final combined objective.
+    pub fn objective(&self) -> f32 {
+        self.objective
+    }
+
+    /// Returns the final dense reprojection report.
+    pub fn final_report(&self) -> &DenseReprojectionReport {
+        &self.final_report
+    }
+}
+
+struct ReducedExpressionJointStep {
+    accepted: bool,
+    reduced: GnmReducedExpressionState,
+    expression: GnmExpressionState,
+    joints: GnmJointState,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::indexing_slicing,
+    clippy::needless_range_loop
+)]
+fn take_reduced_expression_joint_step(
+    model: &GnmModel,
+    identity: &GnmIdentityState,
+    basis: &GnmReducedExpressionBasis,
+    reduced: &GnmReducedExpressionState,
+    expression: &GnmExpressionState,
+    joints: &GnmJointState,
+    mapping: &DenseCorrespondenceSet,
+    observation: &GnmDenseObservation,
+    projection: &DenseProjection,
+    config: DenseExpressionJointStepConfig,
+    auxiliary: Option<(&dyn AuxiliaryObjectiveTerm, f32)>,
+) -> Result<ReducedExpressionJointStep, GnmReprojectionError> {
+    let non_tongue = GnmNonTongueExpression::try_from_full(expression)?;
+    let full_jacobian = non_tongue_projection_jacobian(
+        model,
+        identity,
+        &non_tongue,
+        joints,
+        mapping,
+        observation,
+        projection,
+    )?;
+    let reduced_jacobian = reduce_projection_jacobian(&full_jacobian, basis)?;
+    let (report, joint_jacobian) = linearize_joint_reprojection(
+        model,
+        identity,
+        expression,
+        joints,
+        mapping,
+        observation,
+        projection,
+    )?;
+    if reduced_jacobian.row_count != 2 * report.residuals().len()
+        || joint_jacobian.row_count != reduced_jacobian.row_count
+    {
+        return Err(GnmReprojectionError::InvalidConfig(
+            "reduced and joint Jacobian rows disagree",
+        ));
+    }
+
+    let rank = basis.rank();
+    let joint_count = model.joint_count();
+    let rotation_parameters = 3 * joint_count;
+    let joint_parameters = 3 * (joint_count + 1);
+    let total = rank + joint_parameters;
+    let mut normal = vec![0.0; total * (total + 1) / 2];
+    let mut rhs = vec![0.0; total];
+    let mut row_entries = Vec::with_capacity(total);
+    for (point_row, residual) in report.residuals().iter().enumerate() {
+        let weight = f64::from(residual.base_weight * residual.huber_weight);
+        if weight <= 0.0 {
+            continue;
+        }
+        for (component, component_residual) in residual.residual_xy.into_iter().enumerate() {
+            let row = 2 * point_row + component;
+            row_entries.clear();
+            for parameter in 0..rank {
+                // `ReducedProjectionJacobian` is d(projected_xy)/dq, while the
+                // normal equations below linearize observation - projection.
+                let entry = -reduced_jacobian.values_row_major[row * rank + parameter];
+                if entry != 0.0 {
+                    row_entries.push((parameter, entry));
+                }
+            }
+            for parameter in 0..joint_parameters {
+                let entry = f64::from(joint_jacobian.get(row, parameter).ok_or(
+                    GnmReprojectionError::InvalidConfig(
+                        "reduced and joint Jacobian dimensions disagree",
+                    ),
+                )?);
+                if entry != 0.0 {
+                    row_entries.push((rank + parameter, entry));
+                }
+            }
+            for (entry_index, &(parameter, entry)) in row_entries.iter().enumerate() {
+                for &(lower, other) in &row_entries[entry_index..] {
+                    normal[lower * (lower + 1) / 2 + parameter] += 0.5 * weight * entry * other;
+                }
+                rhs[parameter] -= 0.5 * weight * entry * f64::from(component_residual);
+            }
+        }
+    }
+    for index in 0..total {
+        normal[index * (index + 1) / 2 + index] += f64::from(config.prior_weight + config.damping);
+    }
+
+    let (auxiliary_term, auxiliary_weight) = match auxiliary {
+        Some((term, weight)) if weight.is_finite() && weight > 0.0 => {
+            (Some(term), f64::from(weight))
+        }
+        Some((_, weight)) if !weight.is_finite() || weight < 0.0 => {
+            return Err(GnmReprojectionError::InvalidConfig(
+                "auxiliary weight must be finite and non-negative",
+            ));
+        }
+        _ => (None, 0.0),
+    };
+    let mut auxiliary_loss_before = 0.0;
+    if let Some(term) = auxiliary_term {
+        let evaluation = term.evaluate(
+            expression.values(),
+            joints.rotations(),
+            joints.translation(),
+        )?;
+        if evaluation.loss < 0.0
+            || evaluation.expression_gradient.len() != model.expression_dimension()
+            || evaluation.joint_gradient.len() != joint_parameters
+            || evaluation
+                .expression_gradient
+                .iter()
+                .chain(&evaluation.joint_gradient)
+                .any(|value| !value.is_finite())
+        {
+            return Err(GnmReprojectionError::InvalidConfig(
+                "auxiliary evaluation is invalid",
+            ));
+        }
+        auxiliary_loss_before = auxiliary_weight * f64::from(evaluation.loss);
+        for compact in 0..GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM {
+            let full_index = if compact + 1 == GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM {
+                GNM_HEAD_V3_IRIS_EXPRESSION_INDEX
+            } else {
+                compact
+            };
+            for column in 0..rank {
+                rhs[column] -= auxiliary_weight
+                    * f64::from(evaluation.expression_gradient[full_index])
+                    * f64::from(basis.values_row_major()[compact * rank + column]);
+            }
+        }
+        for (index, value) in evaluation.joint_gradient.iter().enumerate() {
+            rhs[rank + index] -= auxiliary_weight * f64::from(*value);
+        }
+    }
+    let objective_before = f64::from(report.weighted_rms()) + auxiliary_loss_before;
+
+    let Some(step) = solve_spd_packed_lower(&mut normal, &mut rhs) else {
+        return Ok(ReducedExpressionJointStep {
+            accepted: false,
+            reduced: reduced.clone(),
+            expression: expression.clone(),
+            joints: joints.clone(),
+        });
+    };
+    if step.iter().any(|value| !value.is_finite()) {
+        return Ok(ReducedExpressionJointStep {
+            accepted: false,
+            reduced: reduced.clone(),
+            expression: expression.clone(),
+            joints: joints.clone(),
+        });
+    }
+    let reduced_update = &step[..rank];
+    let rotation_update = &step[rank..rank + rotation_parameters];
+    let translation_update = &step[rank + rotation_parameters..];
+    let norm = |values: &[f64]| values.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let mut scale = 1.0_f64;
+    let reduced_norm = norm(reduced_update);
+    let rotation_norm = norm(rotation_update);
+    let translation_norm = norm(translation_update);
+    if reduced_norm > f64::from(config.max_expression_step) {
+        scale = scale.min(f64::from(config.max_expression_step) / reduced_norm);
+    }
+    if rotation_norm > f64::from(config.max_joint_rotation_step) {
+        scale = scale.min(f64::from(config.max_joint_rotation_step) / rotation_norm);
+    }
+    if translation_norm > f64::from(config.max_joint_translation_step) {
+        scale = scale.min(f64::from(config.max_joint_translation_step) / translation_norm);
+    }
+    let mut reduced_values = reduced.values().to_vec();
+    for (value, delta) in reduced_values.iter_mut().zip(reduced_update) {
+        *value += (*delta * scale) as f32;
+    }
+    let candidate_reduced = GnmReducedExpressionState::new(reduced_values, rank)?;
+    let candidate_expression = expand_reduced_expression(basis, &candidate_reduced)?;
+    let mut rotations = joints.rotations().to_vec();
+    let mut translation = joints.translation();
+    for (value, delta) in rotations.iter_mut().flatten().zip(rotation_update) {
+        *value += (*delta * scale) as f32;
+    }
+    for (value, delta) in translation.iter_mut().zip(translation_update) {
+        *value += (*delta * scale) as f32;
+    }
+    let candidate_joints = GnmJointState::new(rotations, translation, joint_count)?;
+    let candidate_report = evaluate_dense_reprojection(
+        model,
+        identity,
+        &candidate_expression,
+        &candidate_joints,
+        mapping,
+        observation,
+        projection,
+        DenseReprojectionConfig::default(),
+    )?;
+    let mut objective_after = f64::from(candidate_report.weighted_rms());
+    if let Some(term) = auxiliary_term {
+        objective_after += auxiliary_weight
+            * f64::from(
+                term.evaluate(
+                    candidate_expression.values(),
+                    candidate_joints.rotations(),
+                    candidate_joints.translation(),
+                )?
+                .loss,
+            );
+    }
+    if !objective_after.is_finite() || objective_after >= objective_before {
+        return Ok(ReducedExpressionJointStep {
+            accepted: false,
+            reduced: reduced.clone(),
+            expression: expression.clone(),
+            joints: joints.clone(),
+        });
+    }
+    Ok(ReducedExpressionJointStep {
+        accepted: true,
+        reduced: candidate_reduced,
+        expression: candidate_expression,
+        joints: candidate_joints,
+    })
+}
+
+/// Fits one frame directly in the rank-k expression coordinates.
+///
+/// The solver reconstructs the full zero-tongue state only for shared model,
+/// rigid, joint, and objective evaluation. It never fits a 351/383-dimensional
+/// expression and projects the result afterward.
+///
+/// # Errors
+///
+/// Propagates typed basis, state, projection, observation, and objective errors.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_single_frame_reduced(
+    model: &GnmModel,
+    identity: &GnmIdentityState,
+    basis: &GnmReducedExpressionBasis,
+    initial_reduced: &GnmReducedExpressionState,
+    initial_joints: &GnmJointState,
+    mapping: &DenseCorrespondenceSet,
+    observation: &GnmDenseObservation,
+    initial_projection: &DenseProjection,
+    config: SingleFrameFitConfig,
+    auxiliary: Option<(&dyn AuxiliaryObjectiveTerm, f32)>,
+) -> Result<ReducedSingleFrameFitOutcome, GnmReprojectionError> {
+    if initial_reduced.values().len() != basis.rank() {
+        return Err(GnmReprojectionError::InvalidConfig(
+            "reduced state rank differs from basis",
+        ));
+    }
+    let mut reduced = initial_reduced.clone();
+    let mut expression = expand_reduced_expression(basis, &reduced)?;
+    let mut joints = initial_joints.clone();
+    let mut projection = *initial_projection;
+    let objective_at = |expression: &GnmExpressionState,
+                        joints: &GnmJointState,
+                        projection: &DenseProjection|
+     -> Result<(f64, DenseReprojectionReport), GnmReprojectionError> {
+        let report = evaluate_dense_reprojection(
+            model,
+            identity,
+            expression,
+            joints,
+            mapping,
+            observation,
+            projection,
+            DenseReprojectionConfig::default(),
+        )?;
+        let auxiliary_loss = match auxiliary {
+            Some((term, weight)) if weight.is_finite() && weight >= 0.0 => {
+                f64::from(weight)
+                    * f64::from(
+                        term.evaluate(
+                            expression.values(),
+                            joints.rotations(),
+                            joints.translation(),
+                        )?
+                        .loss,
+                    )
+            }
+            Some(_) => {
+                return Err(GnmReprojectionError::InvalidConfig(
+                    "auxiliary weight must be finite and non-negative",
+                ));
+            }
+            None => 0.0,
+        };
+        Ok((f64::from(report.weighted_rms()) + auxiliary_loss, report))
+    };
+    let (mut objective, mut final_report) = objective_at(&expression, &joints, &projection)?;
+    for iteration in 1..=config.max_iterations {
+        let rigid = take_dense_rigid_step_impl(
+            model,
+            identity,
+            &expression,
+            &joints,
+            mapping,
+            observation,
+            &projection,
+            config.rigid,
+            None,
+        )?;
+        if rigid.accepted {
+            projection = DenseProjection::new(
+                rigid.yaw_pitch_roll,
+                rigid.translation,
+                projection.focal(),
+                projection.principal_point(),
+            )?;
+        }
+        let expression_joint = take_reduced_expression_joint_step(
+            model,
+            identity,
+            basis,
+            &reduced,
+            &expression,
+            &joints,
+            mapping,
+            observation,
+            &projection,
+            config.expression_joint,
+            auxiliary,
+        )?;
+        if expression_joint.accepted {
+            reduced = expression_joint.reduced;
+            expression = expression_joint.expression;
+            joints = expression_joint.joints;
+        }
+        let (updated_objective, report) = objective_at(&expression, &joints, &projection)?;
+        final_report = report;
+        if !updated_objective.is_finite() {
+            return Ok(ReducedSingleFrameFitOutcome {
+                reduced_expression: reduced,
+                expression,
+                joints,
+                projection,
+                status: SingleFrameFitStatus::NonFiniteState,
+                iterations: iteration,
+                objective: f32::NAN,
+                final_report,
+            });
+        }
+        let improvement = objective - updated_objective;
+        objective = updated_objective;
+        if (!rigid.accepted && !expression_joint.accepted)
+            || improvement <= f64::from(config.tolerance)
+        {
+            return Ok(ReducedSingleFrameFitOutcome {
+                reduced_expression: reduced,
+                expression,
+                joints,
+                projection,
+                status: SingleFrameFitStatus::Converged,
+                iterations: iteration,
+                objective: objective as f32,
+                final_report,
+            });
+        }
+    }
+    Ok(ReducedSingleFrameFitOutcome {
+        reduced_expression: reduced,
+        expression,
+        joints,
+        projection,
+        status: SingleFrameFitStatus::MaxIterationsReached,
+        iterations: config.max_iterations,
+        objective: objective as f32,
+        final_report,
+    })
+}
+
 /// Parameter block of the dense reprojection linearization.
 ///
 /// Identity is intentionally absent: fixed identity is calibration evidence,
@@ -3369,6 +3867,70 @@ pub fn linearize_dense_reprojection(
     }
 
     Ok(DenseLinearization { report, blocks })
+}
+
+#[allow(clippy::too_many_arguments, clippy::indexing_slicing)]
+fn linearize_joint_reprojection(
+    model: &GnmModel,
+    identity: &GnmIdentityState,
+    expression: &GnmExpressionState,
+    joints: &GnmJointState,
+    mapping: &DenseCorrespondenceSet,
+    observation: &GnmDenseObservation,
+    projection: &DenseProjection,
+) -> Result<(DenseReprojectionReport, BlockJacobian), GnmReprojectionError> {
+    let config = DenseReprojectionConfig::default();
+    let steps = LinearizationStepSizes::default();
+    let prepared =
+        model.prepare_sparse_vertices(identity, expression, joints, mapping.surface_landmarks())?;
+    let baseline_surface = prepared.skin(model, identity, joints, mapping.surface_landmarks())?;
+    let report = evaluate_report_from_surface(observation, projection, config, &baseline_surface)?;
+    let retained = report
+        .residuals()
+        .iter()
+        .map(|residual| residual.mapping_index)
+        .collect::<Vec<_>>();
+    let baseline_projected = report
+        .residuals()
+        .iter()
+        .map(|residual| residual.projected_xy)
+        .collect::<Vec<_>>();
+    let parameter_count = ReprojectionBlock::Joints.parameter_count(model);
+    let row_count = 2 * retained.len();
+    let mut entries = vec![0.0; row_count * parameter_count];
+    for parameter in 0..parameter_count {
+        let column = perturbed_residuals(
+            model,
+            identity,
+            expression,
+            joints,
+            mapping,
+            projection,
+            &baseline_surface,
+            &baseline_projected,
+            &prepared,
+            ReprojectionBlock::Joints,
+            parameter,
+            steps,
+            &retained,
+        )?;
+        for (point_row, delta) in column.iter().enumerate() {
+            entries[(2 * point_row) * parameter_count + parameter] = delta[0];
+            entries[(2 * point_row + 1) * parameter_count + parameter] = delta[1];
+        }
+    }
+    if entries.iter().any(|entry| !entry.is_finite()) {
+        return Err(GnmReprojectionError::NonFiniteLinearization { block: "joints" });
+    }
+    Ok((
+        report,
+        BlockJacobian {
+            block: ReprojectionBlock::Joints,
+            parameter_count,
+            row_count,
+            entries,
+        },
+    ))
 }
 
 /// Evaluates `(perturbed - baseline) / step` for every retained point under a
@@ -3693,9 +4255,9 @@ mod tests {
     use crate::dense::test_support::version;
     use crate::{
         CorrespondenceProvenance, CorrespondenceReliability, DenseArray, DenseCorrespondenceSet,
-        GNM_HEAD_V3_EXPRESSION_DIM, GNM_HEAD_V3_IDENTITY_DIM, GNM_HEAD_V3_VERSION, GnmModelData,
-        GnmSurfacePointRef, GnmVariant, MediaPipeGnmDenseCorrespondence,
-        SPARSE_BOOTSTRAP_POINT_COUNT,
+        GNM_HEAD_V3_EXPRESSION_DIM, GNM_HEAD_V3_IDENTITY_DIM, GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE,
+        GNM_HEAD_V3_VERSION, GnmModelData, GnmSurfacePointRef, GnmVariant,
+        MediaPipeGnmDenseCorrespondence, SPARSE_BOOTSTRAP_POINT_COUNT,
     };
 
     /// A pseudo-3D deterministic point cloud with depth variation, unlike the
@@ -4427,6 +4989,90 @@ mod tests {
             |_, _| false,
         )
         .unwrap()
+    }
+
+    fn identity_non_tongue_basis() -> GnmReducedExpressionBasis {
+        let dimension = GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM;
+        let mut values = vec![0.0; dimension * dimension];
+        for index in 0..dimension {
+            values[index * dimension + index] = 1.0;
+        }
+        GnmReducedExpressionBasis::new(dimension, values).unwrap()
+    }
+
+    #[test]
+    fn reduced_jacobian_is_analytic_chain_product() {
+        let model = lin_model();
+        let mapping = mapping_for(&model, 64);
+        let observation = lin_observation(&model, &mapping);
+        let expression = GnmNonTongueExpression::try_from_full(&lin_expression()).unwrap();
+        let full = non_tongue_projection_jacobian(
+            &model,
+            &model.neutral_identity(),
+            &expression,
+            &GnmJointState::neutral(model.joint_count()),
+            &mapping,
+            &observation,
+            &truth_projection(),
+        )
+        .unwrap();
+        let reduced = reduce_projection_jacobian(&full, &identity_non_tongue_basis()).unwrap();
+        assert_eq!(reduced.row_count, full.row_count);
+        assert_eq!(reduced.rank, full.column_count);
+        assert_eq!(reduced.values_row_major, full.values_row_major);
+        assert_eq!(reduced.row_weights, full.row_weights);
+    }
+
+    #[test]
+    fn identity_basis_reduced_solver_matches_full_non_tongue_case() {
+        let model = lin_model();
+        let mapping = mapping_for(&model, 64);
+        let observation = lin_observation(&model, &mapping);
+        let identity = model.neutral_identity();
+        let joints = GnmJointState::neutral(model.joint_count());
+        let projection = truth_projection();
+        let config = SingleFrameFitConfig::default();
+        let full = fit_single_frame_cold_start(
+            &model,
+            &identity,
+            &model.neutral_expression(),
+            &joints,
+            &mapping,
+            &observation,
+            &projection,
+            config,
+            None,
+        )
+        .unwrap();
+        let basis = identity_non_tongue_basis();
+        let reduced = fit_single_frame_reduced(
+            &model,
+            &identity,
+            &basis,
+            &GnmReducedExpressionState::neutral(basis.rank()),
+            &joints,
+            &mapping,
+            &observation,
+            &projection,
+            config,
+            None,
+        )
+        .unwrap();
+        assert_eq!(reduced.status(), full.status());
+        assert!((reduced.objective() - full.objective()).abs() < 1.0e-5);
+        for (reduced, full) in reduced
+            .expression()
+            .values()
+            .iter()
+            .zip(full.expression().values())
+        {
+            assert!((reduced - full).abs() < 1.0e-4);
+        }
+        assert!(
+            reduced.expression().values()[GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE]
+                .iter()
+                .all(|value| *value == 0.0)
+        );
     }
 
     #[test]

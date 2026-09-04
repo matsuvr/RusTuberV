@@ -678,12 +678,7 @@ pub fn compute_cheek_aux_features(
     mapping
         .evaluate_surface(model, identity, expression, joints, &mut surface_buffer)
         .map_err(GnmAuxGeometryError::SurfaceEvaluation)?;
-    cheek_from_parts(
-        surface_buffer.values(),
-        neutral_surface,
-        mapping,
-        scale,
-    )
+    cheek_from_parts(surface_buffer.values(), neutral_surface, mapping, scale)
 }
 
 /// Iris/gaze auxiliary feature for one anatomical side.
@@ -1734,8 +1729,7 @@ mod tests {
             widened[right][0] -= 0.3;
             widened[left][0] += 0.3;
         }
-        let wide =
-            cheek_from_parts(&widened, &neutral_surface, &mapping, 3.0).unwrap();
+        let wide = cheek_from_parts(&widened, &neutral_surface, &mapping, 3.0).unwrap();
         assert!(wide.contour_outward.unwrap() > 0.0);
         let mut narrowed = surface.values().to_vec();
         #[allow(clippy::indexing_slicing)]
@@ -1743,8 +1737,7 @@ mod tests {
             narrowed[right][0] += 0.3;
             narrowed[left][0] -= 0.3;
         }
-        let narrow =
-            cheek_from_parts(&narrowed, &neutral_surface, &mapping, 3.0).unwrap();
+        let narrow = cheek_from_parts(&narrowed, &neutral_surface, &mapping, 3.0).unwrap();
         assert!(narrow.contour_outward.unwrap() < 0.0);
     }
 

@@ -1067,7 +1067,9 @@ fn cheek_contour_basis_specificity_scan() {
             best_contour = contour_mean;
         }
     }
-    println!("cheek contour best channel {best_channel} ratio {best_ratio:.3} contour_mean {best_contour:.6}");
+    println!(
+        "cheek contour best channel {best_channel} ratio {best_ratio:.3} contour_mean {best_contour:.6}"
+    );
     // Pinned on the committed asset: channel 104 at ~2.44x is weaker than
     // the mouth isolator (~3.3x) and far below the eyelid joint probe
     // (~27x), with a tiny absolute displacement (~1e-4). There is no

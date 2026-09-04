@@ -78,6 +78,8 @@ pub mod pipeline;
 pub mod placeholder;
 /// Head pose estimation from landmark sets.
 pub mod pose;
+/// Reduced-GNM runtime basis boundary and MediaPipe rotation seed (Issue #20).
+pub mod reduced_gnm;
 pub mod same_frame_fanout;
 /// Explicit tracking state machine and transition table.
 pub mod state_machine;
@@ -233,6 +235,7 @@ pub use pose::planar::{
     PlanarPoseAlignment, PlanarPoseError, solve_planar_pose,
 };
 pub use pose::{LandmarkSet, PoseAlignment, PoseError, WeightedPoint, solve_relative_pose};
+pub use reduced_gnm::{load_reduced_gnm_basis, seed_gnm_projection_rotation};
 pub use same_frame_fanout::{SameFrameFanOut, SameFrameFanOutError, fan_out_same_frame};
 pub use state_machine::{
     StateMachineConfigError, StateMachineParams, StateTransitionResult, TrackingAction,
