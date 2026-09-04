@@ -80,6 +80,8 @@ pub mod placeholder;
 pub mod pose;
 /// Reduced-GNM runtime basis boundary and MediaPipe rotation seed (Issue #20).
 pub mod reduced_gnm;
+/// Pure reduced-state temporal prediction and fixed gain selection (Issue #21).
+pub mod reduced_temporal;
 pub mod same_frame_fanout;
 /// Explicit tracking state machine and transition table.
 pub mod state_machine;
@@ -236,6 +238,14 @@ pub use pose::planar::{
 };
 pub use pose::{LandmarkSet, PoseAlignment, PoseError, WeightedPoint, solve_relative_pose};
 pub use reduced_gnm::{load_reduced_gnm_basis, seed_gnm_projection_rotation};
+pub use reduced_temporal::{
+    AlphaBetaGain, BALANCED_GAIN, REDUCED_TEMPORAL_ARTIFACT_SCHEMA_VERSION, RESPONSIVE_GAIN,
+    ReducedAlphaBetaGains, ReducedTemporalArtifact, ReducedTemporalError,
+    ReducedTemporalProvenance, ReducedTemporalState, SMOOTH_GAIN, SourceGroupGains,
+    TemporalCandidateMetrics, TimestampedDirectCoefficients, correct_reduced_temporal_state,
+    initialize_reduced_temporal_state, project_source_group_gains, reduced_temporal_gain_grid,
+    sample_direct_coefficients_at, sample_reduced_state_at, select_reduced_temporal_artifact,
+};
 pub use same_frame_fanout::{SameFrameFanOut, SameFrameFanOutError, fan_out_same_frame};
 pub use state_machine::{
     StateMachineConfigError, StateMachineParams, StateTransitionResult, TrackingAction,

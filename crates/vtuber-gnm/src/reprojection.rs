@@ -27,8 +27,9 @@ use crate::{
     GnmDenseObservation, GnmExpressionState, GnmIdentityState, GnmJointState, GnmModel,
     GnmModelError, GnmNonTongueExpression, GnmReducedExpressionBasis, GnmReducedExpressionState,
     GnmSparseVertices, MEDIAPIPE_FACE_LANDMARK_COUNT, MediaPipeGnmDenseCorrespondence,
-    SparsePreparedVertices, SparseSkinningDerivatives, TemporalRegularizationError,
-    expand_reduced_expression,
+    ReducedTemporalHistory, SparsePreparedVertices, SparseSkinningDerivatives,
+    TemporalRegularizationConfig, TemporalRegularizationError,
+    evaluate_reduced_temporal_regularization, expand_reduced_expression,
 };
 
 /// Typed failure from reprojection evaluation or rigid recovery.
@@ -3228,6 +3229,7 @@ fn take_reduced_expression_joint_step(
     projection: &DenseProjection,
     config: DenseExpressionJointStepConfig,
     auxiliary: Option<(&dyn AuxiliaryObjectiveTerm, f32)>,
+    temporal: Option<(ReducedTemporalHistory<'_>, TemporalRegularizationConfig)>,
 ) -> Result<ReducedExpressionJointStep, GnmReprojectionError> {
     let non_tongue = GnmNonTongueExpression::try_from_full(expression)?;
     let full_jacobian = non_tongue_projection_jacobian(
@@ -3303,6 +3305,29 @@ fn take_reduced_expression_joint_step(
         normal[index * (index + 1) / 2 + index] += f64::from(config.prior_weight + config.damping);
     }
 
+    let temporal_before = temporal
+        .map(|(history, temporal_config)| {
+            evaluate_reduced_temporal_regularization(
+                basis,
+                reduced,
+                history.previous,
+                history.previous_previous,
+                history.timing,
+                &history.normalization,
+                temporal_config,
+            )
+        })
+        .transpose()?;
+    if let Some(regularization) = &temporal_before {
+        for row in 0..rank {
+            for column in 0..=row {
+                normal[row * (row + 1) / 2 + column] +=
+                    0.5 * regularization.hessian_row_major[row * rank + column];
+            }
+            rhs[row] -= 0.5 * regularization.gradient[row];
+        }
+    }
+
     let (auxiliary_term, auxiliary_weight) = match auxiliary {
         Some((term, weight)) if weight.is_finite() && weight > 0.0 => {
             (Some(term), f64::from(weight))
@@ -3351,7 +3376,9 @@ fn take_reduced_expression_joint_step(
             rhs[rank + index] -= auxiliary_weight * f64::from(*value);
         }
     }
-    let objective_before = f64::from(report.weighted_rms()) + auxiliary_loss_before;
+    let objective_before = f64::from(report.weighted_rms())
+        + auxiliary_loss_before
+        + temporal_before.as_ref().map_or(0.0, |term| term.energy);
 
     let Some(step) = solve_spd_packed_lower(&mut normal, &mut rhs) else {
         return Ok(ReducedExpressionJointStep {
@@ -3423,6 +3450,18 @@ fn take_reduced_expression_joint_step(
                 .loss,
             );
     }
+    if let Some((history, temporal_config)) = temporal {
+        objective_after += evaluate_reduced_temporal_regularization(
+            basis,
+            &candidate_reduced,
+            history.previous,
+            history.previous_previous,
+            history.timing,
+            &history.normalization,
+            temporal_config,
+        )?
+        .energy;
+    }
     if !objective_after.is_finite() || objective_after >= objective_before {
         return Ok(ReducedExpressionJointStep {
             accepted: false,
@@ -3461,6 +3500,73 @@ pub fn fit_single_frame_reduced(
     config: SingleFrameFitConfig,
     auxiliary: Option<(&dyn AuxiliaryObjectiveTerm, f32)>,
 ) -> Result<ReducedSingleFrameFitOutcome, GnmReprojectionError> {
+    fit_single_frame_reduced_impl(
+        model,
+        identity,
+        basis,
+        initial_reduced,
+        initial_joints,
+        mapping,
+        observation,
+        initial_projection,
+        None,
+        config,
+        auxiliary,
+    )
+}
+
+/// Fits one frame directly in q-space with an optional causal source history.
+///
+/// `None` means the first valid source frame. A stale history returns the
+/// existing typed history-reset error and is never stretched or replaced.
+///
+/// # Errors
+///
+/// Propagates typed solver and temporal-history failures.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_single_frame_reduced_with_temporal(
+    model: &GnmModel,
+    identity: &GnmIdentityState,
+    basis: &GnmReducedExpressionBasis,
+    initial_reduced: &GnmReducedExpressionState,
+    initial_joints: &GnmJointState,
+    mapping: &DenseCorrespondenceSet,
+    observation: &GnmDenseObservation,
+    initial_projection: &DenseProjection,
+    temporal_history: Option<ReducedTemporalHistory<'_>>,
+    config: SingleFrameFitConfig,
+    temporal_config: TemporalRegularizationConfig,
+    auxiliary: Option<(&dyn AuxiliaryObjectiveTerm, f32)>,
+) -> Result<ReducedSingleFrameFitOutcome, GnmReprojectionError> {
+    fit_single_frame_reduced_impl(
+        model,
+        identity,
+        basis,
+        initial_reduced,
+        initial_joints,
+        mapping,
+        observation,
+        initial_projection,
+        temporal_history.map(|history| (history, temporal_config)),
+        config,
+        auxiliary,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fit_single_frame_reduced_impl(
+    model: &GnmModel,
+    identity: &GnmIdentityState,
+    basis: &GnmReducedExpressionBasis,
+    initial_reduced: &GnmReducedExpressionState,
+    initial_joints: &GnmJointState,
+    mapping: &DenseCorrespondenceSet,
+    observation: &GnmDenseObservation,
+    initial_projection: &DenseProjection,
+    temporal: Option<(ReducedTemporalHistory<'_>, TemporalRegularizationConfig)>,
+    config: SingleFrameFitConfig,
+    auxiliary: Option<(&dyn AuxiliaryObjectiveTerm, f32)>,
+) -> Result<ReducedSingleFrameFitOutcome, GnmReprojectionError> {
     if initial_reduced.values().len() != basis.rank() {
         return Err(GnmReprojectionError::InvalidConfig(
             "reduced state rank differs from basis",
@@ -3470,7 +3576,8 @@ pub fn fit_single_frame_reduced(
     let mut expression = expand_reduced_expression(basis, &reduced)?;
     let mut joints = initial_joints.clone();
     let mut projection = *initial_projection;
-    let objective_at = |expression: &GnmExpressionState,
+    let objective_at = |reduced: &GnmReducedExpressionState,
+                        expression: &GnmExpressionState,
                         joints: &GnmJointState,
                         projection: &DenseProjection|
      -> Result<(f64, DenseReprojectionReport), GnmReprojectionError> {
@@ -3503,9 +3610,28 @@ pub fn fit_single_frame_reduced(
             }
             None => 0.0,
         };
-        Ok((f64::from(report.weighted_rms()) + auxiliary_loss, report))
+        let temporal_energy = temporal
+            .map(|(history, temporal_config)| {
+                evaluate_reduced_temporal_regularization(
+                    basis,
+                    reduced,
+                    history.previous,
+                    history.previous_previous,
+                    history.timing,
+                    &history.normalization,
+                    temporal_config,
+                )
+                .map(|regularization| regularization.energy)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        Ok((
+            f64::from(report.weighted_rms()) + auxiliary_loss + temporal_energy,
+            report,
+        ))
     };
-    let (mut objective, mut final_report) = objective_at(&expression, &joints, &projection)?;
+    let (mut objective, mut final_report) =
+        objective_at(&reduced, &expression, &joints, &projection)?;
     for iteration in 1..=config.max_iterations {
         let rigid = take_dense_rigid_step_impl(
             model,
@@ -3538,13 +3664,15 @@ pub fn fit_single_frame_reduced(
             &projection,
             config.expression_joint,
             auxiliary,
+            temporal,
         )?;
         if expression_joint.accepted {
             reduced = expression_joint.reduced;
             expression = expression_joint.expression;
             joints = expression_joint.joints;
         }
-        let (updated_objective, report) = objective_at(&expression, &joints, &projection)?;
+        let (updated_objective, report) =
+            objective_at(&reduced, &expression, &joints, &projection)?;
         final_report = report;
         if !updated_objective.is_finite() {
             return Ok(ReducedSingleFrameFitOutcome {
@@ -5073,6 +5201,60 @@ mod tests {
                 .iter()
                 .all(|value| *value == 0.0)
         );
+    }
+
+    #[test]
+    fn reduced_temporal_solver_propagates_required_history_reset() {
+        let model = lin_model();
+        let mapping = mapping_for(&model, 64);
+        let observation = lin_observation(&model, &mapping);
+        let mut values = vec![0.0; GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM];
+        values[0] = 1.0;
+        let basis = GnmReducedExpressionBasis::new(1, values).unwrap();
+        let previous = GnmReducedExpressionState::neutral(1);
+        let scales = vec![1.0; GNM_HEAD_V3_EXPRESSION_DIM];
+        let zero = crate::TemporalGroupPenaltyWeights::new(0.0, 0.0).unwrap();
+        let temporal_config = TemporalRegularizationConfig::new(
+            crate::TemporalGroupPenaltyWeights::new(1.0e-6, 0.0).unwrap(),
+            zero,
+            zero,
+            zero,
+            0.2,
+        )
+        .unwrap();
+        let result = fit_single_frame_reduced_with_temporal(
+            &model,
+            &model.neutral_identity(),
+            &basis,
+            &previous,
+            &GnmJointState::neutral(model.joint_count()),
+            &mapping,
+            &observation,
+            &truth_projection(),
+            Some(ReducedTemporalHistory {
+                previous: &previous,
+                previous_previous: None,
+                timing: crate::TemporalHistoryTiming {
+                    dt_seconds: 0.3,
+                    previous_dt_seconds: None,
+                },
+                normalization: crate::GnmTemporalNormalization {
+                    expression: &scales,
+                    joints: &[],
+                    head_pose: &[],
+                    translation: &[],
+                },
+            }),
+            SingleFrameFitConfig::default(),
+            temporal_config,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(GnmReprojectionError::Temporal(
+                TemporalRegularizationError::HistoryResetRequired { .. }
+            ))
+        ));
     }
 
     #[test]
