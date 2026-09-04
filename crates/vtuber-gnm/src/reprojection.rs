@@ -3282,7 +3282,11 @@ fn take_reduced_expression_joint_step(
                 }
             }
             for parameter in 0..joint_parameters {
-                let entry = f64::from(joint_jacobian.get(row, parameter).unwrap_or_default());
+                let entry = f64::from(joint_jacobian.get(row, parameter).ok_or(
+                    GnmReprojectionError::InvalidConfig(
+                        "reduced and joint Jacobian dimensions disagree",
+                    ),
+                )?);
                 if entry != 0.0 {
                     row_entries.push((rank + parameter, entry));
                 }
