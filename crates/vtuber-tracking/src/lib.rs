@@ -64,6 +64,8 @@ pub mod gnm_semantic_decoder;
 /// GNM fitter (test infrastructure; see issue #94).
 pub mod gnm_sequence_regression;
 pub mod gnm_shadow;
+/// MediaPipe landmark latent controls and upper-bound decoder (Issue #18).
+pub mod landmark_control;
 /// Loss hold, neutral decay, and recovery blend.
 pub mod loss_recovery;
 /// Bounded procedural micro-motion after tracking loss (Issue #172).
@@ -191,6 +193,16 @@ pub use gnm_sequence_regression::{synthetic_head_model, synthetic_mapping};
 pub use gnm_shadow::{
     GnmShadowCandidate, GnmShadowOutcome, GnmShadowSkip, align_shadow_pair, decode_shadow_features,
     shadow_worker_input,
+};
+pub use landmark_control::{
+    LANDMARK_ALIGNED_BASIS_SCHEMA_VERSION, LANDMARK_CONTROL_DECODER_SCHEMA_VERSION,
+    LandmarkAlignedBasisArtifact, LandmarkAlignmentSample, LandmarkControlDecoderArtifact,
+    LandmarkControlDecoderKind, LandmarkControlError, LandmarkControlFrame,
+    NORMALIZED_LANDMARK_XY_DIM, build_gnm_landmark_upper_bound_features,
+    build_landmark_alignment_samples, build_landmark_control_rows,
+    build_landmark_residual_features, fit_landmark_aligned_basis, fit_landmark_control_decoder,
+    landmark_control_feature_order, normalize_landmarks_xy, predict_landmark_control_raw,
+    project_landmark_latent,
 };
 pub use loss_recovery::{
     LossRecovery, LossRecoveryConfigError, LossRecoveryParams, MAX_DECAY_DURATION,

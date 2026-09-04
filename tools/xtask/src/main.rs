@@ -28,6 +28,8 @@ mod ndi_output_render;
 mod teacher_ablation;
 mod teacher_fit_aligned_basis;
 mod teacher_fit_gnm_decoder;
+mod teacher_fit_landmark_basis;
+mod teacher_fit_landmark_decoder;
 mod teacher_fit_observable_basis;
 mod teacher_fit_prior;
 mod teacher_fit_residual;
@@ -74,6 +76,8 @@ fn main() {
         println!(
             "  teacher-fit-gnm-decoder <opts> Fit GNM-only or hybrid reduced-GNM decoder (Issue #17)"
         );
+        println!("  teacher-fit-landmark-basis <opts> Fit teacher-aligned landmark basis (#18)");
+        println!("  teacher-fit-landmark-decoder <opts> Fit landmark L or HL decoder (#18)");
         println!(
             "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
         );
@@ -187,6 +191,20 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("teacher-fit-gnm-decoder failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-fit-landmark-basis" => match teacher_fit_landmark_basis::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-fit-landmark-basis failed: {error}");
+                process::exit(1);
+            }
+        },
+        "teacher-fit-landmark-decoder" => match teacher_fit_landmark_decoder::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("teacher-fit-landmark-decoder failed: {error}");
                 process::exit(1);
             }
         },

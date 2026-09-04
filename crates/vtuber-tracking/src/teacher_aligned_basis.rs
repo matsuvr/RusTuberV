@@ -17,6 +17,64 @@ pub const TEACHER_ALIGNED_GNM_BASIS_SCHEMA_VERSION: u32 = 1;
 
 const INACTIVE_RESIDUAL_STD_THRESHOLD: f32 = 1.0e-6;
 
+pub(crate) struct ResidualNormalization {
+    pub(crate) mean: [f32; ARKIT_NON_TONGUE_CHANNEL_COUNT],
+    pub(crate) std: [f32; ARKIT_NON_TONGUE_CHANNEL_COUNT],
+    pub(crate) inactive_channels: Vec<usize>,
+    pub(crate) normalized: Vec<[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT]>,
+}
+
+#[allow(clippy::indexing_slicing)]
+pub(crate) fn normalize_teacher_residuals(
+    residuals: &[[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT]],
+) -> Result<ResidualNormalization, TeacherAlignedBasisError> {
+    if residuals.is_empty() {
+        return Err(TeacherAlignedBasisError::NoTrainingSamples);
+    }
+    if residuals.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(TeacherAlignedBasisError::InvalidNumeric("teacher residual"));
+    }
+    let count = residuals.len() as f32;
+    let mut mean = [0.0_f32; ARKIT_NON_TONGUE_CHANNEL_COUNT];
+    for residual in residuals {
+        for (mean, value) in mean.iter_mut().zip(residual) {
+            *mean += *value / count;
+        }
+    }
+    let mut std = [0.0_f32; ARKIT_NON_TONGUE_CHANNEL_COUNT];
+    for residual in residuals {
+        for ((variance, value), mean) in std.iter_mut().zip(residual).zip(mean) {
+            *variance += (*value - mean).powi(2) / count;
+        }
+    }
+    for value in &mut std {
+        *value = value.sqrt();
+    }
+    let inactive_channels: Vec<usize> = std
+        .iter()
+        .enumerate()
+        .filter_map(|(index, std)| (*std <= INACTIVE_RESIDUAL_STD_THRESHOLD).then_some(index))
+        .collect();
+    let normalized = residuals
+        .iter()
+        .map(|residual| {
+            let mut row = [0.0_f32; ARKIT_NON_TONGUE_CHANNEL_COUNT];
+            for index in 0..ARKIT_NON_TONGUE_CHANNEL_COUNT {
+                if std[index] > INACTIVE_RESIDUAL_STD_THRESHOLD {
+                    row[index] = (residual[index] - mean[index]) / std[index];
+                }
+            }
+            row
+        })
+        .collect();
+    Ok(ResidualNormalization {
+        mean,
+        std,
+        inactive_channels,
+        normalized,
+    })
+}
+
 /// One exact-frame expression and ARKit-teacher residual pair.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TeacherAlignmentSample {
@@ -195,57 +253,27 @@ pub fn fit_teacher_aligned_gnm_basis(
     let count = training.len() as f64;
     let mut coordinates = Vec::with_capacity(training.len());
     let mut coordinate_mean = vec![0.0_f64; observable.rank];
-    let mut residual_mean = [0.0_f32; ARKIT_NON_TONGUE_CHANNEL_COUNT];
     for sample in &training {
-        if sample
-            .teacher_residual
-            .iter()
-            .any(|value| !value.is_finite())
-        {
-            return Err(TeacherAlignedBasisError::InvalidNumeric("teacher residual"));
-        }
         let projected = project_non_tongue_expression(&sample.expression, observable)?;
         for (mean, value) in coordinate_mean.iter_mut().zip(&projected) {
             *mean += f64::from(*value) / count;
         }
-        for (mean, value) in residual_mean.iter_mut().zip(sample.teacher_residual) {
-            *mean += value / training.len() as f32;
-        }
         coordinates.push(projected);
     }
-    let mut residual_std = [0.0_f32; ARKIT_NON_TONGUE_CHANNEL_COUNT];
-    for sample in &training {
-        for ((variance, value), mean) in residual_std
-            .iter_mut()
-            .zip(sample.teacher_residual)
-            .zip(residual_mean)
-        {
-            *variance += (value - mean).powi(2) / training.len() as f32;
-        }
-    }
-    for value in &mut residual_std {
-        *value = value.sqrt();
-    }
-    let inactive_residual_channels: Vec<usize> = residual_std
+    let residuals: Vec<[f32; ARKIT_NON_TONGUE_CHANNEL_COUNT]> = training
         .iter()
-        .enumerate()
-        .filter_map(|(index, std)| (*std <= INACTIVE_RESIDUAL_STD_THRESHOLD).then_some(index))
+        .map(|sample| sample.teacher_residual)
         .collect();
+    let normalization = normalize_teacher_residuals(&residuals)?;
 
     let mut cross_covariance =
         DMatrix::<f64>::zeros(observable.rank, ARKIT_NON_TONGUE_CHANNEL_COUNT);
-    for (sample, projected) in training.iter().zip(&coordinates) {
+    for (projected, normalized_residual) in coordinates.iter().zip(&normalization.normalized) {
         for source in 0..observable.rank {
             let centered_coordinate = f64::from(projected[source]) - coordinate_mean[source];
             for channel in 0..ARKIT_NON_TONGUE_CHANNEL_COUNT {
-                if residual_std[channel] > INACTIVE_RESIDUAL_STD_THRESHOLD {
-                    let normalized_residual = f64::from(
-                        (sample.teacher_residual[channel] - residual_mean[channel])
-                            / residual_std[channel],
-                    );
-                    cross_covariance[(source, channel)] +=
-                        centered_coordinate * normalized_residual / count;
-                }
+                cross_covariance[(source, channel)] +=
+                    centered_coordinate * f64::from(normalized_residual[channel]) / count;
             }
         }
     }
@@ -309,9 +337,9 @@ pub fn fit_teacher_aligned_gnm_basis(
         source_rank: observable.rank,
         rank,
         training_takes: training_takes.iter().cloned().collect(),
-        residual_mean,
-        residual_std,
-        inactive_residual_channels,
+        residual_mean: normalization.mean,
+        residual_std: normalization.std,
+        inactive_residual_channels: normalization.inactive_channels,
         singular_values_descending,
         basis_row_major,
         content_hash: 0,
