@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use vtuber_tracking::{
-    CausalFeatureConfig, LinearPriorTrainingConfig, LoadedLinearPrior, PairedTemporalSample,
-    validate_paired_samples,
+    ARKIT_TEACHER_DATASET_SCHEMA_VERSION, CausalFeatureConfig, LinearPriorTrainingConfig,
+    LoadedLinearPrior, PairedTemporalSample, validate_paired_samples,
 };
 
 use crate::teacher_replay::{TraceRow, sample_from_row};
@@ -129,6 +129,7 @@ pub(crate) fn load_trace(directory: &Path) -> Result<LoadedTrace, String> {
         .map_err(|error| format!("read {}: {error}", metadata_path.display()))?;
     let metadata: serde_json::Value = serde_json::from_str(&metadata_text)
         .map_err(|error| format!("parse {}: {error}", metadata_path.display()))?;
+    validate_replay_schema(&metadata, &metadata_path)?;
     let take_id = metadata
         .pointer("/source_dataset/take_id")
         .and_then(serde_json::Value::as_str)
@@ -180,6 +181,20 @@ pub(crate) fn load_trace(directory: &Path) -> Result<LoadedTrace, String> {
         samples,
         expected_solved: solved,
     })
+}
+
+fn validate_replay_schema(metadata: &serde_json::Value, path: &Path) -> Result<(), String> {
+    let found = metadata
+        .pointer("/schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if found != Some(u64::from(ARKIT_TEACHER_DATASET_SCHEMA_VERSION)) {
+        return Err(format!(
+            "{}: expected teacher replay schema {}, found {found:?}; regenerate the trace with teacher-replay",
+            path.display(),
+            ARKIT_TEACHER_DATASET_SCHEMA_VERSION
+        ));
+    }
+    Ok(())
 }
 
 /// Runs the fit/export; see the module documentation.
@@ -290,4 +305,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
     println!("  artifact: {}", options.output.display());
     println!("  artifact_sha256: {sha256}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_schema_requires_v2_without_v1_fallback() {
+        let path = Path::new("replay-metadata.json");
+        assert!(validate_replay_schema(&serde_json::json!({ "schema_version": 2 }), path).is_ok());
+        let error = validate_replay_schema(&serde_json::json!({ "schema_version": 1 }), path)
+            .expect_err("v1 must require regeneration");
+        assert!(error.contains("regenerate"));
+    }
 }

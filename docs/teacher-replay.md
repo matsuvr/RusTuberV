@@ -33,16 +33,23 @@ cargo run -p xtask --release -- teacher-replay `
 
 Outputs:
 
-- `derived-trace.jsonl` — one `PairedTemporalSample` row per frame:
-  `mediapipe_observation` (direct MediaPipe blendshape → ARKit52 mapping,
-  `tongueOut` pinned to 0), `gnm_state` (deterministic cold-start GNM
-  projection + solver residual), `baseline_output` (equals the direct
-  observation; the production baseline applies no temporal prior), plus the
-  teacher record and RGB reference.
+- `derived-trace.jsonl` — schema v2, one `PairedTemporalSample` row per frame.
+  `mediapipe_observation` retains 478 normalized `(x, y)` landmarks (not z),
+  camera-to-face transform, direct MediaPipe → ARKit52 coefficients, and the
+  existing quality values. `gnm_state` retains the pre-projection Head-v3
+  expression with indices `350..382` (tongue) removed, joint rotations,
+  rigid/camera state, projected ARKit52 coefficients, solver objective, and
+  diagnostic per-region RMS. `baseline_output` equals the direct observation.
+  Teacher and RGB-reference metadata remain present; neither pixels nor
+  absolute paths are embedded.
 - `replay-metadata.json` — SHA-256 of every input file and of the trace
   bytes (`trace_sha256`), plus the full config (task bundle hash, GNM model
   hash, fit config, pacing/rotation policies). Re-running with the same
   inputs and config regenerates byte-identical outputs.
+
+Downstream `teacher-fit-prior`, `teacher-fit-residual`, and both ablation
+commands require schema v2 metadata. Existing schema v1 traces must be
+regenerated; there is no implicit migration or fallback.
 
 Determinism: the replay is paced to the capture cadence so MediaPipe sees
 the recorded frame intervals; the fit is a stateless per-frame cold start

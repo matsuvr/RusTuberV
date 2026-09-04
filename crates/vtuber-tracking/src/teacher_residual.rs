@@ -180,9 +180,9 @@ pub fn build_teacher_residual_rows(
         }
 
         let snapshot = Snapshot {
-            direct: arkit_non_tongue_values(direct),
+            direct: arkit_non_tongue_values(&direct.direct_coefficients),
             gnm: arkit_non_tongue_values(&gnm_state.projected_coefficients),
-            residual: gnm_state.residual,
+            residual: gnm_state.objective,
         };
         let mut run = history.clone();
         run.push(snapshot);
@@ -380,10 +380,11 @@ pub fn existing_trace_residual_variants(
     let residual = decoder
         .predict(features)
         .map_err(ResidualAblationError::Decoder)?;
-    let hybrid_projected_residual = apply_non_tongue_residual(direct, residual)
-        .map_err(ResidualAblationError::InvalidOutput)?;
+    let hybrid_projected_residual =
+        apply_non_tongue_residual(&direct.direct_coefficients, residual)
+            .map_err(ResidualAblationError::InvalidOutput)?;
     Ok(ExistingTraceResidualVariants {
-        direct: *direct,
+        direct: direct.direct_coefficients,
         gnm_projected: gnm.projected_coefficients,
         hybrid_projected_residual,
     })
@@ -534,7 +535,9 @@ fn hash_teacher_residual_artifact(artifact: &TeacherResidualDecoderArtifact) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arkit_teacher::{ArkitTeacherFrame, DeterministicGnmState, HeadTransform};
+    use crate::arkit_teacher::{
+        ArkitTeacherFrame, HeadTransform, test_gnm_state, test_mediapipe_observation,
+    };
     use vtuber_core::{ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape};
 
     fn coefficients(jaw: f32) -> Arkit52Coefficients {
@@ -547,11 +550,8 @@ mod tests {
         PairedTemporalSample {
             frame_seq: seq,
             timestamp_micros: seq * 20_000,
-            mediapipe_observation: Some(coefficients(direct)),
-            gnm_state: Some(DeterministicGnmState {
-                projected_coefficients: coefficients(gnm),
-                residual: 0.01 * seq as f32,
-            }),
+            mediapipe_observation: Some(test_mediapipe_observation(coefficients(direct))),
+            gnm_state: Some(test_gnm_state(coefficients(gnm), 0.01 * seq as f32)),
             baseline_output: coefficients(direct),
             teacher: Some(ArkitTeacherFrame {
                 frame_seq: seq,

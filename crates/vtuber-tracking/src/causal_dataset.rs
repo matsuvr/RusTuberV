@@ -166,7 +166,7 @@ pub fn build_causal_dataset(
         }
         // Residual rides in the newest slot's tail entry.
         let residual_base = slot_width - 1;
-        features[residual_base] = current_state.residual;
+        features[residual_base] = current_state.objective;
         fill_velocity_features(
             &mut features[config.history_len * CausalFeatureConfig::feature_dims()..],
             &current_coefficients,
@@ -239,7 +239,7 @@ fn fill_velocity_features(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arkit_teacher::{DeterministicGnmState, HeadTransform};
+    use crate::arkit_teacher::{DeterministicGnmState, HeadTransform, test_gnm_state};
     use vtuber_core::{ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape};
 
     fn coefficients(value: f32) -> Arkit52Coefficients {
@@ -249,10 +249,7 @@ mod tests {
     }
 
     fn state(coefficients: Arkit52Coefficients, residual: f32) -> DeterministicGnmState {
-        DeterministicGnmState {
-            projected_coefficients: coefficients,
-            residual,
-        }
+        test_gnm_state(coefficients, residual)
     }
 
     fn sample(seq: u64, jaw_open: f32, residual: f32) -> PairedTemporalSample {

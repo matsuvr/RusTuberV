@@ -1,11 +1,19 @@
 //! Validated GNM Head v3 data and sparse evaluation.
 
+use std::ops::Range;
+
 use crate::error::GnmModelError;
 
 /// Number of identity coefficients in the official GNM Head v3 model.
 pub const GNM_HEAD_V3_IDENTITY_DIM: usize = 253;
 /// Number of expression coefficients in the official GNM Head v3 model.
 pub const GNM_HEAD_V3_EXPRESSION_DIM: usize = 383;
+/// Tongue-only expression coefficients excluded from research traces.
+pub const GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE: Range<usize> = 350..382;
+/// Iris expression coefficient retained after the tongue block.
+pub const GNM_HEAD_V3_IRIS_EXPRESSION_INDEX: usize = 382;
+/// Head v3 expression dimension after removing the 32 tongue coefficients.
+pub const GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM: usize = 351;
 
 /// GNM model version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +134,75 @@ impl GnmExpressionState {
     /// Returns the coefficients.
     pub fn values(&self) -> &[f32] {
         &self.0
+    }
+}
+
+/// Fixed Head v3 expression state with the tongue block removed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GnmNonTongueExpression(Vec<f32>);
+
+impl GnmNonTongueExpression {
+    /// Extracts indices `0..350` and iris index `382` from a full Head v3 state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a model shape error when the full state is not Head v3 sized.
+    #[allow(clippy::indexing_slicing)]
+    pub fn try_from_full(expression: &GnmExpressionState) -> Result<Self, GnmModelError> {
+        if expression.values().len() != GNM_HEAD_V3_EXPRESSION_DIM {
+            return Err(GnmModelError::Shape {
+                field: "expression".to_owned(),
+                expected: format!("{GNM_HEAD_V3_EXPRESSION_DIM} values"),
+                actual: format!("{} values", expression.values().len()),
+            });
+        }
+        let mut values = expression.values()[..GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE.start].to_vec();
+        values.push(expression.values()[GNM_HEAD_V3_IRIS_EXPRESSION_INDEX]);
+        Ok(Self(values))
+    }
+
+    /// Restores a full Head v3 state with all 32 tongue coefficients set to zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns a model error if the stored non-tongue values are invalid.
+    #[allow(clippy::indexing_slicing)]
+    pub fn expand_with_zero_tongue(&self) -> Result<GnmExpressionState, GnmModelError> {
+        let mut values = vec![0.0; GNM_HEAD_V3_EXPRESSION_DIM];
+        values[..GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE.start]
+            .copy_from_slice(&self.0[..GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE.start]);
+        values[GNM_HEAD_V3_IRIS_EXPRESSION_INDEX] =
+            self.0[GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM - 1];
+        GnmExpressionState::new(values, GNM_HEAD_V3_EXPRESSION_DIM)
+    }
+
+    /// Returns the fixed 351-value non-tongue vector.
+    pub fn values(&self) -> &[f32] {
+        &self.0
+    }
+
+    /// Creates the fixed boundary from serialized non-tongue values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a model error for the wrong dimension or non-finite values.
+    pub fn try_from_values(values: Vec<f32>) -> Result<Self, GnmModelError> {
+        let full = if values.len() == GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM {
+            values
+        } else {
+            return Err(GnmModelError::Shape {
+                field: "non_tongue_expression".to_owned(),
+                expected: format!("{GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM} values"),
+                actual: format!("{} values", values.len()),
+            });
+        };
+        if let Some(index) = full.iter().position(|value| !value.is_finite()) {
+            return Err(GnmModelError::NonFinite {
+                field: "non_tongue_expression".to_owned(),
+                index,
+            });
+        }
+        Ok(Self(full))
     }
 }
 
@@ -1451,6 +1528,37 @@ mod tests {
         };
         assert!(
             matches!(GnmModel::from_data(data), Err(GnmModelError::Shape { field, .. }) if field == "joint_identity_basis")
+        );
+    }
+
+    #[test]
+    fn non_tongue_expression_round_trip_zeroes_only_tongue() {
+        let values: Vec<f32> = (0..GNM_HEAD_V3_EXPRESSION_DIM)
+            .map(|index| index as f32 / GNM_HEAD_V3_EXPRESSION_DIM as f32)
+            .collect();
+        let full = GnmExpressionState::new(values.clone(), GNM_HEAD_V3_EXPRESSION_DIM).unwrap();
+        let compact = GnmNonTongueExpression::try_from_full(&full).unwrap();
+        assert_eq!(
+            compact.values().len(),
+            GNM_HEAD_V3_NON_TONGUE_EXPRESSION_DIM
+        );
+        assert_eq!(
+            compact.values()[350],
+            values[GNM_HEAD_V3_IRIS_EXPRESSION_INDEX]
+        );
+        let expanded = compact.expand_with_zero_tongue().unwrap();
+        assert_eq!(
+            &expanded.values()[..GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE.start],
+            &values[..GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE.start]
+        );
+        assert!(
+            expanded.values()[GNM_HEAD_V3_TONGUE_EXPRESSION_RANGE]
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        assert_eq!(
+            expanded.values()[GNM_HEAD_V3_IRIS_EXPRESSION_INDEX],
+            values[GNM_HEAD_V3_IRIS_EXPRESSION_INDEX]
         );
     }
 }

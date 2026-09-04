@@ -246,10 +246,10 @@ mod tests {
             frame_seq: seq,
             timestamp_micros: seq * 16_667,
             mediapipe_observation: None,
-            gnm_state: Some(crate::arkit_teacher::DeterministicGnmState {
-                projected_coefficients: Arkit52Coefficients::try_from_array(values).unwrap(),
-                residual: 0.01,
-            }),
+            gnm_state: Some(crate::arkit_teacher::test_gnm_state(
+                Arkit52Coefficients::try_from_array(values).unwrap(),
+                0.01,
+            )),
             baseline_output: Arkit52Coefficients::default(),
             teacher: None,
             rgb_reference: None,

@@ -103,7 +103,8 @@ pub use adaptive_temporal::{
     advance_adaptive_temporal_policy,
 };
 pub use arkit_teacher::{
-    ArkitTeacherFrame, DeterministicGnmState, HeadTransform, PairedTemporalSample,
+    ARKIT_TEACHER_DATASET_SCHEMA_VERSION, ArkitTeacherFrame, DeterministicGnmState,
+    GnmTeacherStateRecord, HeadTransform, MediaPipeTeacherObservation, PairedTemporalSample,
     RgbFrameReference, TeacherDatasetError, validate_paired_samples,
 };
 pub use authority_gate::{AuthorityGate, AuthorityOutcome};
