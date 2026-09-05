@@ -53,6 +53,7 @@ fn config() -> PipelineConfig {
             return_duration: Duration::from_millis(200),
         },
         head_filter: HeadFilterParams::with_time_constant(0.05),
+        translation_filter: Default::default(),
         gaze_filter: Default::default(),
         expression_filter: ExpressionFilterParams::with_time_constants(0.03, 0.10),
         loss_recovery: LossRecoveryParams {

@@ -89,6 +89,13 @@ pub struct TrackingRuntime {
     last_avatar_generation: vtuber_avatar::AvatarGeneration,
     last_recenter_error: Option<String>,
     observation_gate: ObservationGate,
+    /// Last face observation dispatched into the pipeline.
+    ///
+    /// The pipeline is advanced on every main-thread frame with this sample
+    /// so the emitted control frames form a continuous signal at the render
+    /// rate. It is replaced when a new observation arrives and cleared on
+    /// face loss.
+    held_sample: Option<FaceTrackingSample>,
     /// Whether the avatar bridge may retain the most recently published
     /// control frame for the current capture session.
     pub control_active: bool,
@@ -114,6 +121,7 @@ impl Default for TrackingRuntime {
             last_avatar_generation: vtuber_avatar::AvatarGeneration::default(),
             last_recenter_error: None,
             observation_gate: ObservationGate::default(),
+            held_sample: None,
             control_active: false,
             control_slot: Arc::new(LatestSlot::new()),
             latest_control: None,
@@ -146,6 +154,7 @@ pub fn tracking_bridge_system(
         // state so a new avatar cannot receive a stale frame.
         tracking.pipeline.reset();
         tracking.observation_gate.reset();
+        tracking.held_sample = None;
         tracking.control_slot.clear();
         tracking.latest_control = None;
         tracking.control_active = false;
@@ -162,6 +171,7 @@ pub fn tracking_bridge_system(
     if capture_inactive || pipeline_failed {
         tracking.pipeline.reset();
         tracking.observation_gate.reset();
+        tracking.held_sample = None;
         tracking.control_slot.clear();
         tracking.latest_control = None;
         tracking.control_active = false;
@@ -198,22 +208,22 @@ pub fn tracking_bridge_system(
         .unwrap_or_else(|| Duration::from_nanos(33_333_333));
     tracking.last_update = Some(now);
 
-    let sample = match tracking
+    let dispatch = tracking
         .observation_gate
-        .dispatch(inference.latest_face_sample.as_ref(), now)
-    {
-        ObservationDispatch::NoUpdate => {
-            // Do not feed the same inference result into the filters again.
-            // The previous control frame remains active until a newer face or
-            // a face-loss update replaces it.
-            view_model.calibration = calibration_view(&tracking);
-            return;
-        }
-        ObservationDispatch::Face(sample) => Some(*sample),
-        ObservationDispatch::NoFace => None,
+        .dispatch(inference.latest_face_sample.as_ref(), now);
+    let neutral_sample = match &dispatch {
+        ObservationDispatch::Face(sample) => Some((**sample).clone()),
+        // The held observation keeps feeding the pipeline between inference
+        // results so the filters advance at the render rate. Re-running the
+        // same sample through the filters is what reconstructs a continuous
+        // motion signal; the pipeline memoizes the per-sample conversion.
+        ObservationDispatch::NoUpdate | ObservationDispatch::NoFace => None,
     };
+    if dispatch == ObservationDispatch::NoFace {
+        tracking.held_sample = None;
+    }
 
-    if let Some(sample) = sample.as_ref() {
+    if let Some(sample) = neutral_sample.as_ref() {
         let neutral_update = if tracking.recenter_requested {
             tracking.auto_neutral.recenter(sample)
         } else {
@@ -234,13 +244,17 @@ pub fn tracking_bridge_system(
             }
         }
     }
+    if let Some(sample) = neutral_sample {
+        tracking.held_sample = Some(sample);
+    }
 
     let neutral = tracking.auto_neutral.reference();
     let gaze_baseline = tracking.auto_neutral.gaze_baseline();
-    let update =
-        tracking
-            .pipeline
-            .update_mediapipe(sample.as_ref(), neutral, gaze_baseline, now, dt);
+    let held = tracking.held_sample.take();
+    let update = tracking
+        .pipeline
+        .update_mediapipe(held.as_ref(), neutral, gaze_baseline, now, dt);
+    tracking.held_sample = held;
     if let Some(frame) = update.frame {
         let _ = tracking.control_slot.publish(frame.clone());
         tracking.latest_control = Some(frame);

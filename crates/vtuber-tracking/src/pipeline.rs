@@ -39,7 +39,7 @@ use crate::expressions::{
 use crate::filter::{
     DetailedExpressionFilter, ExpressionCalibration, ExpressionCalibrationError, ExpressionFilter,
     ExpressionFilterParams, ExpressionRange, GazeFilter, GazeFilterParams, HeadFilterParams,
-    HeadRotationFilter,
+    HeadRotationFilter, TranslationFilter, TranslationFilterParams,
 };
 use crate::loss_recovery::{LossRecovery, LossRecoveryParams};
 use crate::pose::mediapipe::{mediapipe_to_application_basis, relative_transform};
@@ -381,6 +381,8 @@ pub struct PipelineConfig {
     pub state_machine: StateMachineParams,
     /// Head rotation filter parameters.
     pub head_filter: HeadFilterParams,
+    /// Head translation filter parameters.
+    pub translation_filter: TranslationFilterParams,
     /// Eye-in-head gaze filter parameters.
     pub gaze_filter: GazeFilterParams,
     /// Expression normalization and smoothing parameters.
@@ -397,6 +399,7 @@ impl Default for PipelineConfig {
             confidence_gate: ConfidenceGateParams::default(),
             state_machine: StateMachineParams::default(),
             head_filter: HeadFilterParams::default(),
+            translation_filter: TranslationFilterParams::default(),
             gaze_filter: GazeFilterParams::default(),
             expression_filter: ExpressionFilterParams::default(),
             loss_recovery: LossRecoveryParams::default(),
@@ -429,6 +432,54 @@ pub struct PipelineUpdate {
     pub state: TrackingState,
 }
 
+/// Memoized conversion of one canonical MediaPipe sample.
+///
+/// `update_mediapipe` is called on every consumer tick, but a sample only
+/// changes when a new observation arrives. The conversion results (which
+/// allocate) are therefore keyed on `(source_seq, neutral, gaze_baseline)`
+/// and reused while the same sample is re-fed. Filter state is deliberately
+/// not part of the cache: the filters advance on every tick.
+#[derive(Clone, Debug, PartialEq)]
+struct MediapipeSampleCache {
+    source_seq: FrameSeq,
+    neutral: Option<CameraFaceTransform>,
+    gaze_baseline: Option<GazeNeutralBaseline>,
+    observation: RawFaceObservation,
+    gaze: GazeSignal,
+    detailed_input: Arkit52Coefficients,
+    pose_result: Option<Result<HeadPoseFrame, HeadPoseFailure>>,
+}
+
+impl MediapipeSampleCache {
+    fn build(
+        sample: &FaceTrackingSample,
+        neutral: Option<CameraFaceTransform>,
+        gaze_baseline: Option<GazeNeutralBaseline>,
+    ) -> Self {
+        Self {
+            source_seq: sample.source_seq,
+            neutral,
+            gaze_baseline,
+            observation: media_pipe_sample_to_observation(sample),
+            gaze: calibrated_mediapipe_gaze(sample, gaze_baseline),
+            detailed_input: map_mediapipe_perfect_sync(&sample.blendshapes),
+            pose_result: neutral
+                .map(|neutral| media_pipe_pose_frame(sample, neutral, MonoTimeNs(0))),
+        }
+    }
+
+    fn matches(
+        &self,
+        source_seq: FrameSeq,
+        neutral: Option<CameraFaceTransform>,
+        gaze_baseline: Option<GazeNeutralBaseline>,
+    ) -> bool {
+        self.source_seq == source_seq
+            && self.neutral == neutral
+            && self.gaze_baseline == gaze_baseline
+    }
+}
+
 /// Owns the end-to-end tracking pipeline.
 ///
 /// `TrackingPipeline` is single-threaded and contains no worker handles,
@@ -441,10 +492,12 @@ pub struct TrackingPipeline {
     expression_filter: ExpressionFilter,
     detailed_expression_filter: DetailedExpressionFilter,
     head_filter: HeadRotationFilter,
+    translation_filter: TranslationFilter,
     gaze_filter: GazeFilter,
     confidence_gate: ConfidenceGate,
     state_machine: TrackingStateMachine,
     loss_recovery: LossRecovery,
+    mediapipe_cache: Option<MediapipeSampleCache>,
 }
 
 impl TrackingPipeline {
@@ -458,6 +511,7 @@ impl TrackingPipeline {
             ExpressionFilter::new(default_expression_calibration(), config.expression_filter);
         let detailed_expression_filter = DetailedExpressionFilter::new(config.expression_filter);
         let head_filter = HeadRotationFilter::new(config.head_filter);
+        let translation_filter = TranslationFilter::new(config.translation_filter);
         let gaze_filter = GazeFilter::new(config.gaze_filter);
         let confidence_gate = ConfidenceGate::new(config.confidence_gate)
             .map_err(|_| PipelineConfigError::ConfidenceGate)?;
@@ -472,10 +526,12 @@ impl TrackingPipeline {
             expression_filter,
             detailed_expression_filter,
             head_filter,
+            translation_filter,
             gaze_filter,
             confidence_gate,
             state_machine,
             loss_recovery,
+            mediapipe_cache: None,
         })
     }
 
@@ -507,7 +563,9 @@ impl TrackingPipeline {
         self.expression_filter = ExpressionFilter::new(calibration, self.config.expression_filter);
         self.detailed_expression_filter.reset();
         self.head_filter.reset();
+        self.translation_filter.reset();
         self.gaze_filter.reset();
+        self.mediapipe_cache = None;
         self.profile = Some(profile);
         Ok(())
     }
@@ -516,12 +574,14 @@ impl TrackingPipeline {
     pub fn reset_calibration(&mut self) {
         self.profile = None;
         self.head_filter.reset();
+        self.translation_filter.reset();
         self.gaze_filter.reset();
         self.expression_filter = ExpressionFilter::new(
             default_expression_calibration(),
             self.config.expression_filter,
         );
         self.detailed_expression_filter.reset();
+        self.mediapipe_cache = None;
     }
 
     /// Resets filters and tracking state without changing calibration.
@@ -530,9 +590,11 @@ impl TrackingPipeline {
     #[allow(clippy::expect_used)]
     pub fn reset(&mut self) {
         self.head_filter.reset();
+        self.translation_filter.reset();
         self.gaze_filter.reset();
         self.expression_filter.reset();
         self.detailed_expression_filter.reset();
+        self.mediapipe_cache = None;
         self.confidence_gate.reset();
         self.state_machine = TrackingStateMachine::new(self.config.state_machine)
             .expect("config was validated in constructor");
@@ -587,6 +649,14 @@ impl TrackingPipeline {
     /// `neutral` is the latest auto-neutral transform.  The method accepts an
     /// optional sample so face loss follows the same hold/return path as the
     /// legacy observation API without fabricating a face.
+    ///
+    /// The method is safe and cheap to call on every consumer tick, including
+    /// between observation arrivals: the per-sample conversion is memoized on
+    /// `(source_seq, neutral, gaze_baseline)`, while the time-based filters
+    /// (head rotation, expressions, gaze) advance on every call. Re-feeding
+    /// the held sample between observations is what keeps the emitted control
+    /// frames a continuous signal at the consumer's frame rate instead of a
+    /// zero-order hold at the observation rate.
     #[must_use]
     pub fn update_mediapipe(
         &mut self,
@@ -596,25 +666,44 @@ impl TrackingPipeline {
         now: MonoTimeNs,
         dt: Duration,
     ) -> PipelineUpdate {
-        let observation = sample.map(media_pipe_sample_to_observation);
-        let gaze = sample.map(|sample| calibrated_mediapipe_gaze(sample, gaze_baseline));
-        let detailed = sample.map(|sample| {
-            let coefficients = map_mediapipe_perfect_sync(&sample.blendshapes);
-            self.detailed_expression_filter.update(&coefficients, now)
-        });
-        let pose_result = match (sample, neutral) {
-            (Some(sample), Some(neutral)) => Some(media_pipe_pose_frame(sample, neutral, now)),
-            _ => None,
+        let mut cache = self.mediapipe_cache.take();
+        let cache_valid = match (&cache, sample) {
+            (Some(cached), Some(sample)) => {
+                cached.matches(sample.source_seq, neutral, gaze_baseline)
+            }
+            (None, None) => true,
+            _ => false,
         };
-        self.update_with_pose(
-            observation.as_ref(),
-            gaze,
-            detailed,
-            now,
-            dt,
-            pose_result,
-            neutral.is_some(),
-        )
+        if !cache_valid {
+            cache =
+                sample.map(|sample| MediapipeSampleCache::build(sample, neutral, gaze_baseline));
+        }
+
+        let update = match &cache {
+            Some(cached) => {
+                let detailed = self
+                    .detailed_expression_filter
+                    .update(&cached.detailed_input, now);
+                let pose_result = cached.pose_result.map(|result| {
+                    result.map(|frame| HeadPoseFrame {
+                        produced_at: now,
+                        ..frame
+                    })
+                });
+                self.update_with_pose(
+                    Some(&cached.observation),
+                    Some(cached.gaze),
+                    Some(detailed),
+                    now,
+                    dt,
+                    pose_result,
+                    neutral.is_some(),
+                )
+            }
+            None => self.update_with_pose(None, None, None, now, dt, None, neutral.is_some()),
+        };
+        self.mediapipe_cache = cache;
+        update
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -654,6 +743,7 @@ impl TrackingPipeline {
             match action {
                 crate::state_machine::TrackingAction::ResetFilters => {
                     self.head_filter.reset();
+                    self.translation_filter.reset();
                     self.expression_filter.reset();
                     self.detailed_expression_filter.reset();
                     self.gaze_filter.reset();
@@ -668,16 +758,15 @@ impl TrackingPipeline {
             .or_else(|| observation.map(extract_gaze))
             .unwrap_or(GazeSignal::UNAVAILABLE);
         let filtered_gaze = self.gaze_filter.update(raw_gaze, dt);
+        let raw_translation = pose_result
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map(|frame| frame.translation)
+            .unwrap_or(HeadTranslationSignal::UNAVAILABLE);
+        let translation = self.translation_filter.update(raw_translation, now);
         let tracked = observation.map(|obs| {
             let head = self.update_head_filter(&pose_result, now);
             let expressions = self.expression_filter.update(&obs.expressions, now);
-            // Translation passes through unfiltered in this step; shaping and
-            // smoothing are later Body Motion stages (Issue #164).
-            let translation = pose_result
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .map(|frame| frame.translation)
-                .unwrap_or(HeadTranslationSignal::UNAVAILABLE);
 
             AvatarControlFrame {
                 source_seq: obs.source_seq,
@@ -1456,6 +1545,7 @@ mod assembly {
                 return_duration: Duration::from_millis(200),
             },
             head_filter: HeadFilterParams::with_time_constant(0.05),
+            translation_filter: TranslationFilterParams::default(),
             gaze_filter: GazeFilterParams::default(),
             expression_filter: ExpressionFilterParams::with_time_constants(0.03, 0.10),
             loss_recovery: LossRecoveryParams {
@@ -1820,6 +1910,152 @@ mod assembly {
             .expect("frame after reset");
         let detailed = frame.detailed_face.expect("detailed coefficients");
         assert_eq!(detailed.get(ArkitBlendshape::JawOpen), 0.0);
+    }
+
+    /// Builds a sample whose face is rotated by `yaw_deg` around MediaPipe's
+    /// vertical axis, with a unique sequence number.
+    fn rotated_mediapipe_sample(seq: u64, yaw_deg: f32) -> FaceTrackingSample {
+        let half = (yaw_deg.to_radians() / 2.0).sin_cos();
+        let mut sample = mediapipe_sample(&[]);
+        sample.source_seq = FrameSeq(seq);
+        sample.captured_at = MonoTimeNs(seq);
+        sample.camera_to_face = CameraFaceTransform {
+            rotation_xyzw: [0.0, half.0, 0.0, half.1],
+            translation_xyz: [0.0, 0.0, 0.0],
+        };
+        sample
+    }
+
+    #[test]
+    fn held_sample_keeps_advancing_the_head_filter_between_observations() {
+        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let neutral = mediapipe_sample(&[]);
+
+        // Acquire on the neutral pose, then step to a 10-degree target. The
+        // step arrives as one observation; the following calls re-feed the
+        // same sample at the consumer frame rate.
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(33_333_333));
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(66_666_666));
+
+        let target = rotated_mediapipe_sample(2, 10.0);
+        let first = track_mediapipe(&mut pipeline, &target, MonoTimeNs(100_000_000))
+            .expect("frame on observation arrival");
+        let second = track_mediapipe(&mut pipeline, &target, MonoTimeNs(116_666_666))
+            .expect("frame on held re-feed");
+        let third = track_mediapipe(&mut pipeline, &target, MonoTimeNs(133_333_333))
+            .expect("frame on held re-feed");
+
+        let target_yaw = 10.0_f32.to_radians();
+        let distance = |frame: &AvatarControlFrame| (frame.head.yaw_rad - target_yaw).abs();
+        assert!(
+            distance(&first) > distance(&second),
+            "held re-feed must keep converging: first={:?} second={:?}",
+            first.head,
+            second.head
+        );
+        assert!(
+            distance(&second) > distance(&third),
+            "held re-feed must keep converging: second={:?} third={:?}",
+            second.head,
+            third.head
+        );
+    }
+
+    #[test]
+    fn held_sample_keeps_advancing_the_translation_filter_between_observations() {
+        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let neutral = mediapipe_sample(&[]);
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(33_333_333));
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(66_666_666));
+
+        let mut moved = mediapipe_sample(&[]);
+        moved.source_seq = FrameSeq(2);
+        moved.captured_at = MonoTimeNs(2);
+        moved.camera_to_face.translation_xyz = [0.0, 0.0, 0.3];
+
+        let first = track_mediapipe(&mut pipeline, &moved, MonoTimeNs(100_000_000))
+            .expect("frame on observation arrival");
+        let second = track_mediapipe(&mut pipeline, &moved, MonoTimeNs(116_666_666))
+            .expect("frame on held re-feed");
+        let third = track_mediapipe(&mut pipeline, &moved, MonoTimeNs(133_333_333))
+            .expect("frame on held re-feed");
+
+        assert!(first.head_translation.is_available());
+        assert!(
+            second.head_translation.z_meters > first.head_translation.z_meters,
+            "held re-feed must keep converging toward the translation target: \
+             first={:?} second={:?}",
+            first.head_translation,
+            second.head_translation
+        );
+        assert!(
+            third.head_translation.z_meters > second.head_translation.z_meters,
+            "held re-feed must keep converging: second={:?} third={:?}",
+            second.head_translation,
+            third.head_translation
+        );
+    }
+
+    #[test]
+    fn held_re_feed_keeps_the_observation_identity_but_advances_the_stamp() {
+        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let neutral = mediapipe_sample(&[]);
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(33_333_333));
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(66_666_666));
+
+        let target = rotated_mediapipe_sample(2, 6.0);
+        let _ = track_mediapipe(&mut pipeline, &target, MonoTimeNs(100_000_000));
+        let held =
+            track_mediapipe(&mut pipeline, &target, MonoTimeNs(116_666_666)).expect("held frame");
+
+        assert_eq!(held.source_seq, FrameSeq(2));
+        assert_eq!(held.captured_at, MonoTimeNs(2));
+        assert_eq!(held.produced_at, MonoTimeNs(116_666_666));
+    }
+
+    #[test]
+    fn a_new_sample_replaces_the_memoized_conversion() {
+        fn jaw(frame: &AvatarControlFrame) -> f32 {
+            frame
+                .detailed_face
+                .expect("detailed coefficients")
+                .get(ArkitBlendshape::JawOpen)
+        }
+
+        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let closed = mediapipe_sample(&[]);
+        let _ = track_mediapipe(&mut pipeline, &closed, MonoTimeNs(33_333_333));
+        let _ = track_mediapipe(&mut pipeline, &closed, MonoTimeNs(66_666_666));
+
+        let mut open = mediapipe_sample(&[(MediaPipeBlendshape::JawOpen, 1.0)]);
+        open.source_seq = FrameSeq(2);
+        open.captured_at = MonoTimeNs(2);
+        let _ = track_mediapipe(&mut pipeline, &open, MonoTimeNs(100_000_000));
+        let open_held = track_mediapipe(&mut pipeline, &open, MonoTimeNs(116_666_666))
+            .expect("held open frame");
+
+        let mut closed_new = mediapipe_sample(&[]);
+        closed_new.source_seq = FrameSeq(3);
+        closed_new.captured_at = MonoTimeNs(3);
+        let switched = track_mediapipe(&mut pipeline, &closed_new, MonoTimeNs(133_333_333))
+            .expect("frame after new observation");
+        let switched_held = track_mediapipe(&mut pipeline, &closed_new, MonoTimeNs(150_000_000))
+            .expect("held frame after new observation");
+
+        // A stale memoization would keep converging toward the old sample
+        // (jaw rising). The correct behavior releases toward the new sample.
+        assert!(
+            jaw(&switched_held) < jaw(&switched),
+            "held re-feed must converge toward the new sample: switched={} held={}",
+            jaw(&switched),
+            jaw(&switched_held)
+        );
+        assert!(
+            jaw(&switched) < jaw(&open_held),
+            "the new observation must replace the old conversion: open_held={} switched={}",
+            jaw(&open_held),
+            jaw(&switched)
+        );
     }
 
     #[test]
