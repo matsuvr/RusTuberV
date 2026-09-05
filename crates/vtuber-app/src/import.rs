@@ -4,11 +4,13 @@
 //! verifies that it is a supported VRM generation before it reaches the
 //! `bevy_vrm1` compatibility boundary.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -16,6 +18,12 @@ use thiserror::Error;
 pub const DEFAULT_SIZE_LIMIT: u64 = 256 * 1024 * 1024;
 /// Immutable hard cap (1 GiB).
 pub const HARD_SIZE_CAP: u64 = 1024 * 1024 * 1024;
+
+/// Maximum morph targets per mesh the Bevy runtime can load.
+///
+/// Mirrors `bevy_mesh::morph::MAX_MORPH_WEIGHTS`; pinned here so the import
+/// boundary does not depend on Bevy.
+pub const MAX_MORPH_TARGETS: usize = 256;
 
 /// Errors that can occur while importing or inspecting a model.
 #[derive(Debug, Error)]
@@ -239,6 +247,11 @@ pub struct ImportMeta {
 ///
 /// The copied file is placed at `asset_root/avatars/<sha256>/model.vrm`.
 /// A metadata file is written at `asset_root/avatars/<sha256>/import.toml`.
+///
+/// When the source declares more morph targets per mesh than the Bevy runtime
+/// supports, the stored copy is normalized by
+/// [`normalize_vrm_morph_targets`]; the identity hash always refers to the
+/// original source bytes.
 pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
     source: P,
     asset_root: Q,
@@ -273,17 +286,30 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let summary = inspect_vrm(source)?;
 
-    let mut file = fs::File::open(source)?;
-    let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
-    let id = format!("{:x}", hasher.finalize());
+    let source_bytes = fs::read(source)?;
+    let id = format!("{:x}", Sha256::digest(&source_bytes));
+    let stored_bytes = match normalize_vrm_morph_targets(&source_bytes) {
+        Some(normalized) => normalized,
+        None => {
+            if let Some(target_count) = over_limit_morph_target_count(&source_bytes) {
+                return Err(ModelImportError::InvalidVrmField {
+                    path: "meshes[*].primitives[*].targets".to_string(),
+                    reason: format!(
+                        "{target_count} morph targets exceed the runtime limit of \
+                         {MAX_MORPH_TARGETS} and cannot be reduced without changing animation"
+                    ),
+                });
+            }
+            source_bytes
+        }
+    };
 
     let dest_dir = asset_root.as_ref().join("avatars").join(&id);
     fs::create_dir_all(&dest_dir)?;
     let dest_model = dest_dir.join("model.vrm");
     let meta_path = dest_dir.join("import.toml");
 
-    ensure_cached_model(source, &dest_model, size, &id)?;
+    ensure_cached_model(&dest_model, &stored_bytes)?;
 
     let imported = ImportedModel {
         id,
@@ -1038,26 +1064,390 @@ fn check_external_uris(document: &gltf::Document) -> Result<(), ModelImportError
     Ok(())
 }
 
-fn copy_atomic(source: &Path, dest: &Path) -> Result<(), ModelImportError> {
-    let temp = dest.with_extension("tmp");
-    fs::copy(source, &temp)?;
-    replace_staged_file(&temp, dest)?;
-    Ok(())
+/// Rewrites a GLB so that no mesh carries more than [`MAX_MORPH_TARGETS`]
+/// morph targets, which is the hard limit the Bevy runtime imposes at load.
+///
+/// Morph targets that no VRM expression bind references are dropped from
+/// meshes above the limit, and bind indices are remapped to the reduced
+/// target arrays. Returns `None` when the bytes need no rewrite or cannot be
+/// rewritten safely: non-GLB containers, GLBs without an excess mesh, models
+/// that animate morph weights, and meshes whose referenced bind set alone
+/// exceeds the limit.
+pub fn normalize_vrm_morph_targets(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (mut json, bin_chunk) = parse_glb(bytes)?;
+    if has_morph_weight_animation(&json) {
+        return None;
+    }
+    let references = collect_morph_references(&json);
+    let plan = plan_morph_reduction(&json, &references)?;
+    apply_morph_reduction(&mut json, &plan);
+    write_glb(&json, bin_chunk)
 }
 
-fn ensure_cached_model(
-    source: &Path,
-    dest: &Path,
-    source_size: u64,
-    source_id: &str,
-) -> Result<(), ModelImportError> {
+/// One over-limit mesh's keep set, keyed by glTF mesh index.
+struct MorphReductionPlan {
+    /// Target count before reduction, used to detect coherent name/weight arrays.
+    target_count: usize,
+    /// Old morph target index to reduced index.
+    remap: BTreeMap<usize, usize>,
+}
+
+fn parse_glb(bytes: &[u8]) -> Option<(Value, Option<&[u8]>)> {
+    if bytes.get(0..4)? != b"glTF" {
+        return None;
+    }
+    let version = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
+    if version != 2 {
+        return None;
+    }
+    let mut json: Option<Value> = None;
+    let mut bin_chunk: Option<&[u8]> = None;
+    let mut offset = 12_usize;
+    while offset < bytes.len() {
+        let header = bytes.get(offset..offset + 8)?;
+        let chunk_len =
+            usize::try_from(u32::from_le_bytes(header.get(0..4)?.try_into().ok()?)).ok()?;
+        let chunk_type: [u8; 4] = header.get(4..8)?.try_into().ok()?;
+        let data = bytes.get(offset + 8..offset + 8 + chunk_len)?;
+        match &chunk_type {
+            b"JSON" if json.is_none() => json = Some(serde_json::from_slice(data).ok()?),
+            b"BIN\0" if bin_chunk.is_none() => bin_chunk = Some(data),
+            _ => {}
+        }
+        offset = offset.checked_add(8 + chunk_len)?;
+    }
+    Some((json?, bin_chunk))
+}
+
+fn write_glb(json: &Value, bin_chunk: Option<&[u8]>) -> Option<Vec<u8>> {
+    let mut json_chunk = serde_json::to_vec(json).ok()?;
+    while json_chunk.len() % 4 != 0 {
+        json_chunk.push(b' ');
+    }
+    let mut out = Vec::with_capacity(12 + 8 + json_chunk.len());
+    out.extend_from_slice(&0x46546C67_u32.to_le_bytes());
+    out.extend_from_slice(&2_u32.to_le_bytes());
+    out.extend_from_slice(&0_u32.to_le_bytes());
+    out.extend_from_slice(&u32::try_from(json_chunk.len()).ok()?.to_le_bytes());
+    out.extend_from_slice(&0x4E4F534A_u32.to_le_bytes());
+    out.extend_from_slice(&json_chunk);
+    if let Some(bin_chunk) = bin_chunk {
+        out.extend_from_slice(&u32::try_from(bin_chunk.len()).ok()?.to_le_bytes());
+        out.extend_from_slice(&0x004E4942_u32.to_le_bytes());
+        out.extend_from_slice(bin_chunk);
+    }
+    let total = u32::try_from(out.len()).ok()?;
+    out.get_mut(8..12)?.copy_from_slice(&total.to_le_bytes());
+    Some(out)
+}
+
+fn has_morph_weight_animation(root: &Value) -> bool {
+    root.get("animations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|animation| {
+            animation
+                .get("channels")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .any(|channel| {
+            channel
+                .get("target")
+                .and_then(|target| target.get("path"))
+                .and_then(Value::as_str)
+                == Some("weights")
+        })
+}
+
+/// Collects every morph target index referenced by VRM expression binds,
+/// keyed by glTF mesh index. VRM 0.x binds are mesh-indexed; VRM 1.0 binds
+/// are node-indexed and resolved through the node's mesh.
+fn collect_morph_references(root: &Value) -> BTreeMap<usize, BTreeSet<usize>> {
+    let mut references: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    let mut record = |mesh: usize, index: usize| {
+        references.entry(mesh).or_default().insert(index);
+    };
+
+    if let Some(groups) = root
+        .get("extensions")
+        .and_then(|extensions| extensions.get("VRM"))
+        .and_then(|vrm| vrm.get("blendShapeMaster"))
+        .and_then(|master| master.get("blendShapeGroups"))
+        .and_then(Value::as_array)
+    {
+        for bind in groups
+            .iter()
+            .filter_map(|group| group.get("binds"))
+            .filter_map(Value::as_array)
+            .flatten()
+        {
+            let mesh = bind.get("mesh").and_then(Value::as_u64);
+            let index = bind.get("index").and_then(Value::as_u64);
+            if let (Some(mesh), Some(index)) = (mesh, index)
+                && let (Ok(mesh), Ok(index)) = (usize::try_from(mesh), usize::try_from(index))
+            {
+                record(mesh, index);
+            }
+        }
+    }
+
+    for bind in vrm1_morph_target_binds(root) {
+        let node = bind.get("node").and_then(Value::as_u64);
+        let index = bind.get("index").and_then(Value::as_u64);
+        if let (Some(node), Some(index)) = (node, index)
+            && let (Ok(node), Ok(index)) = (usize::try_from(node), usize::try_from(index))
+            && let Some(mesh) = node_mesh_index(root, node)
+        {
+            record(mesh, index);
+        }
+    }
+    references
+}
+
+fn node_mesh_index(root: &Value, node: usize) -> Option<usize> {
+    let mesh = root
+        .get("nodes")?
+        .as_array()?
+        .get(node)?
+        .get("mesh")?
+        .as_u64()?;
+    usize::try_from(mesh).ok()
+}
+
+/// Iterates VRM 1.0 `morphTargetBinds` entries across the preset and custom
+/// expression sections.
+fn vrm1_morph_target_binds(root: &Value) -> impl Iterator<Item = &Value> {
+    let expressions = root
+        .get("extensions")
+        .and_then(|extensions| extensions.get("VRMC_vrm"))
+        .and_then(|vrm| vrm.get("expressions"));
+    ["preset", "custom"]
+        .into_iter()
+        .filter_map(move |section| expressions.and_then(|value| value.get(section)))
+        .filter_map(Value::as_object)
+        .flat_map(|section| section.values())
+        .filter_map(|expression| expression.get("morphTargetBinds"))
+        .filter_map(Value::as_array)
+        .flatten()
+}
+
+fn plan_morph_reduction(
+    root: &Value,
+    references: &BTreeMap<usize, BTreeSet<usize>>,
+) -> Option<BTreeMap<usize, MorphReductionPlan>> {
+    let meshes = root.get("meshes")?.as_array()?;
+    let mut plan = BTreeMap::new();
+    for (mesh_index, mesh) in meshes.iter().enumerate() {
+        let target_count = morph_target_count(mesh);
+        if target_count <= MAX_MORPH_TARGETS {
+            continue;
+        }
+        let keep: Vec<usize> = references
+            .get(&mesh_index)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|index| *index < target_count)
+            .collect();
+        if keep.len() > MAX_MORPH_TARGETS {
+            return None;
+        }
+        let remap: BTreeMap<usize, usize> = keep
+            .iter()
+            .enumerate()
+            .map(|(reduced, original)| (*original, reduced))
+            .collect();
+        plan.insert(
+            mesh_index,
+            MorphReductionPlan {
+                target_count,
+                remap,
+            },
+        );
+    }
+    (!plan.is_empty()).then_some(plan)
+}
+
+fn morph_target_count(mesh: &Value) -> usize {
+    mesh.get("primitives")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|primitive| primitive.get("targets").and_then(Value::as_array))
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0)
+}
+
+fn over_limit_morph_target_count(bytes: &[u8]) -> Option<usize> {
+    let (root, _) = parse_glb(bytes)?;
+    root.get("meshes")?
+        .as_array()?
+        .iter()
+        .map(morph_target_count)
+        .max()
+        .filter(|count| *count > MAX_MORPH_TARGETS)
+}
+
+fn apply_morph_reduction(root: &mut Value, plan: &BTreeMap<usize, MorphReductionPlan>) {
+    reduce_meshes(root, plan);
+    remap_legacy_binds(root, plan);
+    remap_vrm1_binds(root, plan);
+}
+
+fn reduce_meshes(root: &mut Value, plan: &BTreeMap<usize, MorphReductionPlan>) {
+    let Some(meshes) = root.get_mut("meshes").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (mesh_index, mesh) in meshes.iter_mut().enumerate() {
+        let Some(reduction) = plan.get(&mesh_index) else {
+            continue;
+        };
+        let Some(object) = mesh.as_object_mut() else {
+            continue;
+        };
+        if let Some(primitives) = object.get_mut("primitives").and_then(Value::as_array_mut) {
+            for primitive in primitives {
+                if let Some(targets) = primitive.get_mut("targets").and_then(Value::as_array_mut) {
+                    *targets = reduction
+                        .remap
+                        .keys()
+                        .filter_map(|index| targets.get(*index).cloned())
+                        .collect();
+                }
+            }
+        }
+        if let Some(extras) = object.get_mut("extras").and_then(Value::as_object_mut) {
+            match extras.get("targetNames").and_then(Value::as_array) {
+                Some(names) if names.len() == reduction.target_count => {
+                    let reduced = reduction
+                        .remap
+                        .keys()
+                        .filter_map(|index| names.get(*index).cloned())
+                        .collect();
+                    extras.insert("targetNames".into(), Value::Array(reduced));
+                }
+                Some(_) => {
+                    extras.remove("targetNames");
+                }
+                None => {}
+            }
+        }
+        match object.get("weights").and_then(Value::as_array) {
+            Some(weights) if weights.len() == reduction.target_count => {
+                let reduced = reduction
+                    .remap
+                    .keys()
+                    .filter_map(|index| weights.get(*index).cloned())
+                    .collect();
+                object.insert("weights".into(), Value::Array(reduced));
+            }
+            Some(_) => {
+                object.remove("weights");
+            }
+            None => {}
+        }
+    }
+}
+
+fn remap_legacy_binds(root: &mut Value, plan: &BTreeMap<usize, MorphReductionPlan>) {
+    let Some(groups) = root
+        .get_mut("extensions")
+        .and_then(|extensions| extensions.get_mut("VRM"))
+        .and_then(|vrm| vrm.get_mut("blendShapeMaster"))
+        .and_then(|master| master.get_mut("blendShapeGroups"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for group in groups {
+        let Some(binds) = group.get_mut("binds").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        binds.retain_mut(|bind| {
+            remap_bind(bind, plan, |bind| bind.get("mesh").and_then(Value::as_u64)).unwrap_or(true)
+        });
+    }
+}
+
+fn remap_vrm1_binds(root: &mut Value, plan: &BTreeMap<usize, MorphReductionPlan>) {
+    let node_meshes: BTreeMap<usize, usize> = root
+        .get("nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(node, value)| {
+            let mesh = value.get("mesh").and_then(Value::as_u64)?;
+            Some((node, usize::try_from(mesh).ok()?))
+        })
+        .collect();
+    let Some(sections) = root
+        .get_mut("extensions")
+        .and_then(|extensions| extensions.get_mut("VRMC_vrm"))
+        .and_then(|vrm| vrm.get_mut("expressions"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for section in ["preset", "custom"] {
+        let Some(section) = sections.get_mut(section).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for expression in section.values_mut() {
+            let Some(binds) = expression
+                .get_mut("morphTargetBinds")
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            binds.retain_mut(|bind| {
+                remap_bind(bind, plan, |bind| {
+                    let node = bind.get("node").and_then(Value::as_u64)?;
+                    let node = usize::try_from(node).ok()?;
+                    let mesh = node_meshes.get(&node)?;
+                    u64::try_from(*mesh).ok()
+                })
+                .unwrap_or(true)
+            });
+        }
+    }
+}
+
+/// Remaps one bind's morph target index. Returns `None` when the bind does
+/// not participate in a reduced mesh; `Some(false)` when the bind referenced
+/// a dropped morph target and must be removed.
+fn remap_bind(
+    bind: &mut Value,
+    plan: &BTreeMap<usize, MorphReductionPlan>,
+    mesh_of: impl Fn(&Value) -> Option<u64>,
+) -> Option<bool> {
+    let index = bind.get("index").and_then(Value::as_u64)?;
+    let mesh = mesh_of(bind)?;
+    let mesh = usize::try_from(mesh).ok()?;
+    let reduction = plan.get(&mesh)?;
+    let index = usize::try_from(index).ok()?;
+    let Some(reduced) = reduction.remap.get(&index) else {
+        return Some(false);
+    };
+    if let Some(object) = bind.as_object_mut() {
+        object.insert("index".into(), Value::from(*reduced as u64));
+    }
+    Some(true)
+}
+
+fn ensure_cached_model(dest: &Path, stored_bytes: &[u8]) -> Result<(), ModelImportError> {
+    let stored_hash = format!("{:x}", Sha256::digest(stored_bytes));
     let cache_matches = fs::metadata(dest)
         .ok()
-        .filter(|metadata| metadata.is_file() && metadata.len() == source_size)
-        .is_some_and(|_| file_sha256(dest).is_ok_and(|hash| hash == source_id));
+        .filter(|metadata| metadata.is_file() && metadata.len() as usize == stored_bytes.len())
+        .is_some_and(|_| file_sha256(dest).is_ok_and(|hash| hash == stored_hash));
 
     if !cache_matches {
-        copy_atomic(source, dest)?;
+        write_atomic(dest, stored_bytes)?;
     }
     Ok(())
 }
@@ -1090,8 +1480,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ModelImportError> {
     file.write_all(contents)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&temp, path)?;
-    Ok(())
+    replace_staged_file(&temp, path)
 }
 
 #[cfg(test)]
@@ -1484,5 +1873,193 @@ humanoid_nodes = { hips = 0, head = 1 }
             fs::read(&repaired.asset_path).unwrap(),
             fs::read(source).unwrap()
         );
+    }
+
+    fn over_limit_vrm0_fixture(
+        dir: &TempDir,
+        target_count: usize,
+        bind_indices: &[usize],
+    ) -> PathBuf {
+        let mut root: serde_json::Value = serde_json::from_str(VRM0_GLTF_JSON).unwrap();
+        let targets: Vec<serde_json::Value> =
+            (0..target_count).map(|_| serde_json::json!({})).collect();
+        let names: Vec<serde_json::Value> = (0..target_count)
+            .map(|index| serde_json::Value::from(format!("m{index}")))
+            .collect();
+        let mut weights: Vec<serde_json::Value> = vec![serde_json::Value::from(0.0); target_count];
+        weights[5] = serde_json::Value::from(0.25);
+        weights[250] = serde_json::Value::from(0.75);
+
+        let mesh = root["meshes"][0].as_object_mut().unwrap();
+        mesh["primitives"][0]["targets"] = serde_json::Value::Array(targets);
+        mesh.insert(
+            "extras".to_string(),
+            serde_json::json!({"targetNames": names}),
+        );
+        mesh.insert("weights".to_string(), serde_json::Value::Array(weights));
+
+        let binds: Vec<serde_json::Value> = bind_indices
+            .iter()
+            .map(|index| serde_json::json!({"mesh": 0, "index": index, "weight": 50.0}))
+            .collect();
+        let groups = root["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"]
+            .as_array_mut()
+            .unwrap();
+        groups[0]["binds"] = serde_json::Value::Array(binds);
+
+        write_glb_fixture(dir, "vrm0-over-limit.vrm", &root.to_string())
+    }
+
+    fn stored_glb_json(imported: &ImportedModel) -> serde_json::Value {
+        let stored = fs::read(&imported.asset_path).unwrap();
+        let (json, bin) = parse_glb(&stored).expect("stored copy is a valid GLB");
+        assert!(bin.is_some(), "BIN chunk must be preserved");
+        json
+    }
+
+    #[test]
+    fn import_reduces_morph_targets_beyond_bevy_limit() {
+        let dir = TempDir::new().unwrap();
+        let source = over_limit_vrm0_fixture(&dir, 300, &[5, 250]);
+        let asset_root = dir.path().join("asset-root");
+
+        let imported = import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT)
+            .expect("over-limit model should import");
+
+        // Identity remains keyed to the original bytes; the stored copy is
+        // normalized.
+        let source_bytes = fs::read(&source).unwrap();
+        assert_eq!(imported.id, format!("{:x}", Sha256::digest(&source_bytes)));
+        assert_ne!(fs::read(&imported.asset_path).unwrap(), source_bytes);
+
+        let json = stored_glb_json(&imported);
+        let mesh = &json["meshes"][0];
+        let targets = mesh["primitives"][0]["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 2);
+        let names = mesh["extras"]["targetNames"].as_array().unwrap();
+        assert_eq!(names[0], "m5");
+        assert_eq!(names[1], "m250");
+        let weights = mesh["weights"].as_array().unwrap();
+        assert_eq!(weights[0], 0.25);
+        assert_eq!(weights[1], 0.75);
+
+        let groups = &json["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"];
+        let binds = groups[0]["binds"].as_array().unwrap();
+        assert_eq!(binds[0]["mesh"], 0);
+        assert_eq!(binds[0]["index"], 0);
+        assert_eq!(binds[1]["index"], 1);
+
+        // Re-import is idempotent and keeps the normalized copy.
+        let reimported =
+            import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("re-import succeeds");
+        assert_eq!(imported.id, reimported.id);
+        assert_eq!(
+            fs::read(&imported.asset_path).unwrap(),
+            fs::read(&reimported.asset_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn import_keeps_models_within_the_morph_limit_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm0_fixture(&dir);
+        let asset_root = dir.path().join("asset-root");
+        let imported =
+            import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+        assert_eq!(
+            fs::read(&imported.asset_path).unwrap(),
+            fs::read(&source).unwrap()
+        );
+    }
+
+    #[test]
+    fn normalization_bails_when_referenced_binds_alone_exceed_the_limit() {
+        let dir = TempDir::new().unwrap();
+        let bind_indices: Vec<usize> = (0..MAX_MORPH_TARGETS + 4).collect();
+        let source = over_limit_vrm0_fixture(&dir, 300, &bind_indices);
+        let bytes = fs::read(&source).unwrap();
+        assert_eq!(normalize_vrm_morph_targets(&bytes), None);
+
+        let error = import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
+            .expect_err("an over-limit model that cannot be reduced must not be cached raw");
+        assert!(matches!(
+            error,
+            ModelImportError::InvalidVrmField { ref path, .. }
+                if path == "meshes[*].primitives[*].targets"
+        ));
+    }
+
+    #[test]
+    fn normalization_ignores_non_glb_bytes() {
+        assert_eq!(normalize_vrm_morph_targets(b"not glb"), None);
+    }
+
+    #[test]
+    fn normalization_bails_on_morph_weight_animations() {
+        let dir = TempDir::new().unwrap();
+        let source = over_limit_vrm0_fixture(&dir, 300, &[5]);
+        let source_bytes = fs::read(source).unwrap();
+        let (mut root, bin_chunk) = parse_glb(&source_bytes).unwrap();
+        root["animations"] = serde_json::json!([{
+            "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}],
+            "samplers": [{"input": 0, "output": 0}]
+        }]);
+        let bytes = write_glb(&root, bin_chunk).unwrap();
+        assert_eq!(over_limit_morph_target_count(&bytes), Some(300));
+        assert_eq!(normalize_vrm_morph_targets(&bytes), None);
+    }
+
+    fn over_limit_vrm1_fixture(dir: &TempDir) -> PathBuf {
+        let mut root: serde_json::Value = serde_json::from_str(VRM1_GLTF_JSON).unwrap();
+        root["buffers"] = serde_json::json!([{"byteLength": 12}]);
+        root["bufferViews"] = serde_json::json!([{"buffer": 0, "byteOffset": 0, "byteLength": 12}]);
+        root["accessors"] = serde_json::json!([{
+            "bufferView": 0, "componentType": 5126, "count": 1, "type": "VEC3",
+            "min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]
+        }]);
+        root["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"name": "Face", "mesh": 0}));
+        root["meshes"] = serde_json::json!([{
+            "name": "Face",
+            "primitives": [{
+                "attributes": {"POSITION": 0},
+                "targets": (0..300).map(|_| serde_json::json!({})).collect::<Vec<_>>()
+            }],
+            "extras": {"targetNames": (0..300).map(|index| format!("m{index}")).collect::<Vec<_>>()},
+            "weights": (0..300).map(|_| 0.0).collect::<Vec<_>>()
+        }]);
+        root["extensions"]["VRMC_vrm"]["expressions"] = serde_json::json!({
+            "preset": {
+                "aa": {"morphTargetBinds": [{"node": 2, "index": 5}, {"node": 2, "index": 250}]}
+            },
+            "custom": {
+                "smile": {"morphTargetBinds": [{"node": 2, "index": 250}]}
+            }
+        });
+        write_glb_fixture(dir, "vrm1-over-limit.vrm", &root.to_string())
+    }
+
+    #[test]
+    fn import_remaps_vrm1_node_based_binds() {
+        let dir = TempDir::new().unwrap();
+        let source = over_limit_vrm1_fixture(&dir);
+        let asset_root = dir.path().join("asset-root");
+        let imported = import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT)
+            .expect("over-limit VRM 1.0 should import");
+
+        let json = stored_glb_json(&imported);
+        let expressions = &json["extensions"]["VRMC_vrm"]["expressions"];
+        let preset_binds = &expressions["preset"]["aa"]["morphTargetBinds"];
+        assert_eq!(preset_binds[0]["index"], 0);
+        assert_eq!(preset_binds[0]["node"], 2);
+        assert_eq!(preset_binds[1]["index"], 1);
+        let custom_binds = &expressions["custom"]["smile"]["morphTargetBinds"];
+        assert_eq!(custom_binds[0]["index"], 1);
+        let targets = json["meshes"][0]["primitives"][0]["targets"]
+            .as_array()
+            .unwrap();
+        assert_eq!(targets.len(), 2);
     }
 }

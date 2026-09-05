@@ -23,6 +23,7 @@ vtuber-inference = { path = "../../crates/vtuber-inference", features = ["legacy
 vtuber-tracking = { path = "../../crates/vtuber-tracking" }
 # Deterministic GNM baseline fit for the offline teacher replay (GNM #68.3).
 vtuber-gnm = { path = "../../crates/vtuber-gnm" }
+tempfile = "3"
 # JSON trace parsing for the temporal quality report (GNM #57.4); same
 # serde/serde_json versions already used by vtuber-app.
 serde = { version = "1", features = ["derive"] }
