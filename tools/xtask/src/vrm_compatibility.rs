@@ -26,7 +26,11 @@ use vtuber_avatar::compatibility::{VrmCompatibilityPlugin, VrmCompatibilityRepor
 /// Exit code used when at least one fixture fails the gate.
 pub const EXIT_COMPAT_FAIL: i32 = 2;
 /// Maximum number of Bevy updates to wait for initialization.
-pub const MAX_INIT_FRAMES: usize = 600;
+///
+/// Asset parsing runs on background threads while headless updates spin
+/// quickly, so the frame budget is the effective time budget. Large models
+/// (90+ MB, hundreds of morph targets) need several thousand iterations.
+pub const MAX_INIT_FRAMES: usize = 3000;
 
 /// Result of inspecting one model.
 #[derive(Debug, Clone)]
@@ -134,6 +138,32 @@ fn fingerprint(path: &Path) -> Result<(u64, String), String> {
 }
 
 fn load_and_inspect(path: &Path) -> Result<VrmCompatibilityReport, String> {
+    // The application normalizes imported copies before the runtime loads
+    // them; the gate exercises the same normalization so it reflects what
+    // users experience. The temp file must outlive the Bevy app below.
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let normalized_temp: Option<tempfile::NamedTempFile> =
+        match vtuber_app::import::normalize_vrm_morph_targets(&bytes) {
+            Some(normalized) => {
+                let temp = tempfile::Builder::new()
+                    .prefix("rustuberv-compat-")
+                    .suffix(".vrm")
+                    .tempfile()
+                    .map_err(|error| format!("failed to create temp file: {error}"))?;
+                std::fs::write(temp.path(), &normalized)
+                    .map_err(|error| format!("failed to write temp model: {error}"))?;
+                Some(temp)
+            }
+            None => None,
+        };
+
+    let model_path = normalized_temp
+        .as_ref()
+        .map(tempfile::NamedTempFile::path)
+        .unwrap_or(path);
+    let model = ModelPath(model_path.to_string_lossy().to_string());
+
     let mut app = App::new();
 
     // Use DefaultPlugins but disable the window so the runner stays headless.
@@ -155,17 +185,21 @@ fn load_and_inspect(path: &Path) -> Result<VrmCompatibilityReport, String> {
                 file_path: std::env::current_dir()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| ".".to_string()),
+                // Normalized copies live in the OS temp dir, outside the
+                // asset source root; this dev-only runner must load them.
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
                 ..default()
             }),
     )
     .add_plugins(VrmPlugin)
     .add_plugins(VrmCompatibilityPlugin)
     .insert_resource(VrmCompatibilityReport::default())
-    .insert_resource(ModelPath(path.to_string_lossy().to_string()))
+    .insert_resource(model)
     .add_systems(Startup, spawn_model)
     .add_systems(Update, tick_timeout);
 
     let report = wait_for_report(&mut app)?;
+    drop(normalized_temp);
     Ok(report)
 }
 

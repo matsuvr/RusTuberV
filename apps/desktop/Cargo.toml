@@ -20,6 +20,9 @@ bevy_egui = { workspace = true }
 bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", rev = "f9593fd78136fb9e0507bcae111e09291ec9b82a", features = ["log"] }
 directories = "5"
 
+[build-dependencies]
+winres = "0.1"
+
 [features]
 dev-synthetic-input = ["vtuber-app/dev-synthetic-input"]
 ndi-output = ["vtuber-app/ndi-output"]

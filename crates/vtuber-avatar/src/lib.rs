@@ -37,6 +37,7 @@ pub mod placeholder;
 pub mod plugin;
 pub mod pose;
 pub mod render_output;
+pub mod tracking_profile;
 pub mod unload;
 
 pub use arm::{
@@ -99,6 +100,9 @@ pub use render_output::{
     AVATAR_RENDER_LAYER, AvatarOutputCamera, AvatarOutputFrameSlot, AvatarOutputState,
     AvatarOutputTarget, AvatarViewportSnapshot, VIEWPORT_ONLY_RENDER_LAYER,
     register_output_systems,
+};
+pub use tracking_profile::{
+    GlobalBodyTrackingProfile, TRACKING_PROFILE_SCHEMA_VERSION, TrackingProfileDocument,
 };
 pub use unload::{
     ActiveControlFrame, ControlFrameError, set_active_control_frame, tag_control_frame,

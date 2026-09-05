@@ -7,7 +7,6 @@
 pub mod diagnostics;
 pub mod error;
 pub mod file_dialog;
-pub mod live;
 pub mod setup;
 pub mod shell;
 

@@ -63,7 +63,7 @@ cached_positions = 10
 return_position_rate_per_s = 1.25
 return_rotation_rate_per_s = 2.0
 tracking_weight_rate_per_s = 2.5
-head_x_follow = 0.75
+head_x_follow = 0.25
 head_y_follow = 0.0
 head_z_follow = 1.0
 

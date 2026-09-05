@@ -5,6 +5,7 @@ pub mod detailed;
 pub mod expression;
 pub mod gaze;
 pub mod head;
+pub mod translation;
 
 pub use detailed::DetailedExpressionFilter;
 pub use expression::{
@@ -16,3 +17,4 @@ pub use gaze::{
     GazeFilterParams,
 };
 pub use head::{HeadFilterParams, HeadRotationFilter};
+pub use translation::{TranslationFilter, TranslationFilterParams};

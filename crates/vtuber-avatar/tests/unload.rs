@@ -92,6 +92,7 @@ fn test_app() -> App {
         .init_asset::<bevy_vrm1::prelude::VrmAsset>()
         .init_resource::<AvatarLifecycle>()
         .init_resource::<ActiveControlFrame>()
+        .init_resource::<vtuber_avatar::GlobalBodyTrackingProfile>()
         .add_message::<LoadAvatarRequest>()
         .add_message::<LoadAvatarResult>()
         .add_message::<UnloadAvatarRequest>()

@@ -10,7 +10,8 @@ pub use system::{
 };
 
 use bevy_vrm1::prelude::{
-    BodyBoneRotationLimits, BodyBoneWeights, BodyTrackingProfile, BoneRotationLimit,
+    BodyBoneHalfLives, BodyBoneRotationLimits, BodyBoneWeights, BodyTrackingProfile,
+    BoneRotationLimit,
 };
 
 fn limit_degrees(yaw: f32, pitch: f32, roll: f32) -> BoneRotationLimit {
@@ -22,30 +23,64 @@ fn limit_degrees(yaw: f32, pitch: f32, roll: f32) -> BoneRotationLimit {
 }
 
 /// Head-to-torso rotation distribution tuned for human-like propagation.
+///
+/// In a human neck the head and neck rotate as one unit: the neck carries a
+/// large share of every head rotation at nearly the same speed. The
+/// distribution below follows the common practice of webcam VTuber trackers
+/// (kalidoface/kalidokit drives the neck with a ~0.7 dampener of the head
+/// rotation, other rigs use a 40/60 neck/head split): the neck share is
+/// roughly two thirds of the head share on every axis and its smoothing
+/// half-life stays close to the head's, while the torso keeps a visible,
+/// slower share so large turns propagate into the chest, shoulders, and
+/// spine instead of kinking at the neck. Torso engagement starts early
+/// (8 degrees) and is complete by 35 degrees, mirroring the low "body
+/// stiffness" default of established trackers.
 pub fn natural_body_tracking_profile() -> BodyTrackingProfile {
     BodyTrackingProfile {
+        small_yaw_weights: BodyBoneWeights {
+            head: 0.60,
+            neck: 0.40,
+            upper_chest: 0.0,
+            chest: 0.0,
+            spine: 0.0,
+        },
+        large_yaw_weights: BodyBoneWeights {
+            head: 0.35,
+            neck: 0.22,
+            upper_chest: 0.20,
+            chest: 0.13,
+            spine: 0.10,
+        },
         pitch_weights: BodyBoneWeights {
-            head: 0.58,
-            neck: 0.20,
-            upper_chest: 0.12,
-            chest: 0.06,
+            head: 0.48,
+            neck: 0.27,
+            upper_chest: 0.14,
+            chest: 0.07,
             spine: 0.04,
         },
         roll_weights: BodyBoneWeights {
-            head: 0.60,
-            neck: 0.20,
-            upper_chest: 0.12,
-            chest: 0.05,
-            spine: 0.03,
+            head: 0.48,
+            neck: 0.27,
+            upper_chest: 0.14,
+            chest: 0.07,
+            spine: 0.04,
+        },
+        yaw_body_engagement_start_radians: 8.0_f32.to_radians(),
+        yaw_body_engagement_full_radians: 35.0_f32.to_radians(),
+        bone_half_lives: BodyBoneHalfLives {
+            head_seconds: 0.055,
+            neck_seconds: 0.075,
+            upper_chest_seconds: 0.180,
+            chest_seconds: 0.285,
+            spine_seconds: 0.450,
         },
         bone_rotation_limits: BodyBoneRotationLimits {
             head: limit_degrees(45.0, 30.0, 25.0),
-            neck: limit_degrees(25.0, 20.0, 15.0),
-            upper_chest: limit_degrees(18.0, 10.0, 8.0),
+            neck: limit_degrees(30.0, 24.0, 20.0),
+            upper_chest: limit_degrees(18.0, 10.0, 10.0),
             chest: limit_degrees(12.0, 6.0, 5.0),
             spine: limit_degrees(8.0, 5.0, 4.0),
         },
-        ..BodyTrackingProfile::default()
     }
 }
 
@@ -93,19 +128,62 @@ mod tests {
     }
 
     #[test]
-    fn yaw_policy_matches_the_library_default() {
+    fn yaw_policy_keeps_the_neck_on_the_head_axis_and_engages_the_torso_early() {
         let profile = natural_body_tracking_profile();
-        let library_default = BodyTrackingProfile::default();
-        assert_eq!(profile.small_yaw_weights, library_default.small_yaw_weights);
-        assert_eq!(profile.large_yaw_weights, library_default.large_yaw_weights);
+        // Small yaw: neck carries about two thirds of the head share so the
+        // head and neck rotate as one unit, matching common tracker practice.
+        assert_eq!(
+            profile.small_yaw_weights,
+            BodyBoneWeights {
+                head: 0.60,
+                neck: 0.40,
+                upper_chest: 0.0,
+                chest: 0.0,
+                spine: 0.0,
+            }
+        );
+        // Large yaw: the torso takes a visible share so big head turns turn
+        // the chest and shoulders instead of kinking at the neck.
+        assert_eq!(
+            profile.large_yaw_weights,
+            BodyBoneWeights {
+                head: 0.35,
+                neck: 0.22,
+                upper_chest: 0.20,
+                chest: 0.13,
+                spine: 0.10,
+            }
+        );
+        // Torso engagement starts early and completes by 35 degrees, the
+        // low "body stiffness" default of established trackers.
         assert_eq!(
             profile.yaw_body_engagement_start_radians,
-            library_default.yaw_body_engagement_start_radians
+            8.0_f32.to_radians()
         );
         assert_eq!(
             profile.yaw_body_engagement_full_radians,
-            library_default.yaw_body_engagement_full_radians
+            35.0_f32.to_radians()
         );
+    }
+
+    #[test]
+    fn neck_tracks_close_to_the_head_on_every_axis() {
+        let profile = natural_body_tracking_profile();
+        let head = profile.bone_half_lives.head_seconds;
+        let neck = profile.bone_half_lives.neck_seconds;
+        assert!(
+            neck <= head * 2.0,
+            "neck smoothing must stay near the head timing: head={head}, neck={neck}"
+        );
+        // At the physiological 60-degree maximum the unclamped neck share
+        // must fit inside the neck rotation limits.
+        let neck_limits = profile.bone_rotation_limits.neck;
+        let yaw_share = profile.small_yaw_weights.neck;
+        let pitch_share = profile.pitch_weights.neck;
+        let roll_share = profile.roll_weights.neck;
+        assert!(60.0_f32.to_radians() * yaw_share <= neck_limits.yaw_radians);
+        assert!(60.0_f32.to_radians() * pitch_share <= neck_limits.pitch_radians);
+        assert!(60.0_f32.to_radians() * roll_share <= neck_limits.roll_radians);
     }
 
     #[test]

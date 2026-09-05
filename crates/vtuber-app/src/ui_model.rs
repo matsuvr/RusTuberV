@@ -12,12 +12,11 @@ use vtuber_avatar::ArmPoseProfile;
 /// Which screen the UI is currently showing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Screen {
-    /// Initial setup: camera selection, avatar import.
+    /// Unified operation panel: camera, avatar, calibration, preview, and
+    /// output controls that previously lived across Setup and Live.
     #[default]
     Setup,
-    /// Live preview with tracking active.
-    Live,
-    /// Performance diagnostics and metrics.
+    /// Performance diagnostics, tracking health, and system metrics.
     Diagnostics,
 }
 
@@ -402,9 +401,9 @@ mod tests {
     fn ui_model_screen_transitions() {
         let mut vm = UiViewModel::default();
         assert_eq!(vm.screen, Screen::Setup);
-        vm.screen = Screen::Live;
-        assert_eq!(vm.screen, Screen::Live);
         vm.screen = Screen::Diagnostics;
         assert_eq!(vm.screen, Screen::Diagnostics);
+        vm.screen = Screen::Setup;
+        assert_eq!(vm.screen, Screen::Setup);
     }
 }

@@ -78,3 +78,6 @@ pub mod ui_model;
 
 /// Main-thread bridge from inference observations to tracking state.
 pub mod tracking_runtime;
+
+/// File boundary for the user-tunable tracking profile document.
+pub mod tracking_file;

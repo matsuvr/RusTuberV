@@ -21,6 +21,7 @@ fn test_app() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .init_resource::<AvatarLifecycle>()
+        .init_resource::<vtuber_avatar::GlobalBodyTrackingProfile>()
         .add_systems(Update, bind_humanoid_bones);
     app
 }
