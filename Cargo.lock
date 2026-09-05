@@ -6782,6 +6782,8 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_vrm1",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
  "vtuber-core",
  "vtuber-tracking",
 ]

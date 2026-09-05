@@ -24,15 +24,26 @@ use vtuber_app::import;
 use vtuber_app::inference_runtime::InferenceProjectRoot;
 use vtuber_app::orchestrator::Orchestrator;
 use vtuber_app::settings::ArmPoseSettings;
+use vtuber_app::tracking_file::{TRACKING_PROFILE_FILE_NAME, load_tracking_profile};
 use vtuber_app::ui::UiShellPlugin;
 use vtuber_avatar::{
-    AvatarAssetId, ExpectedVrmGeneration, ImportedAvatar, LoadImportedAvatarRequest,
-    StartupModelPath, UserAssetPath, VtuberAvatarPlugin,
+    ArmPoseSourceKind, ArmSourceSelection, AvatarAssetId, ExpectedVrmGeneration, ImportedAvatar,
+    LoadImportedAvatarRequest, StartupModelPath, UserAssetPath, VtuberAvatarPlugin,
 };
 
 fn main() {
     let managed_root = managed_asset_root();
     std::fs::create_dir_all(&managed_root).ok();
+
+    // User-tunable tracking distribution: a missing file is seeded with the
+    // generated template so every knob is visible for editing.
+    let tracking = match load_tracking_profile(&resource_root().join(TRACKING_PROFILE_FILE_NAME)) {
+        Ok(tracking) => tracking,
+        Err(error) => {
+            eprintln!("Failed to load tracking profile: {error}");
+            return;
+        }
+    };
 
     // Import CLI model through the managed asset source so that the same
     // `user://avatars/<sha256>/model.vrm` path invariant is used.
@@ -87,6 +98,11 @@ fn main() {
         ))
         .add_plugins(EguiPlugin::default())
         .add_plugins(VtuberAvatarPlugin)
+        .insert_resource(tracking.body)
+        .insert_resource(ArmSourceSelection {
+            mode: ArmPoseSourceKind::default(),
+            profile: tracking.arm,
+        })
         .insert_resource(ArmPoseSettings::load_default())
         .insert_resource(InferenceProjectRoot(resource_root()))
         .add_plugins(UiShellPlugin)

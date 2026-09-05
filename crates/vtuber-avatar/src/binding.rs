@@ -226,6 +226,7 @@ pub fn bind_humanoid_bones(
     spring_roots: Query<Entity, With<SpringRoot>>,
     parents: Query<&ChildOf>,
     arm_pose_overrides: Option<Res<ArmPoseOverrideStore>>,
+    tracking_profile: Res<crate::tracking_profile::GlobalBodyTrackingProfile>,
 ) {
     if lifecycle.state() != AvatarLifecycleState::Binding {
         return;
@@ -403,7 +404,7 @@ pub fn bind_humanoid_bones(
                 arm_pose_blend,
                 BodyTracking::default(),
                 BodyTrackingPoseInput::default(),
-                crate::pose::natural_body_tracking_profile(),
+                tracking_profile.0,
                 BodyTrackingPositionInput::default(),
                 BodyTrackingPositionProfile::default(),
                 crate::idle::IdleMotionProfile::default(),

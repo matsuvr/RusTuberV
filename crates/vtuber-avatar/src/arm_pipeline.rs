@@ -92,7 +92,9 @@ pub struct DynamicArmProfile {
     /// The lateral component is mirrored per side from the magnitude.
     pub hand_anchor_ratio: Vec3,
     /// How much of the combined head/body translation each axis of the hand
-    /// target follows.
+    /// target follows. Arms hang from the shoulders, so the lateral axis
+    /// only gives a small natural give; established webcam trackers keep
+    /// the hands from visibly tracking lateral head sway.
     pub compensation_gains: Vec3,
     /// Elbow swivel magnitude at the default anchor position.
     pub elbow_swivel_radians: f32,
@@ -118,7 +120,7 @@ impl Default for DynamicArmProfile {
                 -0.150 / crate::body_scale::DEFAULT_BODY_SCALE_METERS,
                 0.0,
             ),
-            compensation_gains: Vec3::new(0.75, 0.0, 1.0),
+            compensation_gains: Vec3::new(0.25, 0.0, 1.0),
             elbow_swivel_radians: 15.0_f32.to_radians(),
             swivel_transition_width_ratio: 0.15,
             pole_influence: 0.2,

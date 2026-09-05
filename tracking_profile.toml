@@ -1,0 +1,87 @@
+## 追従（トラッキング）配分チューニングファイル
+## 反映にはアプリの再起動が必要です。
+## - 角度の単位はすべて「度」、half_life（半減期）の単位は「秒」です。
+## - 値を削除/省略した項目はビルトインの既定値になります。
+## - weights（配分）は合計が1になるように自動的に正規化されます。
+## - セクションや項目名のタイプミスは起動時に警告され、その項目は既定値になります。
+
+schema_version = 1
+
+[body]
+# 小さいyaw（首だけが追従する範囲）での頭/首の配分
+[body.small_yaw]
+head = 0.60
+neck = 0.40
+upper_chest = 0.0
+chest = 0.0
+spine = 0.0
+
+# 大きいyaw（胴体が追従し始めて以降）での配分
+[body.large_yaw]
+head = 0.35
+neck = 0.22
+upper_chest = 0.20
+chest = 0.13
+spine = 0.10
+
+# 縦方向（うなずき/仰向き）の配分
+[body.pitch]
+head = 0.48
+neck = 0.27
+upper_chest = 0.14
+chest = 0.07
+spine = 0.04
+
+# 横傾き（頭をかしげる）の配分
+[body.roll]
+head = 0.48
+neck = 0.27
+upper_chest = 0.14
+chest = 0.07
+spine = 0.04
+
+# 胴体が追従を始めるyaw・追従が最大になるyaw（度）
+[body.engagement]
+start = 8.0
+full = 35.0
+
+# 追従のなめらかさ（半減期・秒）。小さいほど即応、大きいほどゆったり
+[body.half_life]
+head = 0.055
+neck = 0.075
+upper_chest = 0.18
+chest = 0.285
+spine = 0.45
+
+# 各骨の回転上限（度）
+[body.limits.head]
+yaw = 45.0
+pitch = 30.0
+roll = 25.0
+
+[body.limits.neck]
+yaw = 30.0
+pitch = 24.0
+roll = 20.0
+
+[body.limits.upper_chest]
+yaw = 18.0
+pitch = 10.0
+roll = 10.0
+
+[body.limits.chest]
+yaw = 12.0
+pitch = 6.0
+roll = 5.0
+
+[body.limits.spine]
+yaw = 8.0
+pitch = 5.0
+roll = 4.0
+
+# 手（腕）が頭/体の並進移動に追従する割合
+# x: 左右（腕は肩からぶら下がるので小さめ推奨）、y: 上下、z: 前後
+[arm.hand_follow]
+x = 0.25
+y = 0.0
+z = 1.0
