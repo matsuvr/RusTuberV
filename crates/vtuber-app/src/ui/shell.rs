@@ -34,16 +34,29 @@ use crate::preview::PreviewState;
 use crate::preview_landmarks::{PreviewLandmarkState, sync_preview_landmark_system};
 use crate::settings::{ArmPoseSettings, restore_arm_pose_settings_system};
 use crate::tracking_runtime::{TrackingRuntime, tracking_bridge_system};
-use crate::ui_model::{Screen, UiViewModel};
+use crate::ui_model::{Pane, UiViewModel};
 use vtuber_avatar::{
     AvatarMotionMirror, AvatarViewportCamera, CameraInputSet, CameraPointerInputGate,
     apply_arm_pose_profile_changes,
 };
 
-use super::diagnostics::render_diagnostics_screen;
-use super::setup::render_setup_screen;
+use super::diagnostics::render_diagnostics_pane;
+use super::panes::{
+    render_avatar_pane, render_calibration_pane, render_camera_pane, render_ndi_pane,
+    render_preview_pane,
+};
+use super::widgets::{self, app_lifecycle_text};
 
-const DRAWER_WIDTH: f32 = 340.0;
+/// macOS sidebar proportions; the drawer holds navigation, the selected
+/// pane's grouped content, and the session footer, all in one column.
+const DRAWER_WIDTH: f32 = 300.0;
+/// Sidebar row height from the macOS source-list metric.
+const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
+/// macOS systemBlue (dark mode) for the sidebar selection highlight.
+const SIDEBAR_ACCENT: bevy_egui::egui::Color32 = bevy_egui::egui::Color32::from_rgb(10, 132, 255);
+/// Secondary label gray for unselected sidebar icons.
+const SIDEBAR_ICON_GRAY: bevy_egui::egui::Color32 = bevy_egui::egui::Color32::from_rgb(152, 155, 163);
+
 const JAPANESE_FONT_NAME: &str = "LINESeedJP_A_Rg";
 static JAPANESE_FONT_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -51,14 +64,13 @@ static JAPANESE_FONT_BYTES: &[u8] = include_bytes!(concat!(
 ));
 
 /// Fill of the drawer and its pull handle: near-black with a slight
-/// translucency so the avatar scene stays perceptible at the rounded edge.
+/// translucency so the avatar scene stays perceptible behind the sidebar.
 fn drawer_fill() -> bevy_egui::egui::Color32 {
     bevy_egui::egui::Color32::from_rgba_unmultiplied(17, 19, 26, 242)
 }
 
-/// The controls drawer: a fixed-width panel docked to the left edge of the
-/// window, spanning the full height so it slides out over the avatar scene
-/// like a vertical drawer.
+/// The controls drawer: a fixed-width sidebar docked to the left edge of the
+/// window, spanning the full height like a macOS source-list sidebar.
 fn control_drawer_panel() -> bevy_egui::egui::Panel {
     // `exact_size` pins the drawer geometry: egui persists panel sizes per Id,
     // so a stale in-session state can never widen or narrow the drawer.
@@ -66,21 +78,36 @@ fn control_drawer_panel() -> bevy_egui::egui::Panel {
     bevy_egui::egui::Panel::left(bevy_egui::egui::Id::new("control_drawer"))
         .exact_size(DRAWER_WIDTH)
         .resizable(false)
-        .show_separator_line(false)
+        .show_separator_line(true)
         .frame(drawer_frame())
 }
 
-/// Flat modern style for the drawer: dark translucent fill with rounded
-/// corners on the free (right) edge, flush against the left window edge.
+/// macOS sidebar style: square, edge-to-edge translucent fill separated from
+/// the content by the panel's own hairline — no floating rounded edge.
 fn drawer_frame() -> bevy_egui::egui::Frame {
     bevy_egui::egui::Frame::new()
         .fill(drawer_fill())
-        .inner_margin(bevy_egui::egui::Margin::same(10))
-        .corner_radius(bevy_egui::egui::CornerRadius {
-            ne: 12,
-            se: 12,
-            ..bevy_egui::egui::CornerRadius::ZERO
-        })
+        .inner_margin(bevy_egui::egui::Margin::same(8))
+}
+
+/// The single error banner, shown once at the top of the drawer content.
+fn error_banner(
+    ui: &mut bevy_egui::egui::Ui,
+    presentation: &crate::error_presenter::ErrorPresentation,
+    ui_state: &mut UiState,
+) {
+    bevy_egui::egui::Frame::new()
+        .fill(bevy_egui::egui::Color32::from_rgba_unmultiplied(127, 29, 29, 90))
+        .corner_radius(bevy_egui::egui::CornerRadius::same(8))
+        .inner_margin(bevy_egui::egui::Margin::same(12))
+        .stroke(bevy_egui::egui::Stroke::new(
+            1.0,
+            bevy_egui::egui::Color32::from_rgba_unmultiplied(248, 113, 113, 90),
+        ))
+        .show(ui, |ui| {
+            super::error::render_error_panel(ui, presentation, ui_state);
+        });
+    ui.add_space(8.0);
 }
 
 /// Full-viewport background-layer Ui that panels must be shown on.
@@ -97,71 +124,161 @@ fn root_viewport_ui(ctx: &bevy_egui::egui::Context) -> bevy_egui::egui::Ui {
     )
 }
 
-/// Drawer header: title on the left, collapse control on the right.
+/// Sidebar header: macOS toolbar row — one semibold 13pt app title on the
+/// left and a small sidebar-toggle control on the right. The F1 shortcut
+/// lives in the tooltip only, keeping the bar to a single quiet row.
 fn drawer_header(ui: &mut bevy_egui::egui::Ui, hide_requested: &mut bool) {
     ui.horizontal(|ui| {
-        ui.heading("Controls");
+        ui.label(bevy_egui::egui::RichText::new("RusTuber").size(13.0).strong());
         ui.with_layout(
             bevy_egui::egui::Layout::right_to_left(bevy_egui::egui::Align::Center),
             |ui| {
-                ui.small("F1");
-                let close = bevy_egui::egui::Button::new("‹")
-                    .min_size(bevy_egui::egui::vec2(26.0, 24.0))
-                    .corner_radius(bevy_egui::egui::CornerRadius::same(6));
+                let close = bevy_egui::egui::Button::new(
+                    bevy_egui::egui::RichText::new("‹").size(12.0),
+                )
+                .min_size(bevy_egui::egui::vec2(24.0, 22.0))
+                .corner_radius(bevy_egui::egui::CornerRadius::same(5));
                 if ui.add(close).on_hover_text("Hide Controls (F1)").clicked() {
                     *hide_requested = true;
                 }
             },
         );
     });
-    ui.add_space(4.0);
+    ui.add_space(8.0);
 }
 
-/// Two-tab navigation: Setup (Controls) and Diagnostics.
-///
-/// Live was folded into these two — camera reset, calibration, preview, and
-/// NDI output moved to Setup, while tracking status moved to Diagnostics.
-/// Each row is a pill with an icon, title, and a small subtitle so operators
-/// see at a glance where display-affecting controls live.
+/// Setup categories shown in the sidebar, in workflow order.
+const SETUP_ROWS: [(&str, &str, Pane); 3] = [
+    ("◎", "Camera", Pane::Camera),
+    ("◍", "Avatar", Pane::Avatar),
+    ("◉", "Calibration", Pane::Calibration),
+];
+
+/// Output categories shown in the sidebar.
+const OUTPUT_ROWS: [(&str, &str, Pane); 2] = [
+    ("▣", "Preview & Display", Pane::Preview),
+    ("⬡", "NDI Output", Pane::NdiOutput),
+];
+
+/// Source-list navigation: pane categories grouped under section captions,
+/// styled like a macOS sidebar — 28pt rows, 13pt regular labels, and a
+/// full-width rounded highlight in systemBlue for the selected item.
 fn drawer_navigation(
     ui: &mut bevy_egui::egui::Ui,
     view_model: &UiViewModel,
     ui_state: &mut UiState,
 ) {
-    for (screen, icon, title, subtitle) in [
-        (
-            Screen::Setup,
-            "⚙",
-            "Setup",
-            "Camera · Avatar · Calibration · Preview · Output",
-        ),
-        (
-            Screen::Diagnostics,
-            "◉",
-            "Diagnostics",
-            "Status · Performance · Tracking",
-        ),
-    ] {
-        let selected = view_model.screen == screen;
-        let button = bevy_egui::egui::Button::selectable(
-            selected,
-            bevy_egui::egui::RichText::new(format!("{icon}  {title}"))
-                .size(12.0)
-                .strong(),
-        )
-        .min_size(bevy_egui::egui::vec2(ui.available_width(), 30.0))
-        .corner_radius(bevy_egui::egui::CornerRadius::same(9));
-        if ui.add(button).clicked() {
-            ui_state.emit(UiAction::SwitchScreen(screen));
+    widgets::section_caption(ui, "Setup");
+    for (icon, title, pane) in SETUP_ROWS {
+        let selected = view_model.pane == pane;
+        if sidebar_row(ui, selected, icon, title).clicked() {
+            ui_state.emit(UiAction::SwitchPane(pane));
         }
-        ui.label(
-            bevy_egui::egui::RichText::new(subtitle)
-                .size(9.0)
-                .color(bevy_egui::egui::Color32::from_rgb(100, 116, 139)),
-        );
-        ui.add_space(6.0);
+        ui.add_space(2.0);
     }
-    ui.add_space(4.0);
+    ui.add_space(6.0);
+    widgets::section_caption(ui, "Output");
+    for (icon, title, pane) in OUTPUT_ROWS {
+        let selected = view_model.pane == pane;
+        if sidebar_row(ui, selected, icon, title).clicked() {
+            ui_state.emit(UiAction::SwitchPane(pane));
+        }
+        ui.add_space(2.0);
+    }
+    ui.add_space(6.0);
+    widgets::section_caption(ui, "System");
+    if sidebar_row(ui, view_model.pane == Pane::Diagnostics, "▦", "Diagnostics").clicked() {
+        ui_state.emit(UiAction::SwitchPane(Pane::Diagnostics));
+    }
+}
+
+/// Selected pane content: the macOS System Settings grouped list for the
+/// category picked in the sidebar, rendered inside the drawer so nothing
+/// ever covers the avatar scene.
+#[allow(clippy::too_many_arguments)]
+fn drawer_pane_content(
+    ui: &mut bevy_egui::egui::Ui,
+    view_model: &UiViewModel,
+    ui_state: &mut UiState,
+    diagnostics: &crate::diagnostics::DiagnosticsSnapshot,
+    preview: &PreviewState,
+    landmarks: &PreviewLandmarkState,
+    avatar_motion_mirror: AvatarMotionMirror,
+    preview_texture: Option<bevy_egui::egui::TextureId>,
+    file_dialog: &mut super::file_dialog::FileDialogState,
+    error_presenter: &ErrorPresenter,
+) {
+    if let Some(presentation) = error_presenter.current() {
+        error_banner(ui, presentation, ui_state);
+    }
+    match view_model.pane {
+        Pane::Camera => render_camera_pane(ui, view_model, ui_state),
+        Pane::Avatar => render_avatar_pane(ui, view_model, ui_state, file_dialog),
+        Pane::Calibration => render_calibration_pane(ui, view_model, ui_state),
+        Pane::Preview => render_preview_pane(
+            ui,
+            ui_state,
+            preview,
+            landmarks,
+            avatar_motion_mirror,
+            preview_texture,
+        ),
+        Pane::NdiOutput => render_ndi_pane(ui, view_model, ui_state),
+        Pane::Diagnostics => render_diagnostics_pane(ui, view_model, diagnostics),
+    }
+}
+
+/// One macOS sidebar row: 28pt tall, icon plus 13pt label, full-width
+/// selection highlight.
+fn sidebar_row(
+    ui: &mut bevy_egui::egui::Ui,
+    selected: bool,
+    icon: &str,
+    label: &str,
+) -> bevy_egui::egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        bevy_egui::egui::vec2(ui.available_width(), SIDEBAR_ROW_HEIGHT),
+        bevy_egui::egui::Sense::click(),
+    );
+
+    let highlight = if selected {
+        Some(SIDEBAR_ACCENT)
+    } else if response.hovered() {
+        Some(bevy_egui::egui::Color32::from_rgba_unmultiplied(
+            255, 255, 255, 16,
+        ))
+    } else {
+        None
+    };
+    if let Some(fill) = highlight {
+        ui.painter()
+            .rect_filled(rect, bevy_egui::egui::CornerRadius::same(5), fill);
+    }
+
+    let text_color = if selected {
+        bevy_egui::egui::Color32::WHITE
+    } else {
+        ui.visuals().text_color()
+    };
+    let icon_color = if selected { text_color } else { SIDEBAR_ICON_GRAY };
+    let font = bevy_egui::egui::FontId::proportional(13.0);
+    let icon_galley = ui
+        .painter()
+        .layout_no_wrap(icon.to_owned(), font.clone(), icon_color);
+    let label_galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, text_color);
+
+    let mid_y = rect.center().y;
+    let icon_pos = bevy_egui::egui::pos2(rect.left() + 8.0, mid_y - icon_galley.size().y / 2.0);
+    let label_pos = bevy_egui::egui::pos2(
+        icon_pos.x + icon_galley.size().x + 6.0,
+        mid_y - label_galley.size().y / 2.0,
+    );
+    ui.painter().galley(icon_pos, icon_galley, icon_color);
+    ui.painter().galley(label_pos, label_galley, text_color);
+
+    response
 }
 
 /// Plugin that sets up the egui-based UI shell.
@@ -360,17 +477,9 @@ impl UiSurfaceHover {
     }
 }
 
-/// Whether the egui pointer position lands inside the drawer or pull handle.
-fn pointer_over_ui(
-    pointer: Option<bevy_egui::egui::Pos2>,
-    drawer: Option<bevy_egui::egui::Rect>,
-    handle: Option<bevy_egui::egui::Rect>,
-) -> bool {
-    let Some(pointer) = pointer else {
-        return false;
-    };
-    drawer.is_some_and(|rect| rect.contains(pointer))
-        || handle.is_some_and(|rect| rect.contains(pointer))
+/// Whether the egui pointer position lands inside any UI surface.
+fn pointer_over_ui(pointer: Option<bevy_egui::egui::Pos2>, surfaces: &[bevy_egui::egui::Rect]) -> bool {
+    pointer.is_some_and(|pointer| surfaces.iter().any(|rect| rect.contains(pointer)))
 }
 
 /// Bridges egui pointer ownership into the avatar camera domain without
@@ -499,7 +608,7 @@ fn is_deduplicatable(action: &UiAction) -> bool {
     }
     matches!(
         action,
-        UiAction::SwitchScreen(_)
+        UiAction::SwitchPane(_)
             | UiAction::ToggleMirror
             | UiAction::TogglePreview
             | UiAction::DismissError
@@ -564,35 +673,51 @@ fn ui_render_system(
             drawer_header(ui, &mut hide_requested);
             drawer_navigation(ui, &view_model, &mut ui_state);
 
-            // Screen content in a vertical scroll area. Width is pinned
-            // to the viewport so long labels and 16:9 preview images never
-            // expand the drawer beyond DRAWER_WIDTH; horizontal overflow is
-            // wrapped/clipped instead of letting cards peek outside.
-            bevy_egui::egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .id_salt("control_drawer_scroll")
-                .show(ui, |ui| {
-                    // ScrollArea's content width must be locked to its viewport;
-                    // otherwise a single wide card (e.g. 1500px test allocation)
-                    // would let ScrollArea expand the panel.
-                    ui.set_width(ui.available_width());
-                    match view_model.screen {
-                        Screen::Setup => render_setup_screen(
-                            ui,
-                            &view_model,
-                            &mut ui_state,
-                            &preview,
-                            &landmarks,
-                            *avatar_motion_mirror,
-                            preview_texture,
-                            &mut file_dialog,
-                            error_presenter.current(),
-                        ),
-                        Screen::Diagnostics => {
-                            render_diagnostics_screen(ui, &view_model, &diagnostics)
+            // Footer session controls are pinned with a bottom_up layout
+            // (widgets added first land at the bottom); the selected pane's
+            // grouped content fills the space above them in a scroll area.
+            // Everything stays inside the drawer so the avatar scene is
+            // never covered.
+            ui.with_layout(
+                bevy_egui::egui::Layout::bottom_up(bevy_egui::egui::Align::LEFT),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        if widgets::filled_button(ui, "Start", view_model.can_start()).clicked() {
+                            ui_state.emit(UiAction::Start);
                         }
-                    }
-                });
+                        if widgets::plain_button(ui, "Stop", view_model.can_stop()).clicked() {
+                            ui_state.emit(UiAction::Stop);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    let (color, label) = app_lifecycle_text(view_model.lifecycle);
+                    widgets::status_text(ui, color, label);
+                    ui.add_space(6.0);
+                    ui.separator();
+
+                    // Pane content in a vertical scroll area. Width is
+                    // pinned to the viewport so wide content never expands
+                    // the drawer beyond DRAWER_WIDTH.
+                    bevy_egui::egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .id_salt("control_drawer_scroll")
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            drawer_pane_content(
+                                ui,
+                                &view_model,
+                                &mut ui_state,
+                                &diagnostics,
+                                &preview,
+                                &landmarks,
+                                *avatar_motion_mirror,
+                                preview_texture,
+                                &mut file_dialog,
+                                &error_presenter,
+                            );
+                        });
+                },
+            );
         });
 
     ui_state.control_drawer.open = drawer_open && !hide_requested;
@@ -611,8 +736,8 @@ fn ui_render_system(
                 let open = bevy_egui::egui::Button::new("»")
                     .min_size(bevy_egui::egui::vec2(24.0, 72.0))
                     .corner_radius(bevy_egui::egui::CornerRadius {
-                        ne: 10,
-                        se: 10,
+                        ne: 6,
+                        se: 6,
                         ..bevy_egui::egui::CornerRadius::ZERO
                     })
                     .fill(drawer_fill());
@@ -627,10 +752,16 @@ fn ui_render_system(
     // egui's own pointer-over-area probe misses panels drawn in this plugin's
     // own root Ui (see `UiSurfaceHover`), so report hover from the surfaces
     // the shell just drew.
+    let mut surfaces = Vec::new();
+    if let Some(drawer) = drawer_shown.as_ref() {
+        surfaces.push(drawer.response.rect);
+    }
+    if let Some(handle) = handle_rect {
+        surfaces.push(handle);
+    }
     ui_surface_hover.set(pointer_over_ui(
         ctx.input(|input| input.pointer.interact_pos()),
-        drawer_shown.as_ref().map(|drawer| drawer.response.rect),
-        handle_rect,
+        &surfaces,
     ));
 
     // Handle drag-and-drop for VRM files.
@@ -664,37 +795,31 @@ mod tests {
     }
 
     #[test]
-    fn pointer_over_ui_covers_drawer_and_handle_but_not_the_scene() {
-        let drawer = Some(bevy_egui::egui::Rect::from_min_size(
+    fn pointer_over_ui_covers_every_drawn_surface_but_not_the_scene() {
+        let drawer = bevy_egui::egui::Rect::from_min_size(
             bevy_egui::egui::Pos2::ZERO,
             bevy_egui::egui::vec2(DRAWER_WIDTH, 1080.0),
-        ));
-        let handle = Some(bevy_egui::egui::Rect::from_min_size(
+        );
+        let handle = bevy_egui::egui::Rect::from_min_size(
             bevy_egui::egui::Pos2::ZERO,
             bevy_egui::egui::vec2(24.0, 72.0),
-        ));
+        );
 
+        let surfaces = [drawer, handle];
         assert!(pointer_over_ui(
             Some(bevy_egui::egui::pos2(150.0, 300.0)),
-            drawer,
-            None
+            &surfaces
         ));
         assert!(!pointer_over_ui(
             Some(bevy_egui::egui::pos2(900.0, 300.0)),
-            drawer,
-            None
+            &surfaces
         ));
-        assert!(pointer_over_ui(
-            Some(bevy_egui::egui::pos2(12.0, 40.0)),
-            None,
-            handle
-        ));
+        assert!(pointer_over_ui(Some(bevy_egui::egui::pos2(12.0, 40.0)), &surfaces));
         assert!(!pointer_over_ui(
             Some(bevy_egui::egui::pos2(12.0, 300.0)),
-            None,
-            handle
+            &[]
         ));
-        assert!(!pointer_over_ui(None, drawer, handle));
+        assert!(!pointer_over_ui(None, &surfaces));
     }
 
     #[test]
@@ -740,6 +865,61 @@ mod tests {
     }
 
     #[test]
+    fn drawer_footer_is_pinned_above_the_scene_and_pane_content_scrolls_above_it() {
+        let ctx = bevy_egui::egui::Context::default();
+        let raw_input = bevy_egui::egui::RawInput {
+            screen_rect: Some(bevy_egui::egui::Rect::from_min_size(
+                bevy_egui::egui::Pos2::ZERO,
+                bevy_egui::egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+
+        let surface = |ctx: &bevy_egui::egui::Context, raw: bevy_egui::egui::RawInput| {
+            let mut result = None;
+            let _ = ctx.run_ui(raw, |_top_ui| {
+                let mut viewport_ui = root_viewport_ui(ctx);
+                control_drawer_panel().show(&mut viewport_ui, |ui| {
+                    // Mirror the drawer body: bottom_up pins the footer,
+                    // the scroll area fills the space above it.
+                    ui.with_layout(
+                        bevy_egui::egui::Layout::bottom_up(bevy_egui::egui::Align::LEFT),
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                let _ = ui.button("Start");
+                                let _ = ui.button("Stop");
+                            });
+                            ui.add_space(6.0);
+                            let status = ui.label("Idle");                            ui.separator();
+                            let footer_top = status.rect.top();
+                            let scroll = bevy_egui::egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.allocate_space(bevy_egui::egui::vec2(100.0, 4000.0));
+                                });
+                            result = Some((footer_top, scroll.inner_rect, scroll.content_size));
+                        },
+                    );
+                });
+            });
+            result.expect("drawer body laid out")
+        };
+
+        // Warm-up pass so egui animation state exists, then measure.
+        let _ = surface(&ctx, raw_input.clone());
+        let (footer_top, content_rect, content_size) = surface(&ctx, raw_input);
+
+        assert!(
+            content_rect.bottom() <= footer_top,
+            "pane content must sit above the pinned footer, not overlap it"
+        );
+        assert!(
+            content_size.y > content_rect.height(),
+            "pane content taller than the space above the footer must scroll"
+        );
+    }
+
+    #[test]
     fn japanese_font_is_primary_for_both_ui_families() {
         let definitions = japanese_font_definitions();
         let font = definitions
@@ -766,11 +946,11 @@ mod tests {
     #[test]
     fn ui_state_emit_deduplicates_navigation() {
         let mut state = UiState::default();
-        state.emit(UiAction::SwitchScreen(Screen::Diagnostics));
-        state.emit(UiAction::SwitchScreen(Screen::Diagnostics)); // duplicate
+        state.emit(UiAction::SwitchPane(Pane::Diagnostics));
+        state.emit(UiAction::SwitchPane(Pane::Diagnostics)); // duplicate
         assert_eq!(state.pending_actions.len(), 1);
 
-        state.emit(UiAction::SwitchScreen(Screen::Setup)); // different
+        state.emit(UiAction::SwitchPane(Pane::Camera)); // different
         assert_eq!(state.pending_actions.len(), 2);
     }
 
@@ -789,11 +969,11 @@ mod tests {
     #[test]
     fn ui_state_take_allows_same_action_next_batch() {
         let mut state = UiState::default();
-        state.emit(UiAction::SwitchScreen(Screen::Diagnostics));
+        state.emit(UiAction::SwitchPane(Pane::Diagnostics));
         let _ = state.take_actions();
 
         // Same action in next batch should work.
-        state.emit(UiAction::SwitchScreen(Screen::Diagnostics));
+        state.emit(UiAction::SwitchPane(Pane::Diagnostics));
         assert_eq!(state.pending_actions.len(), 1);
     }
 

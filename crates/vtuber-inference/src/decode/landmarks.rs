@@ -164,6 +164,9 @@ pub fn decode_landmarks(
     let count = tensor.shape[rank - 2];
     let row_stride = tensor.shape[rank - 1];
 
+    let roi_transform = RoiLocalToImageTransform::new(roi, frame_w, frame_h)
+        .ok_or_else(|| InferenceError::InvalidRoi("zero frame dimension".into()))?;
+
     let mut landmarks = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -173,8 +176,7 @@ pub fn decode_landmarks(
 
         let (x_local, y_local) = normalize_local_coordinates(x_raw, y_raw, contract);
 
-        let (x_img, y_img) = roi_local_to_image(x_local, y_local, roi, frame_w, frame_h)
-            .ok_or_else(|| InferenceError::InvalidRoi("zero frame dimension".into()))?;
+        let (x_img, y_img) = roi_transform.apply(x_local, y_local);
 
         let z = if contract.channels.has_z() {
             tensor.data[base + 2]
@@ -265,6 +267,47 @@ fn normalize_local_coordinates(
     }
 }
 
+/// Precomputed [`roi_local_to_image`] coefficients.
+///
+/// Hoists the trigonometry and ROI side length out of per-landmark loops;
+/// the arithmetic per landmark is bit-identical to the per-call variant.
+#[derive(Clone, Copy)]
+pub struct RoiLocalToImageTransform {
+    roi_center_x: f32,
+    roi_center_y: f32,
+    cos: f32,
+    sin: f32,
+    side: f32,
+}
+
+impl RoiLocalToImageTransform {
+    /// Returns `None` if `frame_w` or `frame_h` is zero.
+    #[must_use]
+    pub fn new(roi: &FaceRoi, frame_w: u32, frame_h: u32) -> Option<Self> {
+        if frame_w == 0 || frame_h == 0 {
+            return None;
+        }
+        let min_dim = (frame_w.min(frame_h) as f32).max(0.0);
+        Some(Self {
+            roi_center_x: roi.center_x,
+            roi_center_y: roi.center_y,
+            cos: roi.rotation_rad.cos(),
+            sin: roi.rotation_rad.sin(),
+            side: roi.scale * min_dim,
+        })
+    }
+
+    /// Maps ROI-local normalized coordinates to image pixel coordinates.
+    #[must_use]
+    pub fn apply(&self, x_local: f32, y_local: f32) -> (f32, f32) {
+        let lx = (x_local - 0.5) * self.side;
+        let ly = (y_local - 0.5) * self.side;
+        let dx = lx * self.cos - ly * self.sin;
+        let dy = lx * self.sin + ly * self.cos;
+        (self.roi_center_x + dx, self.roi_center_y + dy)
+    }
+}
+
 /// Converts ROI-local normalized coordinates to image pixel coordinates.
 ///
 /// `x_local` and `y_local` are in `[0, 1]` with `(0, 0)` at the top-left of
@@ -280,24 +323,8 @@ pub fn roi_local_to_image(
     frame_w: u32,
     frame_h: u32,
 ) -> Option<(f32, f32)> {
-    if frame_w == 0 || frame_h == 0 {
-        return None;
-    }
-
-    let min_dim = (frame_w.min(frame_h) as f32).max(0.0);
-    let side = roi.scale * min_dim;
-
-    let lx = (x_local - 0.5) * side;
-    let ly = (y_local - 0.5) * side;
-
-    let cos = roi.rotation_rad.cos();
-    let sin = roi.rotation_rad.sin();
-
-    // Clockwise rotation from ROI-local axes to image axes.
-    let dx = lx * cos - ly * sin;
-    let dy = lx * sin + ly * cos;
-
-    Some((roi.center_x + dx, roi.center_y + dy))
+    let transform = RoiLocalToImageTransform::new(roi, frame_w, frame_h)?;
+    Some(transform.apply(x_local, y_local))
 }
 
 /// Converts image pixel coordinates back to ROI-local normalized coordinates.

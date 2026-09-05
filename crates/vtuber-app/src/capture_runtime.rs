@@ -183,6 +183,8 @@ pub fn sync_capture_diagnostics(
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
     mut last_seq: Local<Option<FrameSeq>>,
     mut rate: Local<Option<RateCounter>>,
+    mut cached_state: Local<Option<vtuber_camera::CaptureServiceState>>,
+    mut cached_backend: Local<bool>,
 ) {
     let metrics = capture.controller().metrics();
     let rate_counter = rate.get_or_insert_with(|| RateCounter::new(1_000_000_000));
@@ -193,9 +195,17 @@ pub fn sync_capture_diagnostics(
         *last_seq = Some(frame.seq);
     }
     diagnostics.capture_rate = rate_counter.rate_hz(monotonic_now().0) as f32;
-    diagnostics.capture_state = format!("{:?}", capture.state());
+    let state = capture.state();
+    if cached_state.as_ref() != Some(&state) {
+        diagnostics.capture_state = format!("{state:?}");
+        *cached_state = Some(state);
+    }
     diagnostics.slot_overwrites = metrics.frames_dropped;
-    diagnostics.camera_backend = Some(camera_backend_name().to_string());
+    let backend = camera_backend_name();
+    if !*cached_backend || diagnostics.camera_backend.as_deref() != Some(backend) {
+        diagnostics.camera_backend = Some(backend.to_string());
+        *cached_backend = true;
+    }
     if let Some(err) = metrics.last_error {
         diagnostics.last_error = Some(err);
     }

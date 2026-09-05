@@ -6,12 +6,13 @@ use bevy::app::{AnimationSystems, App};
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-const BONE_COUNT: usize = 5;
+const BONE_COUNT: usize = 6;
 const HEAD: usize = 0;
 const NECK: usize = 1;
 const UPPER_CHEST: usize = 2;
 const CHEST: usize = 3;
 const SPINE: usize = 4;
+const HIPS: usize = 5;
 
 /// Calibrated semantic head pose supplied directly to [`BodyTracking`].
 ///
@@ -34,7 +35,7 @@ pub struct BodyTrackingPoseInput {
     pub active: bool,
 }
 
-/// Named per-bone weights in `head -> neck -> upperChest -> chest -> spine` order.
+/// Named per-bone weights in `head -> neck -> upperChest -> chest -> spine -> hips` order.
 #[derive(Debug, Clone, Copy, Reflect, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", reflect(Serialize, Deserialize))]
@@ -49,6 +50,9 @@ pub struct BodyBoneWeights {
     pub chest: f32,
     /// Spine contribution.
     pub spine: f32,
+    /// Hips contribution. Small values let head motion propagate through the
+    /// whole body; the legs follow the hips automatically as child bones.
+    pub hips: f32,
 }
 
 impl BodyBoneWeights {
@@ -58,6 +62,7 @@ impl BodyBoneWeights {
         upper_chest: f32,
         chest: f32,
         spine: f32,
+        hips: f32,
     ) -> Self {
         Self {
             head,
@@ -65,6 +70,7 @@ impl BodyBoneWeights {
             upper_chest,
             chest,
             spine,
+            hips,
         }
     }
 
@@ -75,6 +81,7 @@ impl BodyBoneWeights {
             self.upper_chest,
             self.chest,
             self.spine,
+            self.hips,
         ]
     }
 
@@ -85,6 +92,7 @@ impl BodyBoneWeights {
             values[UPPER_CHEST],
             values[CHEST],
             values[SPINE],
+            values[HIPS],
         )
     }
 }
@@ -104,6 +112,8 @@ pub struct BodyBoneHalfLives {
     pub chest_seconds: f32,
     /// Spine half-life in seconds.
     pub spine_seconds: f32,
+    /// Hips half-life in seconds.
+    pub hips_seconds: f32,
 }
 
 impl Default for BodyBoneHalfLives {
@@ -114,6 +124,7 @@ impl Default for BodyBoneHalfLives {
             upper_chest_seconds: 0.180,
             chest_seconds: 0.285,
             spine_seconds: 0.450,
+            hips_seconds: 0.650,
         }
     }
 }
@@ -126,6 +137,7 @@ impl BodyBoneHalfLives {
             self.upper_chest_seconds,
             self.chest_seconds,
             self.spine_seconds,
+            self.hips_seconds,
         ]
     }
 }
@@ -172,6 +184,8 @@ pub struct BodyBoneRotationLimits {
     pub chest: BoneRotationLimit,
     /// Spine limits.
     pub spine: BoneRotationLimit,
+    /// Hips limits.
+    pub hips: BoneRotationLimit,
 }
 
 impl Default for BodyBoneRotationLimits {
@@ -184,6 +198,9 @@ impl Default for BodyBoneRotationLimits {
             upper_chest: BoneRotationLimit::from_degrees(18.0, 8.0, 6.0),
             chest: BoneRotationLimit::from_degrees(12.0, 4.0, 0.0),
             spine: BoneRotationLimit::from_degrees(8.0, 0.0, 0.0),
+            // Hips carry only a faint whisper of the head pose so the whole
+            // body sways with it without the feet visibly sliding.
+            hips: BoneRotationLimit::from_degrees(10.0, 4.0, 4.0),
         }
     }
 }
@@ -196,6 +213,7 @@ impl BodyBoneRotationLimits {
             self.upper_chest,
             self.chest,
             self.spine,
+            self.hips,
         ]
     }
 }
@@ -227,10 +245,10 @@ pub struct BodyTrackingProfile {
 impl Default for BodyTrackingProfile {
     fn default() -> Self {
         Self {
-            small_yaw_weights: BodyBoneWeights::new(0.65, 0.35, 0.0, 0.0, 0.0),
-            large_yaw_weights: BodyBoneWeights::new(0.42, 0.23, 0.17, 0.11, 0.07),
-            pitch_weights: BodyBoneWeights::new(0.68, 0.25, 0.06, 0.01, 0.0),
-            roll_weights: BodyBoneWeights::new(0.72, 0.23, 0.05, 0.0, 0.0),
+            small_yaw_weights: BodyBoneWeights::new(0.65, 0.35, 0.0, 0.0, 0.0, 0.0),
+            large_yaw_weights: BodyBoneWeights::new(0.40, 0.22, 0.16, 0.10, 0.07, 0.05),
+            pitch_weights: BodyBoneWeights::new(0.68, 0.25, 0.06, 0.01, 0.0, 0.0),
+            roll_weights: BodyBoneWeights::new(0.72, 0.23, 0.05, 0.0, 0.0, 0.0),
             yaw_body_engagement_start_radians: 12.0_f32.to_radians(),
             yaw_body_engagement_full_radians: 45.0_f32.to_radians(),
             bone_half_lives: BodyBoneHalfLives::default(),
@@ -297,7 +315,7 @@ fn normalize_available_weights(
     }
     let sum: f32 = values.iter().sum();
     if !sum.is_finite() || sum <= f32::EPSILON {
-        return BodyBoneWeights::new(0.0, 0.0, 0.0, 0.0, 0.0);
+        return BodyBoneWeights::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
     BodyBoneWeights::from_array(values.map(|value| value / sum))
 }
@@ -460,7 +478,7 @@ pub(super) fn refresh_parent_global(
     Some(parent_global)
 }
 
-/// Applies direct pose input to the humanoid upper-body chain.
+/// Applies direct pose input to the humanoid upper-body chain and hips.
 ///
 /// Applications normally use [`crate::prelude::VrmPlugin`], which registers
 /// this system after Bevy animation and before VRM constraints. The function
@@ -476,6 +494,7 @@ pub fn apply_direct_body_tracking(
             Option<&UpperChestBoneEntity>,
             Option<&ChestBoneEntity>,
             Option<&SpineBoneEntity>,
+            Option<&HipsBoneEntity>,
         ),
         With<BodyTracking>,
     >,
@@ -497,7 +516,7 @@ pub fn apply_direct_body_tracking(
     bone_states.retain(|entity, _| transforms.contains(*entity));
     root_rest_rotations.retain(|entity, _| root_globals.contains(*entity));
 
-    for (root, input, profile, head, neck, upper_chest, chest, spine) in vrms.iter() {
+    for (root, input, profile, head, neck, upper_chest, chest, spine, hips) in vrms.iter() {
         let Ok(root_global) = root_globals.get(root) else {
             continue;
         };
@@ -512,6 +531,7 @@ pub fn apply_direct_body_tracking(
             upper_chest.is_some(),
             chest.is_some(),
             spine.is_some(),
+            hips.is_some(),
         ];
         let engagement = smoothstep(
             profile.yaw_body_engagement_start_radians,
@@ -534,6 +554,12 @@ pub fn apply_direct_body_tracking(
         let limits = profile.bone_rotation_limits.as_array();
 
         let mut chain = Vec::with_capacity(BONE_COUNT);
+        if let Some(hips) = hips {
+            chain.push(DirectBoneEntry {
+                index: HIPS,
+                entity: hips.0,
+            });
+        }
         if let Some(spine) = spine {
             chain.push(DirectBoneEntry {
                 index: SPINE,
@@ -698,23 +724,33 @@ mod tests {
     fn optional_bones_are_renormalized_without_activating_zero_weights() {
         let profile = BodyTrackingProfile::default();
         let cases = [
-            [true, true, true, true, true],
-            [true, true, false, true, true],
-            [true, true, true, false, true],
-            [true, true, false, false, true],
-            [true, true, false, false, false],
-            [true, true, true, true, false],
+            [true, true, true, true, true, true],
+            [true, true, false, true, true, true],
+            [true, true, true, false, true, true],
+            [true, true, false, false, true, true],
+            [true, true, false, false, false, true],
+            [true, true, true, true, false, true],
+            [true, true, false, false, false, false],
         ];
         for available in cases {
             let normalized = normalize_available_weights(profile.large_yaw_weights, available);
             assert!((sum(normalized) - 1.0).abs() < EPSILON);
         }
 
-        let small_without_torso =
-            normalize_available_weights(profile.small_yaw_weights, [true, true, true, true, true]);
+        let full = normalize_available_weights(
+            profile.large_yaw_weights,
+            [true, true, true, true, true, true],
+        );
+        assert!(full.hips > 0.0, "large yaw must reach the hips");
+
+        let small_without_torso = normalize_available_weights(
+            profile.small_yaw_weights,
+            [true, true, true, true, true, true],
+        );
         assert_eq!(small_without_torso.upper_chest, 0.0);
         assert_eq!(small_without_torso.chest, 0.0);
         assert_eq!(small_without_torso.spine, 0.0);
+        assert_eq!(small_without_torso.hips, 0.0);
     }
 
     #[test]
@@ -723,8 +759,10 @@ mod tests {
         let pitch = normalize_available_weights(profile.pitch_weights, [true; BONE_COUNT]);
         let roll = normalize_available_weights(profile.roll_weights, [true; BONE_COUNT]);
         assert_eq!(pitch.spine, 0.0);
+        assert_eq!(pitch.hips, 0.0);
         assert_eq!(roll.chest, 0.0);
         assert_eq!(roll.spine, 0.0);
+        assert_eq!(roll.hips, 0.0);
         assert!((pitch.head - 0.68).abs() < EPSILON);
         assert!((roll.upper_chest - 0.05).abs() < EPSILON);
     }
@@ -752,10 +790,13 @@ mod tests {
     #[test]
     fn zero_and_non_finite_weights_produce_finite_zeroes() {
         let zero = normalize_available_weights(
-            BodyBoneWeights::new(0.0, f32::NAN, f32::INFINITY, -1.0, 0.0),
+            BodyBoneWeights::new(0.0, f32::NAN, f32::INFINITY, -1.0, 0.0, 0.0),
             [true; BONE_COUNT],
         );
-        assert_eq!(zero, BodyBoneWeights::new(0.0, 0.0, 0.0, 0.0, 0.0));
+        assert_eq!(
+            zero,
+            BodyBoneWeights::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        );
         assert!(zero.as_array().iter().all(|value| value.is_finite()));
     }
 

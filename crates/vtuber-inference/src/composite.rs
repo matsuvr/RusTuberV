@@ -58,6 +58,7 @@ pub struct CompositeRuntime<D, L> {
     coordinate_encoding: LandmarkCoordinateEncoding,
     landmark_input_shape: [usize; 4],
     last_timing: FrameInferenceTiming,
+    roi_state_debug_cache: Option<(crate::roi::RoiState, String)>,
 }
 
 impl<D, L> CompositeRuntime<D, L>
@@ -88,6 +89,7 @@ where
             coordinate_encoding,
             landmark_input_shape,
             last_timing: FrameInferenceTiming::default(),
+            roi_state_debug_cache: None,
         })
     }
 
@@ -300,7 +302,18 @@ where
     fn take_timing(&mut self) -> FrameInferenceTiming {
         let mut timing = std::mem::take(&mut self.last_timing);
         timing.detector_confidence = Some(self.active_detection_confidence);
-        timing.roi_state = Some(format!("{:?}", self.pipeline.roi_state()));
+        let roi_state = *self.pipeline.roi_state();
+        let roi_state_debug = match &self.roi_state_debug_cache {
+            Some((cached_state, cached_debug)) if *cached_state == roi_state => {
+                cached_debug.clone()
+            }
+            _ => {
+                let debug = format!("{roi_state:?}");
+                self.roi_state_debug_cache = Some((roi_state, debug.clone()));
+                debug
+            }
+        };
+        timing.roi_state = Some(roi_state_debug);
         timing
     }
 }

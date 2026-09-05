@@ -455,8 +455,11 @@ fn median_presence(landmarks: &[FaceLandmark]) -> Option<f32> {
     if values.is_empty() {
         return None;
     }
-    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    Some(values[values.len() / 2])
+    let median_index = values.len() / 2;
+    values.select_nth_unstable_by(median_index, |left, right| {
+        left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Some(values[median_index])
 }
 
 fn video_timestamp_ms(captured_at: MonoTimeNs, last_timestamp_ms: &mut Option<i64>) -> Result<i64> {

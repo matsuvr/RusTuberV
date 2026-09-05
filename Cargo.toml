@@ -35,6 +35,13 @@ bevy_vrm1 = { path = "vendor/bevy_vrm1" }
 [profile.dev]
 debug = "line-tables-only"
 
+# Runtime performance profile: whole-crate cross-language-unit optimization.
+# The pipeline is allocation- and inlining-sensitive (per-frame image loops),
+# so thin LTO + single codegen unit measurably improves the hot path.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [workspace.lints.rust]
 # Production code must be panic-free and unsafe-free (see AGENTS.md:
 # "Production Rust panic policy" / "Unsafe code").

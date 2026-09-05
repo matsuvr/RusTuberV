@@ -103,6 +103,8 @@ pub struct TrackingRuntime {
     pub control_slot: Arc<LatestSlot<AvatarControlFrame>>,
     /// Most recent frame consumed by the avatar bridge.
     pub latest_control: Option<AvatarControlFrame>,
+    /// Diagnostic string caches, rebuilt only when their source value changes.
+    diagnostics_cache: TrackingDiagnosticsCache,
 }
 
 impl Default for TrackingRuntime {
@@ -125,6 +127,7 @@ impl Default for TrackingRuntime {
             control_active: false,
             control_slot: Arc::new(LatestSlot::new()),
             latest_control: None,
+            diagnostics_cache: TrackingDiagnosticsCache::default(),
         }
     }
 }
@@ -135,6 +138,42 @@ impl TrackingRuntime {
     pub fn control_slot(&self) -> Arc<LatestSlot<AvatarControlFrame>> {
         Arc::clone(&self.control_slot)
     }
+}
+
+/// Rebuilds a plain `String` diagnostic only when a `Copy` state value changes.
+fn set_debug_cached<T: Copy + PartialEq + std::fmt::Debug>(
+    cache: &mut Option<(T, String)>,
+    value: T,
+    target: &mut String,
+) {
+    if !matches!(cache, Some((cached, _)) if *cached == value) {
+        *target = format!("{value:?}");
+        if let Some((_, text)) = cache.as_mut() {
+            *text = target.clone();
+        } else {
+            *cache = Some((value, target.clone()));
+        }
+    }
+}
+
+/// Rebuilds an `Option<String>` diagnostic only when a `Copy` state value changes.
+fn set_debug_cached_opt<T: Copy + PartialEq + std::fmt::Debug>(
+    cache: &mut Option<(T, String)>,
+    value: T,
+    target: &mut Option<String>,
+) {
+    if !matches!(cache, Some((cached, _)) if *cached == value) {
+        let text = format!("{value:?}");
+        *target = Some(text.clone());
+        *cache = Some((value, text));
+    }
+}
+
+/// Per-frame diagnostic strings rebuilt only when their source value changes.
+#[derive(Default)]
+struct TrackingDiagnosticsCache {
+    tracking_state: Option<(TrackingState, String)>,
+    auto_neutral_state: Option<(AutoNeutralState, String)>,
 }
 
 /// Applies calibration intents and processes one latest inference result.
@@ -178,10 +217,26 @@ pub fn tracking_bridge_system(
         tracking.last_update = None;
         view_model.tracking = tracking_view(TrackingState::Starting, 0.0);
         view_model.calibration = calibration_view(&tracking);
-        diagnostics.tracking_state = format!("{:?}", TrackingState::Starting);
-        diagnostics.tracking_backend = Some("mediapipe-face-landmarker".into());
-        diagnostics.tracking_contract = Some("478 landmarks / 52 blendshapes / pose matrix".into());
-        diagnostics.auto_neutral_state = Some(format!("{:?}", tracking.auto_neutral.state()));
+        set_debug_cached(
+            &mut tracking.diagnostics_cache.tracking_state,
+            TrackingState::Starting,
+            &mut diagnostics.tracking_state,
+        );
+        if diagnostics.tracking_backend.as_deref() != Some("mediapipe-face-landmarker") {
+            diagnostics.tracking_backend = Some("mediapipe-face-landmarker".into());
+        }
+        if diagnostics.tracking_contract.as_deref()
+            != Some("478 landmarks / 52 blendshapes / pose matrix")
+        {
+            diagnostics.tracking_contract =
+                Some("478 landmarks / 52 blendshapes / pose matrix".into());
+        }
+        let auto_neutral_state = tracking.auto_neutral.state();
+        set_debug_cached_opt(
+            &mut tracking.diagnostics_cache.auto_neutral_state,
+            auto_neutral_state,
+            &mut diagnostics.auto_neutral_state,
+        );
         diagnostics.face_tracking_calibration_ready = Some(matches!(
             tracking.auto_neutral.state(),
             vtuber_tracking::AutoNeutralState::Ready
@@ -270,10 +325,25 @@ pub fn tracking_bridge_system(
 
     view_model.calibration = calibration_view(&tracking);
     view_model.tracking = tracking_view(update.state, update.confidence.frame_confidence);
-    diagnostics.tracking_state = format!("{:?}", update.state);
-    diagnostics.tracking_backend = Some("mediapipe-face-landmarker".into());
-    diagnostics.tracking_contract = Some("478 landmarks / 52 blendshapes / pose matrix".into());
-    diagnostics.auto_neutral_state = Some(format!("{:?}", tracking.auto_neutral.state()));
+    set_debug_cached(
+        &mut tracking.diagnostics_cache.tracking_state,
+        update.state,
+        &mut diagnostics.tracking_state,
+    );
+    if diagnostics.tracking_backend.as_deref() != Some("mediapipe-face-landmarker") {
+        diagnostics.tracking_backend = Some("mediapipe-face-landmarker".into());
+    }
+    if diagnostics.tracking_contract.as_deref()
+        != Some("478 landmarks / 52 blendshapes / pose matrix")
+    {
+        diagnostics.tracking_contract = Some("478 landmarks / 52 blendshapes / pose matrix".into());
+    }
+    let auto_neutral_state = tracking.auto_neutral.state();
+    set_debug_cached_opt(
+        &mut tracking.diagnostics_cache.auto_neutral_state,
+        auto_neutral_state,
+        &mut diagnostics.auto_neutral_state,
+    );
     diagnostics.face_tracking_calibration_ready = Some(matches!(
         tracking.auto_neutral.state(),
         vtuber_tracking::AutoNeutralState::Ready

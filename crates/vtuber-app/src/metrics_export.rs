@@ -29,8 +29,8 @@ pub struct MetricsExportState {
     samples_written: usize,
 }
 
-#[derive(Debug)]
-enum ExportPhase {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ExportPhase {
     Disabled,
     WaitingForTracking,
     WarmingUp,
@@ -171,13 +171,20 @@ impl MetricsExportState {
 }
 
 /// Advances the exporter and mirrors its bounded state into diagnostics.
-pub fn export_diagnostics_system(
+pub(crate) fn export_diagnostics_system(
     time: Res<Time<Real>>,
     mut snapshot: ResMut<DiagnosticsSnapshot>,
     mut exporter: ResMut<MetricsExportState>,
+    mut last_rendered: Local<Option<(ExportPhase, usize)>>,
 ) {
     exporter.tick(time.elapsed_secs_f64(), &snapshot);
-    snapshot.metrics_export_status = exporter.status();
+    // The status string depends only on the phase and the sample count; skip
+    // the per-frame formatting while both are unchanged.
+    let rendered = (exporter.phase.clone(), exporter.samples_written);
+    if last_rendered.as_ref() != Some(&rendered) {
+        snapshot.metrics_export_status = exporter.status();
+        *last_rendered = Some(rendered);
+    }
     snapshot.metrics_export_samples = exporter.samples_written;
 }
 

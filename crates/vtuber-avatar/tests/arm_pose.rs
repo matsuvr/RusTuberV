@@ -256,6 +256,43 @@ fn shoulder_follow_is_weak_clamped_and_finger_rest_axes_are_converted() {
 }
 
 #[test]
+fn shoulder_follow_propagates_weakly_downstream_to_elbow_and_wrist() {
+    let with_shoulder = optional_correction_chain();
+    let mut without_shoulder = with_shoulder;
+    without_shoulder.shoulder = None;
+    without_shoulder.rest.shoulder = None;
+    without_shoulder.capabilities.has_shoulder = false;
+    let with = DefaultArmPose::from_chains(AvatarGeneration(1), Some(with_shoulder), None)
+        .left
+        .expect("complete chain should resolve");
+    let without = DefaultArmPose::from_chains(AvatarGeneration(1), Some(without_shoulder), None)
+        .left
+        .expect("complete chain should resolve");
+    let shoulder_angle = with
+        .shoulder
+        .expect("shoulder should resolve")
+        .delta
+        .angle_between(Quat::IDENTITY);
+    assert!(shoulder_angle > 0.0);
+    let upper_change = with
+        .upper_arm_delta
+        .angle_between(without.upper_arm_delta);
+    let lower_change = with
+        .lower_arm_delta
+        .angle_between(without.lower_arm_delta);
+    assert!(upper_change > 1.0e-6, "upper arm inherits part of the shoulder");
+    assert!(lower_change > 1.0e-6, "forearm inherits part of the shoulder");
+    assert!(
+        upper_change < shoulder_angle,
+        "downstream share stays smaller than the shoulder change"
+    );
+    assert!(
+        lower_change < upper_change,
+        "motion decays toward the terminal bones"
+    );
+}
+
+#[test]
 fn actual_child_of_path_propagates_intermediate_globals() {
     let mut app = build_app();
     let chain = spawn_avatar(

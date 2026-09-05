@@ -137,8 +137,8 @@ fn all_perfect_sync_caps() -> AvatarCapabilities {
     caps
 }
 
-fn detailed_name(channel: ArkitBlendshape) -> Option<String> {
-    Some(channel.canonical_name().to_owned())
+fn detailed_name(channel: ArkitBlendshape) -> Option<&'static str> {
+    Some(channel.canonical_name())
 }
 
 // ---------------------------------------------------------------------------

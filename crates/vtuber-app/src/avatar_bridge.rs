@@ -56,7 +56,12 @@ pub fn sync_avatar_diagnostics(
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
 ) {
     if let Some(lifecycle) = lifecycle {
-        diagnostics.avatar_capabilities = lifecycle.capabilities().map(|caps| caps.summary());
+        // The capability summary only changes when the lifecycle resource is
+        // mutated (bind/unbind); rebuilding its joined strings every frame is
+        // pure allocation churn.
+        if lifecycle.is_changed() {
+            diagnostics.avatar_capabilities = lifecycle.capabilities().map(|caps| caps.summary());
+        }
     }
     if let Some(metrics) = pose_metrics {
         diagnostics.avatar_frames_applied = metrics.frames_applied;

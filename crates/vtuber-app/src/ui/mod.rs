@@ -7,7 +7,8 @@
 pub mod diagnostics;
 pub mod error;
 pub mod file_dialog;
-pub mod setup;
+pub mod panes;
 pub mod shell;
+pub(crate) mod widgets;
 
 pub use shell::{UiShellPlugin, UiState};

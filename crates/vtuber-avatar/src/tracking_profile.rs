@@ -29,7 +29,7 @@ fn clean_degrees(value: f32) -> f32 {
     (value * 10_000.0).round() / 10_000.0
 }
 
-/// Per-bone weights over the `head/neck/upperChest/chest/spine` chain.
+/// Per-bone weights over the `head/neck/upperChest/chest/spine/hips` chain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrackingWeights {
@@ -43,6 +43,8 @@ pub struct TrackingWeights {
     pub chest: Option<f32>,
     /// Spine share.
     pub spine: Option<f32>,
+    /// Hips share.
+    pub hips: Option<f32>,
 }
 
 impl TrackingWeights {
@@ -62,6 +64,9 @@ impl TrackingWeights {
         if let Some(value) = self.spine {
             weights.spine = value;
         }
+        if let Some(value) = self.hips {
+            weights.hips = value;
+        }
     }
 
     fn from_weights(weights: BodyBoneWeights) -> Self {
@@ -71,6 +76,7 @@ impl TrackingWeights {
             upper_chest: Some(weights.upper_chest),
             chest: Some(weights.chest),
             spine: Some(weights.spine),
+            hips: Some(weights.hips),
         }
     }
 }
@@ -99,6 +105,8 @@ pub struct TrackingHalfLives {
     pub chest: Option<f32>,
     /// Spine half-life.
     pub spine: Option<f32>,
+    /// Hips half-life.
+    pub hips: Option<f32>,
 }
 
 impl TrackingHalfLives {
@@ -118,6 +126,9 @@ impl TrackingHalfLives {
         if let Some(value) = self.spine {
             half_lives.spine_seconds = value;
         }
+        if let Some(value) = self.hips {
+            half_lives.hips_seconds = value;
+        }
     }
 
     fn from_half_lives(half_lives: BodyBoneHalfLives) -> Self {
@@ -127,6 +138,7 @@ impl TrackingHalfLives {
             upper_chest: Some(half_lives.upper_chest_seconds),
             chest: Some(half_lives.chest_seconds),
             spine: Some(half_lives.spine_seconds),
+            hips: Some(half_lives.hips_seconds),
         }
     }
 }
@@ -179,6 +191,8 @@ pub struct TrackingLimits {
     pub chest: Option<TrackingLimit>,
     /// Spine limits.
     pub spine: Option<TrackingLimit>,
+    /// Hips limits.
+    pub hips: Option<TrackingLimit>,
 }
 
 impl TrackingLimits {
@@ -198,6 +212,9 @@ impl TrackingLimits {
         if let Some(value) = self.spine {
             value.merge_into(&mut limits.spine);
         }
+        if let Some(value) = self.hips {
+            value.merge_into(&mut limits.hips);
+        }
     }
 
     fn from_limits(limits: BodyBoneRotationLimits) -> Self {
@@ -207,6 +224,7 @@ impl TrackingLimits {
             upper_chest: Some(TrackingLimit::from_limit(limits.upper_chest)),
             chest: Some(TrackingLimit::from_limit(limits.chest)),
             spine: Some(TrackingLimit::from_limit(limits.spine)),
+            hips: Some(TrackingLimit::from_limit(limits.hips)),
         }
     }
 }
@@ -403,8 +421,8 @@ mod tests {
         assert!((body.pitch_weights.head - 0.7).abs() < EPSILON);
         assert!((body.pitch_weights.neck - 0.3).abs() < EPSILON);
         // Untouched fields keep the default.
-        assert!((body.pitch_weights.upper_chest - 0.14).abs() < EPSILON);
-        assert!((body.roll_weights.head - 0.48).abs() < EPSILON);
+        assert!((body.pitch_weights.upper_chest - 0.13).abs() < EPSILON);
+        assert!((body.roll_weights.head - 0.47).abs() < EPSILON);
         assert!((body.small_yaw_weights.head - 0.60).abs() < EPSILON);
         assert!((body.yaw_body_engagement_full_radians - 40.0_f32.to_radians()).abs() < EPSILON);
         assert!((body.yaw_body_engagement_start_radians - 8.0_f32.to_radians()).abs() < EPSILON);

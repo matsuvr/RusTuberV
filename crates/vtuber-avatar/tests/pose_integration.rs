@@ -22,6 +22,7 @@ struct Chain {
     upper_chest: Option<Entity>,
     chest: Option<Entity>,
     spine: Option<Entity>,
+    hips: Entity,
     intermediate: Option<Entity>,
     left_eye: Entity,
 }
@@ -34,6 +35,7 @@ fn instant_profile() -> BodyTrackingProfile {
             upper_chest_seconds: 0.0,
             chest_seconds: 0.0,
             spine_seconds: 0.0,
+            hips_seconds: 0.0,
         },
         ..Default::default()
     }
@@ -73,7 +75,8 @@ fn build_app(with_upper_chest: bool, with_intermediate: bool, animated_head: Qua
             instant_profile(),
         ))
         .id();
-    let spine = spawn_bone(&mut app, root, Quat::IDENTITY);
+    let hips = spawn_bone(&mut app, root, Quat::IDENTITY);
+    let spine = spawn_bone(&mut app, hips, Quat::IDENTITY);
     let intermediate = with_intermediate.then(|| spawn_bone(&mut app, spine, Quat::IDENTITY));
     let chest_parent = intermediate.unwrap_or(spine);
     let chest = spawn_bone(&mut app, chest_parent, Quat::IDENTITY);
@@ -90,6 +93,7 @@ fn build_app(with_upper_chest: bool, with_intermediate: bool, animated_head: Qua
         NeckBoneEntity(neck),
         ChestBoneEntity(chest),
         SpineBoneEntity(spine),
+        HipsBoneEntity(hips),
         LeftEyeBoneEntity(left_eye),
     ));
     if let Some(upper_chest) = upper_chest {
@@ -105,6 +109,7 @@ fn build_app(with_upper_chest: bool, with_intermediate: bool, animated_head: Qua
             upper_chest,
             chest: Some(chest),
             spine: Some(spine),
+            hips,
             intermediate,
             left_eye,
         },
@@ -121,15 +126,16 @@ fn local_yaw(app: &App, entity: Entity) -> f32 {
 }
 
 #[test]
-fn large_yaw_uses_all_five_bones_with_documented_weights() {
+fn large_yaw_uses_all_six_bones_with_documented_weights() {
     let (mut app, chain) = build_app(true, false, Quat::IDENTITY);
     app.update();
 
-    assert!((local_yaw(&app, chain.head) - 0.42).abs() < EPSILON);
-    assert!((local_yaw(&app, chain.neck.unwrap()) - 0.23).abs() < EPSILON);
-    assert!((local_yaw(&app, chain.upper_chest.unwrap()) - 0.17).abs() < EPSILON);
-    assert!((local_yaw(&app, chain.chest.unwrap()) - 0.11).abs() < EPSILON);
+    assert!((local_yaw(&app, chain.head) - 0.40).abs() < EPSILON);
+    assert!((local_yaw(&app, chain.neck.unwrap()) - 0.22).abs() < EPSILON);
+    assert!((local_yaw(&app, chain.upper_chest.unwrap()) - 0.16).abs() < EPSILON);
+    assert!((local_yaw(&app, chain.chest.unwrap()) - 0.10).abs() < EPSILON);
     assert!((local_yaw(&app, chain.spine.unwrap()) - 0.07).abs() < EPSILON);
+    assert!((local_yaw(&app, chain.hips) - 0.05).abs() < EPSILON);
 }
 
 #[test]
@@ -143,6 +149,7 @@ fn missing_upper_chest_renormalizes_and_does_not_panic() {
         chain.neck.unwrap(),
         chain.chest.unwrap(),
         chain.spine.unwrap(),
+        chain.hips,
     ] {
         assert!(
             app.world()
@@ -152,8 +159,8 @@ fn missing_upper_chest_renormalizes_and_does_not_panic() {
                 .is_finite()
         );
     }
-    let remaining_sum = 0.42 + 0.23 + 0.11 + 0.07;
-    assert!((local_yaw(&app, chain.head) - 0.42 / remaining_sum).abs() < EPSILON);
+    let remaining_sum = 0.40 + 0.22 + 0.10 + 0.07 + 0.05;
+    assert!((local_yaw(&app, chain.head) - 0.40 / remaining_sum).abs() < EPSILON);
 }
 
 #[test]
@@ -167,12 +174,13 @@ fn intermediate_node_receives_fresh_global_transform() {
         .get::<GlobalTransform>(chain.spine.unwrap())
         .unwrap();
     let intermediate_global = app.world().get::<GlobalTransform>(intermediate).unwrap();
-    assert!(
-        spine_global
-            .rotation()
-            .angle_between(intermediate_global.rotation())
-            < EPSILON
-    );
+    // Both globals compose the same chain of rotations, so any difference is
+    // f32 normalization noise; compare with a dot-product tolerance instead
+    // of a raw angle.
+    let dot = spine_global
+        .rotation()
+        .dot(intermediate_global.rotation());
+    assert!((dot - 1.0).abs() < 1.0e-5);
     assert!(
         app.world()
             .get::<GlobalTransform>(chain.head)

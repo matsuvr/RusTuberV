@@ -460,7 +460,31 @@ fn bind_expressions(
         Option<&ExpressionOverride>,
         Option<&BinaryExpression>,
     )>,
+    mut last_signature: Local<Vec<u64>>,
+    mut signature_scratch: Local<Vec<u64>>,
 ) {
+    // Signature of every expression's resolved input (raw weight bits + binary
+    // flag, in iteration order). All outputs of this system are a pure function
+    // of these values, so an unchanged signature means the morph weights are
+    // already up to date and the zero+accumulate passes can be skipped.
+    signature_scratch.clear();
+    for (tf, _retarget, _category_tag, _override_settings, maybe_override, maybe_binary) in
+        rig_expressions.iter()
+    {
+        let raw_weight = match maybe_override {
+            Some(ExpressionOverride(w)) => *w,
+            None => tf.translation.x,
+        };
+        let is_binary = maybe_binary.is_some();
+        signature_scratch
+            .push((u64::from(raw_weight.to_bits()) << 1) | u64::from(is_binary));
+    }
+    if !signature_scratch.is_empty() && *last_signature == *signature_scratch {
+        return;
+    }
+    last_signature.clear();
+    last_signature.extend_from_slice(&signature_scratch);
+
     // Pass 1: Collect output weights and accumulate override rates.
     // Also collect all mesh entities that need resetting.
     let mut mouth_rate: f32 = 0.0;

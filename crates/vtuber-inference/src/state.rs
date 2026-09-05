@@ -122,8 +122,11 @@ impl InferenceWorkerStatus {
     }
 
     /// Returns a snapshot of the current inference metrics.
+    ///
+    /// The snapshot is cached until new samples are recorded, so polling this
+    /// between frames is allocation-free and does not re-sort the timing rings.
     #[must_use]
-    pub fn metrics(&self) -> InferenceMetrics {
+    pub fn metrics(&mut self) -> InferenceMetrics {
         self.metrics_state.snapshot()
     }
 

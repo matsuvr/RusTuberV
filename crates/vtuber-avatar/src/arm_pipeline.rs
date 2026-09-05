@@ -23,12 +23,25 @@
 
 use bevy::prelude::*;
 
+use bevy_vrm1::prelude::RestGlobalTransform;
+
 use crate::arm::{
     ArmChainBinding, ArmIkError, ArmIkInput, ArmIkSolution, ArmIkTarget, ArmPoseProfile, ArmSide,
 };
 use crate::arm_motion_geometry::ArmMotionRestGeometry;
 use crate::binding::AvatarBinding;
 use crate::lifecycle::AvatarLifecycle;
+
+/// Share of the sampled torso model-space rotation that the hips-relative
+/// hand target counter-rotates.
+///
+/// The virtual hand anchor is hips-relative, so without compensation the
+/// whole arm is carried rigidly by the turning torso and the elbow bend
+/// never changes. Counter-rotating the anchor by a fraction of the chest's
+/// actual rotation makes the hands trail the turn like a real body's inert
+/// arms, so motion propagates through the shoulder, elbow, and wrist instead
+/// of stopping at the shoulder.
+pub const TORSO_LAG_SHARE: f32 = 0.6;
 
 /// Which arm-pose authority produces hand targets for the compositor.
 ///
@@ -229,6 +242,11 @@ pub struct ArmPipelineInput<'a> {
     pub head_offset: Vec3,
     /// Semantic root/body compensation offset (meters), dynamic sources.
     pub body_offset: Vec3,
+    /// Model-space rotation delta of the torso bone the arms hang from
+    /// (chest-relative-to-rest), sampled this frame. The dynamic hand target
+    /// counter-rotates by [`TORSO_LAG_SHARE`] of it so body turns reach the
+    /// elbow and wrist instead of carrying the arms rigidly.
+    pub torso_delta: Quat,
     /// Body scale in meters for scale-aware normalization.
     pub body_scale_meters: f32,
 }
@@ -251,6 +269,7 @@ impl<'a> ArmPipelineInput<'a> {
             dynamic_profile: DynamicArmProfile::default(),
             head_offset: Vec3::ZERO,
             body_offset: Vec3::ZERO,
+            torso_delta: Quat::IDENTITY,
             body_scale_meters: crate::body_scale::DEFAULT_BODY_SCALE_METERS,
         }
     }
@@ -375,6 +394,17 @@ fn apply_shoulder_elevation_trim(
             delta: trim_delta,
         }),
     };
+    // Downstream propagation: the trim's model-space rotation also reaches
+    // the elbow and wrist in small decaying shares so the arm bends with the
+    // shoulder instead of rotating as a rigid stick.
+    (pose.upper_arm_delta, pose.lower_arm_delta) =
+        crate::arm_pose::propagate_shoulder_downstream(
+            model_delta,
+            input.chain.rest.upper_arm.global_rotation,
+            input.chain.rest.elbow.global_rotation,
+            pose.upper_arm_delta,
+            pose.lower_arm_delta,
+        );
 }
 
 /// Parameters for the post-solve forearm twist relaxer (Issue #170).
@@ -860,6 +890,18 @@ impl std::fmt::Display for DynamicArmProfileOverrideError {
 
 impl std::error::Error for DynamicArmProfileOverrideError {}
 
+/// Counter-rotation applied to the hips-relative hand offset: a bounded
+/// share of the torso's model-space rotation, inverted so the hands trail
+/// the turn. Degenerate input degrades to no lag.
+fn torso_lag_rotation(torso_delta: Quat) -> Quat {
+    if !torso_delta.is_finite() {
+        return Quat::IDENTITY;
+    }
+    Quat::IDENTITY
+        .slerp(torso_delta.normalize().inverse(), TORSO_LAG_SHARE)
+        .normalize()
+}
+
 fn virtual_hand_target(input: &ArmPipelineInput<'_>) -> Option<(ArmIkTarget, ArmPipelineOutcome)> {
     let profile = input.dynamic_profile;
     if !profile.is_valid() {
@@ -888,7 +930,8 @@ fn virtual_hand_target(input: &ArmPipelineInput<'_>) -> Option<(ArmIkTarget, Arm
     // Recover the hips rest origin from the bound wrist/anchor pair so the
     // target stays hips-relative even though the solver works in rest space.
     let hips_rest = input.chain.rest.wrist.position - anchor.translation_from_hips;
-    let wrist = hips_rest + base + follow;
+    let lag = torso_lag_rotation(input.torso_delta);
+    let wrist = hips_rest + lag * (base + follow);
     if !wrist.is_finite() {
         return None;
     }
@@ -939,7 +982,7 @@ pub fn resolve_side(
 /// only arm Transform writer. When lifecycle is not Ready, the selected
 /// source is not the virtual hand, or no control frame is available, targets
 /// clear so the compositor falls back to its static default pose.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_dynamic_arm_targets(
     lifecycle: Res<AvatarLifecycle>,
     selection: Res<ArmSourceSelection>,
@@ -954,6 +997,7 @@ pub fn update_dynamic_arm_targets(
         &crate::body_scale::BodyScaleMeters,
         Option<&mut DynamicArmTargets>,
     )>,
+    torso_rotations: Query<(&GlobalTransform, &RestGlobalTransform)>,
 ) {
     let Ok((binding, model_id, motion, scale, targets)) = roots.single_mut() else {
         return;
@@ -997,22 +1041,35 @@ pub fn update_dynamic_arm_targets(
         crate::body_motion::position_channels(frame, mirrored, body_profiles, scale.scale_meters)
             .unwrap_or((Vec3::ZERO, Vec3::ZERO));
 
-    let resolve =
-        |chain: Option<&ArmChainBinding>,
-         geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>| {
-            chain.zip(geometry).and_then(|(chain, geometry)| {
-                let input = ArmPipelineInput {
-                    chain,
-                    motion: geometry,
-                    legacy_profile: crate::arm::ArmPoseProfile::default(),
-                    dynamic_profile: profile,
-                    head_offset,
-                    body_offset,
-                    body_scale_meters: scale.scale_meters,
-                };
-                resolve_side(&input, selection.mode)
-            })
-        };
+    // Sample the torso bone the arms hang from. The direct body-tracking
+    // writer refreshed its global rotation (one frame at most), so the delta
+    // against its rest rotation is the actual turn the arms should trail.
+    let torso_delta = binding
+        .upper_chest
+        .or(binding.chest)
+        .and_then(|bone| {
+            let (global, rest) = torso_rotations.get(bone).ok()?;
+            let delta = global.rotation() * rest.0.rotation().inverse();
+            delta.is_finite().then(|| delta.normalize())
+        })
+        .unwrap_or(Quat::IDENTITY);
+
+    let resolve = |chain: Option<&ArmChainBinding>,
+                   geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>| {
+        chain.zip(geometry).and_then(|(chain, geometry)| {
+            let input = ArmPipelineInput {
+                chain,
+                motion: geometry,
+                legacy_profile: crate::arm::ArmPoseProfile::default(),
+                dynamic_profile: profile,
+                head_offset,
+                body_offset,
+                torso_delta,
+                body_scale_meters: scale.scale_meters,
+            };
+            resolve_side(&input, selection.mode)
+        })
+    };
     *targets = DynamicArmTargets {
         generation: Some(binding.generation),
         source_seq: Some(frame.source_seq),
@@ -1245,6 +1302,63 @@ mod tests {
         assert!((delta.x - total.x * profile.compensation_gains.x).abs() < 1e-4);
         assert!((delta.y - total.y * profile.compensation_gains.y).abs() < 1e-4);
         assert!((delta.z - total.z * profile.compensation_gains.z).abs() < 1e-4);
+    }
+
+    #[test]
+    fn torso_rotation_trails_the_hand_target() {
+        let (chain, motion) = anchored_motion(ArmSide::Left);
+        let input = ArmPipelineInput::binding_time(&chain, &motion, ArmPoseProfile::default());
+        let neutral = resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
+            .unwrap()
+            .unwrap()
+            .1
+            .hand_target
+            .wrist;
+
+        // A 90-degree left yaw of the chest must trail the hands: in rest
+        // space the left-hand anchor counter-rotates toward +Z (forward).
+        let turned = ArmPipelineInput {
+            torso_delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            ..input
+        };
+        let lagged = resolve_arm_pose(&turned, ArmPoseSourceKind::VirtualHandAnchor)
+            .unwrap()
+            .unwrap()
+            .1
+            .hand_target
+            .wrist;
+        assert!(
+            lagged.z > neutral.z + 1.0e-3,
+            "left-hand target must swing forward on a left body turn"
+        );
+        assert!(
+            lagged.x < neutral.x - 1.0e-3,
+            "left-hand target must pull toward the body center on a left turn"
+        );
+
+        // The opposite turn mirrors the trail exactly.
+        let opposite = ArmPipelineInput {
+            torso_delta: Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+            ..input
+        };
+        let mirrored = resolve_arm_pose(&opposite, ArmPoseSourceKind::VirtualHandAnchor)
+            .unwrap()
+            .unwrap()
+            .1
+            .hand_target
+            .wrist;
+        let neutral_offset = neutral
+            - (chain.rest.wrist.position
+                - input.motion.hand_anchor.as_ref().unwrap().translation_from_hips);
+        let expected_offset = Quat::from_rotation_y(TORSO_LAG_SHARE * std::f32::consts::FRAC_PI_2)
+            * neutral_offset;
+        let expected = expected_offset
+            + (chain.rest.wrist.position
+                - input.motion.hand_anchor.as_ref().unwrap().translation_from_hips);
+        assert!(
+            mirrored.distance(expected) < 1.0e-3,
+            "lag must be exactly the bounded share of the torso turn"
+        );
     }
 
     fn mirrored_pair() -> (
@@ -1526,7 +1640,7 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_trim_changes_only_the_shoulder_delta() {
+    fn nonzero_trim_propagates_weakly_to_the_elbow_and_wrist() {
         let chain = chain_with_shoulder(ArmSide::Right);
         let motion = crate::arm_motion_geometry::build_arm_motion_rest_geometry(
             ArmSide::Right,
@@ -1552,12 +1666,26 @@ mod tests {
             .unwrap()
             .unwrap()
             .0;
-        assert_eq!(before.upper_arm_delta, after.upper_arm_delta);
-        assert_eq!(before.lower_arm_delta, after.lower_arm_delta);
         let sh_before = before.shoulder.expect("shoulder present").delta;
         let sh_after = after.shoulder.expect("shoulder present").delta;
         assert!(sh_before.angle_between(sh_after) > 1e-4, "trim applied");
         assert!(sh_after.is_finite());
+        // The trim reaches the terminal bones in small decaying shares: the
+        // elbow follows weakly and the wrist follows even more weakly, so the
+        // arm bends with the shoulder instead of rotating as a rigid stick.
+        let upper_change = before.upper_arm_delta.angle_between(after.upper_arm_delta);
+        let lower_change = before.lower_arm_delta.angle_between(after.lower_arm_delta);
+        let shoulder_change = sh_before.angle_between(sh_after);
+        assert!(upper_change > 1e-4, "upper arm inherits part of the trim");
+        assert!(lower_change > 1e-4, "forearm inherits part of the trim");
+        assert!(
+            upper_change < shoulder_change,
+            "downstream share stays smaller than the shoulder change"
+        );
+        assert!(
+            lower_change < upper_change,
+            "motion decays toward the terminal bones"
+        );
         // Bounded: the trim contribution is exactly the requested angle in
         // the shoulder's rest frame.
         let axis_local = chain

@@ -981,6 +981,11 @@ fn run_ndi_worker(
         source_name: config.source_name.clone(),
     });
     let mut last_connection_poll = std::time::Instant::now();
+    // The validated NDI frame is reused across sends with a stable layout;
+    // only its pixel bytes are rewritten, avoiding a fresh full-frame buffer
+    // allocation on every sent frame.
+    let mut ndi_frame: Option<VideoFrame> = None;
+    let mut ndi_frame_dims: (i32, i32) = (0, 0);
     loop {
         let Some(frame) = mailbox.take(|| stop.is_stopped()) else {
             return WorkerExit::Stopped;
@@ -995,33 +1000,57 @@ fn run_ndi_worker(
                 continue;
             }
         };
-        let mut ndi_frame = match VideoFrame::builder()
-            .resolution(mapping.width, mapping.height)
-            .pixel_format(PixelFormat::BGRA)
-            .frame_rate(mapping.frame_rate_n, mapping.frame_rate_d)
-            .aspect_ratio(mapping.picture_aspect_ratio)
-            .scan_type(ScanType::Progressive)
-            .build()
-        {
-            Ok(frame) => frame,
-            Err(_error) => {
-                let mapped = NdiOutputError::new(
+        let dims = (mapping.width, mapping.height);
+        if ndi_frame.is_none() || ndi_frame_dims != dims {
+            let mut built = match VideoFrame::builder()
+                .resolution(mapping.width, mapping.height)
+                .pixel_format(PixelFormat::BGRA)
+                .frame_rate(mapping.frame_rate_n, mapping.frame_rate_d)
+                .aspect_ratio(mapping.picture_aspect_ratio)
+                .scan_type(ScanType::Progressive)
+                .build()
+            {
+                Ok(frame) => frame,
+                Err(_error) => {
+                    let mapped = NdiOutputError::new(
+                        NdiErrorCode::SendFailed,
+                        "NDI rejected the validated BGRA frame",
+                    );
+                    shared.replace_status_error(&mapped);
+                    return WorkerExit::StartupFailed;
+                }
+            };
+            if built.replace_data(frame.data.to_vec()).is_err() {
+                let error = NdiOutputError::new(
                     NdiErrorCode::SendFailed,
-                    "NDI rejected the validated BGRA frame",
+                    "NDI frame storage rejected the validated BGRA frame",
                 );
-                shared.replace_status_error(&mapped);
+                shared.replace_status_error(&error);
                 return WorkerExit::StartupFailed;
             }
-        };
-        if ndi_frame.replace_data(frame.data.to_vec()).is_err() {
-            let error = NdiOutputError::new(
-                NdiErrorCode::SendFailed,
-                "NDI frame storage rejected the validated BGRA frame",
-            );
-            shared.replace_status_error(&error);
-            return WorkerExit::StartupFailed;
+            ndi_frame_dims = dims;
+            ndi_frame = Some(built);
+        } else if let Some(existing) = ndi_frame.as_mut()
+            && existing.data().len() == frame.data.len()
+        {
+            existing
+                .data_mut()
+                .copy_from_slice(&frame.data);
+        } else if let Some(existing) = ndi_frame.as_mut() {
+            // Defensive length fallback: rebuild with a fresh buffer when the
+            // validated frame data no longer matches the reused layout.
+            if existing.replace_data(frame.data.to_vec()).is_err() {
+                let error = NdiOutputError::new(
+                    NdiErrorCode::SendFailed,
+                    "NDI frame storage rejected the validated BGRA frame",
+                );
+                shared.replace_status_error(&error);
+                return WorkerExit::StartupFailed;
+            }
         }
-        sender.send_video(&ndi_frame);
+        if let Some(existing) = &ndi_frame {
+            sender.send_video(existing);
+        }
         shared.metrics.sent_frames.fetch_add(1, Ordering::Relaxed);
         shared
             .metrics

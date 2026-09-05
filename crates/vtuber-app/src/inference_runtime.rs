@@ -209,6 +209,8 @@ pub(crate) struct InferenceRateState {
     detector_rate: Option<RateCounter>,
     landmark_last_count: u64,
     landmark_rate: Option<RateCounter>,
+    /// Last stage sample counts seen while building the diagnostics timings.
+    stage_counts: [u64; InferenceStage::COUNT],
 }
 
 /// Reads the latest observation and updates worker diagnostics.
@@ -218,7 +220,7 @@ pub(crate) fn read_inference_output_system(
     mut rates: Local<InferenceRateState>,
 ) {
     let _ = inference.read_latest();
-    let status = inference.status();
+    let mut status = inference.status();
     let new_observation = match (status.last_source_seq, status.last_finished_at) {
         (Some(seq), Some(finished_at)) if rates.last_seq != Some(seq) => Some((seq, finished_at.0)),
         _ => None,
@@ -321,31 +323,38 @@ pub(crate) fn read_inference_output_system(
         .landmark_rate
         .as_mut()
         .map_or(0.0, |counter| counter.rate_hz(now) as f32);
-    diagnostics.stage_timings = InferenceStage::ALL
-        .into_iter()
-        .filter_map(|stage| {
-            let timing = metrics.stage(stage);
-            (timing.count > 0).then(|| {
-                (
-                    format!("inference_{stage:?}_mean"),
-                    timing.mean_ns as f32 / 1_000_000.0,
-                )
+    // Stage timing values only change when new samples are recorded, which is
+    // exactly when the stage sample counts advance; skip the per-stage string
+    // rebuilds while the counts are unchanged.
+    let stage_counts = InferenceStage::ALL.map(|stage| metrics.stage(stage).count);
+    if stage_counts != rates.stage_counts {
+        rates.stage_counts = stage_counts;
+        diagnostics.stage_timings = InferenceStage::ALL
+            .into_iter()
+            .filter_map(|stage| {
+                let timing = metrics.stage(stage);
+                (timing.count > 0).then(|| {
+                    (
+                        format!("inference_{stage:?}_mean"),
+                        timing.mean_ns as f32 / 1_000_000.0,
+                    )
+                })
             })
-        })
-        .collect();
-    diagnostics.stage_percentiles = InferenceStage::ALL
-        .into_iter()
-        .filter_map(|stage| {
-            let timing = metrics.stage(stage);
-            (timing.count > 0).then(|| {
-                (
-                    format!("inference_{stage:?}"),
-                    timing.p50_ns as f32 / 1_000_000.0,
-                    timing.p95_ns as f32 / 1_000_000.0,
-                )
+            .collect();
+        diagnostics.stage_percentiles = InferenceStage::ALL
+            .into_iter()
+            .filter_map(|stage| {
+                let timing = metrics.stage(stage);
+                (timing.count > 0).then(|| {
+                    (
+                        format!("inference_{stage:?}"),
+                        timing.p50_ns as f32 / 1_000_000.0,
+                        timing.p95_ns as f32 / 1_000_000.0,
+                    )
+                })
             })
-        })
-        .collect();
+            .collect();
+    }
     if let Some(failure) = status.last_failure.as_ref() {
         diagnostics.last_error = Some(failure.error.to_string());
     }

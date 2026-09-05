@@ -85,19 +85,19 @@ impl ExpressionStateTracker {
             self.reset_for_generation(current_generation);
         }
 
-        // Build the new weight map.
-        let mut new_weights: HashMap<String, f32> = HashMap::new();
-        for cmd in new_commands {
-            new_weights.insert(cmd.name.clone(), cmd.weight);
-        }
-
-        // Check if any change exceeds epsilon.
+        // Check if any change exceeds epsilon, comparing against the previous
+        // state directly. The previous state is only rebuilt when an event is
+        // actually sent, so the steady state performs no string allocation.
         let mut has_significant_change = false;
 
         // Check new/changed values.
-        for (name, &weight) in &new_weights {
-            let prev = self.previous.get(name).copied().unwrap_or(0.0);
-            if (weight - prev).abs() > self.epsilon {
+        for cmd in new_commands {
+            let prev = self
+                .previous
+                .get(cmd.name.as_str())
+                .copied()
+                .unwrap_or(0.0);
+            if (cmd.weight - prev).abs() > self.epsilon {
                 has_significant_change = true;
                 break;
             }
@@ -105,10 +105,12 @@ impl ExpressionStateTracker {
 
         // Check for values that disappeared (need explicit zero).
         if !has_significant_change {
-            for (name, &prev_weight) in &self.previous {
-                if prev_weight.abs() > self.epsilon && !new_weights.contains_key(name) {
+            'outer: for (name, &prev_weight) in &self.previous {
+                if prev_weight.abs() > self.epsilon
+                    && !new_commands.iter().any(|cmd| cmd.name == *name)
+                {
                     has_significant_change = true;
-                    break;
+                    break 'outer;
                 }
             }
         }
@@ -122,7 +124,9 @@ impl ExpressionStateTracker {
 
         // Add explicit zeros for previously non-zero expressions that are now gone.
         for (name, &prev_weight) in &self.previous {
-            if prev_weight.abs() > self.epsilon && !new_weights.contains_key(name) {
+            if prev_weight.abs() > self.epsilon
+                && !new_commands.iter().any(|cmd| cmd.name == *name)
+            {
                 output.push(ExpressionCommand {
                     name: name.clone(),
                     weight: 0.0,
@@ -131,7 +135,9 @@ impl ExpressionStateTracker {
         }
 
         // Update previous state.
-        self.previous = new_weights;
+        self.previous.clear();
+        self.previous
+            .extend(new_commands.iter().map(|cmd| (cmd.name.clone(), cmd.weight)));
 
         Some(output)
     }
@@ -246,13 +252,13 @@ fn resolve_detailed_expression_name(
     expression_map: &ExpressionEntityMap,
     channel: ArkitBlendshape,
     mut is_effective: impl FnMut(Entity) -> bool,
-) -> Option<String> {
+) -> Option<&'static str> {
     [channel.canonical_name(), channel.lower_camel_alias()]
         .into_iter()
         .find_map(|name| {
             let expression = VrmExpression::from(name);
             let entity = expression_map.0.get(&expression)?;
-            is_effective(*entity).then(|| name.to_owned())
+            is_effective(*entity).then_some(name)
         })
 }
 
@@ -306,7 +312,7 @@ mod tests {
     fn resolve_jaw_open_alias(
         canonical_bind_count: usize,
         lower_camel_bind_count: usize,
-    ) -> Option<String> {
+    ) -> Option<&'static str> {
         let mut world = World::new();
         let canonical_entity = world
             .spawn(ExpressionBindingStatus {
@@ -337,7 +343,7 @@ mod tests {
     #[test]
     fn detailed_name_resolution_skips_noop_canonical_alias() {
         assert_eq!(
-            resolve_jaw_open_alias(0, 1).as_deref(),
+            resolve_jaw_open_alias(0, 1),
             Some("jawOpen"),
             "an effective lower-camel alias must win over a no-op canonical alias"
         );
@@ -346,7 +352,7 @@ mod tests {
     #[test]
     fn detailed_name_resolution_skips_noop_lower_camel_alias() {
         assert_eq!(
-            resolve_jaw_open_alias(1, 0).as_deref(),
+            resolve_jaw_open_alias(1, 0),
             Some("JawOpen"),
             "an effective canonical alias must remain eligible"
         );
@@ -354,7 +360,7 @@ mod tests {
 
     #[test]
     fn detailed_name_resolution_prefers_canonical_when_both_aliases_are_effective() {
-        assert_eq!(resolve_jaw_open_alias(1, 1).as_deref(), Some("JawOpen"));
+        assert_eq!(resolve_jaw_open_alias(1, 1), Some("JawOpen"));
     }
 
     #[test]

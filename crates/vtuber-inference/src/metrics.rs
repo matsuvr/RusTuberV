@@ -195,7 +195,7 @@ pub struct DropCounters {
 }
 
 /// Public snapshot of inference metrics.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct InferenceMetrics {
     /// Timing snapshots for each pipeline stage, indexed by [`InferenceStage`].
     pub stage_timings: [StageTimingSnapshot; InferenceStage::COUNT],
@@ -220,6 +220,9 @@ impl InferenceMetrics {
 pub(crate) struct InferenceMetricsState {
     rings: [StageTimingRing<RING_SIZE>; InferenceStage::COUNT],
     drops: DropCounters,
+    /// Cached snapshot, recomputed lazily after any recording mutation.
+    cached: InferenceMetrics,
+    dirty: bool,
 }
 
 impl InferenceMetricsState {
@@ -230,48 +233,61 @@ impl InferenceMetricsState {
     #[allow(clippy::indexing_slicing)]
     pub(crate) fn record_stage_duration(&mut self, stage: InferenceStage, duration: Duration) {
         self.rings[stage.index()].record(duration);
+        self.dirty = true;
     }
 
     /// Records frames overwritten in the input slot.
     pub(crate) fn record_input_overwritten(&mut self, count: u64) {
         self.drops.input_overwritten = self.drops.input_overwritten.saturating_add(count);
+        self.dirty = true;
     }
 
     /// Records a frame that was skipped before inference.
     pub(crate) fn record_skipped_sequence(&mut self) {
         self.drops.skipped_sequence = self.drops.skipped_sequence.saturating_add(1);
+        self.dirty = true;
     }
 
     /// Records a frame that completed inference.
     pub(crate) fn record_processed(&mut self) {
         self.drops.processed = self.drops.processed.saturating_add(1);
+        self.dirty = true;
     }
 
     /// Records an ordinary no-face frame.
     pub(crate) fn record_no_face(&mut self) {
         self.drops.no_face = self.drops.no_face.saturating_add(1);
+        self.dirty = true;
     }
 
     /// Records frames overwritten in the output slot.
     pub(crate) fn record_output_overwritten(&mut self, count: u64) {
         self.drops.output_overwritten = self.drops.output_overwritten.saturating_add(count);
+        self.dirty = true;
     }
 
-    /// Returns an immutable snapshot of the current metrics.
+    /// Returns a snapshot of the current metrics.
+    ///
+    /// The snapshot is cached and only recomputed after a recording mutation,
+    /// so repeated reads between frames do not re-sort the retained samples.
     #[must_use]
     // Bounds are guaranteed by construction in this numeric kernel
     // (loop ranges bounded by buffer lengths / fixed-size dimensions);
     // see the AGENTS.md production panic policy.
     #[allow(clippy::indexing_slicing)]
-    pub(crate) fn snapshot(&self) -> InferenceMetrics {
-        let mut stage_timings = [StageTimingSnapshot::default(); InferenceStage::COUNT];
-        for (i, ring) in self.rings.iter().enumerate() {
-            stage_timings[i] = ring.snapshot();
+    pub(crate) fn snapshot(&mut self) -> InferenceMetrics {
+        if self.dirty {
+            let mut stage_timings = [StageTimingSnapshot::default(); InferenceStage::COUNT];
+            for (i, ring) in self.rings.iter().enumerate() {
+                stage_timings[i] = ring.snapshot();
+            }
+            self.cached = InferenceMetrics {
+                stage_timings,
+                drops: self.drops,
+            };
+            self.dirty = false;
         }
-        InferenceMetrics {
-            stage_timings,
-            drops: self.drops,
-        }
+        self.cached
     }
 }
 

@@ -284,15 +284,43 @@ fn sync_output_camera(
         return;
     };
 
-    snapshot.transform = Some(*main_transform);
-    snapshot.projection = Some(main_projection.clone());
+    // Commit only when the mirrored values actually changed; rewriting
+    // identical camera components every frame would dirty change detection
+    // (and the render extractor) for no data change.
+    if snapshot.transform != Some(*main_transform) {
+        snapshot.transform = Some(*main_transform);
+    }
+    if snapshot.projection.as_ref().is_none_or(|projection| {
+        projection.fov != main_projection.fov
+            || projection.aspect_ratio != main_projection.aspect_ratio
+            || projection.near != main_projection.near
+            || projection.far != main_projection.far
+    }) {
+        snapshot.projection = Some(main_projection.clone());
+    }
 
     for (entity, mut camera, mut projection, mut transform, mut global_transform, in_flight) in
         &mut output_cameras.cameras
     {
-        *transform = *main_transform;
-        *global_transform = GlobalTransform::from(*main_transform);
-        *projection = Projection::Perspective(main_projection.clone());
+        if *transform != *main_transform {
+            *transform = *main_transform;
+        }
+        let main_global = GlobalTransform::from(*main_transform);
+        if *global_transform != main_global {
+            *global_transform = main_global;
+        }
+        let projection_changed = match &*projection {
+            Projection::Perspective(current) => {
+                current.fov != main_projection.fov
+                    || current.aspect_ratio != main_projection.aspect_ratio
+                    || current.near != main_projection.near
+                    || current.far != main_projection.far
+            }
+            Projection::Orthographic(_) | Projection::Custom(_) => true,
+        };
+        if projection_changed {
+            *projection = Projection::Perspective(main_projection.clone());
+        }
         camera.is_active = state.is_active();
         if state.is_active() && in_flight.is_none() {
             commands.entity(entity).insert((

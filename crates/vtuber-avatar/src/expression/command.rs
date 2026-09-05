@@ -77,7 +77,7 @@ impl ExpressionCommandBuilder {
         &mut self,
         expressions: impl IntoIterator<Item = (&'a str, f32)>,
     ) -> Vec<ExpressionCommand> {
-        let mut seen = HashMap::new();
+        let mut seen: HashMap<&'a str, ()> = HashMap::new();
         let mut commands = Vec::new();
 
         for (name, weight) in expressions {
@@ -100,7 +100,7 @@ impl ExpressionCommandBuilder {
                 self.metrics.duplicates_suppressed += 1;
                 continue;
             }
-            seen.insert(name.to_string(), ());
+            seen.insert(name, ());
 
             commands.push(ExpressionCommand {
                 name: name.to_string(),
@@ -173,10 +173,10 @@ pub fn build_frame_commands(
 pub fn build_detailed_face_commands(
     coefficients: &Arkit52Coefficients,
     capabilities: &PerfectSyncCapabilities,
-    mut resolve_name: impl FnMut(ArkitBlendshape) -> Option<String>,
+    mut resolve_name: impl FnMut(ArkitBlendshape) -> Option<&'static str>,
 ) -> Vec<ExpressionCommand> {
     let mut builder = ExpressionCommandBuilder::new();
-    let mut named = Vec::with_capacity(ARKIT52_CHANNEL_COUNT - 1);
+    let mut named: Vec<(&'static str, f32)> = Vec::with_capacity(ARKIT52_CHANNEL_COUNT - 1);
     for channel in ArkitBlendshape::ALL {
         if channel == ArkitBlendshape::TongueOut || !capabilities.is_effective(channel) {
             continue;
@@ -185,7 +185,7 @@ pub fn build_detailed_face_commands(
             named.push((name, coefficients.get(channel)));
         }
     }
-    builder.build(named.iter().map(|(name, weight)| (name.as_str(), *weight)))
+    builder.build(named)
 }
 
 /// Builds one pure face command list from exactly one of two paths.
@@ -202,7 +202,7 @@ pub fn build_face_commands(
     blink_weights: &[(String, f32)],
     mouth_weights: &[(String, f32)],
     gaze_weights: &[(String, f32)],
-    resolve_name: impl FnMut(ArkitBlendshape) -> Option<String>,
+    resolve_name: impl FnMut(ArkitBlendshape) -> Option<&'static str>,
 ) -> Vec<ExpressionCommand> {
     let supports_detailed = capabilities.perfect_sync.supports_perfect_sync();
     if let Some(coefficients) = detailed_face.filter(|_| supports_detailed) {
@@ -353,7 +353,7 @@ mod tests {
             ("BrowInnerUp", false),
         ]);
         let commands = build_detailed_face_commands(&coefficients, &capabilities, |channel| {
-            Some(channel.canonical_name().to_owned())
+            Some(channel.canonical_name())
         });
         assert_eq!(
             commands,

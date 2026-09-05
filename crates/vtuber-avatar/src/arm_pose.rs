@@ -19,6 +19,17 @@ use crate::load::AvatarAssetId;
 
 const ROTATION_MATCH_EPSILON: f32 = 1.0e-6;
 const SHOULDER_FOLLOW_MAX_RADIANS: f32 = 5.0_f32.to_radians();
+/// Share of a shoulder model-space rotation inherited by the upper arm.
+///
+/// The hierarchy already carries the shoulder rotation rigidly to its
+/// children; this small extra share changes the relative bend so the arm
+/// does not rotate as a single rigid stick.
+pub(crate) const SHOULDER_TO_UPPER_SHARE: f32 = 0.3;
+/// Share of a shoulder model-space rotation inherited by the forearm.
+///
+/// Smaller than the upper-arm share so motion visibly decays toward the
+/// terminal bones instead of stopping at the shoulder.
+pub(crate) const SHOULDER_TO_LOWER_SHARE: f32 = 0.15;
 /// Normal default-pose transition duration.
 pub const DEFAULT_ARM_TRANSITION_SECONDS: f32 = 0.25;
 /// Slower return-to-default transition duration.
@@ -612,11 +623,31 @@ pub(crate) fn solve_stage(
             .map(|delta| ResolvedBoneDelta { entity, delta })
         });
 
+    let (mut upper_arm_delta, mut lower_arm_delta) = (
+        solution.upper_arm_delta.normalize(),
+        solution.lower_arm_delta.normalize(),
+    );
+    // Downstream propagation: a small share of the shoulder's own
+    // model-space rotation reaches the elbow and wrist so the bend follows
+    // the shoulder instead of locking into a rigid stick.
+    if let Some(shoulder_delta) = shoulder.zip(chain.rest.shoulder) {
+        let (rest_shoulder, local) = (shoulder_delta.1, shoulder_delta.0.delta);
+        let shoulder_model =
+            rest_shoulder.global_rotation * local * rest_shoulder.global_rotation.inverse();
+        (upper_arm_delta, lower_arm_delta) = propagate_shoulder_downstream(
+            shoulder_model,
+            chain.rest.upper_arm.global_rotation,
+            chain.rest.elbow.global_rotation,
+            upper_arm_delta,
+            lower_arm_delta,
+        );
+    }
+
     Ok(Some(ResolvedArmPose {
         upper_arm: chain.upper_arm,
         lower_arm: chain.lower_arm,
-        upper_arm_delta: solution.upper_arm_delta.normalize(),
-        lower_arm_delta: solution.lower_arm_delta.normalize(),
+        upper_arm_delta,
+        lower_arm_delta,
         shoulder,
         fingers: resolve_finger_pose(chain.finger_rest, profile.finger_curl_radians),
     }))
@@ -636,6 +667,53 @@ fn weak_follow_delta(model_delta: Quat, rest_global: Quat, weight: f32) -> Optio
     let angle = (angle * weight).min(SHOULDER_FOLLOW_MAX_RADIANS);
     let weak_model_delta = Quat::from_axis_angle(axis, angle);
     normalized_or_identity(rest_global.inverse() * weak_model_delta * rest_global)
+}
+
+/// Propagates a small share of a shoulder model-space rotation downstream
+/// into the upper/lower local rest-relative deltas.
+///
+/// Every motion, however slight, must reach the terminal bones: without this
+/// the solved elbow bend stays locked while the shoulder rotates and the arm
+/// reads as a rigid stick. The shares decay toward the wrist
+/// ([`SHOULDER_TO_UPPER_SHARE`] > [`SHOULDER_TO_LOWER_SHARE`]). Degenerate
+/// input leaves the deltas untouched.
+pub(crate) fn propagate_shoulder_downstream(
+    shoulder_model_delta: Quat,
+    upper_rest_global: Quat,
+    lower_rest_global: Quat,
+    upper_delta: Quat,
+    lower_delta: Quat,
+) -> (Quat, Quat) {
+    let Some(upper_extra) = fractional_rest_delta(
+        shoulder_model_delta,
+        upper_rest_global,
+        SHOULDER_TO_UPPER_SHARE,
+    ) else {
+        return (upper_delta, lower_delta);
+    };
+    let Some(lower_extra) = fractional_rest_delta(
+        shoulder_model_delta,
+        lower_rest_global,
+        SHOULDER_TO_LOWER_SHARE,
+    ) else {
+        return (upper_delta, lower_delta);
+    };
+    let upper = (upper_extra * upper_delta).normalize();
+    let lower = (lower_extra * lower_delta).normalize();
+    if upper.is_finite() && lower.is_finite() {
+        (upper, lower)
+    } else {
+        (upper_delta, lower_delta)
+    }
+}
+
+fn fractional_rest_delta(model_delta: Quat, rest_global: Quat, share: f32) -> Option<Quat> {
+    if !model_delta.is_finite() || !rest_global.is_finite() {
+        return None;
+    }
+    let model_delta = model_delta.normalize();
+    let fractional = Quat::IDENTITY.slerp(model_delta, share).normalize();
+    normalized_or_identity(rest_global.inverse() * fractional * rest_global)
 }
 
 fn resolve_finger_pose(fingers: FingerRestReferences, curl_radians: f32) -> ResolvedFingerPose {
@@ -942,10 +1020,16 @@ fn apply_delta(
     };
     let delta = delta.normalize();
     let output = finite_normalized_or(base * delta, base);
-    transform.rotation = output;
     state.base = base;
     state.last_delta = delta;
     state.initialized = true;
+    if output == transform.rotation {
+        // The pose is already applied bit-for-bit; reporting no change lets
+        // the caller skip the ancestor/subtree global-transform refresh that
+        // would only rewrite identical values.
+        return false;
+    }
+    transform.rotation = output;
     true
 }
 

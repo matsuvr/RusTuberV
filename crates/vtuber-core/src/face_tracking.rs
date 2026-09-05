@@ -250,9 +250,18 @@ impl MediaPipeBlendshape {
     /// Parses one official category name.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|category| category.as_str() == name)
+        static LOOKUP: std::sync::OnceLock<
+            std::collections::HashMap<&'static str, MediaPipeBlendshape>,
+        > = std::sync::OnceLock::new();
+        LOOKUP
+            .get_or_init(|| {
+                Self::ALL
+                    .into_iter()
+                    .map(|category| (category.as_str(), category))
+                    .collect()
+            })
+            .get(name)
+            .copied()
     }
 
     /// Returns the fixed array index for this category.

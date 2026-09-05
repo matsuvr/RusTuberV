@@ -307,8 +307,9 @@ pub fn run_inference_worker(
                                     };
 
                                     let output_overwritten_before = output_slot.overwritten_count();
+                                    let observation_roi = observation.roi;
                                     let outcome = InferenceOutcome::Face(observation.clone());
-                                    if !output_slot.publish(observation.clone()) {
+                                    if !output_slot.publish(observation) {
                                         update_status(&status, |s| s.record_dropped());
                                     }
                                     let _ = outcome_slot.publish(outcome);
@@ -339,7 +340,7 @@ pub fn run_inference_worker(
                                         s.record_stage_duration(InferenceStage::Total, elapsed);
                                         s.record_output_overwritten(output_overwritten_delta);
                                         s.record_processed(frame.seq, finished_at, elapsed);
-                                        s.set_last_roi(Some(observation.roi));
+                                        s.set_last_roi(Some(observation_roi));
                                     });
                                     update_status(&status, |s| s.clear_consecutive_errors());
                                 }
@@ -436,17 +437,18 @@ fn process_composite_frame(
             }
 
             let output_overwritten_before = output_slot.overwritten_count();
-            if !output_slot.publish(observation.clone()) {
+            let observation_roi = observation.roi;
+            let _ = outcome_slot.publish(InferenceOutcome::Face(observation.clone()));
+            if !output_slot.publish(observation) {
                 update_status(status, |s| s.record_dropped());
             }
             let output_overwritten_delta = output_slot
                 .overwritten_count()
                 .saturating_sub(output_overwritten_before);
-            let _ = outcome_slot.publish(InferenceOutcome::Face(observation.clone()));
             update_status(status, |s| {
                 s.record_output_overwritten(output_overwritten_delta);
                 s.record_processed(frame.seq, finished_at, elapsed);
-                s.set_last_roi(Some(observation.roi));
+                s.set_last_roi(Some(observation_roi));
                 s.clear_consecutive_errors();
             });
             false

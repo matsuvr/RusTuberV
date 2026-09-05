@@ -15,9 +15,9 @@ use vtuber_avatar::ArmPoseProfileOverride;
 /// and send them — it should not perform the actual operations.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
-    // --- Screen navigation ---
-    /// Switch to a different screen.
-    SwitchScreen(crate::ui_model::Screen),
+    // --- Pane navigation ---
+    /// Switch the detail pane to a different category.
+    SwitchPane(crate::ui_model::Pane),
 
     // --- Camera actions ---
     /// Refresh the list of available cameras.
@@ -93,17 +93,17 @@ impl UiAction {
         )
     }
 
-    /// Check if this action is a screen navigation action.
+    /// Check if this action is a pane navigation action.
     #[must_use]
     pub fn is_navigation(&self) -> bool {
-        matches!(self, UiAction::SwitchScreen(_))
+        matches!(self, UiAction::SwitchPane(_))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui_model::Screen;
+    use crate::ui_model::Pane;
 
     #[test]
     fn actions_start_does_not_require_pipeline() {
@@ -132,8 +132,8 @@ mod tests {
 
     #[test]
     fn actions_navigation_is_navigation() {
-        assert!(UiAction::SwitchScreen(Screen::Setup).is_navigation());
-        assert!(UiAction::SwitchScreen(Screen::Diagnostics).is_navigation());
+        assert!(UiAction::SwitchPane(Pane::Camera).is_navigation());
+        assert!(UiAction::SwitchPane(Pane::Diagnostics).is_navigation());
     }
 
     #[test]

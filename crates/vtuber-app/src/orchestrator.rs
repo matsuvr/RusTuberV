@@ -58,8 +58,8 @@ pub struct Orchestrator {
     last_error: Option<OrchestratorError>,
     /// Pipeline lifecycle state.
     pipeline_state: PipelineState,
-    /// Current UI screen.
-    current_screen: Screen,
+    /// Current UI pane.
+    current_pane: Pane,
     /// Pending avatar load request not yet submitted to the lifecycle.
     pending_load: Option<PendingLoadRequest>,
     /// Next avatar load request correlation identifier.
@@ -171,7 +171,7 @@ impl Default for Orchestrator {
             selected_camera: None,
             last_error: None,
             pipeline_state: PipelineState::Idle,
-            current_screen: Screen::default(),
+            current_pane: Pane::default(),
             pending_load: None,
             next_load_request_id: 1,
             lifecycle_state: AvatarLifecycleState::None,
@@ -197,8 +197,8 @@ impl Orchestrator {
     /// Process a UI action and update internal state.
     pub fn process_action(&mut self, action: &UiAction) {
         match action {
-            UiAction::SwitchScreen(screen) => {
-                self.current_screen = *screen;
+            UiAction::SwitchPane(pane) => {
+                self.current_pane = *pane;
             }
             UiAction::RefreshCameras => {
                 // Camera enumeration is handled by the capture bridge system,
@@ -384,8 +384,65 @@ impl Orchestrator {
     /// an imported model. A model becomes ready only after the `bevy_vrm1`
     /// asset has initialized and humanoid binding has completed.
     pub fn update_view_model(&self, vm: &mut UiViewModel) {
-        // Screen.
-        vm.screen = self.current_screen;
+        // The view model is rebuilt only when an input to it actually changed;
+        // rebuilding it every frame clones strings and path buffers for the
+        // camera list and imported-model summary even in the steady state.
+        if !self.view_model_source_unchanged(vm) {
+            self.rebuild_view_model(vm);
+        }
+    }
+
+    /// Returns `true` when `vm` already reflects every current source value
+    /// consumed by [`Self::rebuild_view_model`].
+    fn view_model_source_unchanged(&self, vm: &UiViewModel) -> bool {
+        let lifecycle = match self.pipeline_state {
+            PipelineState::Idle => AppLifecycle::Idle,
+            PipelineState::Starting => AppLifecycle::Starting,
+            PipelineState::Running => AppLifecycle::Running,
+            PipelineState::Stopping => AppLifecycle::Stopping,
+            PipelineState::Failed => AppLifecycle::Failed,
+        };
+        if vm.pane != self.current_pane || vm.lifecycle != lifecycle {
+            return false;
+        }
+        if vm.camera.selected_index != self.selected_camera
+            || vm.camera.available_cameras.len() != self.cameras.len()
+        {
+            return false;
+        }
+        for (i, camera) in self.cameras.iter().enumerate() {
+            match vm.camera.available_cameras.get(i) {
+                Some(descriptor) if descriptor.name == camera.label => {}
+                _ => return false,
+            }
+        }
+        match (&vm.avatar.imported_model, &self.imported_model) {
+            (None, None) => {}
+            (Some(summary), model) => match model {
+                Some(model) => {
+                    let has_required_bones = model.summary.humanoid_nodes.hips < 1000
+                        && model.summary.humanoid_nodes.head < 1000;
+                    if summary.generation != model.summary.generation
+                        || summary.id != model.id
+                        || summary.name != model.name
+                        || summary.original_path != model.original_path
+                        || summary.has_required_bones != has_required_bones
+                        || summary.expression_count != model.summary.expression_presets.len()
+                    {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            (None, Some(_)) => return false,
+        }
+        vm.avatar.lifecycle == self.lifecycle_state
+    }
+
+    /// Rebuilds every view-model field from current orchestrator state.
+    fn rebuild_view_model(&self, vm: &mut UiViewModel) {
+        // Pane.
+        vm.pane = self.current_pane;
 
         // Lifecycle.
         vm.lifecycle = match self.pipeline_state {
@@ -753,8 +810,9 @@ fn sync_arm_pose_view_model(
         view_model.arm_pose = ArmPoseViewModel::default();
         return;
     };
-    view_model.arm_pose.profile = overrides.profile_for(&id).unwrap_or_default();
-    view_model.arm_pose.has_override = overrides.profile_for(&id).is_some();
+    let profile = overrides.profile_for(&id);
+    view_model.arm_pose.profile = profile.unwrap_or_default();
+    view_model.arm_pose.has_override = profile.is_some();
 }
 
 /// Converts the avatar lifecycle's internal state to the UI model's state.

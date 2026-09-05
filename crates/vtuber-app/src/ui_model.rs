@@ -9,13 +9,23 @@ use std::path::PathBuf;
 use crate::import::VrmGeneration;
 use vtuber_avatar::ArmPoseProfile;
 
-/// Which screen the UI is currently showing.
+/// Which settings pane the detail area is showing.
+///
+/// Follows the macOS System Settings model: the sidebar selects a category
+/// and the detail pane shows that category's controls as a grouped list.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Screen {
-    /// Unified operation panel: camera, avatar, calibration, preview, and
-    /// output controls that previously lived across Setup and Live.
+pub enum Pane {
+    /// Camera capture device and viewport navigation.
     #[default]
-    Setup,
+    Camera,
+    /// VRM model import and arm pose.
+    Avatar,
+    /// Neutral pose calibration.
+    Calibration,
+    /// Camera feed preview and display mirroring.
+    Preview,
+    /// NDI transparent output.
+    NdiOutput,
     /// Performance diagnostics, tracking health, and system metrics.
     Diagnostics,
 }
@@ -199,8 +209,8 @@ pub struct NdiOutputViewModel {
 /// Complete UI view model snapshot.
 #[derive(Clone, Debug, Default, Resource)]
 pub struct UiViewModel {
-    /// Current screen.
-    pub screen: Screen,
+    /// Current pane shown in the detail area.
+    pub pane: Pane,
     /// Application lifecycle.
     pub lifecycle: AppLifecycle,
     /// Camera state.
@@ -282,7 +292,7 @@ mod tests {
     fn ui_model_default_is_idle() {
         let vm = UiViewModel::default();
         assert_eq!(vm.lifecycle, AppLifecycle::Idle);
-        assert_eq!(vm.screen, Screen::Setup);
+        assert_eq!(vm.pane, Pane::Camera);
         assert!(!vm.can_start());
         assert!(!vm.can_stop());
     }
@@ -398,12 +408,12 @@ mod tests {
     }
 
     #[test]
-    fn ui_model_screen_transitions() {
+    fn ui_model_pane_transitions() {
         let mut vm = UiViewModel::default();
-        assert_eq!(vm.screen, Screen::Setup);
-        vm.screen = Screen::Diagnostics;
-        assert_eq!(vm.screen, Screen::Diagnostics);
-        vm.screen = Screen::Setup;
-        assert_eq!(vm.screen, Screen::Setup);
+        assert_eq!(vm.pane, Pane::Camera);
+        vm.pane = Pane::Diagnostics;
+        assert_eq!(vm.pane, Pane::Diagnostics);
+        vm.pane = Pane::Camera;
+        assert_eq!(vm.pane, Pane::Camera);
     }
 }

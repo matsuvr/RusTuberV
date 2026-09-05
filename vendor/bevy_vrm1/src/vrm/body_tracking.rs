@@ -554,6 +554,7 @@ mod tests {
             upper_chest: 0.0,
             chest: 0.0,
             spine: 0.0,
+            hips: 0.0,
         };
         let profile = BodyTrackingProfile {
             small_yaw_weights: head_only,
@@ -566,6 +567,7 @@ mod tests {
                 upper_chest_seconds: 0.0,
                 chest_seconds: 0.0,
                 spine_seconds: 0.0,
+                hips_seconds: 0.0,
             },
             ..default()
         };
