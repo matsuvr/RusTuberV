@@ -1,7 +1,9 @@
 //! UI shell — the bevy_egui integration layer.
 //!
 //! Provides the [`UiShellPlugin`] which sets up egui and renders the
-//! three main screens: Setup, Live, and Diagnostics.
+//! two main screens: Setup (Controls) and Diagnostics. The former Live tab
+//! was folded into these two so controls live in Setup and health in
+//! Diagnostics.
 
 use bevy::prelude::*;
 use bevy_egui::{
@@ -43,7 +45,6 @@ use vtuber_avatar::{
 };
 
 use super::diagnostics::render_diagnostics_screen;
-use super::live::render_live_screen;
 use super::setup::render_setup_screen;
 
 const DRAWER_WIDTH: f32 = 340.0;
@@ -120,25 +121,51 @@ fn drawer_header(ui: &mut bevy_egui::egui::Ui, hide_requested: &mut bool) {
     ui.add_space(4.0);
 }
 
-/// Vertical navigation list styled as full-width rounded items.
+/// Two-tab navigation: Setup (Controls) and Diagnostics.
+///
+/// Live was folded into these two — camera reset, calibration, preview, and
+/// NDI output moved to Setup, while tracking status moved to Diagnostics.
+/// Each row is a pill with an icon, title, and a small subtitle so operators
+/// see at a glance where display-affecting controls live.
 fn drawer_navigation(
     ui: &mut bevy_egui::egui::Ui,
     view_model: &UiViewModel,
     ui_state: &mut UiState,
 ) {
-    for (screen, label) in [
-        (Screen::Setup, "Setup"),
-        (Screen::Live, "Live"),
-        (Screen::Diagnostics, "Diagnostics"),
+    for (screen, icon, title, subtitle) in [
+        (
+            Screen::Setup,
+            "⚙",
+            "Setup",
+            "Camera · Avatar · Calibration · Preview · Output",
+        ),
+        (
+            Screen::Diagnostics,
+            "◉",
+            "Diagnostics",
+            "Status · Performance · Tracking",
+        ),
     ] {
-        let item = bevy_egui::egui::Button::selectable(view_model.screen == screen, label)
-            .min_size(bevy_egui::egui::vec2(ui.available_width(), 26.0))
-            .corner_radius(bevy_egui::egui::CornerRadius::same(6));
-        if ui.add(item).clicked() {
+        let selected = view_model.screen == screen;
+        let button = bevy_egui::egui::Button::selectable(
+            selected,
+            bevy_egui::egui::RichText::new(format!("{icon}  {title}"))
+                .size(12.0)
+                .strong(),
+        )
+        .min_size(bevy_egui::egui::vec2(ui.available_width(), 30.0))
+        .corner_radius(bevy_egui::egui::CornerRadius::same(9));
+        if ui.add(button).clicked() {
             ui_state.emit(UiAction::SwitchScreen(screen));
         }
+        ui.label(
+            bevy_egui::egui::RichText::new(subtitle)
+                .size(9.0)
+                .color(bevy_egui::egui::Color32::from_rgb(100, 116, 139)),
+        );
+        ui.add_space(6.0);
     }
-    ui.add_space(6.0);
+    ui.add_space(4.0);
 }
 
 /// Plugin that sets up the egui-based UI shell.
@@ -176,6 +203,7 @@ impl Plugin for UiShellPlugin {
             .init_resource::<NdiOutputRuntime>()
             .init_resource::<AvatarMotionMirror>()
             .init_resource::<CameraPointerInputGate>()
+            .init_resource::<UiSurfaceHover>()
             .init_resource::<DiagnosticsSnapshot>()
             .init_resource::<MetricsExportState>()
             .init_resource::<ErrorPresenter>()
@@ -314,13 +342,58 @@ fn attach_primary_egui_context_to_viewport_camera(
     }
 }
 
-/// Bridges the official egui pointer-ownership resource into the avatar camera
-/// domain without letting UI code touch a camera transform or projection.
+/// Whether the egui pointer currently rests over a surface this shell drew.
+///
+/// bevy_egui wraps UI systems in [`bevy_egui::egui::Context::run_ui`], whose
+/// background-layer pointer probe only knows its internal root Ui. Panels
+/// drawn in this plugin's own root Ui are invisible to it, so
+/// [`bevy_egui::input::EguiWantsInput`] alone would leave the main viewport
+/// input ungated while the pointer hovers the drawer.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiSurfaceHover {
+    over_ui: bool,
+}
+
+impl UiSurfaceHover {
+    /// Records whether the pointer rests over a UI surface this frame.
+    pub fn set(&mut self, over_ui: bool) {
+        self.over_ui = over_ui;
+    }
+
+    /// Whether the pointer rests over a UI surface.
+    #[must_use]
+    pub const fn over_ui(self) -> bool {
+        self.over_ui
+    }
+}
+
+/// Whether the egui pointer position lands inside the drawer or pull handle.
+fn pointer_over_ui(
+    pointer: Option<bevy_egui::egui::Pos2>,
+    drawer: Option<bevy_egui::egui::Rect>,
+    handle: Option<bevy_egui::egui::Rect>,
+) -> bool {
+    let Some(pointer) = pointer else {
+        return false;
+    };
+    drawer.is_some_and(|rect| rect.contains(pointer))
+        || handle.is_some_and(|rect| rect.contains(pointer))
+}
+
+/// Bridges egui pointer ownership into the avatar camera domain without
+/// letting UI code touch a camera transform or projection.
+///
+/// [`bevy_egui::input::EguiWantsInput`] still covers active drags and open
+/// popups, but its hover probe misses this shell's panels (see
+/// [`UiSurfaceHover`]), so the surfaces drawn this frame supply the rest.
 fn sync_camera_pointer_input_gate(
     egui_wants_input: Res<bevy_egui::input::EguiWantsInput>,
+    ui_surface_hover: Res<UiSurfaceHover>,
     mut gate: ResMut<CameraPointerInputGate>,
 ) {
-    gate.set_egui_owns_pointer(egui_wants_input.wants_any_pointer_input());
+    gate.set_egui_owns_pointer(
+        egui_wants_input.wants_any_pointer_input() || ui_surface_hover.over_ui(),
+    );
 }
 
 /// Performs the explicit reverse-order shutdown required by the worker
@@ -471,6 +544,7 @@ fn ui_render_system(
     avatar_motion_mirror: Res<AvatarMotionMirror>,
     face_backend: Res<FaceTrackingBackendState>,
     mut file_dialog: ResMut<super::file_dialog::FileDialogState>,
+    mut ui_surface_hover: ResMut<UiSurfaceHover>,
 ) -> Result {
     let preview_texture = preview
         .image_handle
@@ -498,37 +572,45 @@ fn ui_render_system(
             drawer_header(ui, &mut hide_requested);
             drawer_navigation(ui, &view_model, &mut ui_state);
 
-            // Screen content in a vertical scroll area.
+            // Screen content in a vertical scroll area. Width is pinned
+            // to the viewport so long labels and 16:9 preview images never
+            // expand the drawer beyond DRAWER_WIDTH; horizontal overflow is
+            // wrapped/clipped instead of letting cards peek outside.
             bevy_egui::egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| match view_model.screen {
-                    Screen::Setup => render_setup_screen(
-                        ui,
-                        &view_model,
-                        &mut ui_state,
-                        face_backend.requested,
-                        &mut file_dialog,
-                        error_presenter.current(),
-                    ),
-                    Screen::Live => render_live_screen(
-                        ui,
-                        &view_model,
-                        &mut ui_state,
-                        &preview,
-                        &landmarks,
-                        *avatar_motion_mirror,
-                        preview_texture,
-                    ),
-                    Screen::Diagnostics => render_diagnostics_screen(ui, &view_model, &diagnostics),
+                .id_salt("control_drawer_scroll")
+                .show(ui, |ui| {
+                    // ScrollArea's content width must be locked to its viewport;
+                    // otherwise a single wide card (e.g. 1500px test allocation)
+                    // would let ScrollArea expand the panel.
+                    ui.set_width(ui.available_width());
+                    match view_model.screen {
+                        Screen::Setup => render_setup_screen(
+                            ui,
+                            &view_model,
+                            &mut ui_state,
+                            &preview,
+                            &landmarks,
+                            *avatar_motion_mirror,
+                            preview_texture,
+                            face_backend.requested,
+                            &mut file_dialog,
+                            error_presenter.current(),
+                        ),
+                        Screen::Diagnostics => {
+                            render_diagnostics_screen(ui, &view_model, &diagnostics)
+                        }
+                    }
                 });
         });
 
     ui_state.control_drawer.open = drawer_open && !hide_requested;
 
+    let mut handle_rect = None;
     if drawer_shown.is_none() {
         // Drawer fully closed: leave a slim pull handle docked to the left
         // edge instead of a floating button that hides the avatar.
-        bevy_egui::egui::Area::new(bevy_egui::egui::Id::new("control_drawer_handle"))
+        let handle = bevy_egui::egui::Area::new(bevy_egui::egui::Id::new("control_drawer_handle"))
             .anchor(
                 bevy_egui::egui::Align2::LEFT_CENTER,
                 bevy_egui::egui::vec2(0.0, 0.0),
@@ -543,11 +625,22 @@ fn ui_render_system(
                         ..bevy_egui::egui::CornerRadius::ZERO
                     })
                     .fill(drawer_fill());
-                if ui.add(open).on_hover_text("Show Controls (F1)").clicked() {
-                    ui_state.control_drawer.open = true;
-                }
+                ui.add(open).on_hover_text("Show Controls (F1)")
             });
+        handle_rect = Some(handle.response.rect);
+        if handle.inner.clicked() {
+            ui_state.control_drawer.open = true;
+        }
     }
+
+    // egui's own pointer-over-area probe misses panels drawn in this plugin's
+    // own root Ui (see `UiSurfaceHover`), so report hover from the surfaces
+    // the shell just drew.
+    ui_surface_hover.set(pointer_over_ui(
+        ctx.input(|input| input.pointer.interact_pos()),
+        drawer_shown.as_ref().map(|drawer| drawer.response.rect),
+        handle_rect,
+    ));
 
     // Handle drag-and-drop for VRM files.
     super::file_dialog::handle_dropped_files(ctx, &mut ui_state);
@@ -580,6 +673,82 @@ mod tests {
     }
 
     #[test]
+    fn pointer_over_ui_covers_drawer_and_handle_but_not_the_scene() {
+        let drawer = Some(bevy_egui::egui::Rect::from_min_size(
+            bevy_egui::egui::Pos2::ZERO,
+            bevy_egui::egui::vec2(DRAWER_WIDTH, 1080.0),
+        ));
+        let handle = Some(bevy_egui::egui::Rect::from_min_size(
+            bevy_egui::egui::Pos2::ZERO,
+            bevy_egui::egui::vec2(24.0, 72.0),
+        ));
+
+        assert!(pointer_over_ui(
+            Some(bevy_egui::egui::pos2(150.0, 300.0)),
+            drawer,
+            None
+        ));
+        assert!(!pointer_over_ui(
+            Some(bevy_egui::egui::pos2(900.0, 300.0)),
+            drawer,
+            None
+        ));
+        assert!(pointer_over_ui(
+            Some(bevy_egui::egui::pos2(12.0, 40.0)),
+            None,
+            handle
+        ));
+        assert!(!pointer_over_ui(
+            Some(bevy_egui::egui::pos2(12.0, 300.0)),
+            None,
+            handle
+        ));
+        assert!(!pointer_over_ui(None, drawer, handle));
+    }
+
+    #[test]
+    fn open_drawer_surface_rect_tracks_pointer_hover() {
+        let ctx = bevy_egui::egui::Context::default();
+        let raw_input = bevy_egui::egui::RawInput {
+            screen_rect: Some(bevy_egui::egui::Rect::from_min_size(
+                bevy_egui::egui::Pos2::ZERO,
+                bevy_egui::egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+
+        let surface = |ctx: &bevy_egui::egui::Context, raw: bevy_egui::egui::RawInput| {
+            let mut drawer_rect = None;
+            let _ = ctx.run_ui(raw, |_top_ui| {
+                // Mirror `ui_render_system`: the drawer lives in the shell's
+                // own root Ui, not in run_ui's internal root.
+                let mut viewport_ui = root_viewport_ui(ctx);
+                let mut open = true;
+                let shown =
+                    control_drawer_panel().show_collapsible(&mut viewport_ui, &mut open, |ui| {
+                        ui.heading("Controls");
+                    });
+                drawer_rect = shown.map(|response| response.response.rect);
+            });
+            drawer_rect.expect("open drawer is shown")
+        };
+
+        // Warm-up pass so egui animation state exists, then measure.
+        let _ = surface(&ctx, raw_input.clone());
+        let drawer_rect = surface(&ctx, raw_input);
+
+        assert_eq!(drawer_rect.width(), DRAWER_WIDTH);
+        assert!(
+            drawer_rect.contains(bevy_egui::egui::pos2(150.0, 300.0)),
+            "pointer over the drawer must count as over UI"
+        );
+        assert!(
+            !drawer_rect.contains(bevy_egui::egui::pos2(900.0, 300.0)),
+            "pointer over the 3D scene must not count as over UI"
+        );
+    }
+
+    #[test]
     fn japanese_font_is_primary_for_both_ui_families() {
         let definitions = japanese_font_definitions();
         let font = definitions
@@ -606,8 +775,8 @@ mod tests {
     #[test]
     fn ui_state_emit_deduplicates_navigation() {
         let mut state = UiState::default();
-        state.emit(UiAction::SwitchScreen(Screen::Live));
-        state.emit(UiAction::SwitchScreen(Screen::Live)); // duplicate
+        state.emit(UiAction::SwitchScreen(Screen::Diagnostics));
+        state.emit(UiAction::SwitchScreen(Screen::Diagnostics)); // duplicate
         assert_eq!(state.pending_actions.len(), 1);
 
         state.emit(UiAction::SwitchScreen(Screen::Setup)); // different
@@ -629,11 +798,11 @@ mod tests {
     #[test]
     fn ui_state_take_allows_same_action_next_batch() {
         let mut state = UiState::default();
-        state.emit(UiAction::SwitchScreen(Screen::Live));
+        state.emit(UiAction::SwitchScreen(Screen::Diagnostics));
         let _ = state.take_actions();
 
         // Same action in next batch should work.
-        state.emit(UiAction::SwitchScreen(Screen::Live));
+        state.emit(UiAction::SwitchScreen(Screen::Diagnostics));
         assert_eq!(state.pending_actions.len(), 1);
     }
 

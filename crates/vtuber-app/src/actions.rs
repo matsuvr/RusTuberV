@@ -136,7 +136,6 @@ mod tests {
 
     #[test]
     fn actions_navigation_is_navigation() {
-        assert!(UiAction::SwitchScreen(Screen::Live).is_navigation());
         assert!(UiAction::SwitchScreen(Screen::Setup).is_navigation());
         assert!(UiAction::SwitchScreen(Screen::Diagnostics).is_navigation());
     }
