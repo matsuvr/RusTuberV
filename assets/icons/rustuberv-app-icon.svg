@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<rect x="36" y="36" width="952" height="952" rx="215" fill="#121826"/>
+<g fill="#23D5E5">
+  <rect x="113" y="113" width="174" height="56" rx="28"/><rect x="113" y="113" width="56" height="174" rx="28"/>
+  <rect x="737" y="113" width="174" height="56" rx="28"/><rect x="855" y="113" width="56" height="174" rx="28"/>
+  <rect x="113" y="855" width="174" height="56" rx="28"/><rect x="113" y="737" width="56" height="174" rx="28"/>
+  <rect x="737" y="855" width="174" height="56" rx="28"/><rect x="855" y="737" width="56" height="174" rx="28"/>
+</g>
+<ellipse cx="512" cy="845" rx="251" ry="225" fill="#EB5C3D"/>
+<ellipse cx="512" cy="451" rx="220" ry="276" fill="#EB5C3D"/>
+<ellipse cx="512" cy="476" rx="169" ry="215" fill="#FFF2E1"/>
+<path d="M379 271 L512 481 L645 271 L614 184 L410 184 Z" fill="#EB5C3D"/>
+<rect x="382" y="480" width="84" height="35" rx="18" fill="#121826"/>
+<rect x="558" y="480" width="84" height="35" rx="18" fill="#121826"/>
+<circle cx="799" cy="512" r="25" fill="#FFFFFF"/>
+</svg>

@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
 
 fn main() {
+    embed_app_icon();
+
     println!("cargo:rerun-if-env-changed=NDI_SDK_DIR");
     println!("cargo:rerun-if-env-changed=NDI_RUNTIME_DLL");
 
@@ -25,6 +27,31 @@ fn main() {
 
     if let Err(error) = stage_runtime_dll() {
         panic!("cannot prepare the NDI-enabled desktop artifact: {error}");
+    }
+}
+
+fn embed_app_icon() {
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
+    let icon_path = manifest_dir.join("../../assets/icons/rustuberv-app.ico");
+    println!("cargo:rerun-if-changed={}", icon_path.display());
+
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
+    if !icon_path.is_file() {
+        panic!("app icon not found: {}", icon_path.display());
+    }
+
+    let icon_str = icon_path.to_str().unwrap_or_else(|| {
+        panic!("app icon path is not valid UTF-8: {}", icon_path.display());
+    });
+
+    let mut resource = winres::WindowsResource::new();
+    resource.set_icon(icon_str);
+    if let Err(error) = resource.compile() {
+        panic!("failed to embed app icon {}: {error}", icon_path.display());
     }
 }
 
