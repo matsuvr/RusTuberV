@@ -6824,13 +6824,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vtuber-gnm"
-version = "0.1.0"
-dependencies = [
- "zip",
-]
-
-[[package]]
 name = "vtuber-inference"
 version = "0.1.0"
 dependencies = [
@@ -6859,11 +6852,8 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "nalgebra",
- "serde",
- "serde_json",
  "thiserror 2.0.19",
  "vtuber-core",
- "vtuber-gnm",
 ]
 
 [[package]]
@@ -7936,15 +7926,12 @@ dependencies = [
  "gltf",
  "image",
  "mediapipe",
- "serde",
- "serde_json",
  "sha2",
  "tempfile",
  "vtuber-app",
  "vtuber-avatar",
  "vtuber-camera",
  "vtuber-core",
- "vtuber-gnm",
  "vtuber-inference",
  "vtuber-tracking",
 ]

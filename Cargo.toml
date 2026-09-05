@@ -3,7 +3,6 @@ members = [
   "crates/vtuber-core",
   "crates/vtuber-camera",
   "crates/vtuber-inference",
-  "crates/vtuber-gnm",
   "crates/vtuber-tracking",
   "crates/vtuber-avatar",
   "crates/vtuber-ndi",
@@ -35,17 +34,6 @@ bevy_vrm1 = { path = "vendor/bevy_vrm1" }
 # "debug = true" / 2.
 [profile.dev]
 debug = "line-tables-only"
-
-# Issue #148: the dense GNM solver's O(K³) Cholesky factorization and
-# normal-equation assembly dominate debug-profile wall-clock time for the
-# persistent-fitter, sequence-regression, and latest-frame-worker test
-# suites. Optimizing the numeric kernel crate keeps those suites near
-# release speed. Package-level override only: workspace dev-profile
-# settings (debug info, incremental compilation) stay governed by the
-# build artifact disk policy in AGENTS.md, and Rust floating-point
-# semantics are unchanged at opt-level 2.
-[profile.dev.package.vtuber-gnm]
-opt-level = 2
 
 [workspace.lints.rust]
 # Production code must be panic-free and unsafe-free (see AGENTS.md:

@@ -76,10 +76,6 @@ pub enum UiAction {
     /// Remove the active model's override and return to geometry-derived pose.
     ResetArmPoseProfile,
 
-    // --- Face tracking backend ---
-    /// Select the face tracking backend (Direct, GNM Temporal, GNM Shadow).
-    SetFaceTrackingBackend(crate::face_backend::FaceTrackingBackendSelection),
-
     // --- Error actions ---
     /// Dismiss the current error (does not clear domain failure state).
     DismissError,

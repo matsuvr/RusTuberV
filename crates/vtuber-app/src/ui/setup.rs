@@ -247,7 +247,6 @@ pub fn render_setup_screen(
     landmarks: &PreviewLandmarkState,
     avatar_motion_mirror: AvatarMotionMirror,
     preview_texture: Option<TextureId>,
-    face_backend: crate::face_backend::FaceTrackingBackendSelection,
     file_dialog: &mut FileDialogState,
     current_error: Option<&ErrorPresentation>,
 ) {
@@ -693,8 +692,6 @@ pub fn render_setup_screen(
             ui.add_space(8.0);
 
             // Settings — keep collapsings but padded
-            render_face_tracking_backend_settings(ui, ui_state, face_backend);
-            ui.add_space(4.0);
             render_arm_pose_settings(ui, vm, ui_state);
 
             ui.add_space(8.0);
@@ -772,20 +769,6 @@ pub fn render_setup_screen(
                         }
                     });
                 });
-
-            // Still show backend selector even with no avatar? keep collapsed hidden — but show hint
-            ui.add_space(6.0);
-            ui.collapsing("Face Tracking", |ui| {
-                ui.small("Selects the requested face tracking backend.");
-                for selection in crate::face_backend::FaceTrackingBackendSelection::all() {
-                    if ui
-                        .radio(selection == face_backend, selection.label())
-                        .clicked()
-                    {
-                        ui_state.emit(UiAction::SetFaceTrackingBackend(selection));
-                    }
-                }
-            });
         }
     });
 
@@ -1326,48 +1309,6 @@ pub fn render_setup_screen(
     ui.add_space(8.0);
 }
 
-fn render_face_tracking_backend_settings(
-    ui: &mut Ui,
-    ui_state: &mut super::UiState,
-    current: crate::face_backend::FaceTrackingBackendSelection,
-) {
-    ui.collapsing(
-        RichText::new("Face Tracking")
-            .size(11.0)
-            .strong()
-            .color(Color32::from_rgb(203, 213, 225)),
-        |ui| {
-            ui.label(
-                RichText::new("Selects the requested face tracking backend.")
-                    .size(10.0)
-                    .color(Color32::from_rgb(100, 116, 139)),
-            );
-            ui.add_space(4.0);
-            for selection in crate::face_backend::FaceTrackingBackendSelection::all() {
-                if ui
-                    .radio(
-                        selection == current,
-                        RichText::new(selection.label()).size(11.0),
-                    )
-                    .clicked()
-                {
-                    ui_state.emit(UiAction::SetFaceTrackingBackend(selection));
-                }
-            }
-            if current != crate::face_backend::FaceTrackingBackendSelection::DirectMediaPipe {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        "Falls back to Direct automatically while the backend is unavailable.",
-                    )
-                    .size(10.0)
-                    .color(Color32::from_rgb(100, 116, 139))
-                    .italics(),
-                );
-            }
-        },
-    );
-}
 
 fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::UiState) {
     ui.collapsing(

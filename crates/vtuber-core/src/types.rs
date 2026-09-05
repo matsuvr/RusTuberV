@@ -160,7 +160,7 @@ pub enum HeadTranslationState {
 /// Horizontal mirroring is a semantic transform applied at one place:
 /// [`HeadTranslationSignal::mirrored`] flips only `x_meters`; `y_meters`,
 /// `z_meters`, and all rotation semantics are unchanged. This type carries no
-/// dependency on GNM, Bevy, VRM, or MediaPipe runtime types.
+/// dependency on Bevy, VRM, or MediaPipe runtime types.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeadTranslationSignal {
     /// Neutral-relative X in meters; positive toward unmirrored image right.

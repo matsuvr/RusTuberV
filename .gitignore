@@ -25,12 +25,10 @@ desktop.ini
 
 # Face inference model binaries are large and reproducible from the manifest.
 # Keep manifest.toml and LICENSE.mediapipe.txt; ignore downloaded artifacts.
-# (gnm_head.npz is a 53 MB GNM weight archive downloaded by tools/xtask.)
 /assets/models/*.tflite
 /assets/models/*.onnx
 /assets/models/*.task
 /assets/models/*.binarypb
-*.npz
 
 # User-provided VRM models and runtime outputs
 *.vrm
@@ -52,8 +50,8 @@ desktop.ini
 *.cached_pipeline
 
 # Development-only capture datasets and raw device frames stay outside the
-# repository (GNM #68.1 privacy boundary). Only derived numeric fixtures may
-# be committed.
+# repository (privacy boundary). Only derived numeric fixtures may be
+# committed.
 data/raw/**
 data/datasets/**
 *.teachercapture/

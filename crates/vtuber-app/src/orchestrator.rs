@@ -615,7 +615,6 @@ pub fn process_ui_actions_system(
     mut arm_pose_overrides: Option<ResMut<ArmPoseOverrideStore>>,
     arm_pose_settings: Option<Res<ArmPoseSettings>>,
     mut arm_pose_changes: Option<MessageWriter<ArmPoseProfileChange>>,
-    mut face_backend_state: Option<ResMut<crate::face_backend::FaceTrackingBackendState>>,
     lifecycle: Option<Res<vtuber_avatar::AvatarLifecycle>>,
     mut reset_camera_requests: Option<MessageWriter<vtuber_avatar::ResetCameraRequest>>,
 ) {
@@ -642,19 +641,6 @@ pub fn process_ui_actions_system(
                     arm_pose_settings.as_deref(),
                     &mut arm_pose_changes,
                 );
-            }
-            UiAction::SetFaceTrackingBackend(selection) => {
-                if let Some(state) = face_backend_state.as_deref_mut() {
-                    state.set_requested(*selection);
-                    if let Some(path) = arm_pose_settings
-                        .as_deref()
-                        .and_then(crate::settings::ArmPoseSettings::path)
-                        && let Err(error) =
-                            crate::settings::save_face_tracking_mode(path, *selection)
-                    {
-                        bevy::log::warn!("face tracking selection not persisted: {error}");
-                    }
-                }
             }
             UiAction::ResetAvatarCamera => {
                 if let (Some(lifecycle), Some(requests)) =

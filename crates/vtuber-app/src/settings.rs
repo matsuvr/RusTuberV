@@ -14,8 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use vtuber_avatar::{ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride};
 
-use crate::face_backend::FaceTrackingBackendSelection;
-
 /// Version of the application settings document.
 pub const ARM_POSE_SETTINGS_SCHEMA_VERSION: u32 = 1;
 /// File name used in the per-user application configuration directory.
@@ -164,7 +162,6 @@ pub fn save_arm_pose_overrides(
     path: &Path,
     store: &ArmPoseOverrideStore,
 ) -> Result<(), ArmPoseSettingsError> {
-    // Preserve other sections (face tracking selection) on rewrite.
     let mut document = if path.is_file() {
         let text = fs::read_to_string(path)?;
         toml::from_str::<ArmPoseSettingsDocument>(&text)?
@@ -173,7 +170,6 @@ pub fn save_arm_pose_overrides(
             schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
-            face_tracking_mode: None,
         }
     };
     document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
@@ -190,73 +186,6 @@ pub fn save_arm_pose_overrides(
             )
         })
         .collect();
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
-}
-
-/// Loads the persisted face tracking backend selection.
-///
-/// Returns `Ok(None)` when no selection was persisted. An unknown token is a
-/// recoverable configuration problem: it is reported as [`ArmPoseSettingsError::InvalidFaceTrackingMode`]
-/// so callers can warn and fall back to Direct instead of failing startup.
-///
-/// # Errors
-///
-/// Propagates I/O, decode, and schema-version failures from the shared
-/// settings document boundary.
-pub fn load_face_tracking_mode(
-    path: &Path,
-) -> Result<Option<FaceTrackingBackendSelection>, ArmPoseSettingsError> {
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(path)?;
-    let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
-    if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
-        return Err(ArmPoseSettingsError::UnsupportedSchema {
-            version: document.schema_version,
-        });
-    }
-    match document.face_tracking_mode.as_deref() {
-        None => Ok(None),
-        Some(token) => Ok(Some(
-            FaceTrackingBackendSelection::from_persisted_str(token).ok_or(
-                ArmPoseSettingsError::InvalidFaceTrackingMode {
-                    value: token.to_owned(),
-                },
-            )?,
-        )),
-    }
-}
-
-/// Persists the face tracking backend selection without touching other
-/// sections of the settings document.
-///
-/// # Errors
-///
-/// Propagates I/O, encode/decode, and schema-version failures; an unsupported
-/// existing document is never overwritten implicitly.
-pub fn save_face_tracking_mode(
-    path: &Path,
-    selection: FaceTrackingBackendSelection,
-) -> Result<(), ArmPoseSettingsError> {
-    let mut document = if path.is_file() {
-        let text = fs::read_to_string(path)?;
-        let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
-        if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
-            return Err(ArmPoseSettingsError::UnsupportedSchema {
-                version: document.schema_version,
-            });
-        }
-        document
-    } else {
-        ArmPoseSettingsDocument {
-            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
-            arm_pose_overrides: BTreeMap::new(),
-            dynamic_arm_profiles: BTreeMap::new(),
-            face_tracking_mode: None,
-        }
-    };
-    document.face_tracking_mode = Some(selection.as_persisted_str().to_owned());
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
@@ -289,9 +218,6 @@ struct ArmPoseSettingsDocument {
     /// defaults.
     #[serde(default)]
     dynamic_arm_profiles: BTreeMap<String, PersistedDynamicArmProfile>,
-    /// Persisted face tracking backend selection; absent in older documents.
-    #[serde(default)]
-    face_tracking_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -402,12 +328,6 @@ pub enum ArmPoseSettingsError {
     /// At least one persisted profile was invalid.
     #[error("settings contain an invalid arm-pose profile")]
     InvalidEntry,
-    /// A persisted face-tracking backend token was not recognized.
-    #[error("unknown face tracking mode `{value}`")]
-    InvalidFaceTrackingMode {
-        /// Unrecognized persisted value.
-        value: String,
-    },
 }
 
 #[cfg(test)]
@@ -491,51 +411,6 @@ mod tests {
         let loaded = ArmPoseSettings::load(&path);
         assert_eq!(loaded.restored_entries().count(), 0);
         assert!(path.with_extension("toml.invalid").is_file());
-    }
-
-    #[test]
-    fn face_tracking_mode_round_trips_through_the_settings_document() {
-        let directory = tempdir().expect("tempdir");
-        let path = directory.path().join("settings.toml");
-
-        assert_eq!(load_face_tracking_mode(&path).unwrap(), None);
-
-        save_face_tracking_mode(&path, FaceTrackingBackendSelection::GnmShadow).unwrap();
-        assert_eq!(
-            load_face_tracking_mode(&path).unwrap(),
-            Some(FaceTrackingBackendSelection::GnmShadow)
-        );
-
-        // Saving the selection must not erase arm-pose overrides.
-        let mut store = ArmPoseOverrideStore::default();
-        let _ = store.import_entries([("model-a".to_owned(), profile(0.55))]);
-        save_arm_pose_overrides(&path, &store).unwrap();
-        assert_eq!(
-            load_face_tracking_mode(&path).unwrap(),
-            Some(FaceTrackingBackendSelection::GnmShadow)
-        );
-        assert_eq!(load_arm_pose_overrides(&path).unwrap().entries().count(), 1);
-    }
-
-    #[test]
-    fn unknown_face_tracking_token_is_typed_and_missing_file_is_none() {
-        let directory = tempdir().expect("tempdir");
-        let path = directory.path().join("settings.toml");
-        std::fs::write(
-            &path,
-            "schema_version = 1\nface_tracking_mode = \"experimental_gnm_v9\"\n",
-        )
-        .unwrap();
-        match load_face_tracking_mode(&path) {
-            Err(ArmPoseSettingsError::InvalidFaceTrackingMode { value }) => {
-                assert_eq!(value, "experimental_gnm_v9");
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
-        assert_eq!(
-            load_face_tracking_mode(&directory.path().join("missing.toml")).unwrap(),
-            None
-        );
     }
 }
 

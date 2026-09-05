@@ -21,13 +21,7 @@ vtuber-app = { path = "../../crates/vtuber-app" }
 vtuber-avatar = { path = "../../crates/vtuber-avatar" }
 vtuber-inference = { path = "../../crates/vtuber-inference", features = ["legacy-face-stack"] }
 vtuber-tracking = { path = "../../crates/vtuber-tracking" }
-# Deterministic GNM baseline fit for the offline teacher replay (GNM #68.3).
-vtuber-gnm = { path = "../../crates/vtuber-gnm" }
 tempfile = "3"
-# JSON trace parsing for the temporal quality report (GNM #57.4); same
-# serde/serde_json versions already used by vtuber-app.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 # JPEG input is needed only by the still-image detector diagnostic.
 image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
 mediapipe = { git = "https://github.com/nikicat/mediapipe-rs", rev = "527037fa0fe1339750140283930bbb9560460e9e", version = "=0.1.0" }

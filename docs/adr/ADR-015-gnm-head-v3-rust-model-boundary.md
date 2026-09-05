@@ -1,6 +1,6 @@
 # ADR-015: GNM Head v3 Rust model boundary
 
-Status: Accepted for Issue #50 child #52
+Status: Superseded by ADR-023 (GNM removed from main; preserved on `archive/gnm`)
 
 ## Decision
 

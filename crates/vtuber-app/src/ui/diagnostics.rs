@@ -542,25 +542,6 @@ pub fn render_diagnostics_screen(ui: &mut Ui, vm: &UiViewModel, diagnostics: &Di
                 }
                 kv_row(
                     ui,
-                    "Requested backend",
-                    diagnostics
-                        .face_tracking_requested
-                        .as_deref()
-                        .unwrap_or("(none)"),
-                );
-                kv_row(
-                    ui,
-                    "Output authority",
-                    diagnostics
-                        .face_tracking_authority
-                        .as_deref()
-                        .unwrap_or("(none)"),
-                );
-                if let Some(reason) = diagnostics.face_tracking_fallback_reason.as_deref() {
-                    kv_row(ui, "Fallback reason", reason);
-                }
-                kv_row(
-                    ui,
                     "Latest residual",
                     &diagnostics
                         .face_tracking_latest_residual
@@ -576,21 +557,6 @@ pub fn render_diagnostics_screen(ui: &mut Ui, vm: &UiViewModel, diagnostics: &Di
                         .unwrap_or_else(|| "(none)".to_string()),
                 );
             });
-        if let Some(reason) = diagnostics.face_tracking_fallback_reason.as_deref() {
-            // highlight already in grid, also emphasize as warning bar
-            ui.add_space(6.0);
-            Frame::new()
-                .fill(Color32::from_rgba_unmultiplied(120, 53, 15, 70))
-                .corner_radius(CornerRadius::same(7))
-                .inner_margin(Margin::symmetric(8, 6))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("⚠ Fallback: {reason}"))
-                            .size(10.0)
-                            .color(Color32::from_rgb(253, 224, 71)),
-                    );
-                });
-        }
     });
 
     // Last error

@@ -17,7 +17,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
-mod ab_report;
 mod acceptance;
 mod face_image_probe;
 mod face_pipeline_smoke;
@@ -25,21 +24,6 @@ mod mediapipe_face_smoke;
 mod mediapipe_pose_probe;
 mod ndi;
 mod ndi_output_render;
-mod perfect_sync_morph;
-mod teacher_ablation;
-mod teacher_benchmark_reduced_gnm;
-mod teacher_fit_aligned_basis;
-mod teacher_fit_gnm_decoder;
-mod teacher_fit_landmark_basis;
-mod teacher_fit_landmark_decoder;
-mod teacher_fit_observable_basis;
-mod teacher_fit_prior;
-mod teacher_fit_residual;
-mod teacher_replay;
-mod teacher_residual_ablation;
-mod teacher_tune_reduced_temporal;
-mod teacher_unified_gnm_ablation;
-mod temporal_report;
 mod vrm_compatibility;
 mod vrm_managed_compatibility;
 
@@ -61,37 +45,6 @@ fn main() {
         println!("  face-pipeline-smoke       Legacy research detector/crop/landmark probe");
         println!("  mediapipe-face-smoke      Windows MSMF MediaPipe Face Landmarker gate");
         println!("  mediapipe-pose-probe      Guided MediaPipe neutral-relative pose proof");
-        println!("  temporal-report <json>    Direct/GNM temporal quality report (GNM #57.4)");
-        println!(
-            "  ab-report <json>          Direct/GNM robustness/cross-talk/performance A/B report (GNM #57.5)"
-        );
-        println!(
-            "  teacher-replay <opts>     Offline ARKit-teacher replay into a derived trace (GNM #68.3)"
-        );
-        println!(
-            "  teacher-fit-prior <opts>  Fit/export the causal linear prior from derived traces (GNM #68.4)"
-        );
-        println!(
-            "  teacher-fit-observable-basis <opts> Fit geometric non-tongue GNM basis (Issue #15)"
-        );
-        println!(
-            "  teacher-fit-aligned-basis <opts> Fit teacher-aligned observable GNM basis (Issue #16)"
-        );
-        println!(
-            "  teacher-fit-gnm-decoder <opts> Fit GNM-only or hybrid reduced-GNM decoder (Issue #17)"
-        );
-        println!("  teacher-fit-landmark-basis <opts> Fit teacher-aligned landmark basis (#18)");
-        println!("  teacher-fit-landmark-decoder <opts> Fit landmark L or HL decoder (#18)");
-        println!("  teacher-unified-gnm-ablation <opts> Evaluate D/G0/G1/L/H/HL (#19)");
-        println!("  teacher-benchmark-reduced-gnm <opts> Benchmark full/reduced GNM (#20)");
-        println!("  teacher-tune-reduced-temporal <opts> Tune causal reduced 60 Hz sampling (#21)");
-        println!(
-            "  teacher-fit-residual <opts> Fit/export same-frame teacher residual decoder (Issue #12)"
-        );
-        println!("  teacher-residual-ablation <opts> Evaluate D/G0/H0 on held-out traces (#13)");
-        println!(
-            "  teacher-ablation <opts>   Held-out no-prior/learned-prior ablation evaluation (GNM #68.5)"
-        );
         println!("  ndi <command>             Stage or verify a Windows NDI release package");
         return;
     }
@@ -163,111 +116,6 @@ fn main() {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("mediapipe-pose-probe failed: {error}");
-                std::process::exit(1);
-            }
-        },
-        "teacher-replay" => match teacher_replay::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-replay failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-fit-prior" => match teacher_fit_prior::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-fit-prior failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-fit-observable-basis" => match teacher_fit_observable_basis::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-fit-observable-basis failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-fit-aligned-basis" => match teacher_fit_aligned_basis::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-fit-aligned-basis failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-fit-gnm-decoder" => match teacher_fit_gnm_decoder::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-fit-gnm-decoder failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-fit-landmark-basis" => match teacher_fit_landmark_basis::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-fit-landmark-basis failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-fit-landmark-decoder" => match teacher_fit_landmark_decoder::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-fit-landmark-decoder failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-unified-gnm-ablation" => match teacher_unified_gnm_ablation::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-unified-gnm-ablation failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-benchmark-reduced-gnm" => match teacher_benchmark_reduced_gnm::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-benchmark-reduced-gnm failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-tune-reduced-temporal" => match teacher_tune_reduced_temporal::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-tune-reduced-temporal failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-fit-residual" => match teacher_fit_residual::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-fit-residual failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-residual-ablation" => match teacher_residual_ablation::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-residual-ablation failed: {error}");
-                process::exit(1);
-            }
-        },
-        "teacher-ablation" => match teacher_ablation::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("teacher-ablation failed: {error}");
-                process::exit(1);
-            }
-        },
-        "ab-report" => match ab_report::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("ab-report failed: {error}");
-                std::process::exit(1);
-            }
-        },
-        "temporal-report" => match temporal_report::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("temporal-report failed: {error}");
                 std::process::exit(1);
             }
         },

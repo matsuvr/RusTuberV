@@ -27,9 +27,6 @@ pub mod capture_runtime;
 /// Diagnostics snapshot for the UI.
 pub mod diagnostics;
 
-/// Face tracking backend selection, persistence, and authority display.
-pub mod face_backend;
-
 /// Bounded release-run metrics export for performance acceptance.
 pub mod metrics_export;
 

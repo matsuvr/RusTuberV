@@ -21,10 +21,6 @@ use crate::capture_runtime::{
 };
 use crate::diagnostics::{DiagnosticsSnapshot, sync_engine_diagnostics};
 use crate::error_presenter::ErrorPresenter;
-use crate::face_backend::{
-    FaceTrackingBackendState, restore_face_backend_selection_system,
-    sync_face_backend_diagnostics_system,
-};
 use crate::inference_runtime::{
     InferenceProjectRoot, InferenceRuntime, inference_bridge_system, read_inference_output_system,
 };
@@ -209,8 +205,7 @@ impl Plugin for UiShellPlugin {
             .init_resource::<ErrorPresenter>()
             .init_resource::<super::file_dialog::FileDialogState>()
             .init_resource::<CaptureRuntime>()
-            .init_resource::<LatestVideoFrame>()
-            .init_resource::<FaceTrackingBackendState>();
+            .init_resource::<LatestVideoFrame>();
 
         let frame_slot = app.world().resource::<CaptureRuntime>().frame_slot();
         let project_root = app
@@ -221,16 +216,14 @@ impl Plugin for UiShellPlugin {
         app.insert_resource(InferenceRuntime::new(frame_slot, project_root))
             .init_resource::<TrackingRuntime>()
             .add_systems(Startup, restore_arm_pose_settings_system)
-            .add_systems(Startup, restore_face_backend_selection_system)
-            // Action processing, avatar pose re-resolution, backend authority,
-            // and lifecycle sync are chained so a settings action reaches the
-            // compositor in the same Update frame.
+            // Action processing, avatar pose re-resolution, and lifecycle sync
+            // are chained so a settings action reaches the compositor in the
+            // same Update frame.
             .add_systems(
                 Update,
                 (
                     process_ui_actions_system,
                     apply_arm_pose_profile_changes,
-                    sync_face_backend_diagnostics_system,
                     sync_avatar_lifecycle_system,
                 )
                     .chain(),
@@ -542,7 +535,6 @@ fn ui_render_system(
     preview: Res<PreviewState>,
     landmarks: Res<PreviewLandmarkState>,
     avatar_motion_mirror: Res<AvatarMotionMirror>,
-    face_backend: Res<FaceTrackingBackendState>,
     mut file_dialog: ResMut<super::file_dialog::FileDialogState>,
     mut ui_surface_hover: ResMut<UiSurfaceHover>,
 ) -> Result {
@@ -593,7 +585,6 @@ fn ui_render_system(
                             &landmarks,
                             *avatar_motion_mirror,
                             preview_texture,
-                            face_backend.requested,
                             &mut file_dialog,
                             error_presenter.current(),
                         ),

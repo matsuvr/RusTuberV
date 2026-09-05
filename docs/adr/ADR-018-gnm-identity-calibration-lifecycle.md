@@ -1,6 +1,6 @@
 # ADR-018: GNM identity calibration lifecycle lives in vtuber-tracking
 
-Status: Accepted for Issue #85 (GNM #54.4)
+Status: Superseded by ADR-023 (GNM removed from main; preserved on `archive/gnm`)
 
 ## Decision
 

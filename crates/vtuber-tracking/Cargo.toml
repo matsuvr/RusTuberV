@@ -10,17 +10,11 @@ description = "Calibration, pose solving, filtering, and tracking state for RusT
 
 [dependencies]
 vtuber-core = { path = "../vtuber-core" }
-vtuber-gnm = { path = "../vtuber-gnm" }
 nalgebra = "=0.35.0"
 thiserror = "2"
-# Serialization of versioned research artifacts (GNM #68.4b); same serde
-# versions already used by vtuber-app. No Bevy/engine types are involved.
-serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 approx = "=0.5.1"
-# JSON round-trip of research artifacts in tests (GNM #68.4c).
-serde_json = "1"
 
 [lints]
 workspace = true

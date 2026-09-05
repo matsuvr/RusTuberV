@@ -64,12 +64,6 @@ pub struct DiagnosticsSnapshot {
     pub auto_neutral_state: Option<String>,
     /// Whether an auto-neutral calibration reference is ready for tracking.
     pub face_tracking_calibration_ready: Option<bool>,
-    /// Requested face tracking backend label.
-    pub face_tracking_requested: Option<String>,
-    /// Backend that currently owns avatar output.
-    pub face_tracking_authority: Option<String>,
-    /// Why the GNM request fell back, when applicable.
-    pub face_tracking_fallback_reason: Option<String>,
     /// Latest backend residual reported by the active tracker, if any.
     pub face_tracking_latest_residual: Option<f32>,
     /// Additional end-to-end latency added by the non-Direct backend, if any.
