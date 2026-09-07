@@ -670,7 +670,7 @@ pub fn process_ui_actions_system(
     mut preview: ResMut<PreviewState>,
     mut avatar_motion_mirror: ResMut<AvatarMotionMirror>,
     mut arm_pose_overrides: Option<ResMut<ArmPoseOverrideStore>>,
-    arm_pose_settings: Option<Res<ArmPoseSettings>>,
+    mut arm_pose_settings: Option<ResMut<ArmPoseSettings>>,
     mut arm_pose_changes: Option<MessageWriter<ArmPoseProfileChange>>,
     lifecycle: Option<Res<vtuber_avatar::AvatarLifecycle>>,
     mut reset_camera_requests: Option<MessageWriter<vtuber_avatar::ResetCameraRequest>>,
@@ -708,6 +708,11 @@ pub fn process_ui_actions_system(
                         generation: lifecycle.current_generation(),
                     });
                 }
+                // Side-placed capture cameras observe a yawed face. Recentering
+                // makes the currently observed facing direction the new front,
+                // so the reset is visible in avatar head orientation instead of
+                // only restoring the viewport orbit.
+                orchestrator.process_action(&UiAction::BeginCalibration);
             }
             UiAction::StartNdiOutput => {
                 if let Some(intent) = ndi_intent.as_deref_mut() {
@@ -717,6 +722,15 @@ pub fn process_ui_actions_system(
             UiAction::StopNdiOutput => {
                 if let Some(intent) = ndi_intent.as_deref_mut() {
                     intent.request_stop();
+                }
+            }
+            UiAction::SetLanguage(language) => {
+                if let Some(settings) = arm_pose_settings.as_mut()
+                    && let Err(error) = settings.set_language(*language)
+                {
+                    orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
+                        error.to_string(),
+                    )));
                 }
             }
             _ => orchestrator.process_action(action),
@@ -1027,6 +1041,9 @@ mod tests {
             lifecycle.current_generation()
         };
         app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .set_pipeline_state(PipelineState::Running);
+        app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::ResetAvatarCamera);
         app.update();
@@ -1038,6 +1055,46 @@ mod tests {
         let requests = cursor.read(messages).collect::<Vec<_>>();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].generation, generation);
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Orchestrator>()
+                .take_calibration_request(),
+            Some(CalibrationRequest::Begin)
+        );
+    }
+
+    #[test]
+    fn reset_camera_action_skips_tracking_recenter_while_idle() {
+        let mut app = App::new();
+        app.init_resource::<Orchestrator>()
+            .init_resource::<UiState>()
+            .init_resource::<UiViewModel>()
+            .init_resource::<PreviewState>()
+            .init_resource::<AvatarMotionMirror>()
+            .init_resource::<vtuber_avatar::AvatarLifecycle>()
+            .add_message::<vtuber_avatar::ResetCameraRequest>()
+            .add_systems(Update, process_ui_actions_system);
+
+        let root = app.world_mut().spawn_empty().id();
+        {
+            let mut lifecycle = app
+                .world_mut()
+                .resource_mut::<vtuber_avatar::AvatarLifecycle>();
+            lifecycle.request_load(root).expect("test load is valid");
+            lifecycle.start_binding(root);
+            lifecycle.finish_ready();
+        }
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ResetAvatarCamera);
+        app.update();
+
+        assert!(
+            app.world_mut()
+                .resource_mut::<Orchestrator>()
+                .take_calibration_request()
+                .is_none()
+        );
     }
 
     #[test]

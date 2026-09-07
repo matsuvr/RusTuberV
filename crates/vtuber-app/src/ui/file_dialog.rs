@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use bevy::prelude::*;
 
 use crate::actions::UiAction;
+use crate::settings::UiLanguage;
 
 /// Resource managing the async file dialog state.
 #[derive(Resource, Clone, Default)]
@@ -34,7 +35,7 @@ impl FileDialogState {
     }
 
     /// Start a new file dialog.
-    pub fn start(&mut self) {
+    pub fn start(&mut self, lang: UiLanguage) {
         let mut inner = self
             .inner
             .lock()
@@ -55,8 +56,11 @@ impl FileDialogState {
                 let rt = tokio::runtime::Runtime::new().ok()?;
                 rt.block_on(async {
                     let handle = rfd::AsyncFileDialog::new()
-                        .add_filter("VRM models", &["vrm"])
-                        .set_title("Select VRM model (0.x or 1.0)")
+                        .add_filter(lang.pick("VRM モデル", "VRM models"), &["vrm"])
+                        .set_title(lang.pick(
+                            "VRM モデルを選択 (0.x / 1.0)",
+                            "Select VRM model (0.x or 1.0)",
+                        ))
                         .pick_file()
                         .await;
                     handle.map(|h| h.path().to_path_buf())

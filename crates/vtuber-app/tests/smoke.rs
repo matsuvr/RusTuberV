@@ -82,22 +82,23 @@ fn smoke_view_model_reflects_state() {
 fn smoke_error_presenter_no_duplicate() {
     use vtuber_app::error_presenter::ErrorPresenter;
     use vtuber_app::orchestrator::OrchestratorError;
+    use vtuber_app::settings::UiLanguage;
 
     let mut presenter = ErrorPresenter::default();
 
     // First error is presented.
     let err = OrchestratorError::NoCameraSelected;
-    assert!(presenter.update(Some(&err)));
+    assert!(presenter.update(Some(&err), UiLanguage::Ja));
 
     // Same error is not re-presented.
-    assert!(!presenter.update(Some(&err)));
+    assert!(!presenter.update(Some(&err), UiLanguage::Ja));
 
     // Dismiss clears it.
     presenter.dismiss();
     assert!(presenter.current().is_none());
 
     // Can present again after dismiss.
-    assert!(presenter.update(Some(&err)));
+    assert!(presenter.update(Some(&err), UiLanguage::Ja));
 }
 
 /// Smoke test: preview toggle doesn't affect tracking.

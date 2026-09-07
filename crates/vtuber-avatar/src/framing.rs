@@ -4,6 +4,7 @@ pub mod camera_control;
 pub mod camera_input;
 pub mod camera_reset;
 pub(crate) mod fixed_fov_fit;
+pub(crate) mod hair_bounds;
 pub(crate) mod head_subtree_bounds;
 
 use bevy::ecs::system::SystemParam;
@@ -12,6 +13,7 @@ use bevy_vrm1::prelude::{HeadBoneEntity, HipsBoneEntity};
 
 use self::camera_control::{AvatarCameraControl, CameraControlPose};
 use self::fixed_fov_fit::{FIXED_VERTICAL_FOV, solve_fixed_fov_fit};
+use self::hair_bounds::{HairBounds, collect_hair_bounds};
 use self::head_subtree_bounds::{HeadSubtreeBounds, WorldBounds, collect_head_subtree_bounds};
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 
@@ -51,6 +53,7 @@ pub(crate) struct FramingWorld<'w, 's> {
     bones: Query<'w, 's, &'static GlobalTransform>,
     children: Query<'w, 's, &'static Children>,
     renderables: Query<'w, 's, &'static Mesh3d>,
+    names: Query<'w, 's, &'static Name>,
     mesh_assets: Res<'w, Assets<Mesh>>,
 }
 
@@ -98,14 +101,29 @@ pub(crate) fn frame_avatar_camera(
         &world.bones,
         &world.mesh_assets,
     );
+    let hair_bounds = collect_hair_bounds(
+        root,
+        &world.children,
+        &world.renderables,
+        &world.names,
+        &world.bones,
+        &world.mesh_assets,
+    );
     let Some(upper_body_bounds) = upper_body_bounds(head.translation(), hips.translation()) else {
         return;
     };
-    let bounds = match subtree_bounds {
-        HeadSubtreeBounds::Pending => return,
-        HeadSubtreeBounds::Empty | HeadSubtreeBounds::Invalid => upper_body_bounds,
-        HeadSubtreeBounds::Ready(subtree_bounds) => upper_body_bounds.union(subtree_bounds),
-    };
+    if matches!(subtree_bounds, HeadSubtreeBounds::Pending)
+        || matches!(hair_bounds, HairBounds::Pending)
+    {
+        return;
+    }
+    let mut bounds = upper_body_bounds;
+    if let HeadSubtreeBounds::Ready(subtree_bounds) = subtree_bounds {
+        bounds = bounds.union(subtree_bounds);
+    }
+    if let HairBounds::Ready(hair_bounds) = hair_bounds {
+        bounds = bounds.union(hair_bounds);
+    }
 
     let mut framed_pose = None;
     for (camera, viewport_camera, mut transform, mut projection) in &mut cameras {
@@ -800,6 +818,23 @@ mod tests {
         assert!((projection.fov - FIXED_VERTICAL_FOV).abs() < f32::EPSILON);
     }
 
+    fn spawn_named_renderable(
+        app: &mut App,
+        parent: Entity,
+        name: &str,
+        mesh: Handle<Mesh>,
+        transform: GlobalTransform,
+    ) -> Entity {
+        app.world_mut()
+            .spawn((
+                Name::new(name.to_owned()),
+                Mesh3d(mesh),
+                ChildOf(parent),
+                transform,
+            ))
+            .id()
+    }
+
     #[test]
     fn portrait_and_landscape_viewports_use_their_actual_aspect_ratio() {
         fn run_fit(viewport: UVec2) -> (f32, f32) {
@@ -829,5 +864,150 @@ mod tests {
         assert!((portrait_aspect - 900.0 / 1600.0).abs() < f32::EPSILON);
         assert!((landscape_aspect - 1600.0 / 900.0).abs() < f32::EPSILON);
         assert!(portrait_distance > landscape_distance);
+    }
+
+    #[test]
+    fn hair_mesh_under_avatar_root_is_inside_viewport() {
+        let mut app = frame_app(UVec2::new(1600, 900));
+        let camera = camera_entity(&mut app);
+        let (root, head, hips) = spawn_humanoid_parts(&mut app, 0.0);
+        let mesh = mesh_asset(&mut app, &cube_positions());
+        // Hair is a sibling of the body under the avatar root, not a child of
+        // the head bone. Tall and wide hair must expand the fixed-FOV fit.
+        spawn_named_renderable(
+            &mut app,
+            root,
+            "Hair",
+            mesh.clone(),
+            GlobalTransform::from_translation(Vec3::new(-4.0, 0.0, 0.0)),
+        );
+        spawn_named_renderable(
+            &mut app,
+            root,
+            "Hair",
+            mesh.clone(),
+            GlobalTransform::from_translation(Vec3::new(4.0, 0.0, 0.0)),
+        );
+        spawn_named_renderable(
+            &mut app,
+            root,
+            "Hair",
+            mesh,
+            GlobalTransform::from_translation(Vec3::new(0.0, 5.0, 0.0)),
+        );
+        make_ready(&mut app, root);
+        app.update();
+
+        let camera_transform = *app
+            .world()
+            .get::<Transform>(camera)
+            .expect("camera transform");
+        let Projection::Perspective(projection) = app.world().get::<Projection>(camera).unwrap()
+        else {
+            panic!("avatar viewport camera must use perspective projection");
+        };
+        assert!((projection.fov - FIXED_VERTICAL_FOV).abs() < f32::EPSILON);
+        let base = upper_body_bounds(
+            app.world()
+                .get::<GlobalTransform>(head)
+                .unwrap()
+                .translation(),
+            app.world()
+                .get::<GlobalTransform>(hips)
+                .unwrap()
+                .translation(),
+        )
+        .unwrap();
+        let hair =
+            WorldBounds::new(Vec3::new(-4.25, -0.25, -0.25), Vec3::new(4.25, 5.25, 0.25)).unwrap();
+        assert_projected_inside(camera_transform, projection, base.union(hair));
+    }
+
+    #[test]
+    fn non_hair_mesh_under_avatar_root_does_not_expand_framing() {
+        fn framed_distance(with_body: bool) -> f32 {
+            let mut app = frame_app(UVec2::new(1600, 900));
+            let camera = camera_entity(&mut app);
+            let (root, _, _) = spawn_humanoid_parts(&mut app, 0.0);
+            if with_body {
+                let mesh = mesh_asset(&mut app, &cube_positions());
+                spawn_named_renderable(
+                    &mut app,
+                    root,
+                    "Body",
+                    mesh,
+                    GlobalTransform::from_translation(Vec3::new(4.0, 0.0, 0.0)),
+                );
+            }
+            make_ready(&mut app, root);
+            app.update();
+            app.world()
+                .get::<Transform>(camera)
+                .expect("camera transform")
+                .translation
+                .distance(Vec3::ZERO)
+        }
+
+        let without_body = framed_distance(false);
+        let with_body = framed_distance(true);
+        assert!((without_body - with_body).abs() < 1e-4);
+    }
+
+    #[test]
+    fn pending_hair_retries_without_marking_generation_framed() {
+        let mut app = frame_app(UVec2::new(1600, 900));
+        let camera = camera_entity(&mut app);
+        let (root, _, _) = spawn_humanoid_parts(&mut app, 0.0);
+        let mesh = mesh_asset(&mut app, &cube_positions());
+        let hair = spawn_named_renderable(
+            &mut app,
+            root,
+            "Hair",
+            mesh,
+            GlobalTransform::IDENTITY,
+        );
+        app.world_mut()
+            .entity_mut(hair)
+            .remove::<GlobalTransform>();
+        make_ready(&mut app, root);
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
+        let before = *app
+            .world()
+            .get::<Transform>(camera)
+            .expect("camera transform");
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<Transform>(camera)
+                .expect("camera transform"),
+            &before
+        );
+        assert!(
+            app.world()
+                .resource::<AvatarCameraControl>()
+                .current_for(generation)
+                .is_none()
+        );
+
+        app.world_mut()
+            .entity_mut(hair)
+            .insert(GlobalTransform::IDENTITY);
+        app.update();
+        assert_ne!(
+            app.world()
+                .get::<Transform>(camera)
+                .expect("camera transform"),
+            &before
+        );
+        assert!(
+            app.world()
+                .resource::<AvatarCameraControl>()
+                .current_for(generation)
+                .is_some()
+        );
     }
 }

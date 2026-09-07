@@ -8,6 +8,7 @@ use bevy_egui::egui::{
     self, Button, Color32, CornerRadius, Frame, Margin, Response, RichText, Ui, vec2,
 };
 
+use crate::settings::UiLanguage;
 use crate::ui_model::AppLifecycle;
 
 /// macOS systemBlue (dark mode) — the single accent color.
@@ -128,12 +129,15 @@ pub(crate) fn caption(ui: &mut Ui, text: &str) {
 }
 
 /// Lifecycle label and semantic color for the session status.
-pub(crate) fn app_lifecycle_text(lifecycle: AppLifecycle) -> (Color32, &'static str) {
+pub(crate) fn app_lifecycle_text(
+    lifecycle: AppLifecycle,
+    lang: UiLanguage,
+) -> (Color32, &'static str) {
     match lifecycle {
-        AppLifecycle::Idle => (SECONDARY, "Idle"),
-        AppLifecycle::Starting => (INFO_BLUE, "Starting"),
-        AppLifecycle::Running => (OK_GREEN, "Running"),
-        AppLifecycle::Stopping => (WARNING_AMBER, "Stopping"),
-        AppLifecycle::Failed => (ALERT_RED, "Failed"),
+        AppLifecycle::Idle => (SECONDARY, lang.pick("待機", "Idle")),
+        AppLifecycle::Starting => (INFO_BLUE, lang.pick("起動中", "Starting")),
+        AppLifecycle::Running => (OK_GREEN, lang.pick("実行中", "Running")),
+        AppLifecycle::Stopping => (WARNING_AMBER, lang.pick("停止中", "Stopping")),
+        AppLifecycle::Failed => (ALERT_RED, lang.pick("エラー", "Failed")),
     }
 }

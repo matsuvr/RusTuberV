@@ -19,11 +19,34 @@ pub const ARM_POSE_SETTINGS_SCHEMA_VERSION: u32 = 1;
 /// File name used in the per-user application configuration directory.
 pub const ARM_POSE_SETTINGS_FILE_NAME: &str = "settings.toml";
 
+/// UI 表示言語。既定は日本語。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLanguage {
+    /// 日本語（既定）。
+    #[default]
+    Ja,
+    /// English.
+    En,
+}
+
+impl UiLanguage {
+    /// 言語に対応する文字列を選択する。
+    #[must_use]
+    pub fn pick<'a>(self, ja: &'a str, en: &'a str) -> &'a str {
+        match self {
+            Self::Ja => ja,
+            Self::En => en,
+        }
+    }
+}
+
 /// Application resource that owns the persistent arm-pose settings location.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct ArmPoseSettings {
     path: Option<PathBuf>,
     restored: ArmPoseOverrideStore,
+    language: UiLanguage,
 }
 
 impl Default for ArmPoseSettings {
@@ -31,6 +54,7 @@ impl Default for ArmPoseSettings {
         Self {
             path: default_settings_path(),
             restored: ArmPoseOverrideStore::default(),
+            language: UiLanguage::default(),
         }
     }
 }
@@ -52,9 +76,11 @@ impl ArmPoseSettings {
                 ArmPoseOverrideStore::default()
             }
         };
+        let language = load_language(&path);
         Self {
             path: Some(path),
             restored,
+            language,
         }
     }
 
@@ -73,6 +99,7 @@ impl ArmPoseSettings {
         Self {
             path: Some(path.into()),
             restored: ArmPoseOverrideStore::default(),
+            language: UiLanguage::default(),
         }
     }
 
@@ -94,6 +121,21 @@ impl ArmPoseSettings {
             return Err(ArmPoseSettingsError::NoConfigDirectory);
         };
         save_arm_pose_overrides(path, store)
+    }
+
+    /// Returns the UI language loaded at startup.
+    #[must_use]
+    pub fn language(&self) -> UiLanguage {
+        self.language
+    }
+
+    /// Persists the UI language and applies it to this resource.
+    pub fn set_language(&mut self, language: UiLanguage) -> Result<(), ArmPoseSettingsError> {
+        if let Some(path) = &self.path {
+            save_language(path, language)?;
+        }
+        self.language = language;
+        Ok(())
     }
 }
 
@@ -119,6 +161,34 @@ pub fn restore_arm_pose_settings_system(
 pub fn default_settings_path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "RusTuberV")
         .map(|dirs| dirs.config_dir().join(ARM_POSE_SETTINGS_FILE_NAME))
+}
+
+/// Loads the UI language from the settings document, defaulting to Japanese
+/// when the file is missing or unreadable.
+#[must_use]
+pub fn load_language(path: &Path) -> UiLanguage {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<ArmPoseSettingsDocument>(&text).ok())
+        .map(|document| document.language)
+        .unwrap_or_default()
+}
+
+/// Persists the UI language, preserving the rest of the settings document.
+pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSettingsError> {
+    let mut document = if path.is_file() {
+        let text = fs::read_to_string(path)?;
+        toml::from_str::<ArmPoseSettingsDocument>(&text)?
+    } else {
+        ArmPoseSettingsDocument {
+            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
+            language,
+            arm_pose_overrides: BTreeMap::new(),
+            dynamic_arm_profiles: BTreeMap::new(),
+        }
+    };
+    document.language = language;
+    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
 /// Loads and validates the arm-pose settings document.
@@ -168,6 +238,7 @@ pub fn save_arm_pose_overrides(
     } else {
         ArmPoseSettingsDocument {
             schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
+            language: load_language(path),
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
         }
@@ -212,6 +283,9 @@ fn write_settings_atomically(path: &Path, text: &str) -> Result<(), ArmPoseSetti
 #[derive(Debug, Serialize, Deserialize)]
 struct ArmPoseSettingsDocument {
     schema_version: u32,
+    /// UI 表示言語。欠損時は日本語。
+    #[serde(default)]
+    language: UiLanguage,
     #[serde(default)]
     arm_pose_overrides: BTreeMap<String, PersistedArmPoseProfile>,
     /// Per-model dynamic arm profiles; absent documents load as automatic
@@ -381,6 +455,24 @@ mod tests {
         let restored = load_arm_pose_overrides(&path).expect("settings reload");
         assert!(restored.profile_for(&first).is_none());
         assert!(restored.profile_for(&second).is_some());
+    }
+
+    #[test]
+    fn ui_language_round_trips_and_defaults_to_japanese() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+
+        assert_eq!(load_language(&path), UiLanguage::Ja);
+        save_language(&path, UiLanguage::En).expect("language save");
+        assert_eq!(load_language(&path), UiLanguage::En);
+
+        // Language survives an arm-pose save of the same document.
+        let store = ArmPoseOverrideStore::default();
+        save_arm_pose_overrides(&path, &store).expect("settings save");
+        assert_eq!(load_language(&path), UiLanguage::En);
+
+        let settings = ArmPoseSettings::load(&path);
+        assert_eq!(settings.language(), UiLanguage::En);
     }
 
     #[test]

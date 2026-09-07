@@ -32,7 +32,7 @@ use crate::ndi_output::{
 use crate::orchestrator::{Orchestrator, process_ui_actions_system, sync_avatar_lifecycle_system};
 use crate::preview::PreviewState;
 use crate::preview_landmarks::{PreviewLandmarkState, sync_preview_landmark_system};
-use crate::settings::{ArmPoseSettings, restore_arm_pose_settings_system};
+use crate::settings::{ArmPoseSettings, UiLanguage, restore_arm_pose_settings_system};
 use crate::tracking_runtime::{TrackingRuntime, tracking_bridge_system};
 use crate::ui_model::{Pane, UiViewModel};
 use vtuber_avatar::{
@@ -95,6 +95,7 @@ fn error_banner(
     ui: &mut bevy_egui::egui::Ui,
     presentation: &crate::error_presenter::ErrorPresentation,
     ui_state: &mut UiState,
+    lang: UiLanguage,
 ) {
     bevy_egui::egui::Frame::new()
         .fill(bevy_egui::egui::Color32::from_rgba_unmultiplied(127, 29, 29, 90))
@@ -105,9 +106,37 @@ fn error_banner(
             bevy_egui::egui::Color32::from_rgba_unmultiplied(248, 113, 113, 90),
         ))
         .show(ui, |ui| {
-            super::error::render_error_panel(ui, presentation, ui_state);
+            super::error::render_error_panel(ui, presentation, ui_state, lang);
         });
     ui.add_space(8.0);
+}
+
+/// Language switcher pinned at the bottom of the drawer; emits
+/// [`UiAction::SetLanguage`] when the selection changes.
+fn language_selector(ui: &mut bevy_egui::egui::Ui, lang: UiLanguage, ui_state: &mut UiState) {
+    ui.horizontal(|ui| {
+        ui.label(
+            bevy_egui::egui::RichText::new(lang.pick("言語", "Language"))
+                .size(11.0)
+                .color(widgets::SECONDARY),
+        );
+        ui.with_layout(bevy_egui::egui::Layout::right_to_left(bevy_egui::egui::Align::Center), |ui| {
+            let mut selected = lang;
+            bevy_egui::egui::ComboBox::from_id_salt("language_select")
+                .selected_text(match selected {
+                    UiLanguage::Ja => "日本語",
+                    UiLanguage::En => "English",
+                })
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selected, UiLanguage::Ja, "日本語");
+                    ui.selectable_value(&mut selected, UiLanguage::En, "English");
+                });
+            if selected != lang {
+                ui_state.emit(UiAction::SetLanguage(selected));
+            }
+        });
+    });
 }
 
 /// Full-viewport background-layer Ui that panels must be shown on.
@@ -127,7 +156,7 @@ fn root_viewport_ui(ctx: &bevy_egui::egui::Context) -> bevy_egui::egui::Ui {
 /// Sidebar header: macOS toolbar row — one semibold 13pt app title on the
 /// left and a small sidebar-toggle control on the right. The F1 shortcut
 /// lives in the tooltip only, keeping the bar to a single quiet row.
-fn drawer_header(ui: &mut bevy_egui::egui::Ui, hide_requested: &mut bool) {
+fn drawer_header(ui: &mut bevy_egui::egui::Ui, hide_requested: &mut bool, lang: UiLanguage) {
     ui.horizontal(|ui| {
         ui.label(bevy_egui::egui::RichText::new("RusTuber").size(13.0).strong());
         ui.with_layout(
@@ -138,7 +167,11 @@ fn drawer_header(ui: &mut bevy_egui::egui::Ui, hide_requested: &mut bool) {
                 )
                 .min_size(bevy_egui::egui::vec2(24.0, 22.0))
                 .corner_radius(bevy_egui::egui::CornerRadius::same(5));
-                if ui.add(close).on_hover_text("Hide Controls (F1)").clicked() {
+                if ui
+                    .add(close)
+                    .on_hover_text(lang.pick("操作パネルを隠す (F1)", "Hide Controls (F1)"))
+                    .clicked()
+                {
                     *hide_requested = true;
                 }
             },
@@ -148,16 +181,16 @@ fn drawer_header(ui: &mut bevy_egui::egui::Ui, hide_requested: &mut bool) {
 }
 
 /// Setup categories shown in the sidebar, in workflow order.
-const SETUP_ROWS: [(&str, &str, Pane); 3] = [
-    ("◎", "Camera", Pane::Camera),
-    ("◍", "Avatar", Pane::Avatar),
-    ("◉", "Calibration", Pane::Calibration),
+const SETUP_ROWS: [(&str, &str, &str, Pane); 3] = [
+    ("◎", "カメラ", "Camera", Pane::Camera),
+    ("◍", "アバター", "Avatar", Pane::Avatar),
+    ("◉", "キャリブレーション", "Calibration", Pane::Calibration),
 ];
 
 /// Output categories shown in the sidebar.
-const OUTPUT_ROWS: [(&str, &str, Pane); 2] = [
-    ("▣", "Preview & Display", Pane::Preview),
-    ("⬡", "NDI Output", Pane::NdiOutput),
+const OUTPUT_ROWS: [(&str, &str, &str, Pane); 2] = [
+    ("▣", "プレビューと表示", "Preview & Display", Pane::Preview),
+    ("⬡", "NDI 出力", "NDI Output", Pane::NdiOutput),
 ];
 
 /// Source-list navigation: pane categories grouped under section captions,
@@ -167,27 +200,35 @@ fn drawer_navigation(
     ui: &mut bevy_egui::egui::Ui,
     view_model: &UiViewModel,
     ui_state: &mut UiState,
+    lang: UiLanguage,
 ) {
-    widgets::section_caption(ui, "Setup");
-    for (icon, title, pane) in SETUP_ROWS {
+    widgets::section_caption(ui, lang.pick("セットアップ", "Setup"));
+    for (icon, ja, en, pane) in SETUP_ROWS {
         let selected = view_model.pane == pane;
-        if sidebar_row(ui, selected, icon, title).clicked() {
+        if sidebar_row(ui, selected, icon, lang.pick(ja, en)).clicked() {
             ui_state.emit(UiAction::SwitchPane(pane));
         }
         ui.add_space(2.0);
     }
     ui.add_space(6.0);
-    widgets::section_caption(ui, "Output");
-    for (icon, title, pane) in OUTPUT_ROWS {
+    widgets::section_caption(ui, lang.pick("出力", "Output"));
+    for (icon, ja, en, pane) in OUTPUT_ROWS {
         let selected = view_model.pane == pane;
-        if sidebar_row(ui, selected, icon, title).clicked() {
+        if sidebar_row(ui, selected, icon, lang.pick(ja, en)).clicked() {
             ui_state.emit(UiAction::SwitchPane(pane));
         }
         ui.add_space(2.0);
     }
     ui.add_space(6.0);
-    widgets::section_caption(ui, "System");
-    if sidebar_row(ui, view_model.pane == Pane::Diagnostics, "▦", "Diagnostics").clicked() {
+    widgets::section_caption(ui, lang.pick("システム", "System"));
+    if sidebar_row(
+        ui,
+        view_model.pane == Pane::Diagnostics,
+        "▦",
+        lang.pick("診断", "Diagnostics"),
+    )
+    .clicked()
+    {
         ui_state.emit(UiAction::SwitchPane(Pane::Diagnostics));
     }
 }
@@ -207,14 +248,15 @@ fn drawer_pane_content(
     preview_texture: Option<bevy_egui::egui::TextureId>,
     file_dialog: &mut super::file_dialog::FileDialogState,
     error_presenter: &ErrorPresenter,
+    lang: UiLanguage,
 ) {
     if let Some(presentation) = error_presenter.current() {
-        error_banner(ui, presentation, ui_state);
+        error_banner(ui, presentation, ui_state, lang);
     }
     match view_model.pane {
-        Pane::Camera => render_camera_pane(ui, view_model, ui_state),
-        Pane::Avatar => render_avatar_pane(ui, view_model, ui_state, file_dialog),
-        Pane::Calibration => render_calibration_pane(ui, view_model, ui_state),
+        Pane::Camera => render_camera_pane(ui, view_model, ui_state, lang),
+        Pane::Avatar => render_avatar_pane(ui, view_model, ui_state, file_dialog, lang),
+        Pane::Calibration => render_calibration_pane(ui, view_model, ui_state, lang),
         Pane::Preview => render_preview_pane(
             ui,
             ui_state,
@@ -222,9 +264,10 @@ fn drawer_pane_content(
             landmarks,
             avatar_motion_mirror,
             preview_texture,
+            lang,
         ),
-        Pane::NdiOutput => render_ndi_pane(ui, view_model, ui_state),
-        Pane::Diagnostics => render_diagnostics_pane(ui, view_model, diagnostics),
+        Pane::NdiOutput => render_ndi_pane(ui, view_model, ui_state, lang),
+        Pane::Diagnostics => render_diagnostics_pane(ui, view_model, diagnostics, lang),
     }
 }
 
@@ -611,6 +654,8 @@ fn is_deduplicatable(action: &UiAction) -> bool {
         UiAction::SwitchPane(_)
             | UiAction::ToggleMirror
             | UiAction::TogglePreview
+            | UiAction::ToggleAvatarMotionMirror
+            | UiAction::SetLanguage(_)
             | UiAction::DismissError
             | UiAction::StartNdiOutput
             | UiAction::StopNdiOutput
@@ -622,13 +667,25 @@ fn sync_error_presenter(
     orchestrator: Res<Orchestrator>,
     mut error_presenter: ResMut<ErrorPresenter>,
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
+    settings: Option<Res<ArmPoseSettings>>,
 ) {
-    error_presenter.update(orchestrator.last_error());
-    diagnostics.last_error = orchestrator.last_error().map(ToString::to_string);
-    diagnostics.last_error_code = orchestrator
-        .last_error()
-        .map(crate::error_presenter::present_error)
-        .map(|presentation| presentation.code.to_string());
+    let lang = settings
+        .as_deref()
+        .map(|settings| settings.language())
+        .unwrap_or_default();
+    let last_error = orchestrator.last_error();
+    error_presenter.update(last_error, lang);
+    match last_error {
+        Some(error) => {
+            let presentation = crate::error_presenter::present_error(error, lang);
+            diagnostics.last_error = Some(presentation.user_message);
+            diagnostics.last_error_code = Some(presentation.code.to_string());
+        }
+        None => {
+            diagnostics.last_error = None;
+            diagnostics.last_error_code = None;
+        }
+    }
 }
 
 /// System that renders the UI using egui.
@@ -644,9 +701,11 @@ fn ui_render_system(
     preview: Res<PreviewState>,
     landmarks: Res<PreviewLandmarkState>,
     avatar_motion_mirror: Res<AvatarMotionMirror>,
+    settings: Res<ArmPoseSettings>,
     mut file_dialog: ResMut<super::file_dialog::FileDialogState>,
     mut ui_surface_hover: ResMut<UiSurfaceHover>,
 ) -> Result {
+    let lang = settings.language();
     let preview_texture = preview
         .image_handle
         .as_ref()
@@ -670,8 +729,8 @@ fn ui_render_system(
     let mut viewport_ui = root_viewport_ui(ctx);
     let drawer_shown =
         control_drawer_panel().show_collapsible(&mut viewport_ui, &mut drawer_open, |ui| {
-            drawer_header(ui, &mut hide_requested);
-            drawer_navigation(ui, &view_model, &mut ui_state);
+            drawer_header(ui, &mut hide_requested, lang);
+            drawer_navigation(ui, &view_model, &mut ui_state, lang);
 
             // Footer session controls are pinned with a bottom_up layout
             // (widgets added first land at the bottom); the selected pane's
@@ -681,16 +740,30 @@ fn ui_render_system(
             ui.with_layout(
                 bevy_egui::egui::Layout::bottom_up(bevy_egui::egui::Align::LEFT),
                 |ui| {
+                    language_selector(ui, lang, &mut ui_state);
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if widgets::filled_button(ui, "Start", view_model.can_start()).clicked() {
+                        if widgets::filled_button(
+                            ui,
+                            lang.pick("開始", "Start"),
+                            view_model.can_start(),
+                        )
+                        .clicked()
+                        {
                             ui_state.emit(UiAction::Start);
                         }
-                        if widgets::plain_button(ui, "Stop", view_model.can_stop()).clicked() {
+                        if widgets::plain_button(
+                            ui,
+                            lang.pick("停止", "Stop"),
+                            view_model.can_stop(),
+                        )
+                        .clicked()
+                        {
                             ui_state.emit(UiAction::Stop);
                         }
                     });
                     ui.add_space(6.0);
-                    let (color, label) = app_lifecycle_text(view_model.lifecycle);
+                    let (color, label) = app_lifecycle_text(view_model.lifecycle, lang);
                     widgets::status_text(ui, color, label);
                     ui.add_space(6.0);
                     ui.separator();
@@ -714,6 +787,7 @@ fn ui_render_system(
                                 preview_texture,
                                 &mut file_dialog,
                                 &error_presenter,
+                                lang,
                             );
                         });
                 },
@@ -741,7 +815,7 @@ fn ui_render_system(
                         ..bevy_egui::egui::CornerRadius::ZERO
                     })
                     .fill(drawer_fill());
-                ui.add(open).on_hover_text("Show Controls (F1)")
+                ui.add(open).on_hover_text(lang.pick("操作パネルを表示 (F1)", "Show Controls (F1)"))
             });
         handle_rect = Some(handle.response.rect);
         if handle.inner.clicked() {
@@ -1003,6 +1077,7 @@ mod tests {
         app.init_resource::<Orchestrator>()
             .init_resource::<ErrorPresenter>()
             .init_resource::<DiagnosticsSnapshot>()
+            .init_resource::<ArmPoseSettings>()
             .add_systems(Update, sync_error_presenter);
 
         app.world_mut()
@@ -1023,7 +1098,18 @@ mod tests {
                 .resource::<DiagnosticsSnapshot>()
                 .last_error
                 .as_deref(),
-            Some("Import failed: invalid VRM")
+            Some("モデルを読み込めませんでした: invalid VRM")
+        );
+    }
+
+    #[test]
+    fn language_selector_emits_set_language_action() {
+        let mut ui_state = UiState::default();
+        ui_state.emit(UiAction::SetLanguage(UiLanguage::En));
+        ui_state.emit(UiAction::SetLanguage(UiLanguage::En)); // duplicate in batch
+        assert_eq!(
+            ui_state.take_actions(),
+            vec![UiAction::SetLanguage(UiLanguage::En)]
         );
     }
 

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 
 use crate::diagnostics::DiagnosticsSnapshot;
+use crate::settings::UiLanguage;
 
 /// Environment variable that enables the bounded CSV exporter.
 pub const METRICS_CSV_ENV: &str = "VTUBER_METRICS_CSV";
@@ -155,17 +156,34 @@ impl MetricsExportState {
         file.flush()
     }
 
-    fn status(&self) -> String {
+    fn status(&self, lang: UiLanguage) -> String {
         match &self.phase {
-            ExportPhase::Disabled => "disabled".to_string(),
-            ExportPhase::WaitingForTracking => "waiting for live tracking".to_string(),
-            ExportPhase::WarmingUp => format!("warming up ({:.0}s)", WARMUP_SECONDS),
-            ExportPhase::Recording => format!(
-                "recording {}/{} at {:.0}s cadence",
-                self.samples_written, MAX_SAMPLES, SAMPLE_INTERVAL_SECONDS
-            ),
-            ExportPhase::Complete => format!("complete ({MAX_SAMPLES} samples)"),
-            ExportPhase::Failed(error) => format!("failed: {error}"),
+            ExportPhase::Disabled => lang.pick("無効", "disabled").to_string(),
+            ExportPhase::WaitingForTracking => {
+                lang.pick("ライブトラッキング待ち", "waiting for live tracking").to_string()
+            }
+            ExportPhase::WarmingUp => match lang {
+                UiLanguage::Ja => format!("ウォームアップ中（{:.0}秒）", WARMUP_SECONDS),
+                UiLanguage::En => format!("warming up ({:.0}s)", WARMUP_SECONDS),
+            },
+            ExportPhase::Recording => match lang {
+                UiLanguage::Ja => format!(
+                    "記録中 {}/{}（{:.0}秒間隔）",
+                    self.samples_written, MAX_SAMPLES, SAMPLE_INTERVAL_SECONDS
+                ),
+                UiLanguage::En => format!(
+                    "recording {}/{} at {:.0}s cadence",
+                    self.samples_written, MAX_SAMPLES, SAMPLE_INTERVAL_SECONDS
+                ),
+            },
+            ExportPhase::Complete => match lang {
+                UiLanguage::Ja => format!("完了（{MAX_SAMPLES}サンプル）"),
+                UiLanguage::En => format!("complete ({MAX_SAMPLES} samples)"),
+            },
+            ExportPhase::Failed(error) => match lang {
+                UiLanguage::Ja => format!("失敗: {error}"),
+                UiLanguage::En => format!("failed: {error}"),
+            },
         }
     }
 }
@@ -176,13 +194,18 @@ pub(crate) fn export_diagnostics_system(
     mut snapshot: ResMut<DiagnosticsSnapshot>,
     mut exporter: ResMut<MetricsExportState>,
     mut last_rendered: Local<Option<(ExportPhase, usize)>>,
+    settings: Option<Res<crate::settings::ArmPoseSettings>>,
 ) {
+    let lang = settings
+        .as_deref()
+        .map(|settings| settings.language())
+        .unwrap_or_default();
     exporter.tick(time.elapsed_secs_f64(), &snapshot);
     // The status string depends only on the phase and the sample count; skip
     // the per-frame formatting while both are unchanged.
     let rendered = (exporter.phase.clone(), exporter.samples_written);
     if last_rendered.as_ref() != Some(&rendered) {
-        snapshot.metrics_export_status = exporter.status();
+        snapshot.metrics_export_status = exporter.status(lang);
         *last_rendered = Some(rendered);
     }
     snapshot.metrics_export_samples = exporter.samples_written;

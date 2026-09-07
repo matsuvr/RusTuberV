@@ -27,7 +27,9 @@ pub enum UiAction {
         /// Camera index from the available list.
         index: usize,
     },
-    /// Restore the current avatar's last successful auto-framed camera pose.
+    /// Restore the current avatar's last successful auto-framed camera pose
+    /// and recenter the tracking neutral so the currently observed facing
+    /// direction becomes the new front.
     ResetAvatarCamera,
 
     // --- Avatar actions ---
@@ -81,6 +83,10 @@ pub enum UiAction {
     DismissError,
     /// Retry after a recoverable error.
     RetryAfterError,
+
+    // --- Appearance ---
+    /// Switch the UI language and persist the choice.
+    SetLanguage(crate::settings::UiLanguage),
 }
 
 impl UiAction {
