@@ -24,6 +24,7 @@ directories = "5"
 winres = "0.1"
 
 [features]
+default = ["ndi-output"]
 dev-synthetic-input = ["vtuber-app/dev-synthetic-input"]
 ndi-output = ["vtuber-app/ndi-output"]
 

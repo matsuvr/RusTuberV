@@ -12,6 +12,7 @@ use bevy_egui::egui::{
 use crate::actions::UiAction;
 use crate::preview::PreviewState;
 use crate::preview_landmarks::PreviewLandmarkState;
+use crate::settings::UiLanguage;
 use crate::ui_model::{AvatarLifecycleState, NdiOutputUiState, UiViewModel};
 use vtuber_avatar::{ArmPoseProfileOverride, AvatarMotionMirror};
 use vtuber_core::{FaceLandmark, MonoTimeNs, monotonic_now};
@@ -105,28 +106,51 @@ pub(crate) struct NdiLiveSection {
     pub error_text: Option<String>,
 }
 
-pub(crate) fn ndi_live_section(vm: &UiViewModel) -> NdiLiveSection {
+pub(crate) fn ndi_live_section(vm: &UiViewModel, lang: UiLanguage) -> NdiLiveSection {
     let source_name = vm
         .ndi_output
         .source_name
         .clone()
         .unwrap_or_else(|| "RusTuberV".to_owned());
     let status = match vm.ndi_output.state {
-        NdiOutputUiState::Off => "Off".to_string(),
-        NdiOutputUiState::Starting => "Starting…".to_string(),
+        NdiOutputUiState::Off => lang.pick("オフ", "Off").to_string(),
+        NdiOutputUiState::Starting => lang.pick("開始中…", "Starting…").to_string(),
         NdiOutputUiState::Live => vm
             .ndi_output
             .connections
-            .map(|count| format!("Live ({count} receiver(s))"))
-            .unwrap_or_else(|| "Live".to_string()),
-        NdiOutputUiState::Error => "Error".to_string(),
+            .map(|count| match lang {
+                UiLanguage::Ja => format!("配信中（受信 {count}）"),
+                UiLanguage::En => format!("Live ({count} receiver(s))"),
+            })
+            .unwrap_or_else(|| lang.pick("配信中", "Live").to_string()),
+        NdiOutputUiState::Error => lang.pick("エラー", "Error").to_string(),
     };
     let error_text = match (
         vm.ndi_output.error_code.as_deref(),
         vm.ndi_output.error_message.as_deref(),
     ) {
+        (Some("NDI_RUNTIME_NOT_FOUND"), _) => Some(
+            lang.pick(
+                "NDIランタイムがインストールされていません",
+                "NDI runtime is not installed.",
+            )
+            .to_string(),
+        ),
         (Some(code), Some(message)) => Some(format!("{code}: {message}")),
         _ => None,
+    };
+    let unavailable_hint = if !vm.ndi_output.runtime_installed {
+        Some(lang.pick(
+            "NDIランタイムがインストールされていません",
+            "NDI runtime is not installed.",
+        ))
+    } else if !vm.ndi_output.available {
+        Some(lang.pick(
+            "このビルドには NDI 出力が含まれていません。",
+            "NDI output is not included in this build.",
+        ))
+    } else {
+        None
     };
     NdiLiveSection {
         official_link: NDI_OFFICIAL_URL,
@@ -136,8 +160,7 @@ pub(crate) fn ndi_live_section(vm: &UiViewModel) -> NdiLiveSection {
         stop_enabled: vm.can_stop_ndi_output(),
         start_action: UiAction::StartNdiOutput,
         stop_action: UiAction::StopNdiOutput,
-        unavailable_hint: (!vm.ndi_output.available)
-            .then_some("NDI output is not included in this build."),
+        unavailable_hint,
         error_text,
     }
 }
@@ -157,24 +180,29 @@ fn ndi_status_color(vm: &UiViewModel) -> Color32 {
 // ---------------------------------------------------------------------------
 
 /// Camera capture device and viewport navigation.
-pub fn render_camera_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::UiState) {
-    section_caption(ui, "Capture device");
+pub fn render_camera_pane(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    ui_state: &mut super::UiState,
+    lang: UiLanguage,
+) {
+    section_caption(ui, lang.pick("キャプチャデバイス", "Capture device"));
     group(ui, |ui| {
         if vm.camera.available_cameras.is_empty() {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("No cameras detected.")
+                    RichText::new(lang.pick("カメラが検出されません。", "No cameras detected."))
                         .size(13.0)
                         .color(SECONDARY),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if plain_button(ui, "Refresh", true).clicked() {
+                    if plain_button(ui, lang.pick("更新", "Refresh"), true).clicked() {
                         ui_state.emit(UiAction::RefreshCameras);
                     }
                 });
             });
         } else {
-            settings_row(ui, "Camera", |ui| {
+            settings_row(ui, lang.pick("カメラ", "Camera"), |ui| {
                 let selected = vm.camera.selected_index.unwrap_or(usize::MAX);
                 let mut new_selected = selected;
                 let combo_label = vm
@@ -182,7 +210,7 @@ pub fn render_camera_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::U
                     .available_cameras
                     .get(selected)
                     .map(|c| c.name.as_str())
-                    .unwrap_or("None");
+                    .unwrap_or_else(|| lang.pick("なし", "None"));
                 egui::ComboBox::from_id_salt("camera_select")
                     .selected_text(RichText::new(combo_label).size(13.0).color(LABEL))
                     .width(170.0)
@@ -202,7 +230,7 @@ pub fn render_camera_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::U
                             .corner_radius(CornerRadius::same(6))
                             .min_size(vec2(28.0, 26.0)),
                     )
-                    .on_hover_text("Refresh cameras")
+                    .on_hover_text(lang.pick("カメラを再検出", "Refresh cameras"))
                     .clicked()
                 {
                     ui_state.emit(UiAction::RefreshCameras);
@@ -211,16 +239,22 @@ pub fn render_camera_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::U
         }
     });
 
-    section_caption(ui, "Viewport");
+    section_caption(ui, lang.pick("ビューポート", "Viewport"));
     group(ui, |ui| {
-        settings_row(ui, "Camera pose", |ui| {
+        settings_row(ui, lang.pick("カメラ姿勢", "Camera pose"), |ui| {
             let can_reset = vm.can_reset_camera();
-            if plain_button(ui, "Reset", can_reset).clicked() {
+            if plain_button(ui, lang.pick("リセット", "Reset"), can_reset).clicked() {
                 ui_state.emit(UiAction::ResetAvatarCamera);
             }
         });
     });
-    caption(ui, "Left drag: Orbit · Right drag: Pan · Wheel: Dolly");
+    caption(
+        ui,
+        lang.pick(
+            "左ドラッグ: 回転 · 右ドラッグ: 移動 · ホイール: ズーム",
+            "Left drag: Orbit · Right drag: Pan · Wheel: Dolly",
+        ),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -238,22 +272,35 @@ fn lifecycle_color(state: AvatarLifecycleState) -> Color32 {
     }
 }
 
+/// Avatar lifecycle label for the status row.
+fn lifecycle_label(state: AvatarLifecycleState, lang: UiLanguage) -> &'static str {
+    match state {
+        AvatarLifecycleState::None => lang.pick("なし", "None"),
+        AvatarLifecycleState::Loading => lang.pick("読み込み中", "Loading"),
+        AvatarLifecycleState::Binding => lang.pick("バインド中", "Binding"),
+        AvatarLifecycleState::Ready => lang.pick("準備完了", "Ready"),
+        AvatarLifecycleState::Unloading => lang.pick("解放中", "Unloading"),
+        AvatarLifecycleState::Failed => lang.pick("失敗", "Failed"),
+    }
+}
+
 /// VRM model import and arm pose settings.
 pub fn render_avatar_pane(
     ui: &mut Ui,
     vm: &UiViewModel,
     ui_state: &mut super::UiState,
     file_dialog: &mut FileDialogState,
+    lang: UiLanguage,
 ) {
-    section_caption(ui, "Model");
+    section_caption(ui, lang.pick("モデル", "Model"));
     match &vm.avatar.imported_model {
         Some(model) => {
             group(ui, |ui| {
-                info_row(ui, "Name", &model.name, LABEL);
+                info_row(ui, lang.pick("名前", "Name"), &model.name, LABEL);
                 row_separator(ui);
                 info_row(
                     ui,
-                    "Format",
+                    lang.pick("フォーマット", "Format"),
                     match model.generation {
                         crate::import::VrmGeneration::Vrm0 => "VRM 0.x",
                         crate::import::VrmGeneration::Vrm1 => "VRM 1.0",
@@ -261,47 +308,71 @@ pub fn render_avatar_pane(
                     LABEL,
                 );
                 row_separator(ui);
-                info_row(ui, "Expressions", &model.expression_count.to_string(), LABEL);
+                info_row(
+                    ui,
+                    lang.pick("表情", "Expressions"),
+                    &model.expression_count.to_string(),
+                    LABEL,
+                );
                 row_separator(ui);
                 let lc = lifecycle_color(vm.avatar.lifecycle);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Status").size(13.0).color(SECONDARY));
+                    ui.label(
+                        RichText::new(lang.pick("状態", "Status"))
+                            .size(13.0)
+                            .color(SECONDARY),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        status_text(ui, lc, &format!("{:?}", vm.avatar.lifecycle));
+                        status_text(
+                            ui,
+                            lc,
+                            lifecycle_label(vm.avatar.lifecycle, lang),
+                        );
                     });
                 });
                 row_separator(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if destructive_button(ui, "Unload", true).clicked() {
+                    if destructive_button(ui, lang.pick("解除", "Unload"), true).clicked() {
                         ui_state.emit(UiAction::UnloadAvatar);
                     }
-                    if filled_button(ui, "Import VRM…", true).clicked() && !file_dialog.is_active()
+                    if filled_button(ui, lang.pick("VRM を読み込む…", "Import VRM…"), true)
+                        .clicked()
+                        && !file_dialog.is_active()
                     {
-                        file_dialog.start();
+                        file_dialog.start(lang);
                     }
                 });
                 if vm.avatar.lifecycle == AvatarLifecycleState::Failed {
                     row_separator(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if plain_button(ui, "Retry Load", true).clicked() {
+                        if plain_button(ui, lang.pick("再読み込み", "Retry Load"), true).clicked()
+                        {
                             ui_state.emit(UiAction::RetryAfterError);
                         }
                     });
                 }
             });
-            section_caption(ui, "Arm pose");
+            section_caption(ui, lang.pick("アーム姿勢", "Arm pose"));
             group(ui, |ui| {
-                render_arm_pose_settings(ui, vm, ui_state);
+                render_arm_pose_settings(ui, vm, ui_state, lang);
             });
         }
         None => {
             group(ui, |ui| {
-                caption(ui, "No avatar loaded. Import a VRM to begin.");
+                caption(
+                    ui,
+                    lang.pick(
+                        "アバターが未読み込みです。VRM を読み込んで開始してください。",
+                        "No avatar loaded. Import a VRM to begin.",
+                    ),
+                );
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if filled_button(ui, "Import VRM…", true).clicked() && !file_dialog.is_active()
+                    if filled_button(ui, lang.pick("VRM を読み込む…", "Import VRM…"), true)
+                        .clicked()
+                        && !file_dialog.is_active()
                     {
-                        file_dialog.start();
+                        file_dialog.start(lang);
                     }
                 });
             });
@@ -310,21 +381,32 @@ pub fn render_avatar_pane(
 }
 
 /// Arm pose sliders as grouped rows; emits a single action per change.
-fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::UiState) {
-    caption(ui, "Saved per model by its content hash.");
+fn render_arm_pose_settings(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    ui_state: &mut super::UiState,
+    lang: UiLanguage,
+) {
+    caption(
+        ui,
+        lang.pick(
+            "モデルごとにハッシュ単位で保存されます。",
+            "Saved per model by its content hash.",
+        ),
+    );
     ui.add_space(4.0);
     let mut profile = vm.arm_pose.profile;
     let mut arm_drop_degrees = profile.arm_drop_radians.to_degrees();
     let mut finger_curl_degrees = profile.finger_curl_radians.to_degrees();
     let mut changed = false;
 
-    settings_row(ui, "Arm drop", |ui| {
+    settings_row(ui, lang.pick("腕下げ", "Arm drop"), |ui| {
         changed |= ui
             .add(egui::Slider::new(&mut arm_drop_degrees, 0.0..=90.0))
             .changed();
     });
     row_separator(ui);
-    settings_row(ui, "Reach ratio", |ui| {
+    settings_row(ui, lang.pick("リーチ比", "Reach ratio"), |ui| {
         changed |= ui
             .add(
                 egui::Slider::new(&mut profile.reach_ratio, 0.01..=1.0),
@@ -332,7 +414,7 @@ fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super:
             .changed();
     });
     row_separator(ui);
-    settings_row(ui, "Forward offset", |ui| {
+    settings_row(ui, lang.pick("前方オフセット", "Forward offset"), |ui| {
         changed |= ui
             .add(
                 egui::Slider::new(&mut profile.forward_hand_offset_ratio, -1.0..=1.0)
@@ -341,7 +423,7 @@ fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super:
             .changed();
     });
     row_separator(ui);
-    settings_row(ui, "Elbow pole", |ui| {
+    settings_row(ui, lang.pick("肘ポール", "Elbow pole"), |ui| {
         changed |= ui
             .add(
                 egui::Slider::new(&mut profile.elbow_pole_offset_ratio, 0.0..=1.0)
@@ -350,7 +432,7 @@ fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super:
             .changed();
     });
     row_separator(ui);
-    settings_row(ui, "Shoulder follow", |ui| {
+    settings_row(ui, lang.pick("肩追従", "Shoulder follow"), |ui| {
         changed |= ui
             .add(
                 egui::Slider::new(&mut profile.shoulder_follow_weight, 0.0..=1.0)
@@ -359,7 +441,7 @@ fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super:
             .changed();
     });
     row_separator(ui);
-    settings_row(ui, "Finger curl", |ui| {
+    settings_row(ui, lang.pick("指の曲げ", "Finger curl"), |ui| {
         changed |= ui
             .add(egui::Slider::new(&mut finger_curl_degrees, 0.0..=90.0))
             .changed();
@@ -376,7 +458,7 @@ fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super:
     if vm.arm_pose.has_override {
         row_separator(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if plain_button(ui, "Reset to automatic", true).clicked() {
+            if plain_button(ui, lang.pick("自動に戻す", "Reset to automatic"), true).clicked() {
                 ui_state.emit(UiAction::ResetArmPoseProfile);
             }
         });
@@ -388,11 +470,16 @@ fn render_arm_pose_settings(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super:
 // ---------------------------------------------------------------------------
 
 /// Neutral pose calibration.
-pub fn render_calibration_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::UiState) {
-    section_caption(ui, "Neutral pose");
+pub fn render_calibration_pane(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    ui_state: &mut super::UiState,
+    lang: UiLanguage,
+) {
+    section_caption(ui, lang.pick("中立姿勢", "Neutral pose"));
     group(ui, |ui| {
         if vm.calibration.is_calibrating {
-            settings_row(ui, "Calibrating", |ui| {
+            settings_row(ui, lang.pick("キャリブレーション中", "Calibrating"), |ui| {
                 ui.label(
                     RichText::new(format!(
                         "{}/{}",
@@ -417,18 +504,21 @@ pub fn render_calibration_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut sup
                 row_separator(ui);
                 info_row(
                     ui,
-                    "Quality",
+                    lang.pick("品質", "Quality"),
                     &format!("{:.0}%", score * 100.0),
                     LABEL,
                 );
             }
             if let Some(reason) = &vm.calibration.last_reject_reason {
                 ui.add_space(4.0);
-                caption(ui, &format!("Rejected: {reason}"));
+                caption(
+                    ui,
+                    &format!("{}: {reason}", lang.pick("却下", "Rejected")),
+                );
             }
             row_separator(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if plain_button(ui, "Cancel", true).clicked() {
+                if plain_button(ui, lang.pick("キャンセル", "Cancel"), true).clicked() {
                     ui_state.emit(UiAction::CancelCalibration);
                 }
             });
@@ -437,29 +527,50 @@ pub fn render_calibration_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut sup
                 let quality = vm
                     .calibration
                     .quality_score
-                    .map(|score| format!("Calibrated · {:.0}%", score * 100.0))
-                    .unwrap_or_else(|| "Calibrated".to_string());
+                    .map(|score| match lang {
+                        UiLanguage::Ja => format!("キャリブレーション完了 · {:.0}%", score * 100.0),
+                        UiLanguage::En => format!("Calibrated · {:.0}%", score * 100.0),
+                    })
+                    .unwrap_or_else(|| lang.pick("キャリブレーション完了", "Calibrated").to_string());
                 status_text(ui, OK_GREEN, &quality);
             });
             row_separator(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if plain_button(ui, "Redo", true).clicked() {
+                if plain_button(ui, lang.pick("やり直す", "Redo"), true).clicked() {
                     ui_state.emit(UiAction::RetryCalibration);
                 }
             });
         } else if vm.can_calibrate() {
-            caption(ui, "Face the camera with a relaxed expression, then begin.");
+            caption(
+                ui,
+                lang.pick(
+                    "リラックスした表情でカメラを向けて、開始してください。",
+                    "Face the camera with a relaxed expression, then begin.",
+                ),
+            );
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if filled_button(ui, "Begin Calibration", true).clicked() {
+                if filled_button(ui, lang.pick("キャリブレーション開始", "Begin Calibration"), true)
+                    .clicked()
+                {
                     ui_state.emit(UiAction::BeginCalibration);
                 }
             });
         } else {
-            caption(ui, "Start the session to calibrate.");
+            caption(
+                ui,
+                lang.pick(
+                    "セッション開始後にキャリブレーションできます。",
+                    "Start the session to calibrate.",
+                ),
+            );
             ui.add_space(4.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                filled_button(ui, "Begin Calibration", false);
+                filled_button(
+                    ui,
+                    lang.pick("キャリブレーション開始", "Begin Calibration"),
+                    false,
+                );
             });
         }
     });
@@ -477,28 +588,32 @@ pub fn render_preview_pane(
     landmarks: &PreviewLandmarkState,
     avatar_motion_mirror: AvatarMotionMirror,
     preview_texture: Option<TextureId>,
+    lang: UiLanguage,
 ) {
-    section_caption(ui, "Display");
+    section_caption(ui, lang.pick("表示", "Display"));
     group(ui, |ui| {
         let mut preview_visible = preview.visible;
-        settings_row(ui, "Show preview", |ui| {
+        settings_row(ui, lang.pick("プレビュー表示", "Show preview"), |ui| {
             if ui.checkbox(&mut preview_visible, "").changed() {
                 ui_state.emit(UiAction::TogglePreview);
             }
         });
         row_separator(ui);
         let mut mirror = preview.mirrored;
-        settings_row(ui, "Mirror preview", |ui| {
+        settings_row(ui, lang.pick("プレビュー左右反転", "Mirror preview"), |ui| {
             if ui.checkbox(&mut mirror, "").changed() {
                 ui_state.emit(UiAction::ToggleMirror);
             }
         });
         row_separator(ui);
         let mut mirror_avatar_motion = avatar_motion_mirror.is_enabled();
-        settings_row(ui, "Mirror avatar motion", |ui| {
+        settings_row(ui, lang.pick("アバター動きを反転", "Mirror avatar motion"), |ui| {
             if ui
                 .checkbox(&mut mirror_avatar_motion, "")
-                .on_hover_text("Reflect avatar motion for the operator view")
+                .on_hover_text(lang.pick(
+                    "オペレーター用にアバターの動きを反転させます",
+                    "Reflect avatar motion for the operator view",
+                ))
                 .changed()
             {
                 ui_state.emit(UiAction::ToggleAvatarMotionMirror);
@@ -507,7 +622,13 @@ pub fn render_preview_pane(
     });
 
     if !preview.visible {
-        caption(ui, "Preview hidden — tracking still runs in background.");
+        caption(
+            ui,
+            lang.pick(
+                "プレビューは非表示です — トラッキングはバックグラウンドで継続しています。",
+                "Preview hidden — tracking still runs in background.",
+            ),
+        );
         return;
     }
 
@@ -524,7 +645,10 @@ pub fn render_preview_pane(
                 .rect;
             caption(
                 ui,
-                &format!("Camera feed · {} fps target", preview.target_fps),
+                &match lang {
+                    UiLanguage::Ja => format!("カメラ映像 · {} fps", preview.target_fps),
+                    UiLanguage::En => format!("Camera feed · {} fps target", preview.target_fps),
+                },
             );
             let now = monotonic_now();
             if should_draw_landmark_overlay(preview.visible, Some(texture), landmarks, now) {
@@ -536,7 +660,7 @@ pub fn render_preview_pane(
                 ui.vertical_centered(|ui| {
                     ui.spinner();
                     ui.add_space(4.0);
-                    caption(ui, "Waiting for camera frames…");
+                    caption(ui, lang.pick("カメラ映像を待っています…", "Waiting for camera frames…"));
                 });
             });
         }
@@ -548,24 +672,33 @@ pub fn render_preview_pane(
 // ---------------------------------------------------------------------------
 
 /// NDI transparent avatar output.
-pub fn render_ndi_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::UiState) {
-    let ndi = ndi_live_section(vm);
-    section_caption(ui, "NDI Output");
+pub fn render_ndi_pane(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    ui_state: &mut super::UiState,
+    lang: UiLanguage,
+) {
+    let ndi = ndi_live_section(vm, lang);
+    section_caption(ui, lang.pick("NDI 出力", "NDI Output"));
     group(ui, |ui| {
-        info_row(ui, "Source", &ndi.source_name, LABEL);
+        info_row(ui, lang.pick("ソース名", "Source"), &ndi.source_name, LABEL);
         row_separator(ui);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Status").size(13.0).color(SECONDARY));
+            ui.label(
+                RichText::new(lang.pick("状態", "Status"))
+                    .size(13.0)
+                    .color(SECONDARY),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 status_text(ui, ndi_status_color(vm), &ndi.status_text);
             });
         });
         row_separator(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if plain_button(ui, "Stop", ndi.stop_enabled).clicked() {
+            if plain_button(ui, lang.pick("停止", "Stop"), ndi.stop_enabled).clicked() {
                 ui_state.emit(ndi.stop_action.clone());
             }
-            if filled_button(ui, "Start", ndi.start_enabled).clicked() {
+            if filled_button(ui, lang.pick("開始", "Start"), ndi.start_enabled).clicked() {
                 ui_state.emit(ndi.start_action.clone());
             }
         });
@@ -583,7 +716,9 @@ pub fn render_ndi_pane(ui: &mut Ui, vm: &UiViewModel, ui_state: &mut super::UiSt
     }
     ui.add_space(4.0);
     ui.hyperlink_to(
-        RichText::new("NDI® info ↗").size(11.0).color(ACCENT),
+        RichText::new(lang.pick("NDI® 情報 ↗", "NDI® info ↗"))
+            .size(11.0)
+            .color(ACCENT),
         ndi.official_link,
     );
 }
@@ -746,13 +881,14 @@ mod tests {
         vm.avatar.is_ready = true;
         vm.avatar.lifecycle = crate::ui_model::AvatarLifecycleState::Ready;
         vm.ndi_output.available = true;
+        vm.ndi_output.runtime_installed = true;
         vm.ndi_output.source_name = Some("RusTuberV".into());
         vm
     }
 
     #[test]
     fn live_ndi_section_exists_with_official_link_and_does_not_hold_a_sender() {
-        let section = ndi_live_section(&ready_ndi_view_model());
+        let section = ndi_live_section(&ready_ndi_view_model(), UiLanguage::En);
         assert_eq!(section.official_link, NDI_OFFICIAL_URL);
         assert!(section.official_link.starts_with("https://ndi.video"));
         assert_eq!(section.start_action, UiAction::StartNdiOutput);
@@ -764,7 +900,7 @@ mod tests {
 
     #[test]
     fn off_start_and_live_stop_each_emit_exactly_one_action() {
-        let off = ndi_live_section(&ready_ndi_view_model());
+        let off = ndi_live_section(&ready_ndi_view_model(), UiLanguage::En);
         assert!(off.start_enabled);
         assert!(!off.stop_enabled);
         let mut ui_state = UiState::default();
@@ -775,7 +911,7 @@ mod tests {
         let mut live = ready_ndi_view_model();
         live.ndi_output.state = NdiOutputUiState::Live;
         live.ndi_output.connections = Some(1);
-        let live_section = ndi_live_section(&live);
+        let live_section = ndi_live_section(&live, UiLanguage::En);
         assert!(!live_section.start_enabled);
         assert!(live_section.stop_enabled);
         assert_eq!(live_section.status_text, "Live (1 receiver(s))");
@@ -788,17 +924,33 @@ mod tests {
     fn starting_state_does_not_emit_a_duplicate_start() {
         let mut vm = ready_ndi_view_model();
         vm.ndi_output.state = NdiOutputUiState::Starting;
-        let section = ndi_live_section(&vm);
+        let section = ndi_live_section(&vm, UiLanguage::En);
         assert!(!section.start_enabled);
         assert!(section.stop_enabled);
         assert_eq!(section.status_text, "Starting…");
     }
 
     #[test]
+    fn japanese_language_localizes_statuses_and_hints() {
+        let mut vm = ready_ndi_view_model();
+        vm.ndi_output.state = NdiOutputUiState::Live;
+        vm.ndi_output.connections = Some(2);
+        let section = ndi_live_section(&vm, UiLanguage::Ja);
+        assert_eq!(section.status_text, "配信中（受信 2）");
+
+        vm.ndi_output.available = false;
+        let unavailable = ndi_live_section(&vm, UiLanguage::Ja);
+        assert_eq!(
+            unavailable.unavailable_hint,
+            Some("このビルドには NDI 出力が含まれていません。")
+        );
+    }
+
+    #[test]
     fn unavailable_and_error_states_are_visible_and_start_is_disabled() {
         let mut vm = ready_ndi_view_model();
         vm.ndi_output.available = false;
-        let unavailable = ndi_live_section(&vm);
+        let unavailable = ndi_live_section(&vm, UiLanguage::En);
         assert!(!unavailable.start_enabled);
         assert_eq!(
             unavailable.unavailable_hint,
@@ -809,7 +961,7 @@ mod tests {
         vm.ndi_output.state = NdiOutputUiState::Error;
         vm.ndi_output.error_code = Some("NDI_RUNTIME_NOT_FOUND".into());
         vm.ndi_output.error_message = Some("NDI runtime could not be loaded.".into());
-        let error = ndi_live_section(&vm);
+        let error = ndi_live_section(&vm, UiLanguage::En);
         assert!(
             error.start_enabled,
             "Start is the Retry path after an NDI error"
@@ -817,7 +969,48 @@ mod tests {
         assert_eq!(error.status_text, "Error");
         assert_eq!(
             error.error_text.as_deref(),
-            Some("NDI_RUNTIME_NOT_FOUND: NDI runtime could not be loaded.")
+            Some("NDI runtime is not installed.")
         );
+
+        let error_ja = ndi_live_section(&vm, UiLanguage::Ja);
+        assert_eq!(
+            error_ja.error_text.as_deref(),
+            Some("NDIランタイムがインストールされていません")
+        );
+    }
+
+    #[test]
+    fn missing_runtime_shows_install_message_in_both_languages() {
+        let mut vm = ready_ndi_view_model();
+        vm.ndi_output.runtime_installed = false;
+        let ja = ndi_live_section(&vm, UiLanguage::Ja);
+        assert_eq!(
+            ja.unavailable_hint,
+            Some("NDIランタイムがインストールされていません")
+        );
+        let en = ndi_live_section(&vm, UiLanguage::En);
+        assert_eq!(
+            en.unavailable_hint,
+            Some("NDI runtime is not installed.")
+        );
+    }
+
+    #[test]
+    fn missing_runtime_message_takes_priority_over_build_hint() {
+        let mut vm = ready_ndi_view_model();
+        vm.ndi_output.available = false;
+        vm.ndi_output.runtime_installed = false;
+        let section = ndi_live_section(&vm, UiLanguage::Ja);
+        assert_eq!(
+            section.unavailable_hint,
+            Some("NDIランタイムがインストールされていません")
+        );
+    }
+
+    #[test]
+    fn installed_runtime_with_sdk_build_shows_no_hint() {
+        let vm = ready_ndi_view_model();
+        let section = ndi_live_section(&vm, UiLanguage::Ja);
+        assert_eq!(section.unavailable_hint, None);
     }
 }

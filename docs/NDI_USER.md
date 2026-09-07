@@ -3,9 +3,9 @@
 NDI® is a registered trademark of Vizrt NDI AB.
 公式サイト: https://ndi.video/
 
-このアプリケーションは Live 画面の NDI Output から、背景透過のアバター映像を
+このアプリケーションは「NDI 出力」ペインから、背景透過のアバター映像を
 同一 LAN 上の NDI receiver（OBS Studio + DistroAV など）へ送ります。
-音声は送りません。
+音声は送りません。デスクトップ版の標準ビルドに NDI 出力が含まれています。
 
 ## 1. この ZIP に含まれているもの
 
@@ -27,7 +27,7 @@ runtime DLL は application フォルダへ置き、System32 や PATH へは入�
 1. ZIP を任意のフォルダへ展開する。
 2. `vtuber-desktop.exe` を起動する。
 3. VRM アバターを import し、Ready になるまで待つ。
-4. Live 画面の **NDI® Output** で Start を押す。
+4. 「NDI 出力」ペインで「開始」を押す。
 5. 既定の source 名は `RusTuberV` です。
 
 既定の映像 profile は 1920x1080 / 60fps / straight-alpha BGRA です。
@@ -37,7 +37,7 @@ runtime DLL は application フォルダへ置き、System32 や PATH へは入�
 この ZIP は Standard SDK の x64 runtime DLL を application-local に同梱します。
 通常は sender 側で NDI SDK / NDI Tools / 別途 Runtime installer は不要です。
 
-Start 時に `NDI_RUNTIME_NOT_FOUND` と出る場合:
+「NDIランタイムがインストールされていません」と出る場合:
 
 - `Processing.NDI.Lib.x64.dll` が `vtuber-desktop.exe` と同じフォルダにあるか確認する。
 - それでも失敗する場合のみ、公式の NDI Runtime を導入する。
@@ -66,5 +66,5 @@ version 番号は公式情報が将来変わる前提です。導入前に Distr
 - source が見えない: 同一 LAN か、ファイアウォールが NDI discovery を落としていないかを確認する。
   このアプリはファイアウォール規則を勝手に追加しません。
 - 映像が止まる / 古い: sender は latest-frame 置換です。receiver が遅くてもアプリ本体は待ちません。
-- Stop 後: Live の Stop で sender を止めます。アプリが hang / panic しないことが正常です。
+- 停止後: 「NDI 出力」ペインの「停止」で sender を止めます。アプリが hang / panic しないことが正常です。
 - NDI Tools が必要、ということはありません。見たい場合は https://ndi.video/tools/ から各自入手してください。

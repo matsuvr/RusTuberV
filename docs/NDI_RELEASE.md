@@ -14,12 +14,21 @@ THIRD_PARTY_NOTICES.md.
 
 ## Fixed release boundary
 
-The first release target is Windows x86_64. The normal workspace build remains
-SDK-free. Only the explicit ndi-output feature requires the locally installed
-NDI SDK headers and bindgen environment:
+The first release target is Windows x86_64. Since ADR-024 (2026-09-07), NDI
+output is standard: the default `vtuber-desktop` build includes the
+`ndi-output` feature and therefore requires the locally installed NDI SDK
+headers and bindgen environment:
 
 ~~~~text
-cargo build -p vtuber-desktop --release --features ndi-output
+cargo build -p vtuber-desktop --release
+~~~~
+
+An SDK-free build remains available as an explicit opt-out for environments
+without the NDI SDK:
+
+~~~~text
+cargo build -p vtuber-desktop --release --no-default-features
+cargo check --workspace --no-default-features
 ~~~~
 
 For an NDI-enabled local build, `apps/desktop/build.rs` reads the x64 import
@@ -193,6 +202,11 @@ SDK/runtime receiver harness must supply the manifest on a validation
 machine. No such receiver harness was available for this local run.
 
 ## Acceptance evidence
+
+The table below is the dated 2026-08-20 record, kept as-is. Since ADR-024
+(2026-09-07) the "NDI-enabled release build" row's command is the plain
+default (`cargo build -p vtuber-desktop --release`), and the SDK-free rows
+use `--no-default-features`.
 
 | Gate | Result on 2026-08-20 | Evidence |
 |---|---|---|

@@ -25,5 +25,6 @@
 | ADR-021 | Accepted | 長時間tracking喪失時のdefault pose復帰とloss-scoped breathing（micro-motion層） |
 | ADR-022 | Accepted | Perfect Sync 52はMediaPipe直接駆動とする（学習動的prior不採用） |
 | ADR-023 | Accepted | GNM実装をmainツリーから完全除去し`archive/gnm`ブランチに保存 |
+| ADR-024 | Accepted | デスクトップ製品ではNDI出力を標準有効化（ADR-012/013の境界・配布規則は維持） |
 
 番号は再利用しない。採用済み判断を変更するときは元ADRを削除せず、Statusを`Superseded`へ変更し、新しいADRから参照する。

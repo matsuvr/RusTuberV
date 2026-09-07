@@ -1,6 +1,6 @@
 # ADR-013: Guarded NDI runtime distribution
 
-Status: Accepted for Issue #49 research ZIP packaging
+Status: Accepted for Issue #49 research ZIP packaging; SDK-free-default bullet superseded by ADR-024 on 2026-09-07
 Date: 2026-08-20
 
 ## Context
@@ -13,8 +13,11 @@ whether application-local runtime distribution is permitted.
 
 ## Decision
 
-- Keep the default workspace and source package SDK-free.
-- Enable the sender only with the explicit ndi-output feature.
+- Keep the source package SDK-free (no committed SDK/runtime binaries).
+  Since ADR-024 the default desktop build enables the sender; an SDK-free
+  build is the explicit `--no-default-features` opt-out.
+- Enable the sender with the `ndi-output` feature, which `vtuber-desktop`
+  turns on by default since ADR-024.
 - For an NDI-enabled local build, inspect the x64 import library and stage
   only its matching Standard SDK runtime filename beside the executable. The
   supported names are `Processing.NDI.Lib.x64.dll` and the legacy

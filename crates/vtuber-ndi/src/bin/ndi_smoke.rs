@@ -186,19 +186,27 @@ fn inspect_frame(
     let mut hash = 0_u64;
     for row in 0..height {
         let start = row.saturating_mul(stride);
-        let end = (start + width.saturating_mul(4)).min(data.len());
+        let end = start
+            .saturating_add(width.saturating_mul(4))
+            .min(data.len());
         if start >= data.len() || end <= start {
             continue;
         }
-        for pixel in data[start..end].chunks_exact(4) {
-            hash = hash.wrapping_mul(16777619) ^ u64::from(pixel[0]);
-            hash = hash.wrapping_mul(16777619) ^ u64::from(pixel[1]);
-            hash = hash.wrapping_mul(16777619) ^ u64::from(pixel[2]);
-            hash = hash.wrapping_mul(16777619) ^ u64::from(pixel[3]);
-            match pixel[3] {
+        let Some(row_data) = data.get(start..end) else {
+            continue;
+        };
+        for pixel in row_data.chunks_exact(4) {
+            let [b, g, r, a] = pixel else {
+                continue;
+            };
+            hash = hash.wrapping_mul(16777619) ^ u64::from(*b);
+            hash = hash.wrapping_mul(16777619) ^ u64::from(*g);
+            hash = hash.wrapping_mul(16777619) ^ u64::from(*r);
+            hash = hash.wrapping_mul(16777619) ^ u64::from(*a);
+            match *a {
                 0 => {
                     *alpha_zero += 1;
-                    if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                    if *b != 0 || *g != 0 || *r != 0 {
                         *transparent_rgb_zero = false;
                     }
                 }
@@ -221,7 +229,13 @@ fn submit_pattern(
         pixel.copy_from_slice(&background);
     }
     let origin = ((HEIGHT / 2) * WIDTH + (WIDTH / 2)) as usize * 4;
-    data[origin..origin + 4].copy_from_slice(&foreground);
+    let end = origin
+        .checked_add(4)
+        .ok_or_else(|| "smoke frame origin overflows".to_owned())?;
+    let slot = data
+        .get_mut(origin..end)
+        .ok_or_else(|| "smoke frame origin is out of bounds".to_owned())?;
+    slot.copy_from_slice(&foreground);
     let frame = VideoOutputFrame::new_bgra8(WIDTH, HEIGHT, FrameSeq(seq), MonoTimeNs(seq), data)
         .map_err(|error| format!("test frame invalid: {error}"))?;
     match controller.submit_frame(frame) {

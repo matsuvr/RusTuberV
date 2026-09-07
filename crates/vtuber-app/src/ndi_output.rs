@@ -120,6 +120,7 @@ pub fn sync_ndi_output_view_model_system(
     let default_source = NdiOutputConfig::default().source_name;
     let ndi = &mut view_model.ndi_output;
     ndi.available = vtuber_ndi::is_sdk_feature_enabled();
+    ndi.runtime_installed = vtuber_ndi::is_ndi_runtime_installed();
     ndi.source_name = Some(default_source);
     ndi.connections = None;
     ndi.error_code = None;

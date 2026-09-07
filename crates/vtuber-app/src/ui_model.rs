@@ -190,6 +190,8 @@ pub enum NdiOutputUiState {
 pub struct NdiOutputViewModel {
     /// Whether this build contains the explicit NDI SDK feature.
     pub available: bool,
+    /// Whether an NDI Standard runtime DLL was found on this machine.
+    pub runtime_installed: bool,
     /// Current sender state.
     pub state: NdiOutputUiState,
     /// Fixed source name used by the application.

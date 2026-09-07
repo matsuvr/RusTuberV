@@ -2,15 +2,17 @@
 
 ## Status
 
-Accepted for Issue #47 on 2026-08-18.
+Accepted for Issue #47 on 2026-08-18. Default-build scope superseded by
+ADR-024 on 2026-09-07 (`vtuber-desktop` now enables `ndi-output` by
+default); the crate boundary and transport contract below are unchanged.
 
 ## Decision
 
 The NDI sender lives in the independent `vtuber-ndi` crate. Its default
 feature set is SDK-free and exposes a deterministic typed-disabled result.
-`vtuber-desktop` can opt into the explicit `ndi-output` feature, which enables
-`vtuber-ndi/ndi-sdk`; no application or avatar crate contains NDI types or
-hand-written FFI.
+`vtuber-desktop` enables the `ndi-output` feature by default since ADR-024
+(which enables `vtuber-ndi/ndi-sdk`; `--no-default-features` opts out);
+no application or avatar crate contains NDI types or hand-written FFI.
 
 The backend accepts only the `vtuber-core::VideoOutputFrame` contract from
 Issue #46: packed BGRA8, straight alpha, exact profile dimensions and stride.
@@ -34,9 +36,9 @@ pending frames but cannot block the render/readback producer or grow a queue.
 
 The wrapper's default image-encoding feature is disabled. `advanced_sdk`,
 audio, PTZ, receiver, and async-runtime features are not enabled. The wrapper
-build still requires the local NDI SDK headers and bindgen toolchain only when
-`ndi-sdk` is explicitly enabled. The default workspace build does not require
-that SDK.
+build still requires the local NDI SDK headers and bindgen toolchain whenever
+`ndi-sdk` is enabled, which since ADR-024 includes the default desktop build.
+An SDK-free build requires `--no-default-features`.
 
 References:
 
@@ -48,8 +50,9 @@ References:
 
 ## Consequences
 
-- Normal format, check, test, clippy, and deny gates remain SDK-free.
-- An NDI-enabled local build and machine sender smoke require a separately
-  installed NDI SDK/runtime and are not claimed by the default automated gate.
+- Format, check, test, clippy, and deny gates assume an installed NDI SDK;
+  `--no-default-features` keeps an SDK-free gate.
+- A local build and machine sender smoke require a separately
+  installed NDI SDK/runtime.
 - Runtime packaging, trademark attribution, SDK license notices, and OBS
   interoperability remain Issue #49 work.

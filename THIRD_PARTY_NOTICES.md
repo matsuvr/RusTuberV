@@ -2,10 +2,11 @@
 
 ## NDI® runtime
 
-This application can optionally use the NDI Standard SDK runtime for
+This application uses the NDI Standard SDK runtime for
 transparent avatar output. The runtime DLL is not included in the normal
 source tree and must only be staged from the exact SDK package used for a
 release, after its license agreement and SDK documentation have been checked.
+An SDK-free build remains available via `--no-default-features`.
 
 NDI® is a registered trademark of Vizrt NDI AB. See the official
 [NDI developer site](https://ndi.video/) and the

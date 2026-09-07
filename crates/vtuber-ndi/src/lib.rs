@@ -30,6 +30,67 @@ pub const fn is_sdk_feature_enabled() -> bool {
     cfg!(feature = "ndi-sdk")
 }
 
+/// File names of the supported NDI Standard runtime DLLs (current and legacy).
+#[cfg(any(target_os = "windows", test))]
+const RUNTIME_FILE_NAMES: [&str; 2] =
+    ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
+
+/// Returns whether an NDI Standard runtime DLL is discoverable on this machine.
+///
+/// Filesystem probe only; it never loads the SDK. On Windows it checks the
+/// executable directory, `NDI_SDK_DIR`, `NDI_RUNTIME_DIR_V6`, and the standard
+/// install locations. On other platforms it defers to the SDK init result so
+/// a valid non-DLL install is never reported as missing.
+#[must_use]
+pub fn is_ndi_runtime_installed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        runtime_dll_present_in(&candidate_runtime_dirs(), &RUNTIME_FILE_NAMES)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn candidate_runtime_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        dirs.push(parent.to_path_buf());
+    }
+    if let Some(sdk_dir) = std::env::var_os("NDI_SDK_DIR") {
+        let sdk_dir = std::path::PathBuf::from(sdk_dir);
+        dirs.push(sdk_dir.join("Bin").join("x64"));
+    }
+    if let Some(runtime_dir) = std::env::var_os("NDI_RUNTIME_DIR_V6") {
+        let runtime_dir = std::path::PathBuf::from(runtime_dir);
+        dirs.push(runtime_dir.join("v6"));
+        dirs.push(runtime_dir);
+    }
+    dirs.push(std::path::PathBuf::from(
+        r"C:\Program Files\NDI\NDI 6 SDK\Bin\x64",
+    ));
+    dirs.push(std::path::PathBuf::from(
+        r"C:\Program Files\NDI\NDI 6 Runtime\v6",
+    ));
+    dirs.push(std::path::PathBuf::from(
+        r"C:\Program Files\NDI\NDI 6 Runtime",
+    ));
+    dirs
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn runtime_dll_present_in(dirs: &[std::path::PathBuf], file_names: &[&str]) -> bool {
+    dirs.iter().any(|dir| {
+        file_names
+            .iter()
+            .any(|file| dir.join(file).is_file())
+    })
+}
+
 /// Stable error codes emitted by the optional output backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NdiErrorCode {
@@ -1130,6 +1191,51 @@ mod tests {
         assert_eq!(source.data, source_bytes);
         assert_eq!(source.data[3], 4);
         assert_eq!(source.data[7], 8);
+    }
+
+    #[cfg(test)]
+    fn runtime_probe_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vtuber-ndi-runtime-probe-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe dir is creatable");
+        dir
+    }
+
+    #[test]
+    fn runtime_probe_finds_current_dll_name() {
+        let dir = runtime_probe_dir("current");
+        std::fs::write(dir.join(RUNTIME_FILE_NAMES[0]), b"stub")
+            .expect("current stub is writable");
+        assert!(runtime_dll_present_in(std::slice::from_ref(&dir), &RUNTIME_FILE_NAMES));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_probe_accepts_legacy_dll_name() {
+        let dir = runtime_probe_dir("legacy");
+        std::fs::write(dir.join(RUNTIME_FILE_NAMES[1]), b"stub")
+            .expect("legacy stub is writable");
+        assert!(runtime_dll_present_in(std::slice::from_ref(&dir), &RUNTIME_FILE_NAMES));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_probe_reports_missing_for_empty_dir() {
+        let dir = runtime_probe_dir("empty");
+        assert!(!runtime_dll_present_in(
+            std::slice::from_ref(&dir),
+            &RUNTIME_FILE_NAMES
+        ));
+        assert!(!runtime_dll_present_in(&[], &RUNTIME_FILE_NAMES));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_probe_does_not_panic() {
+        let _ = is_ndi_runtime_installed();
     }
 
     #[test]
