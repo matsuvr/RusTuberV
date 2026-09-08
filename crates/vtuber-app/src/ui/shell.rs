@@ -354,7 +354,9 @@ mod tests {
         app.init_resource::<Orchestrator>().init_resource::<ErrorPresenter>()
             .init_resource::<DiagnosticsSnapshot>().init_resource::<ArmPoseSettings>()
             .add_systems(Update, sync_error_presenter);
-        app.world_mut().resource_mut::<Orchestrator>().set_last_error(Some(crate::orchestrator::OrchestratorError::NoCameraSelected));
+        // Exercise the existing public action boundary; Start without a
+        // selected camera produces NoCameraSelected without camera/file I/O.
+        app.world_mut().resource_mut::<Orchestrator>().process_action(&UiAction::Start);
         app.update();
         assert_eq!(app.world().resource::<DiagnosticsSnapshot>().last_error_code.as_deref(), Some("NO_CAMERA"));
         assert!(app.world().resource::<ErrorPresenter>().current().is_some());
