@@ -397,14 +397,13 @@ fn apply_shoulder_elevation_trim(
     // Downstream propagation: the trim's model-space rotation also reaches
     // the elbow and wrist in small decaying shares so the arm bends with the
     // shoulder instead of rotating as a rigid stick.
-    (pose.upper_arm_delta, pose.lower_arm_delta) =
-        crate::arm_pose::propagate_shoulder_downstream(
-            model_delta,
-            input.chain.rest.upper_arm.global_rotation,
-            input.chain.rest.elbow.global_rotation,
-            pose.upper_arm_delta,
-            pose.lower_arm_delta,
-        );
+    (pose.upper_arm_delta, pose.lower_arm_delta) = crate::arm_pose::propagate_shoulder_downstream(
+        model_delta,
+        input.chain.rest.upper_arm.global_rotation,
+        input.chain.rest.elbow.global_rotation,
+        pose.upper_arm_delta,
+        pose.lower_arm_delta,
+    );
 }
 
 /// Parameters for the post-solve forearm twist relaxer (Issue #170).
@@ -1054,22 +1053,23 @@ pub fn update_dynamic_arm_targets(
         })
         .unwrap_or(Quat::IDENTITY);
 
-    let resolve = |chain: Option<&ArmChainBinding>,
-                   geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>| {
-        chain.zip(geometry).and_then(|(chain, geometry)| {
-            let input = ArmPipelineInput {
-                chain,
-                motion: geometry,
-                legacy_profile: crate::arm::ArmPoseProfile::default(),
-                dynamic_profile: profile,
-                head_offset,
-                body_offset,
-                torso_delta,
-                body_scale_meters: scale.scale_meters,
-            };
-            resolve_side(&input, selection.mode)
-        })
-    };
+    let resolve =
+        |chain: Option<&ArmChainBinding>,
+         geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>| {
+            chain.zip(geometry).and_then(|(chain, geometry)| {
+                let input = ArmPipelineInput {
+                    chain,
+                    motion: geometry,
+                    legacy_profile: crate::arm::ArmPoseProfile::default(),
+                    dynamic_profile: profile,
+                    head_offset,
+                    body_offset,
+                    torso_delta,
+                    body_scale_meters: scale.scale_meters,
+                };
+                resolve_side(&input, selection.mode)
+            })
+        };
     *targets = DynamicArmTargets {
         generation: Some(binding.generation),
         source_seq: Some(frame.source_seq),
@@ -1349,12 +1349,22 @@ mod tests {
             .wrist;
         let neutral_offset = neutral
             - (chain.rest.wrist.position
-                - input.motion.hand_anchor.as_ref().unwrap().translation_from_hips);
-        let expected_offset = Quat::from_rotation_y(TORSO_LAG_SHARE * std::f32::consts::FRAC_PI_2)
-            * neutral_offset;
+                - input
+                    .motion
+                    .hand_anchor
+                    .as_ref()
+                    .unwrap()
+                    .translation_from_hips);
+        let expected_offset =
+            Quat::from_rotation_y(TORSO_LAG_SHARE * std::f32::consts::FRAC_PI_2) * neutral_offset;
         let expected = expected_offset
             + (chain.rest.wrist.position
-                - input.motion.hand_anchor.as_ref().unwrap().translation_from_hips);
+                - input
+                    .motion
+                    .hand_anchor
+                    .as_ref()
+                    .unwrap()
+                    .translation_from_hips);
         assert!(
             mirrored.distance(expected) < 1.0e-3,
             "lag must be exactly the bounded share of the torso turn"

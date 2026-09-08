@@ -274,14 +274,16 @@ fn shoulder_follow_propagates_weakly_downstream_to_elbow_and_wrist() {
         .delta
         .angle_between(Quat::IDENTITY);
     assert!(shoulder_angle > 0.0);
-    let upper_change = with
-        .upper_arm_delta
-        .angle_between(without.upper_arm_delta);
-    let lower_change = with
-        .lower_arm_delta
-        .angle_between(without.lower_arm_delta);
-    assert!(upper_change > 1.0e-6, "upper arm inherits part of the shoulder");
-    assert!(lower_change > 1.0e-6, "forearm inherits part of the shoulder");
+    let upper_change = with.upper_arm_delta.angle_between(without.upper_arm_delta);
+    let lower_change = with.lower_arm_delta.angle_between(without.lower_arm_delta);
+    assert!(
+        upper_change > 1.0e-6,
+        "upper arm inherits part of the shoulder"
+    );
+    assert!(
+        lower_change > 1.0e-6,
+        "forearm inherits part of the shoulder"
+    );
     assert!(
         upper_change < shoulder_angle,
         "downstream share stays smaller than the shoulder change"

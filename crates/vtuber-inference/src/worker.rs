@@ -911,9 +911,18 @@ mod tests {
             .load_model(descriptor, RuntimeSettings::default())
             .expect("send load model");
 
-        std::thread::sleep(Duration::from_millis(200));
-        let status = controller.status();
-        assert_eq!(status.state, InferenceWorkerState::Failed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            let status = controller.status();
+            if status.state == InferenceWorkerState::Failed {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "model load did not fail: {status:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(
             status.last_failure.as_ref().map(|f| f.stage),
             Some(FailureStage::ModelLoad)

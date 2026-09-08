@@ -1,11 +1,8 @@
 //! Bevy/egui integration. Domain workers keep their existing scheduling;
 //! layout and consent decisions live in studio and privacy respectively.
 
-use bevy::prelude::*;
-use bevy_egui::{
-    EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPostUpdateSet,
-    EguiPrimaryContextPass, EguiTextureHandle, EguiUserTextures, PrimaryEguiContext,
-};
+use super::fonts::{UiFonts, configure_fonts};
+use super::privacy::{CameraPreviewConsent, CameraPreviewEvent, next_camera_preview_consent};
 use crate::actions::UiAction;
 #[cfg(not(feature = "dev-synthetic-input"))]
 use crate::avatar_bridge::publish_control_frame_system;
@@ -16,21 +13,29 @@ use crate::capture_runtime::{
 };
 use crate::diagnostics::{DiagnosticsSnapshot, sync_engine_diagnostics};
 use crate::error_presenter::ErrorPresenter;
-use crate::inference_runtime::{InferenceProjectRoot, InferenceRuntime, inference_bridge_system, read_inference_output_system};
+use crate::inference_runtime::{
+    InferenceProjectRoot, InferenceRuntime, inference_bridge_system, read_inference_output_system,
+};
 use crate::metrics_export::{MetricsExportState, export_diagnostics_system};
-use crate::ndi_output::{NdiOutputIntent, NdiOutputRuntime, ndi_output_bridge_system, shutdown_ndi_output, sync_ndi_output_view_model_system};
+use crate::ndi_output::{
+    NdiOutputIntent, NdiOutputRuntime, ndi_output_bridge_system, shutdown_ndi_output,
+    sync_ndi_output_view_model_system,
+};
 use crate::orchestrator::{Orchestrator, process_ui_actions_system, sync_avatar_lifecycle_system};
 use crate::preview::PreviewState;
 use crate::preview_landmarks::{PreviewLandmarkState, sync_preview_landmark_system};
 use crate::settings::{ArmPoseSettings, restore_arm_pose_settings_system};
 use crate::tracking_runtime::{TrackingRuntime, tracking_bridge_system};
 use crate::ui_model::{Pane, UiViewModel};
+use bevy::prelude::*;
+use bevy_egui::{
+    EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPostUpdateSet, EguiPrimaryContextPass,
+    EguiTextureHandle, EguiUserTextures, PrimaryEguiContext,
+};
 use vtuber_avatar::{
     AvatarMotionMirror, AvatarOutputCamera, AvatarOutputState, AvatarOutputTarget,
     AvatarViewportCamera, CameraInputSet, CameraPointerInputGate, apply_arm_pose_profile_changes,
 };
-use super::fonts::{UiFonts, configure_fonts};
-use super::privacy::{CameraPreviewConsent, CameraPreviewEvent, next_camera_preview_consent};
 
 /// Session-local UI state. Camera consent is deliberately never persisted.
 #[derive(Resource, Debug)]
@@ -58,15 +63,25 @@ impl Default for UiState {
 impl UiState {
     /// Emit a command, deduplicating the existing one-shot UI actions.
     pub fn emit(&mut self, action: UiAction) {
-        if matches!(action, UiAction::SwitchPane(_) | UiAction::SelectCamera { .. } | UiAction::Stop | UiAction::UnloadAvatar) {
+        if matches!(
+            action,
+            UiAction::SwitchPane(_)
+                | UiAction::SelectCamera { .. }
+                | UiAction::Stop
+                | UiAction::UnloadAvatar
+        ) {
             self.preview_event(CameraPreviewEvent::Hide);
         }
-        if is_deduplicatable(&action) && self.pending_actions.contains(&action) { return; }
+        if is_deduplicatable(&action) && self.pending_actions.contains(&action) {
+            return;
+        }
         self.pending_actions.push(action);
     }
 
     /// Drain pending commands.
-    pub fn take_actions(&mut self) -> Vec<UiAction> { std::mem::take(&mut self.pending_actions) }
+    pub fn take_actions(&mut self) -> Vec<UiAction> {
+        std::mem::take(&mut self.pending_actions)
+    }
 
     pub(crate) fn preview_event(&mut self, event: CameraPreviewEvent) {
         self.camera_consent = next_camera_preview_consent(self.camera_consent, event);
@@ -86,10 +101,17 @@ impl UiState {
 }
 
 fn is_deduplicatable(action: &UiAction) -> bool {
-    matches!(action,
-        UiAction::SwitchPane(_) | UiAction::ToggleMirror | UiAction::TogglePreview
-        | UiAction::ToggleAvatarMotionMirror | UiAction::SetLanguage(_)
-        | UiAction::DismissError | UiAction::StartNdiOutput | UiAction::StopNdiOutput)
+    matches!(
+        action,
+        UiAction::SwitchPane(_)
+            | UiAction::ToggleMirror
+            | UiAction::TogglePreview
+            | UiAction::ToggleAvatarMotionMirror
+            | UiAction::SetLanguage(_)
+            | UiAction::DismissError
+            | UiAction::StartNdiOutput
+            | UiAction::StopNdiOutput
+    )
 }
 
 /// Installs the studio UI and its bridges to existing domain services.
@@ -98,17 +120,25 @@ pub struct UiShellPlugin;
 impl Plugin for UiShellPlugin {
     fn build(&self, app: &mut App) {
         // Invariant: the desktop installs EguiPlugin before this plugin.
-        assert!(app.is_plugin_added::<EguiPlugin>(), "UiShellPlugin requires EguiPlugin to be installed first");
+        assert!(
+            app.is_plugin_added::<EguiPlugin>(),
+            "UiShellPlugin requires EguiPlugin to be installed first"
+        );
         // The first camera may be the offscreen output camera. Never attach
         // egui there: UI pixels must stay on the window-targeting camera only.
-        app.world_mut().resource_mut::<EguiGlobalSettings>().auto_create_primary_context = false;
+        app.world_mut()
+            .resource_mut::<EguiGlobalSettings>()
+            .auto_create_primary_context = false;
         app.add_systems(Update, attach_primary_egui_context_to_viewport_camera);
         app.init_resource::<UiState>()
             .init_resource::<UiFonts>()
             .init_resource::<UiViewModel>()
             .init_resource::<Orchestrator>()
             .init_resource::<ArmPoseSettings>()
-            .insert_resource(PreviewState { visible: false, ..Default::default() })
+            .insert_resource(PreviewState {
+                visible: false,
+                ..Default::default()
+            })
             .init_resource::<PreviewLandmarkState>()
             .init_resource::<NdiOutputIntent>()
             .init_resource::<NdiOutputRuntime>()
@@ -121,46 +151,117 @@ impl Plugin for UiShellPlugin {
             .init_resource::<super::file_dialog::FileDialogState>()
             .init_resource::<CaptureRuntime>()
             .init_resource::<LatestVideoFrame>();
-        app.world_mut().resource_mut::<UiState>().emit(UiAction::SwitchPane(Pane::Studio));
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::SwitchPane(Pane::Studio));
         let frame_slot = app.world().resource::<CaptureRuntime>().frame_slot();
-        let project_root = app.world().get_resource::<InferenceProjectRoot>()
-            .map(|root| root.0.clone()).unwrap_or_else(|| std::path::PathBuf::from("."));
+        let project_root = app
+            .world()
+            .get_resource::<InferenceProjectRoot>()
+            .map(|root| root.0.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         app.insert_resource(InferenceRuntime::new(frame_slot, project_root))
             .init_resource::<TrackingRuntime>()
             .add_systems(Startup, restore_arm_pose_settings_system)
-            .add_systems(Update, (process_ui_actions_system, apply_arm_pose_profile_changes, sync_avatar_lifecycle_system).chain())
-            .add_systems(Update, sync_error_presenter.after(sync_avatar_lifecycle_system).after(sync_capture_diagnostics))
-            .add_systems(Update, ndi_output_bridge_system.after(sync_avatar_lifecycle_system))
-            .add_systems(Update, sync_ndi_output_view_model_system.after(ndi_output_bridge_system))
-            .add_systems(Update, (
-                capture_bridge_system, read_latest_frame, update_preview_texture_system,
-                register_preview_texture_system, sync_capture_diagnostics,
-            ).chain())
+            .add_systems(
+                Update,
+                (
+                    process_ui_actions_system,
+                    apply_arm_pose_profile_changes,
+                    sync_avatar_lifecycle_system,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                Update,
+                sync_error_presenter
+                    .after(sync_avatar_lifecycle_system)
+                    .after(sync_capture_diagnostics),
+            )
+            .add_systems(
+                Update,
+                ndi_output_bridge_system.after(sync_avatar_lifecycle_system),
+            )
+            .add_systems(
+                Update,
+                sync_ndi_output_view_model_system.after(ndi_output_bridge_system),
+            )
+            .add_systems(
+                Update,
+                (
+                    capture_bridge_system,
+                    read_latest_frame,
+                    update_preview_texture_system,
+                    register_preview_texture_system,
+                    sync_capture_diagnostics,
+                )
+                    .chain(),
+            )
             .add_systems(Update, register_avatar_preview_texture)
-            .add_systems(Update, (inference_bridge_system, read_inference_output_system).chain().before(capture_bridge_system))
-            .add_systems(Update, sync_preview_landmark_system.after(read_inference_output_system))
-            .add_systems(Update, tracking_bridge_system.after(read_inference_output_system))
-            .add_systems(Last, (sync_engine_diagnostics, export_diagnostics_system).chain().before(shutdown_workers_on_exit))
+            .add_systems(
+                Update,
+                (inference_bridge_system, read_inference_output_system)
+                    .chain()
+                    .before(capture_bridge_system),
+            )
+            .add_systems(
+                Update,
+                sync_preview_landmark_system.after(read_inference_output_system),
+            )
+            .add_systems(
+                Update,
+                tracking_bridge_system.after(read_inference_output_system),
+            )
+            .add_systems(
+                Last,
+                (sync_engine_diagnostics, export_diagnostics_system)
+                    .chain()
+                    .before(shutdown_workers_on_exit),
+            )
             .add_systems(Last, shutdown_workers_on_exit)
-            .add_systems(PostUpdate, sync_camera_pointer_input_gate.after(EguiPostUpdateSet::ProcessOutput).before(CameraInputSet))
-            .add_systems(EguiPrimaryContextPass, (configure_fonts, ui_render_system).chain());
+            .add_systems(
+                PostUpdate,
+                sync_camera_pointer_input_gate
+                    .after(EguiPostUpdateSet::ProcessOutput)
+                    .before(CameraInputSet),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                (configure_fonts, ui_render_system).chain(),
+            );
         #[cfg(not(feature = "dev-synthetic-input"))]
-        app.add_systems(Update, publish_control_frame_system.after(tracking_bridge_system))
-            .add_systems(Update, sync_avatar_diagnostics.after(publish_control_frame_system));
+        app.add_systems(
+            Update,
+            publish_control_frame_system.after(tracking_bridge_system),
+        )
+        .add_systems(
+            Update,
+            sync_avatar_diagnostics.after(publish_control_frame_system),
+        );
         #[cfg(feature = "dev-synthetic-input")]
         app.insert_resource(crate::synthetic_tracking::SyntheticTrackingSource::default())
-            .add_systems(Update, crate::synthetic_tracking::synthetic_tracking_system.after(tracking_bridge_system))
-            .add_systems(Update, sync_avatar_diagnostics.after(crate::synthetic_tracking::synthetic_tracking_system));
+            .add_systems(
+                Update,
+                crate::synthetic_tracking::synthetic_tracking_system.after(tracking_bridge_system),
+            )
+            .add_systems(
+                Update,
+                sync_avatar_diagnostics.after(crate::synthetic_tracking::synthetic_tracking_system),
+            );
     }
 }
 
 fn attach_primary_egui_context_to_viewport_camera(
     mut commands: Commands,
-    viewport_cameras: Query<Entity, (With<AvatarViewportCamera>, Without<PrimaryEguiContext>, Without<AvatarOutputCamera>)>,
+    viewport_cameras: Query<Entity, (With<AvatarViewportCamera>, Without<AvatarOutputCamera>)>,
     primary_contexts: Query<(), With<PrimaryEguiContext>>,
 ) {
-    if !primary_contexts.is_empty() { return; }
-    if let Ok(entity) = viewport_cameras.single() { commands.entity(entity).insert(PrimaryEguiContext); }
+    if !primary_contexts.is_empty() {
+        return;
+    }
+    if let Ok(entity) = viewport_cameras.single() {
+        commands.entity(entity).insert(PrimaryEguiContext);
+    }
 }
 
 fn register_avatar_preview_texture(
@@ -176,13 +277,19 @@ fn register_avatar_preview_texture(
 
 /// Pointer ownership for panels drawn in the shell's own egui root.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct UiSurfaceHover { over_ui: bool }
+pub struct UiSurfaceHover {
+    over_ui: bool,
+}
 impl UiSurfaceHover {
     /// Record pointer ownership for this frame.
-    pub fn set(&mut self, over_ui: bool) { self.over_ui = over_ui; }
+    pub fn set(&mut self, over_ui: bool) {
+        self.over_ui = over_ui;
+    }
     /// Whether a studio surface owns the pointer.
     #[must_use]
-    pub const fn over_ui(self) -> bool { self.over_ui }
+    pub const fn over_ui(self) -> bool {
+        self.over_ui
+    }
 }
 
 fn sync_camera_pointer_input_gate(
@@ -213,7 +320,10 @@ fn sync_error_presenter(
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
     settings: Option<Res<ArmPoseSettings>>,
 ) {
-    let lang = settings.as_deref().map(|settings| settings.language()).unwrap_or_default();
+    let lang = settings
+        .as_deref()
+        .map(|settings| settings.language())
+        .unwrap_or_default();
     let error = orchestrator.last_error();
     presenter.update(error, lang);
     match error {
@@ -222,7 +332,10 @@ fn sync_error_presenter(
             diagnostics.last_error = Some(presentation.user_message);
             diagnostics.last_error_code = Some(presentation.code.to_owned());
         }
-        None => { diagnostics.last_error = None; diagnostics.last_error_code = None; }
+        None => {
+            diagnostics.last_error = None;
+            diagnostics.last_error_code = None;
+        }
     }
 }
 
@@ -244,9 +357,14 @@ fn ui_render_system(
     mut hover: ResMut<UiSurfaceHover>,
 ) -> Result {
     super::file_dialog::poll_file_dialog(&mut file_dialog, &mut state);
-    let camera_texture = preview.image_handle.as_ref().and_then(|image| contexts.image_id(image.id()));
+    let camera_texture = preview
+        .image_handle
+        .as_ref()
+        .and_then(|image| contexts.image_id(image.id()));
     let avatar_texture = target.as_ref().and_then(|target| {
-        contexts.image_id(target.image().id()).map(|texture| (texture, target.profile()))
+        contexts
+            .image_id(target.image().id())
+            .map(|texture| (texture, target.profile()))
     });
     let ctx = contexts.ctx_mut()?;
     state.sync_pane(vm.pane);
@@ -258,9 +376,19 @@ fn ui_render_system(
         state.preview_event(CameraPreviewEvent::Hide);
     }
     let over_ui = super::studio::render_studio(
-        ctx, &vm, &mut state, &diagnostics, errors.current(),
-        &preview, &landmarks, *avatar_mirror, camera_texture, avatar_texture,
-        file_dialog.is_active(), fonts.error.as_deref(), settings.language(),
+        ctx,
+        &vm,
+        &mut state,
+        &diagnostics,
+        errors.current(),
+        &preview,
+        &landmarks,
+        *avatar_mirror,
+        camera_texture,
+        avatar_texture,
+        file_dialog.is_active(),
+        fonts.error.as_deref(),
+        settings.language(),
     );
     hover.set(over_ui);
     // Uploads depend on explicit session consent; capture and inference do not.
@@ -271,7 +399,9 @@ fn ui_render_system(
         output.set_preview_visible(state.controls_open && vm.avatar.is_ready);
     }
     // The UI requests a dialog; this boundary owns filesystem/dialog effects.
-    if std::mem::take(&mut state.import_requested) { file_dialog.start(settings.language()); }
+    if std::mem::take(&mut state.import_requested) {
+        file_dialog.start(settings.language());
+    }
     super::file_dialog::handle_dropped_files(ctx, &mut state);
     Ok(())
 }
@@ -284,15 +414,18 @@ mod tests {
     fn ui_state_emit_and_take() {
         let mut state = UiState::default();
         assert!(state.pending_actions.is_empty());
-        state.emit(UiAction::Start); state.emit(UiAction::Stop);
+        state.emit(UiAction::Start);
+        state.emit(UiAction::Stop);
         assert_eq!(state.take_actions(), vec![UiAction::Start, UiAction::Stop]);
         assert!(state.pending_actions.is_empty());
     }
 
     #[test]
     fn navigation_is_deduplicated_and_always_revokes_camera_consent() {
-        let mut state = UiState::default();
-        state.camera_consent = CameraPreviewConsent::Visible;
+        let mut state = UiState {
+            camera_consent: CameraPreviewConsent::Visible,
+            ..Default::default()
+        };
         state.emit(UiAction::SwitchPane(Pane::Camera));
         state.emit(UiAction::SwitchPane(Pane::Camera));
         assert_eq!(state.pending_actions.len(), 1);
@@ -307,33 +440,48 @@ mod tests {
         let mut state = UiState::default();
         assert!(state.controls_open);
         state.camera_consent = CameraPreviewConsent::Visible;
-        state.set_controls_open(false); state.set_controls_open(true);
+        state.set_controls_open(false);
+        state.set_controls_open(true);
         assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
     }
 
     #[test]
     fn camera_change_stop_and_unload_revoke_preview() {
-        for action in [UiAction::SelectCamera { index: 1 }, UiAction::Stop, UiAction::UnloadAvatar] {
-            let mut state = UiState::default(); state.camera_consent = CameraPreviewConsent::Visible;
-            state.emit(action); assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
+        for action in [
+            UiAction::SelectCamera { index: 1 },
+            UiAction::Stop,
+            UiAction::UnloadAvatar,
+        ] {
+            let mut state = UiState {
+                camera_consent: CameraPreviewConsent::Visible,
+                ..Default::default()
+            };
+            state.emit(action);
+            assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
         }
     }
 
     #[test]
     fn same_page_rerender_preserves_consent_but_external_navigation_does_not() {
-        let mut state = UiState::default(); state.sync_pane(Pane::Camera);
+        let mut state = UiState::default();
+        state.sync_pane(Pane::Camera);
         state.camera_consent = CameraPreviewConsent::Visible;
-        state.sync_pane(Pane::Camera); assert_eq!(state.camera_consent, CameraPreviewConsent::Visible);
-        state.sync_pane(Pane::Studio); assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
+        state.sync_pane(Pane::Camera);
+        assert_eq!(state.camera_consent, CameraPreviewConsent::Visible);
+        state.sync_pane(Pane::Studio);
+        assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
     }
 
     #[test]
     fn ui_state_emit_deduplicates_toggles_not_start() {
         let mut state = UiState::default();
-        state.emit(UiAction::ToggleMirror); state.emit(UiAction::ToggleMirror);
-        state.emit(UiAction::ToggleAvatarMotionMirror); state.emit(UiAction::ToggleAvatarMotionMirror);
+        state.emit(UiAction::ToggleMirror);
+        state.emit(UiAction::ToggleMirror);
+        state.emit(UiAction::ToggleAvatarMotionMirror);
+        state.emit(UiAction::ToggleAvatarMotionMirror);
         assert_eq!(state.take_actions().len(), 2);
-        state.emit(UiAction::Start); state.emit(UiAction::Start);
+        state.emit(UiAction::Start);
+        state.emit(UiAction::Start);
         assert_eq!(state.take_actions().len(), 2);
     }
 
@@ -341,7 +489,12 @@ mod tests {
     fn egui_attaches_only_to_the_window_avatar_camera_not_the_output_target() {
         let mut app = App::new();
         let output = app.world_mut().spawn(AvatarOutputCamera).id();
-        let viewport = app.world_mut().spawn(AvatarViewportCamera::from_default_transform(Transform::default())).id();
+        let viewport = app
+            .world_mut()
+            .spawn(AvatarViewportCamera::from_default_transform(
+                Transform::default(),
+            ))
+            .id();
         app.add_systems(Update, attach_primary_egui_context_to_viewport_camera);
         app.update();
         assert!(app.world().get::<PrimaryEguiContext>(viewport).is_some());
@@ -351,14 +504,24 @@ mod tests {
     #[test]
     fn sync_error_presenter_updates_translated_summary_and_diagnostics() {
         let mut app = App::new();
-        app.init_resource::<Orchestrator>().init_resource::<ErrorPresenter>()
-            .init_resource::<DiagnosticsSnapshot>().init_resource::<ArmPoseSettings>()
+        app.init_resource::<Orchestrator>()
+            .init_resource::<ErrorPresenter>()
+            .init_resource::<DiagnosticsSnapshot>()
+            .init_resource::<ArmPoseSettings>()
             .add_systems(Update, sync_error_presenter);
         // Exercise the existing public action boundary; Start without a
         // selected camera produces NoCameraSelected without camera/file I/O.
-        app.world_mut().resource_mut::<Orchestrator>().process_action(&UiAction::Start);
+        app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .process_action(&UiAction::Start);
         app.update();
-        assert_eq!(app.world().resource::<DiagnosticsSnapshot>().last_error_code.as_deref(), Some("NO_CAMERA"));
+        assert_eq!(
+            app.world()
+                .resource::<DiagnosticsSnapshot>()
+                .last_error_code
+                .as_deref(),
+            Some("NO_CAMERA")
+        );
         assert!(app.world().resource::<ErrorPresenter>().current().is_some());
     }
 }

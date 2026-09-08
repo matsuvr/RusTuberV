@@ -39,16 +39,29 @@ mod tests {
     fn opening_a_page_or_requesting_a_preview_does_not_reveal_pixels() {
         let hidden = CameraPreviewConsent::default();
         assert_eq!(hidden, CameraPreviewConsent::Hidden);
-        assert_eq!(next_camera_preview_consent(hidden, CameraPreviewEvent::Confirm), hidden);
+        assert_eq!(
+            next_camera_preview_consent(hidden, CameraPreviewEvent::Confirm),
+            hidden
+        );
         let requested = next_camera_preview_consent(hidden, CameraPreviewEvent::Request);
         assert_eq!(requested, CameraPreviewConsent::Confirming);
-        assert_eq!(next_camera_preview_consent(requested, CameraPreviewEvent::Confirm), CameraPreviewConsent::Visible);
+        assert_eq!(
+            next_camera_preview_consent(requested, CameraPreviewEvent::Confirm),
+            CameraPreviewConsent::Visible
+        );
     }
 
     #[test]
     fn navigation_close_escape_and_camera_change_revoke_consent() {
-        for state in [CameraPreviewConsent::Hidden, CameraPreviewConsent::Confirming, CameraPreviewConsent::Visible] {
-            assert_eq!(next_camera_preview_consent(state, CameraPreviewEvent::Hide), CameraPreviewConsent::Hidden);
+        for state in [
+            CameraPreviewConsent::Hidden,
+            CameraPreviewConsent::Confirming,
+            CameraPreviewConsent::Visible,
+        ] {
+            assert_eq!(
+                next_camera_preview_consent(state, CameraPreviewEvent::Hide),
+                CameraPreviewConsent::Hidden
+            );
         }
     }
 }

@@ -150,9 +150,7 @@ mod tests {
         assert!(profile.pitch_weights.hips > 0.0);
         assert!(profile.roll_weights.hips > 0.0);
         // Hips respond slowest so the sway reads as weight shift.
-        assert!(
-            profile.bone_half_lives.hips_seconds > profile.bone_half_lives.spine_seconds
-        );
+        assert!(profile.bone_half_lives.hips_seconds > profile.bone_half_lives.spine_seconds);
     }
 
     #[test]

@@ -1,9 +1,9 @@
 //! UI view models — immutable snapshots for rendering the UI.
 //! These types hide Bevy queries from the UI, which emits UiAction commands.
 
+use crate::import::VrmGeneration;
 use bevy::prelude::Resource;
 use std::path::PathBuf;
-use crate::import::VrmGeneration;
 use vtuber_avatar::ArmPoseProfile;
 
 /// Destination selected by the navigation-only sidebar.
@@ -237,15 +237,21 @@ impl UiViewModel {
     /// Whether Start is available.
     #[must_use]
     pub fn can_start(&self) -> bool {
-        self.lifecycle == AppLifecycle::Idle && self.avatar.is_ready && self.camera.selected_index.is_some()
+        self.lifecycle == AppLifecycle::Idle
+            && self.avatar.is_ready
+            && self.camera.selected_index.is_some()
     }
     /// Whether Stop is available.
     #[must_use]
-    pub fn can_stop(&self) -> bool { self.lifecycle == AppLifecycle::Running }
+    pub fn can_stop(&self) -> bool {
+        self.lifecycle == AppLifecycle::Running
+    }
     /// Whether neutral calibration can begin.
     #[must_use]
     pub fn can_calibrate(&self) -> bool {
-        self.lifecycle == AppLifecycle::Running && !self.calibration.is_calibrating && !self.calibration.is_complete
+        self.lifecycle == AppLifecycle::Running
+            && !self.calibration.is_calibrating
+            && !self.calibration.is_complete
     }
     /// Whether the avatar has a camera default to restore.
     #[must_use]
@@ -255,14 +261,21 @@ impl UiViewModel {
     /// Whether NDI can start independently of tracking.
     #[must_use]
     pub fn can_start_ndi_output(&self) -> bool {
-        self.avatar.is_ready && self.avatar.lifecycle == AvatarLifecycleState::Ready
+        self.avatar.is_ready
+            && self.avatar.lifecycle == AvatarLifecycleState::Ready
             && self.ndi_output.available
-            && matches!(self.ndi_output.state, NdiOutputUiState::Off | NdiOutputUiState::Error)
+            && matches!(
+                self.ndi_output.state,
+                NdiOutputUiState::Off | NdiOutputUiState::Error
+            )
     }
     /// Whether NDI can stop.
     #[must_use]
     pub fn can_stop_ndi_output(&self) -> bool {
-        matches!(self.ndi_output.state, NdiOutputUiState::Starting | NdiOutputUiState::Live)
+        matches!(
+            self.ndi_output.state,
+            NdiOutputUiState::Starting | NdiOutputUiState::Live
+        )
     }
 }
 
@@ -274,60 +287,113 @@ mod tests {
         let vm = UiViewModel::default();
         assert_eq!(vm.lifecycle, AppLifecycle::Idle);
         assert_eq!(vm.pane, Pane::Camera);
-        assert!(!vm.can_start()); assert!(!vm.can_stop());
+        assert!(!vm.can_start());
+        assert!(!vm.can_stop());
     }
     #[test]
     fn ui_model_can_start_when_ready() {
-        let mut vm = UiViewModel::default(); vm.avatar.is_ready = true; vm.camera.selected_index = Some(0);
+        let mut vm = UiViewModel::default();
+        vm.avatar.is_ready = true;
+        vm.camera.selected_index = Some(0);
         assert!(vm.can_start());
     }
     #[test]
     fn ui_model_cannot_start_without_camera() {
-        let mut vm = UiViewModel::default(); vm.avatar.is_ready = true; assert!(!vm.can_start());
+        let mut vm = UiViewModel::default();
+        vm.avatar.is_ready = true;
+        assert!(!vm.can_start());
     }
     #[test]
     fn ui_model_cannot_start_without_avatar() {
-        let mut vm = UiViewModel::default(); vm.camera.selected_index = Some(0); assert!(!vm.can_start());
+        let mut vm = UiViewModel::default();
+        vm.camera.selected_index = Some(0);
+        assert!(!vm.can_start());
     }
     #[test]
     fn ui_model_can_stop_when_running() {
-        let vm = UiViewModel { lifecycle: AppLifecycle::Running, ..Default::default() }; assert!(vm.can_stop());
+        let vm = UiViewModel {
+            lifecycle: AppLifecycle::Running,
+            ..Default::default()
+        };
+        assert!(vm.can_stop());
     }
     #[test]
-    fn ui_model_cannot_stop_when_idle() { assert!(!UiViewModel::default().can_stop()); }
+    fn ui_model_cannot_stop_when_idle() {
+        assert!(!UiViewModel::default().can_stop());
+    }
     #[test]
     fn ui_model_ndi_start_requires_ready_avatar_but_not_tracking() {
-        let mut vm = UiViewModel::default(); vm.ndi_output.available = true; assert!(!vm.can_start_ndi_output());
-        vm.avatar.is_ready = true; vm.avatar.lifecycle = AvatarLifecycleState::Ready; assert!(vm.can_start_ndi_output());
-        vm.lifecycle = AppLifecycle::Running; assert!(vm.can_start_ndi_output());
+        let mut vm = UiViewModel::default();
+        vm.ndi_output.available = true;
+        assert!(!vm.can_start_ndi_output());
+        vm.avatar.is_ready = true;
+        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+        assert!(vm.can_start_ndi_output());
+        vm.lifecycle = AppLifecycle::Running;
+        assert!(vm.can_start_ndi_output());
     }
     #[test]
     fn ui_model_ndi_stop_is_available_only_while_starting_or_live() {
-        let mut vm = UiViewModel::default(); assert!(!vm.can_stop_ndi_output());
-        vm.ndi_output.state = NdiOutputUiState::Starting; assert!(vm.can_stop_ndi_output());
-        vm.ndi_output.state = NdiOutputUiState::Live; assert!(vm.can_stop_ndi_output());
+        let mut vm = UiViewModel::default();
+        assert!(!vm.can_stop_ndi_output());
+        vm.ndi_output.state = NdiOutputUiState::Starting;
+        assert!(vm.can_stop_ndi_output());
+        vm.ndi_output.state = NdiOutputUiState::Live;
+        assert!(vm.can_stop_ndi_output());
     }
     #[test]
     fn ui_model_can_reset_camera_only_for_a_ready_avatar() {
-        let mut vm = UiViewModel::default(); assert!(!vm.can_reset_camera());
-        vm.avatar.is_ready = true; assert!(!vm.can_reset_camera());
-        vm.avatar.lifecycle = AvatarLifecycleState::Ready; assert!(vm.can_reset_camera());
+        let mut vm = UiViewModel::default();
+        assert!(!vm.can_reset_camera());
+        vm.avatar.is_ready = true;
+        assert!(!vm.can_reset_camera());
+        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+        assert!(vm.can_reset_camera());
     }
     #[test]
     fn ui_model_can_calibrate_when_running() {
-        let vm = UiViewModel { lifecycle: AppLifecycle::Running, ..Default::default() }; assert!(vm.can_calibrate());
+        let vm = UiViewModel {
+            lifecycle: AppLifecycle::Running,
+            ..Default::default()
+        };
+        assert!(vm.can_calibrate());
     }
     #[test]
     fn ui_model_cannot_calibrate_when_calibrating() {
-        let vm = UiViewModel { lifecycle: AppLifecycle::Running, calibration: CalibrationViewModel { is_calibrating: true, ..Default::default() }, ..Default::default() }; assert!(!vm.can_calibrate());
+        let vm = UiViewModel {
+            lifecycle: AppLifecycle::Running,
+            calibration: CalibrationViewModel {
+                is_calibrating: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!vm.can_calibrate());
     }
     #[test]
     fn ui_model_cannot_calibrate_when_complete() {
-        let vm = UiViewModel { lifecycle: AppLifecycle::Running, calibration: CalibrationViewModel { is_complete: true, ..Default::default() }, ..Default::default() }; assert!(!vm.can_calibrate());
+        let vm = UiViewModel {
+            lifecycle: AppLifecycle::Running,
+            calibration: CalibrationViewModel {
+                is_complete: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!vm.can_calibrate());
     }
     #[test]
     fn ui_model_pane_transitions() {
-        let mut vm = UiViewModel::default(); assert_eq!(vm.pane, Pane::Camera);
-        for pane in [Pane::Studio, Pane::Diagnostics, Pane::Settings, Pane::Camera] { vm.pane = pane; assert_eq!(vm.pane, pane); }
+        let mut vm = UiViewModel::default();
+        assert_eq!(vm.pane, Pane::Camera);
+        for pane in [
+            Pane::Studio,
+            Pane::Diagnostics,
+            Pane::Settings,
+            Pane::Camera,
+        ] {
+            vm.pane = pane;
+            assert_eq!(vm.pane, pane);
+        }
     }
 }

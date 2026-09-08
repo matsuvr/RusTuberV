@@ -85,7 +85,11 @@ impl ArmPoseSettings {
             }
         };
         let language = load_language(&path);
-        Self { path: Some(path), restored, language }
+        Self {
+            path: Some(path),
+            restored,
+            language,
+        }
     }
 
     /// Loads settings from the platform user configuration directory.
@@ -109,7 +113,9 @@ impl ArmPoseSettings {
 
     /// Returns the configured settings path.
     #[must_use]
-    pub fn path(&self) -> Option<&Path> { self.path.as_deref() }
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
 
     /// Returns the validated entries read before the Bevy app started.
     pub fn restored_entries(&self) -> impl Iterator<Item = (&str, &ArmPoseProfileOverride)> {
@@ -126,11 +132,15 @@ impl ArmPoseSettings {
 
     /// Returns the UI language loaded at startup.
     #[must_use]
-    pub fn language(&self) -> UiLanguage { self.language }
+    pub fn language(&self) -> UiLanguage {
+        self.language
+    }
 
     /// Persists the UI language and applies it to this resource.
     pub fn set_language(&mut self, language: UiLanguage) -> Result<(), ArmPoseSettingsError> {
-        if let Some(path) = &self.path { save_language(path, language)?; }
+        if let Some(path) = &self.path {
+            save_language(path, language)?;
+        }
         self.language = language;
         Ok(())
     }
@@ -141,22 +151,31 @@ pub fn restore_arm_pose_settings_system(
     settings: Res<ArmPoseSettings>,
     mut overrides: Option<bevy::prelude::ResMut<ArmPoseOverrideStore>>,
 ) {
-    let Some(overrides) = overrides.as_deref_mut() else { return; };
-    overrides.import_entries(settings.restored_entries().map(|(model_id, profile)| (model_id.to_owned(), *profile)));
+    let Some(overrides) = overrides.as_deref_mut() else {
+        return;
+    };
+    overrides.import_entries(
+        settings
+            .restored_entries()
+            .map(|(model_id, profile)| (model_id.to_owned(), *profile)),
+    );
 }
 
 /// Returns the application settings path for the current platform.
 #[must_use]
 pub fn default_settings_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "RusTuberV").map(|dirs| dirs.config_dir().join(ARM_POSE_SETTINGS_FILE_NAME))
+    ProjectDirs::from("", "", "RusTuberV")
+        .map(|dirs| dirs.config_dir().join(ARM_POSE_SETTINGS_FILE_NAME))
 }
 
 /// Loads UI language, defaulting to Japanese when the file is missing or unreadable.
 #[must_use]
 pub fn load_language(path: &Path) -> UiLanguage {
-    fs::read_to_string(path).ok()
+    fs::read_to_string(path)
+        .ok()
         .and_then(|text| toml::from_str::<ArmPoseSettingsDocument>(&text).ok())
-        .map(|document| document.language).unwrap_or_default()
+        .map(|document| document.language)
+        .unwrap_or_default()
 }
 
 /// Persists UI language, preserving the rest of the settings document.
@@ -178,25 +197,40 @@ pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSet
 
 /// Loads and validates the arm-pose settings document.
 pub fn load_arm_pose_overrides(path: &Path) -> Result<ArmPoseOverrideStore, ArmPoseSettingsError> {
-    if !path.is_file() { return Ok(ArmPoseOverrideStore::default()); }
+    if !path.is_file() {
+        return Ok(ArmPoseOverrideStore::default());
+    }
     let text = fs::read_to_string(path)?;
     let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
     if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
-        return Err(ArmPoseSettingsError::UnsupportedSchema { version: document.schema_version });
+        return Err(ArmPoseSettingsError::UnsupportedSchema {
+            version: document.schema_version,
+        });
     }
     let expected = document.arm_pose_overrides.len();
     let mut store = ArmPoseOverrideStore::default();
-    let entries = document.arm_pose_overrides.into_iter().map(|(model_id, profile)| (model_id, profile.into_runtime()));
+    let entries = document
+        .arm_pose_overrides
+        .into_iter()
+        .map(|(model_id, profile)| (model_id, profile.into_runtime()));
     let accepted = store.import_entries(entries);
-    if accepted != expected { return Err(ArmPoseSettingsError::InvalidEntry); }
+    if accepted != expected {
+        return Err(ArmPoseSettingsError::InvalidEntry);
+    }
     // Existing settings policy: invalid dynamic entries are ignored by the store.
-    let dynamic_entries = document.dynamic_arm_profiles.into_iter().map(|(model_id, profile)| (model_id, profile.into_runtime()));
+    let dynamic_entries = document
+        .dynamic_arm_profiles
+        .into_iter()
+        .map(|(model_id, profile)| (model_id, profile.into_runtime()));
     store.import_dynamic_entries(dynamic_entries);
     Ok(store)
 }
 
 /// Saves validated entries using the existing settings-file replacement policy.
-pub fn save_arm_pose_overrides(path: &Path, store: &ArmPoseOverrideStore) -> Result<(), ArmPoseSettingsError> {
+pub fn save_arm_pose_overrides(
+    path: &Path,
+    store: &ArmPoseOverrideStore,
+) -> Result<(), ArmPoseSettingsError> {
     let mut document = if path.is_file() {
         let text = fs::read_to_string(path)?;
         toml::from_str::<ArmPoseSettingsDocument>(&text)?
@@ -209,19 +243,36 @@ pub fn save_arm_pose_overrides(path: &Path, store: &ArmPoseOverrideStore) -> Res
         }
     };
     document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
-    document.arm_pose_overrides = store.entries().map(|(model_id, profile)| (model_id.to_owned(), PersistedArmPoseProfile::from(*profile))).collect();
-    document.dynamic_arm_profiles = store.dynamic_entries().map(|(model_id, profile)| (model_id.to_owned(), PersistedDynamicArmProfile::from(*profile))).collect();
+    document.arm_pose_overrides = store
+        .entries()
+        .map(|(model_id, profile)| (model_id.to_owned(), PersistedArmPoseProfile::from(*profile)))
+        .collect();
+    document.dynamic_arm_profiles = store
+        .dynamic_entries()
+        .map(|(model_id, profile)| {
+            (
+                model_id.to_owned(),
+                PersistedDynamicArmProfile::from(*profile),
+            )
+        })
+        .collect();
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
 fn write_settings_atomically(path: &Path, text: &str) -> Result<(), ArmPoseSettingsError> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let temporary = path.with_extension("toml.tmp");
     fs::write(&temporary, text)?;
     if let Err(rename_error) = fs::rename(&temporary, path) {
         // Existing Windows replacement behavior, unrelated to UI language.
-        if path.exists() { fs::remove_file(path)?; fs::rename(&temporary, path)?; }
-        else { return Err(rename_error.into()); }
+        if path.exists() {
+            fs::remove_file(path)?;
+            fs::rename(&temporary, path)?;
+        } else {
+            return Err(rename_error.into());
+        }
     }
     Ok(())
 }
@@ -350,7 +401,10 @@ mod tests {
     use vtuber_avatar::{ArmPoseProfile, AvatarAssetId};
 
     fn profile(drop: f32) -> ArmPoseProfileOverride {
-        ArmPoseProfileOverride::from_profile(ArmPoseProfile { arm_drop_radians: drop, ..Default::default() })
+        ArmPoseProfileOverride::from_profile(ArmPoseProfile {
+            arm_drop_radians: drop,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -364,8 +418,14 @@ mod tests {
         store.set(second.0.clone(), profile(0.85)).unwrap();
         save_arm_pose_overrides(&path, &store).expect("settings save");
         let restarted = load_arm_pose_overrides(&path).expect("settings reload");
-        assert_eq!(restarted.profile_for(&first).unwrap().arm_drop_radians, 0.55);
-        assert_eq!(restarted.profile_for(&second).unwrap().arm_drop_radians, 0.85);
+        assert_eq!(
+            restarted.profile_for(&first).unwrap().arm_drop_radians,
+            0.55
+        );
+        assert_eq!(
+            restarted.profile_for(&second).unwrap().arm_drop_radians,
+            0.85
+        );
     }
 
     #[test]
@@ -389,10 +449,16 @@ mod tests {
         let directory = tempdir().expect("temporary settings directory");
         let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
         assert_eq!(load_language(&path), UiLanguage::Ja);
-        for language in [UiLanguage::Ja, UiLanguage::En, UiLanguage::Zh, UiLanguage::Ko] {
+        for language in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
             save_language(&path, language).expect("language save");
             assert_eq!(load_language(&path), language);
-            save_arm_pose_overrides(&path, &ArmPoseOverrideStore::default()).expect("settings save");
+            save_arm_pose_overrides(&path, &ArmPoseOverrideStore::default())
+                .expect("settings save");
             assert_eq!(load_language(&path), language);
             assert_eq!(ArmPoseSettings::load(&path).language(), language);
         }
@@ -406,8 +472,16 @@ mod tests {
 
     #[test]
     fn four_language_selection_is_exhaustive() {
-        for (language, expected) in [(UiLanguage::Ja, "日本語"), (UiLanguage::En, "English"), (UiLanguage::Zh, "中文"), (UiLanguage::Ko, "한국어")] {
-            assert_eq!(language.pick("日本語", "English", "中文", "한국어"), expected);
+        for (language, expected) in [
+            (UiLanguage::Ja, "日本語"),
+            (UiLanguage::En, "English"),
+            (UiLanguage::Zh, "中文"),
+            (UiLanguage::Ko, "한국어"),
+        ] {
+            assert_eq!(
+                language.pick("日本語", "English", "中文", "한국어"),
+                expected
+            );
         }
     }
 
@@ -433,10 +507,16 @@ mod tests {
 mod dynamic_profile_tests {
     use super::*;
     use tempfile::tempdir;
-    use vtuber_avatar::{ArmPoseProfile, ArmPoseProfileOverride, AvatarAssetId, DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION, DynamicArmProfile, DynamicArmProfileOverride};
+    use vtuber_avatar::{
+        ArmPoseProfile, ArmPoseProfileOverride, AvatarAssetId,
+        DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION, DynamicArmProfile, DynamicArmProfileOverride,
+    };
 
     fn dynamic_override(trim: f32) -> DynamicArmProfileOverride {
-        DynamicArmProfileOverride::from_profile(DynamicArmProfile { shoulder_elevation_trim_radians: trim, ..DynamicArmProfile::default() })
+        DynamicArmProfileOverride::from_profile(DynamicArmProfile {
+            shoulder_elevation_trim_radians: trim,
+            ..DynamicArmProfile::default()
+        })
     }
 
     #[test]
@@ -446,12 +526,32 @@ mod dynamic_profile_tests {
         let first = AvatarAssetId::new("sha256:first");
         let second = AvatarAssetId::new("sha256:second");
         let mut store = ArmPoseOverrideStore::default();
-        store.set_dynamic_profile(first.0.clone(), dynamic_override(-0.13)).unwrap();
-        store.set_dynamic_profile(second.0.clone(), dynamic_override(0.05)).unwrap();
+        store
+            .set_dynamic_profile(first.0.clone(), dynamic_override(-0.13))
+            .unwrap();
+        store
+            .set_dynamic_profile(second.0.clone(), dynamic_override(0.05))
+            .unwrap();
         save_arm_pose_overrides(&path, &store).expect("settings save");
         let reloaded = load_arm_pose_overrides(&path).expect("settings reload");
-        assert!((reloaded.dynamic_profile_for(&first).unwrap().shoulder_elevation_trim_radians - -0.13).abs() < 1e-6);
-        assert!((reloaded.dynamic_profile_for(&second).unwrap().shoulder_elevation_trim_radians - 0.05).abs() < 1e-6);
+        assert!(
+            (reloaded
+                .dynamic_profile_for(&first)
+                .unwrap()
+                .shoulder_elevation_trim_radians
+                - -0.13)
+                .abs()
+                < 1e-6
+        );
+        assert!(
+            (reloaded
+                .dynamic_profile_for(&second)
+                .unwrap()
+                .shoulder_elevation_trim_radians
+                - 0.05)
+                .abs()
+                < 1e-6
+        );
         assert!(store.reset_dynamic_profile(&first));
         assert!(store.dynamic_profile_for(&first).is_none());
         assert!(store.dynamic_profile_for(&second).is_some());
@@ -463,14 +563,28 @@ mod dynamic_profile_tests {
         let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
         fs::write(&path, format!("schema_version = {ARM_POSE_SETTINGS_SCHEMA_VERSION}\n[dynamic_arm_profiles.\"sha256:bad\"]\nschema_version = 1\nhand_anchor_ratio = [0.0, 0.0, 0.0]\ncompensation_gains = [2.5, 0.0, 0.0]\nelbow_swivel_radians = 99.0\nswivel_transition_width_ratio = 0.15\npole_influence = 0.2\ntwist_relax_weight = 0.7\ntwist_parent_child_crossfade = 0.9\nshoulder_elevation_trim_radians = 9.9\n")).expect("write corrupt settings");
         let store = load_arm_pose_overrides(&path).expect("settings reload");
-        assert!(store.dynamic_profile_for(&AvatarAssetId::new("sha256:bad")).is_none());
+        assert!(
+            store
+                .dynamic_profile_for(&AvatarAssetId::new("sha256:bad"))
+                .is_none()
+        );
     }
 
     #[test]
     fn migration_from_legacy_v1_resets_to_automatic_defaults() {
-        let legacy = ArmPoseProfileOverride::from_profile(ArmPoseProfile { arm_drop_radians: 0.4, reach_ratio: 0.8, ..ArmPoseProfile::default() });
+        let legacy = ArmPoseProfileOverride::from_profile(ArmPoseProfile {
+            arm_drop_radians: 0.4,
+            reach_ratio: 0.8,
+            ..ArmPoseProfile::default()
+        });
         let migrated = DynamicArmProfileOverride::from_legacy_override(&legacy);
-        assert_eq!(migrated.schema_version, DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION);
-        assert_eq!(migrated.into_profile().unwrap(), DynamicArmProfile::default());
+        assert_eq!(
+            migrated.schema_version,
+            DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION
+        );
+        assert_eq!(
+            migrated.into_profile().unwrap(),
+            DynamicArmProfile::default()
+        );
     }
 }
