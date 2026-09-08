@@ -1,33 +1,31 @@
 //! UI view models — immutable snapshots for rendering the UI.
-//!
-//! These types hide Bevy query details from the UI layer. The UI reads
-//! these snapshots and emits [`crate::actions::UiAction`] commands.
+//! These types hide Bevy queries from the UI, which emits UiAction commands.
 
 use bevy::prelude::Resource;
 use std::path::PathBuf;
-
 use crate::import::VrmGeneration;
 use vtuber_avatar::ArmPoseProfile;
 
-/// Which settings pane the detail area is showing.
-///
-/// Follows the macOS System Settings model: the sidebar selects a category
-/// and the detail pane shows that category's controls as a grouped list.
+/// Destination selected by the navigation-only sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
-    /// Camera capture device and viewport navigation.
+    /// Guided setup overview. The desktop shell selects this on startup.
+    Studio,
+    /// Capture device and explicitly confirmed camera preview.
     #[default]
     Camera,
-    /// VRM model import and arm pose.
+    /// VRM import and arm pose.
     Avatar,
     /// Neutral pose calibration.
     Calibration,
-    /// Camera feed preview and display mirroring.
+    /// Legacy camera-preview destination, rendered as the camera page.
     Preview,
-    /// NDI transparent output.
+    /// Clean avatar output, including optional NDI.
     NdiOutput,
-    /// Performance diagnostics, tracking health, and system metrics.
+    /// Tracking health and technical diagnostics.
     Diagnostics,
+    /// Application language and appearance settings.
+    Settings,
 }
 
 /// Overall application lifecycle state for UI display.
@@ -49,98 +47,98 @@ pub enum AppLifecycle {
 /// Camera state for the UI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CameraViewModel {
-    /// Available camera descriptors (display name, index).
+    /// Available camera descriptors.
     pub available_cameras: Vec<CameraDescriptor>,
-    /// Currently selected camera index, if any.
+    /// Currently selected camera index.
     pub selected_index: Option<usize>,
-    /// Whether the camera is currently capturing.
+    /// Whether the camera is capturing.
     pub is_capturing: bool,
-    /// Camera backend name (e.g. "MSMF", "AVFoundation").
+    /// Backend name.
     pub backend: Option<String>,
-    /// Active resolution (width x height).
+    /// Active resolution.
     pub resolution: Option<(u32, u32)>,
 }
 
-/// A camera descriptor for display in the UI.
+/// A camera descriptor for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CameraDescriptor {
-    /// Human-readable camera name.
+    /// Human-readable device name.
     pub name: String,
-    /// Platform-specific index or identifier.
+    /// Platform index or identifier.
     pub index: usize,
 }
 
 /// Avatar state for the UI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AvatarViewModel {
-    /// Imported model summary, if any.
+    /// Imported model summary.
     pub imported_model: Option<ImportedModelSummary>,
     /// Avatar lifecycle state.
     pub lifecycle: AvatarLifecycleState,
     /// Whether the avatar is ready for tracking.
     pub is_ready: bool,
-    /// Whether the avatar load/binding failed (recoverable).
+    /// Whether loading or binding failed.
     pub load_failed: bool,
 }
 
-/// Settings view model for the active avatar's default arm pose.
+/// Settings for the active avatar's default arm pose.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ArmPoseViewModel {
-    /// Current validated profile, automatic or model-specific.
+    /// Current validated profile.
     pub profile: ArmPoseProfile,
-    /// Whether the active model has an explicit persisted override.
+    /// Whether there is a model-specific persisted override.
     pub has_override: bool,
 }
 
-/// Summary of an imported model for display.
+/// Summary of an imported model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportedModelSummary {
-    /// VRM generation accepted by preflight and the runtime adapter.
+    /// VRM generation.
     pub generation: VrmGeneration,
-    /// Stable asset ID (SHA-256 short).
+    /// Stable asset ID.
     pub id: String,
-    /// Model name from VRM metadata.
+    /// Name from VRM metadata.
     pub name: String,
-    /// Original file path (for display only, not used for loading).
+    /// Original source path, not used for loading.
     pub original_path: PathBuf,
-    /// Whether the model has all required bones.
+    /// Whether required bones exist.
     pub has_required_bones: bool,
-    /// Available expression preset count.
+    /// Expression preset count.
     pub expression_count: usize,
 }
 
-/// Avatar lifecycle state for UI display.
+/// Avatar lifecycle state for display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AvatarLifecycleState {
     /// No avatar loaded.
     #[default]
     None,
-    /// Avatar is loading.
+    /// Loading.
     Loading,
-    /// Avatar is binding bones.
+    /// Binding bones.
     Binding,
-    /// Avatar is ready.
+    /// Ready.
     Ready,
-    /// Avatar is unloading.
+    /// Unloading.
     Unloading,
-    /// Avatar loading/binding failed.
+    /// Failed.
     Failed,
 }
 
 /// Calibration state for the UI.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CalibrationViewModel {
-    /// Whether calibration is in progress.
+    /// Whether calibration is collecting samples.
     pub is_calibrating: bool,
-    /// Number of samples collected so far.
+    /// Samples collected.
     pub samples_collected: u32,
-    /// Target number of samples.
+    /// Target samples.
     pub samples_target: u32,
-    /// Quality score (0.0 to 1.0), if available.
+    /// Quality score in 0..1.
     pub quality_score: Option<f32>,
-    /// Last rejection reason, if any.
+    /// Last rejection reason.
     pub last_reject_reason: Option<String>,
-    /// Whether calibration completed successfully.
+    /// Whether calibration succeeded.
     pub is_complete: bool,
 }
 
@@ -149,69 +147,69 @@ pub struct CalibrationViewModel {
 pub struct TrackingViewModel {
     /// Whether tracking is active.
     pub is_tracking: bool,
-    /// Current tracking state (Tracking/Lost/Initializing).
+    /// Current state.
     pub state: TrackingState,
-    /// Current confidence (0.0 to 1.0).
+    /// Confidence in 0..1.
     pub confidence: f32,
     /// Face detected.
     pub face_detected: bool,
 }
 
-/// Tracking state enum for UI display.
+/// Tracking state for display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrackingState {
     /// Not tracking.
     #[default]
     Idle,
-    /// Initializing / calibrating.
+    /// Initializing.
     Initializing,
-    /// Actively tracking.
+    /// Tracking.
     Tracking,
-    /// Face lost, attempting recovery.
+    /// Face lost.
     Lost,
 }
 
-/// Display state for the optional NDI output sender.
+/// State of the optional NDI sender.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NdiOutputUiState {
-    /// No sender is active.
+    /// Off.
     #[default]
     Off,
-    /// The sender is being initialized.
+    /// Initializing.
     Starting,
-    /// Frames are being offered to the sender.
+    /// Offering frames to receivers.
     Live,
-    /// The last start/send operation failed.
+    /// Failed.
     Error,
 }
 
-/// Small immutable snapshot of the optional NDI output state.
+/// Immutable NDI output snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NdiOutputViewModel {
-    /// Whether this build contains the explicit NDI SDK feature.
+    /// Whether the build includes the SDK feature.
     pub available: bool,
-    /// Whether an NDI Standard runtime DLL was found on this machine.
+    /// Whether the NDI runtime was found.
     pub runtime_installed: bool,
-    /// Current sender state.
+    /// Sender state.
     pub state: NdiOutputUiState,
-    /// Fixed source name used by the application.
+    /// Source name.
     pub source_name: Option<String>,
-    /// Number of currently connected receivers, when reported by the backend.
+    /// Connected receiver count.
     pub connections: Option<u32>,
-    /// Frames discarded because the sender mailbox was not running.
+    /// Discarded frames.
     pub dropped_frames: u64,
-    /// Frames replaced in the bounded latest-value mailbox.
+    /// Replaced mailbox frames.
     pub replaced_frames: u64,
-    /// Stable backend error code, when present.
+    /// Backend error code.
     pub error_code: Option<String>,
-    /// Short backend error message, when present.
+    /// Backend error detail.
     pub error_message: Option<String>,
 }
 
-/// Complete UI view model snapshot.
+/// Complete UI snapshot.
 #[derive(Clone, Debug, Default, Resource)]
 pub struct UiViewModel {
-    /// Current pane shown in the detail area.
+    /// Selected destination.
     pub pane: Pane,
     /// Application lifecycle.
     pub lifecycle: AppLifecycle,
@@ -219,203 +217,117 @@ pub struct UiViewModel {
     pub camera: CameraViewModel,
     /// Avatar state.
     pub avatar: AvatarViewModel,
-    /// Active model arm-pose settings.
+    /// Arm pose settings.
     pub arm_pose: ArmPoseViewModel,
     /// Calibration state.
     pub calibration: CalibrationViewModel,
     /// Tracking state.
     pub tracking: TrackingViewModel,
-    /// Optional NDI output state.
+    /// NDI state.
     pub ndi_output: NdiOutputViewModel,
-    /// Whether preview mirroring is enabled.
+    /// Camera-preview mirroring.
     pub mirror_preview: bool,
-    /// Whether avatar motion is reflected for the operator.
+    /// Operator-facing avatar mirroring.
     pub mirror_avatar_motion: bool,
-    /// Whether preview is visible.
+    /// Camera-preview visibility.
     pub preview_visible: bool,
 }
 
 impl UiViewModel {
-    /// Check if the Start action is available.
+    /// Whether Start is available.
     #[must_use]
     pub fn can_start(&self) -> bool {
-        self.lifecycle == AppLifecycle::Idle
-            && self.avatar.is_ready
-            && self.camera.selected_index.is_some()
+        self.lifecycle == AppLifecycle::Idle && self.avatar.is_ready && self.camera.selected_index.is_some()
     }
-
-    /// Check if the Stop action is available.
+    /// Whether Stop is available.
     #[must_use]
-    pub fn can_stop(&self) -> bool {
-        self.lifecycle == AppLifecycle::Running
-    }
-
-    /// Check if calibration can begin.
+    pub fn can_stop(&self) -> bool { self.lifecycle == AppLifecycle::Running }
+    /// Whether neutral calibration can begin.
     #[must_use]
     pub fn can_calibrate(&self) -> bool {
-        self.lifecycle == AppLifecycle::Running
-            && !self.calibration.is_calibrating
-            && !self.calibration.is_complete
+        self.lifecycle == AppLifecycle::Running && !self.calibration.is_calibrating && !self.calibration.is_complete
     }
-
-    /// Check if the current avatar has a camera default that can be reset.
+    /// Whether the avatar has a camera default to restore.
     #[must_use]
     pub fn can_reset_camera(&self) -> bool {
         self.avatar.is_ready && self.avatar.lifecycle == AvatarLifecycleState::Ready
     }
-
-    /// Check if NDI output can be started for the current ready avatar.
+    /// Whether NDI can start independently of tracking.
     #[must_use]
     pub fn can_start_ndi_output(&self) -> bool {
-        self.avatar.is_ready
-            && self.avatar.lifecycle == AvatarLifecycleState::Ready
+        self.avatar.is_ready && self.avatar.lifecycle == AvatarLifecycleState::Ready
             && self.ndi_output.available
-            && matches!(
-                self.ndi_output.state,
-                NdiOutputUiState::Off | NdiOutputUiState::Error
-            )
+            && matches!(self.ndi_output.state, NdiOutputUiState::Off | NdiOutputUiState::Error)
     }
-
-    /// Check if an active or starting NDI sender can be stopped.
+    /// Whether NDI can stop.
     #[must_use]
     pub fn can_stop_ndi_output(&self) -> bool {
-        matches!(
-            self.ndi_output.state,
-            NdiOutputUiState::Starting | NdiOutputUiState::Live
-        )
+        matches!(self.ndi_output.state, NdiOutputUiState::Starting | NdiOutputUiState::Live)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn ui_model_default_is_idle() {
         let vm = UiViewModel::default();
         assert_eq!(vm.lifecycle, AppLifecycle::Idle);
         assert_eq!(vm.pane, Pane::Camera);
-        assert!(!vm.can_start());
-        assert!(!vm.can_stop());
+        assert!(!vm.can_start()); assert!(!vm.can_stop());
     }
-
     #[test]
     fn ui_model_can_start_when_ready() {
-        let mut vm = UiViewModel::default();
-        vm.avatar.is_ready = true;
-        vm.camera.selected_index = Some(0);
+        let mut vm = UiViewModel::default(); vm.avatar.is_ready = true; vm.camera.selected_index = Some(0);
         assert!(vm.can_start());
     }
-
     #[test]
     fn ui_model_cannot_start_without_camera() {
-        let mut vm = UiViewModel::default();
-        vm.avatar.is_ready = true;
-        // No camera selected.
-        assert!(!vm.can_start());
+        let mut vm = UiViewModel::default(); vm.avatar.is_ready = true; assert!(!vm.can_start());
     }
-
     #[test]
     fn ui_model_cannot_start_without_avatar() {
-        let mut vm = UiViewModel::default();
-        vm.camera.selected_index = Some(0);
-        // Avatar not ready.
-        assert!(!vm.can_start());
+        let mut vm = UiViewModel::default(); vm.camera.selected_index = Some(0); assert!(!vm.can_start());
     }
-
     #[test]
     fn ui_model_can_stop_when_running() {
-        let vm = UiViewModel {
-            lifecycle: AppLifecycle::Running,
-            ..Default::default()
-        };
-        assert!(vm.can_stop());
+        let vm = UiViewModel { lifecycle: AppLifecycle::Running, ..Default::default() }; assert!(vm.can_stop());
     }
-
     #[test]
-    fn ui_model_cannot_stop_when_idle() {
-        let vm = UiViewModel::default();
-        assert!(!vm.can_stop());
-    }
-
+    fn ui_model_cannot_stop_when_idle() { assert!(!UiViewModel::default().can_stop()); }
     #[test]
     fn ui_model_ndi_start_requires_ready_avatar_but_not_tracking() {
-        let mut vm = UiViewModel::default();
-        vm.ndi_output.available = true;
-        assert!(!vm.can_start_ndi_output());
-
-        vm.avatar.is_ready = true;
-        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
-        assert!(vm.can_start_ndi_output());
-
-        vm.lifecycle = AppLifecycle::Running;
-        assert!(vm.can_start_ndi_output());
+        let mut vm = UiViewModel::default(); vm.ndi_output.available = true; assert!(!vm.can_start_ndi_output());
+        vm.avatar.is_ready = true; vm.avatar.lifecycle = AvatarLifecycleState::Ready; assert!(vm.can_start_ndi_output());
+        vm.lifecycle = AppLifecycle::Running; assert!(vm.can_start_ndi_output());
     }
-
     #[test]
     fn ui_model_ndi_stop_is_available_only_while_starting_or_live() {
-        let mut vm = UiViewModel::default();
-        assert!(!vm.can_stop_ndi_output());
-        vm.ndi_output.state = NdiOutputUiState::Starting;
-        assert!(vm.can_stop_ndi_output());
-        vm.ndi_output.state = NdiOutputUiState::Live;
-        assert!(vm.can_stop_ndi_output());
+        let mut vm = UiViewModel::default(); assert!(!vm.can_stop_ndi_output());
+        vm.ndi_output.state = NdiOutputUiState::Starting; assert!(vm.can_stop_ndi_output());
+        vm.ndi_output.state = NdiOutputUiState::Live; assert!(vm.can_stop_ndi_output());
     }
-
     #[test]
     fn ui_model_can_reset_camera_only_for_a_ready_avatar() {
-        let mut vm = UiViewModel::default();
-        assert!(!vm.can_reset_camera());
-
-        vm.avatar.is_ready = true;
-        assert!(!vm.can_reset_camera());
-
-        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
-        assert!(vm.can_reset_camera());
+        let mut vm = UiViewModel::default(); assert!(!vm.can_reset_camera());
+        vm.avatar.is_ready = true; assert!(!vm.can_reset_camera());
+        vm.avatar.lifecycle = AvatarLifecycleState::Ready; assert!(vm.can_reset_camera());
     }
-
     #[test]
     fn ui_model_can_calibrate_when_running() {
-        let vm = UiViewModel {
-            lifecycle: AppLifecycle::Running,
-            ..Default::default()
-        };
-        assert!(vm.can_calibrate());
+        let vm = UiViewModel { lifecycle: AppLifecycle::Running, ..Default::default() }; assert!(vm.can_calibrate());
     }
-
     #[test]
     fn ui_model_cannot_calibrate_when_calibrating() {
-        let vm = UiViewModel {
-            lifecycle: AppLifecycle::Running,
-            calibration: CalibrationViewModel {
-                is_calibrating: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(!vm.can_calibrate());
+        let vm = UiViewModel { lifecycle: AppLifecycle::Running, calibration: CalibrationViewModel { is_calibrating: true, ..Default::default() }, ..Default::default() }; assert!(!vm.can_calibrate());
     }
-
     #[test]
     fn ui_model_cannot_calibrate_when_complete() {
-        let vm = UiViewModel {
-            lifecycle: AppLifecycle::Running,
-            calibration: CalibrationViewModel {
-                is_complete: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(!vm.can_calibrate());
+        let vm = UiViewModel { lifecycle: AppLifecycle::Running, calibration: CalibrationViewModel { is_complete: true, ..Default::default() }, ..Default::default() }; assert!(!vm.can_calibrate());
     }
-
     #[test]
     fn ui_model_pane_transitions() {
-        let mut vm = UiViewModel::default();
-        assert_eq!(vm.pane, Pane::Camera);
-        vm.pane = Pane::Diagnostics;
-        assert_eq!(vm.pane, Pane::Diagnostics);
-        vm.pane = Pane::Camera;
-        assert_eq!(vm.pane, Pane::Camera);
+        let mut vm = UiViewModel::default(); assert_eq!(vm.pane, Pane::Camera);
+        for pane in [Pane::Studio, Pane::Diagnostics, Pane::Settings, Pane::Camera] { vm.pane = pane; assert_eq!(vm.pane, pane); }
     }
 }

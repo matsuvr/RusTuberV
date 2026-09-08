@@ -2,106 +2,67 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-
 use bevy::prelude::*;
-
 use crate::actions::UiAction;
 use crate::settings::UiLanguage;
 
 /// Resource managing the async file dialog state.
 #[derive(Resource, Clone, Default)]
-pub struct FileDialogState {
-    /// Shared state for the async file dialog.
-    inner: Arc<Mutex<FileDialogInner>>,
-}
-
-/// Internal file dialog state.
+pub struct FileDialogState { inner: Arc<Mutex<FileDialogInner>> }
 #[derive(Default)]
-struct FileDialogInner {
-    /// Whether a dialog is currently active.
-    active: bool,
-    /// Result from the last completed dialog.
-    result: Option<Option<PathBuf>>,
-}
+struct FileDialogInner { active: bool, result: Option<Option<PathBuf>> }
 
 impl FileDialogState {
-    /// Check if a file dialog is currently active.
+    /// Whether a dialog is already active.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .active
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).active
     }
 
-    /// Start a new file dialog.
+    /// Start a new dialog. Called by the shell's side-effect boundary, not by
+    /// the snapshot-rendering functions. Native dialog buttons follow the OS.
     pub fn start(&mut self, lang: UiLanguage) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if inner.active {
-            return;
-        }
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.active { return; }
         inner.active = true;
         inner.result = None;
-
-        // Spawn the async file dialog task.
         let state = self.inner.clone();
         std::thread::spawn(move || {
-            // Use a simple blocking approach in a separate thread.
-            // This is acceptable because it's in a separate thread.
             let result = std::panic::catch_unwind(|| {
-                // Create a new runtime for the async file dialog.
                 let rt = tokio::runtime::Runtime::new().ok()?;
                 rt.block_on(async {
                     let handle = rfd::AsyncFileDialog::new()
-                        .add_filter(lang.pick("VRM モデル", "VRM models"), &["vrm"])
-                        .set_title(lang.pick(
-                            "VRM モデルを選択 (0.x / 1.0)",
-                            "Select VRM model (0.x or 1.0)",
-                        ))
-                        .pick_file()
-                        .await;
-                    handle.map(|h| h.path().to_path_buf())
+                        .add_filter(lang.pick("VRM モデル", "VRM models", "VRM 模型", "VRM 모델"), &["vrm"])
+                        .set_title(lang.pick("VRM モデルを選択 (0.x / 1.0)", "Select VRM model (0.x or 1.0)", "选择VRM模型 (0.x / 1.0)", "VRM 모델 선택 (0.x / 1.0)"))
+                        .pick_file().await;
+                    handle.map(|handle| handle.path().to_path_buf())
                 })
             });
-
-            let mut inner = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut inner = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             inner.active = false;
             inner.result = Some(result.ok().flatten());
         });
     }
 
-    /// Take the result if available.
+    /// Take a completed dialog result.
     pub fn take_result(&mut self) -> Option<Option<PathBuf>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .result
-            .take()
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).result.take()
     }
 }
 
-/// Poll the file dialog and emit import action if a file was selected.
+/// Poll the dialog and emit the import command.
 pub fn poll_file_dialog(state: &mut FileDialogState, ui_state: &mut super::UiState) {
-    if let Some(Some(path)) = state.take_result() {
-        ui_state.emit(UiAction::ImportAvatar { path });
-    }
+    if let Some(Some(path)) = state.take_result() { ui_state.emit(UiAction::ImportAvatar { path }); }
 }
 
-/// Handle dropped files from egui context.
+/// Accept the first dropped VRM file.
 pub fn handle_dropped_files(ctx: &bevy_egui::egui::Context, ui_state: &mut super::UiState) {
-    for event in ctx.input(|i| i.raw.dropped_files.clone()) {
+    for event in ctx.input(|input| input.raw.dropped_files.clone()) {
         if let Some(path) = event.path {
             let path_buf = PathBuf::from(&path);
-            if let Some(ext) = path_buf.extension()
-                && ext.to_string_lossy().to_lowercase() == "vrm"
-            {
+            if let Some(ext) = path_buf.extension() && ext.to_string_lossy().to_lowercase() == "vrm" {
                 ui_state.emit(UiAction::ImportAvatar { path: path_buf });
-                break; // Only accept the first .vrm file.
+                break;
             }
         }
     }
@@ -110,26 +71,13 @@ pub fn handle_dropped_files(ctx: &bevy_egui::egui::Context, ui_state: &mut super
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn file_dialog_default_is_inactive() {
-        let state = FileDialogState::default();
-        assert!(!state.is_active());
-    }
-
+    fn file_dialog_default_is_inactive() { assert!(!FileDialogState::default().is_active()); }
     #[test]
     fn vrm_extension_check() {
-        // Test the extension matching logic.
-        let path = PathBuf::from("test.vrm");
-        let ext = path.extension().unwrap().to_string_lossy().to_lowercase();
-        assert_eq!(ext, "vrm");
-
-        let path_upper = PathBuf::from("test.VRM");
-        let ext_upper = path_upper
-            .extension()
-            .unwrap()
-            .to_string_lossy()
-            .to_lowercase();
-        assert_eq!(ext_upper, "vrm");
+        for name in ["test.vrm", "test.VRM"] {
+            let path = PathBuf::from(name);
+            assert_eq!(path.extension().unwrap().to_string_lossy().to_lowercase(), "vrm");
+        }
     }
 }
