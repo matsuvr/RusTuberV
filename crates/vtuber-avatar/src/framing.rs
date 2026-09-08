@@ -959,16 +959,8 @@ mod tests {
         let camera = camera_entity(&mut app);
         let (root, _, _) = spawn_humanoid_parts(&mut app, 0.0);
         let mesh = mesh_asset(&mut app, &cube_positions());
-        let hair = spawn_named_renderable(
-            &mut app,
-            root,
-            "Hair",
-            mesh,
-            GlobalTransform::IDENTITY,
-        );
-        app.world_mut()
-            .entity_mut(hair)
-            .remove::<GlobalTransform>();
+        let hair = spawn_named_renderable(&mut app, root, "Hair", mesh, GlobalTransform::IDENTITY);
+        app.world_mut().entity_mut(hair).remove::<GlobalTransform>();
         make_ready(&mut app, root);
         let generation = app
             .world()

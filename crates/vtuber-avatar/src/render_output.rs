@@ -1,9 +1,9 @@
 //! Transparent avatar-only render target and asynchronous GPU readback.
 //!
-//! This module owns the Bevy side of the output boundary. It deliberately
-//! exposes only the transport-neutral [`vtuber_core::VideoOutputFrame`] and a
-//! latest-value slot; no network or NDI type enters the avatar crate.
+//! Rendering this texture for a local preview does not activate readback or
+//! NDI. The UI samples the texture; it never renders into this camera.
 
+use crate::lifecycle::AvatarGeneration;
 use bevy::camera::{CameraUpdateSystems, ClearColorConfig, RenderTarget, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -12,89 +12,81 @@ use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::renderer::RenderDevice;
 use vtuber_core::{FrameSeq, VideoOutputFrame, VideoOutputProfile, monotonic_now};
 
-use crate::lifecycle::AvatarGeneration;
-
 /// The rendering layer containing avatar geometry and output lighting.
 pub const AVATAR_RENDER_LAYER: usize = 0;
 /// The main-window-only layer containing the ground plane.
 pub const VIEWPORT_ONLY_RENDER_LAYER: usize = 1;
 
-/// Fixed render target and profile used by the output camera.
+/// Fixed render target and profile used by both the preview and output camera.
 #[derive(Resource, Clone, Debug)]
 pub struct AvatarOutputTarget {
     image: Handle<Image>,
     profile: VideoOutputProfile,
 }
-
 impl AvatarOutputTarget {
-    /// Returns the fixed transport-neutral output profile.
+    /// The fixed transport-neutral output profile.
     #[must_use]
     pub const fn profile(&self) -> VideoOutputProfile {
         self.profile
     }
-
-    /// Returns the render-target image handle for renderer integration.
+    /// The render-target image, also sampled by the application preview.
     #[must_use]
     pub fn image(&self) -> &Handle<Image> {
         &self.image
     }
 }
 
-/// Runtime activation state for the transparent output camera/readback.
-///
-/// The default is inactive. Toggling this resource does not affect camera
-/// capture, tracking, or the main avatar viewport.
+/// Independent activation of local rendering and transport readback.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct AvatarOutputState {
     active: bool,
+    preview_visible: bool,
     profile: VideoOutputProfile,
 }
-
 impl AvatarOutputState {
-    /// Returns whether the offscreen camera and readback are active.
+    /// Whether transport readback is active. Local preview does not change this.
     #[must_use]
     pub const fn is_active(&self) -> bool {
         self.active
     }
-
-    /// Returns the fixed output profile.
+    /// Whether either consumer needs the avatar render target this frame.
+    #[must_use]
+    pub const fn is_rendering(&self) -> bool {
+        self.active || self.preview_visible
+    }
+    /// Request GPU rendering for the local preview, without any CPU readback.
+    pub fn set_preview_visible(&mut self, visible: bool) {
+        self.preview_visible = visible;
+    }
+    /// The fixed output profile.
     #[must_use]
     pub const fn profile(&self) -> VideoOutputProfile {
         self.profile
     }
-
-    /// Activates or deactivates the output camera/readback lifecycle.
+    /// Activate or deactivate transport readback without hiding the local preview.
     pub fn set_active(&mut self, active: bool) {
         self.active = active;
     }
-
-    /// Activates transparent output.
+    /// Activate transparent output readback.
     pub fn activate(&mut self) {
         self.set_active(true);
     }
-
-    /// Deactivates transparent output.
+    /// Deactivate readback; a visible local preview keeps rendering.
     pub fn deactivate(&mut self) {
         self.set_active(false);
     }
-
-    /// Creates an inactive output state with a caller-selected profile.
-    ///
-    /// Production uses [`VideoOutputProfile::DEFAULT`]. Validators may choose a
-    /// smaller target so GPU pixel contracts can be exercised without changing
-    /// the application profile.
+    /// Create an inactive output state with a caller-selected profile.
     #[must_use]
     pub const fn with_profile(profile: VideoOutputProfile) -> Self {
         Self {
             active: false,
+            preview_visible: false,
             profile,
         }
     }
 }
 
-/// A latest-value slot for completed output frames.
-///
-/// A slow consumer can replace one pending frame, but cannot grow a queue.
+/// Capacity-one slot for completed output frames.
 #[derive(Resource, Default, Debug)]
 pub struct AvatarOutputFrameSlot {
     latest: Option<VideoOutputFrame>,
@@ -103,45 +95,35 @@ pub struct AvatarOutputFrameSlot {
     replaced_frames: u64,
     rejected_frames: u64,
 }
-
 impl AvatarOutputFrameSlot {
-    /// Takes the newest completed frame, if one is pending.
+    /// Take the newest completed frame.
     pub fn take_latest(&mut self) -> Option<VideoOutputFrame> {
         self.latest.take()
     }
-
-    /// Returns the newest completed frame without removing it.
+    /// Inspect the newest completed frame.
     #[must_use]
     pub fn latest(&self) -> Option<&VideoOutputFrame> {
         self.latest.as_ref()
     }
-
-    /// Number of successfully converted readback frames.
+    /// Successfully converted readback frames.
     #[must_use]
     pub const fn received_frames(&self) -> u64 {
         self.received_frames
     }
-
-    /// Number of completed frames replaced before a consumer took them.
+    /// Pending frames replaced before consumption.
     #[must_use]
     pub const fn replaced_frames(&self) -> u64 {
         self.replaced_frames
     }
-
-    /// Number of malformed readbacks rejected at the contract boundary.
+    /// Malformed readbacks rejected at the contract boundary.
     #[must_use]
     pub const fn rejected_frames(&self) -> u64 {
         self.rejected_frames
     }
-
-    /// Publishes a completed frame into the capacity-one slot.
-    ///
-    /// The GPU observer is the production caller. Tests use the same path to
-    /// prove replacement and orchestration contracts without a GPU.
+    /// Publish a completed transport-neutral frame.
     pub fn publish(&mut self, frame: VideoOutputFrame) {
         self.replace(frame);
     }
-
     fn replace(&mut self, frame: VideoOutputFrame) {
         self.next_frame_seq = self.next_frame_seq.saturating_add(1);
         self.received_frames = self.received_frames.saturating_add(1);
@@ -149,43 +131,34 @@ impl AvatarOutputFrameSlot {
             self.replaced_frames = self.replaced_frames.saturating_add(1);
         }
     }
-
     fn reject(&mut self) {
         self.rejected_frames = self.rejected_frames.saturating_add(1);
     }
-
     fn next_frame_seq(&self) -> FrameSeq {
         FrameSeq(self.next_frame_seq)
     }
 }
 
-/// Read-only snapshot of the current main avatar viewport camera.
-///
-/// The snapshot contains no Bevy entity ID and is updated only after the
-/// main camera's framing/manual controls have produced their current state.
+/// Read-only camera snapshot after framing and manual controls.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct AvatarViewportSnapshot {
-    /// Avatar lifecycle generation associated with this camera state.
+    /// Associated avatar generation.
     pub generation: AvatarGeneration,
-    /// Current viewport camera transform.
+    /// Main viewport transform.
     pub transform: Option<Transform>,
-    /// Current perspective projection values.
+    /// Main perspective projection.
     pub projection: Option<PerspectiveProjection>,
 }
 
-/// Marks the dedicated transparent output camera.
+/// Dedicated transparent avatar-only camera; never an egui context.
 #[derive(Component, Debug)]
 pub struct AvatarOutputCamera;
 
-/// Internal gate that allows only one GPU readback to be in flight.
 #[derive(Component, Debug)]
 struct AvatarOutputReadbackInFlight;
 
 #[derive(SystemParam)]
 struct OutputCameraQuery<'w, 's> {
-    // This tuple intentionally keeps all output-camera writes in one query so
-    // the camera, projection, transform, and bounded-readback gate change as
-    // one synchronized boundary.
     #[allow(clippy::type_complexity)]
     cameras: Query<
         'w,
@@ -205,7 +178,7 @@ struct OutputCameraQuery<'w, 's> {
     >,
 }
 
-/// Creates the fixed transparent target and output camera.
+/// Create the fixed transparent image and output camera.
 pub fn setup_output_camera(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -218,11 +191,10 @@ pub fn setup_output_camera(
         TextureFormat::Bgra8UnormSrgb,
         None,
     );
-    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC | TextureUsages::TEXTURE_BINDING;
     let image_handle = images.add(image);
     let camera_transform =
         Transform::from_translation(Vec3::new(0.0, 0.0, 2.5)).looking_at(Vec3::ZERO, Vec3::Y);
-
     commands.insert_resource(AvatarOutputTarget {
         image: image_handle.clone(),
         profile,
@@ -251,11 +223,8 @@ pub fn setup_output_camera(
     state.deactivate();
 }
 
-/// Mirrors the main viewport camera into the fixed offscreen camera.
-///
-/// This runs after avatar framing and after transform propagation. The output
-/// camera has no parent, so its global transform can be committed immediately
-/// and the render extractor sees the same state in this frame.
+/// Mirror main framing into the output target. Only transport activation
+/// schedules a readback; preview-only rendering remains entirely on the GPU.
 #[allow(clippy::type_complexity)]
 fn sync_output_camera(
     lifecycle: Res<crate::lifecycle::AvatarLifecycle>,
@@ -283,10 +252,6 @@ fn sync_output_camera(
         snapshot.projection = None;
         return;
     };
-
-    // Commit only when the mirrored values actually changed; rewriting
-    // identical camera components every frame would dirty change detection
-    // (and the render extractor) for no data change.
     if snapshot.transform != Some(*main_transform) {
         snapshot.transform = Some(*main_transform);
     }
@@ -298,7 +263,6 @@ fn sync_output_camera(
     }) {
         snapshot.projection = Some(main_projection.clone());
     }
-
     for (entity, mut camera, mut projection, mut transform, mut global_transform, in_flight) in
         &mut output_cameras.cameras
     {
@@ -321,7 +285,7 @@ fn sync_output_camera(
         if projection_changed {
             *projection = Projection::Perspective(main_projection.clone());
         }
-        camera.is_active = state.is_active();
+        camera.is_active = state.is_rendering();
         if state.is_active() && in_flight.is_none() {
             commands.entity(entity).insert((
                 Readback::texture(target.image().clone()),
@@ -369,7 +333,7 @@ fn handle_output_readback(
     }
 }
 
-/// Adds the output lifecycle systems to an existing avatar app.
+/// Register output resources and lifecycle systems.
 pub fn register_output_systems(app: &mut App) {
     app.init_resource::<AvatarOutputState>()
         .init_resource::<AvatarOutputFrameSlot>()
@@ -399,6 +363,7 @@ mod tests {
     fn output_starts_inactive_and_has_fixed_profile() {
         let state = AvatarOutputState::default();
         assert!(!state.is_active());
+        assert!(!state.is_rendering());
         assert_eq!(state.profile(), VideoOutputProfile::DEFAULT);
     }
 
@@ -413,7 +378,7 @@ mod tests {
                 vtuber_core::MonoTimeNs(seq),
                 vec![0, 0, 0, 0],
             )
-            .expect("one transparent pixel is valid")
+            .expect("transparent pixel")
         };
         slot.publish(make(0));
         slot.publish(make(1));
@@ -425,82 +390,17 @@ mod tests {
         assert!(slot.take_latest().is_none());
     }
 
-    #[test]
-    fn output_camera_mirrors_the_current_viewport_state() {
-        let mut app = App::new();
-        app.init_resource::<crate::lifecycle::AvatarLifecycle>()
-            .insert_resource(AvatarOutputState::default())
-            .insert_resource(test_target())
-            .insert_resource(AvatarViewportSnapshot::default());
-
-        let main_transform = Transform::from_xyz(1.0, 2.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y);
-        let main_projection = Projection::Perspective(PerspectiveProjection {
-            fov: 0.42,
-            aspect_ratio: 1.7,
-            ..default()
-        });
-        app.world_mut().spawn((
-            main_transform,
-            main_projection,
-            crate::framing::AvatarViewportCamera::from_default_transform(main_transform),
-        ));
-        let output = app
-            .world_mut()
-            .spawn((
-                Camera::default(),
-                Projection::Perspective(PerspectiveProjection::default()),
-                Transform::default(),
-                GlobalTransform::default(),
-                AvatarOutputCamera,
-            ))
-            .id();
-        app.add_systems(Update, sync_output_camera);
-
-        app.update();
-
-        assert_eq!(app.world().get::<Transform>(output), Some(&main_transform));
-        assert_eq!(
-            app.world().get::<GlobalTransform>(output),
-            Some(&GlobalTransform::from(main_transform))
-        );
-        let Projection::Perspective(projection) = app.world().get::<Projection>(output).unwrap()
-        else {
-            panic!("output camera must remain perspective");
-        };
-        assert_eq!(projection.fov, 0.42);
-        assert_eq!(projection.aspect_ratio, 1.7);
-        let snapshot = app.world().resource::<AvatarViewportSnapshot>();
-        assert_eq!(snapshot.transform, Some(main_transform));
-        let snapshot_projection = snapshot.projection.as_ref().expect("projection snapshot");
-        assert_eq!(snapshot_projection.fov, 0.42);
-        assert_eq!(snapshot_projection.aspect_ratio, 1.7);
-    }
-
-    #[test]
-    fn layer_contract_excludes_ground_from_output() {
-        let output = RenderLayers::layer(AVATAR_RENDER_LAYER);
-        let ground = RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER);
-        let viewport =
-            RenderLayers::from_layers(&[AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER]);
-        assert!(!output.intersects(&ground));
-        assert!(output.intersects(&viewport));
-        assert!(ground.intersects(&viewport));
-    }
-
     fn camera_entity(app: &mut App, main: bool) -> Entity {
         if main {
             let mut query = app
                 .world_mut()
                 .query_filtered::<Entity, With<crate::framing::AvatarViewportCamera>>();
-            query.iter(app.world()).next().expect("main camera exists")
+            query.iter(app.world()).next().expect("main camera")
         } else {
             let mut query = app
                 .world_mut()
                 .query_filtered::<Entity, With<AvatarOutputCamera>>();
-            query
-                .iter(app.world())
-                .next()
-                .expect("output camera exists")
+            query.iter(app.world()).next().expect("output camera")
         }
     }
 
@@ -534,9 +434,7 @@ mod tests {
         let mut app = App::new();
         let mut lifecycle = crate::lifecycle::AvatarLifecycle::default();
         let root = app.world_mut().spawn_empty().id();
-        lifecycle
-            .request_load(root)
-            .expect("load is allowed from NoAvatar");
+        lifecycle.request_load(root).expect("load from NoAvatar");
         lifecycle.start_binding(root);
         lifecycle.finish_ready();
         while lifecycle.current_generation() != generation {
@@ -558,6 +456,48 @@ mod tests {
     }
 
     #[test]
+    fn output_camera_mirrors_the_current_viewport_state() {
+        let mut app = output_sync_app(AvatarGeneration(1));
+        let main_transform = Transform::from_xyz(1.0, 2.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y);
+        let output = spawn_mirrored_cameras(
+            &mut app,
+            main_transform,
+            PerspectiveProjection {
+                fov: 0.42,
+                aspect_ratio: 1.7,
+                ..default()
+            },
+        );
+        app.update();
+        assert_eq!(app.world().get::<Transform>(output), Some(&main_transform));
+        assert_eq!(
+            app.world().get::<GlobalTransform>(output),
+            Some(&GlobalTransform::from(main_transform))
+        );
+        let Projection::Perspective(projection) = app.world().get::<Projection>(output).unwrap()
+        else {
+            panic!("perspective");
+        };
+        assert_eq!(projection.fov, 0.42);
+        assert_eq!(projection.aspect_ratio, 1.7);
+        let snapshot = app.world().resource::<AvatarViewportSnapshot>();
+        assert_eq!(snapshot.transform, Some(main_transform));
+        assert_eq!(snapshot.projection.as_ref().unwrap().fov, 0.42);
+        assert_eq!(snapshot.projection.as_ref().unwrap().aspect_ratio, 1.7);
+    }
+
+    #[test]
+    fn layer_contract_excludes_ground_from_output() {
+        let output = RenderLayers::layer(AVATAR_RENDER_LAYER);
+        let ground = RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER);
+        let viewport =
+            RenderLayers::from_layers(&[AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER]);
+        assert!(!output.intersects(&ground));
+        assert!(output.intersects(&viewport));
+        assert!(ground.intersects(&viewport));
+    }
+
+    #[test]
     fn output_camera_does_not_invent_a_different_perspective_fov() {
         let mut app = output_sync_app(AvatarGeneration(1));
         let main_transform = Transform::from_xyz(0.0, 1.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y);
@@ -568,10 +508,9 @@ mod tests {
         };
         let output = spawn_mirrored_cameras(&mut app, main_transform, main_projection.clone());
         app.update();
-
         let Projection::Perspective(projection) = app.world().get::<Projection>(output).unwrap()
         else {
-            panic!("output camera must remain perspective");
+            panic!("perspective");
         };
         assert_eq!(
             projection.fov,
@@ -595,61 +534,49 @@ mod tests {
         };
         let output = spawn_mirrored_cameras(&mut app, initial, projection.clone());
         let main = camera_entity(&mut app, true);
-
         let pose = crate::framing::camera_control::CameraControlPose::new(
             initial,
             Vec3::new(0.0, 1.0, 0.0),
         )
-        .expect("initial pose is valid");
-        let orbited = crate::framing::camera_control::geometry::orbit(pose, 0.3, 0.1)
-            .expect("orbit is valid");
-        *app.world_mut()
-            .get_mut::<Transform>(main)
-            .expect("main transform") = orbited.transform();
+        .expect("pose");
+        let orbited =
+            crate::framing::camera_control::geometry::orbit(pose, 0.3, 0.1).expect("orbit");
+        *app.world_mut().get_mut::<Transform>(main).unwrap() = orbited.transform();
         app.update();
         assert_eq!(
             app.world().get::<Transform>(output),
             Some(&orbited.transform())
         );
-
         let panned = crate::framing::camera_control::geometry::pan(
             orbited,
             Vec2::new(40.0, -12.0),
             Vec2::new(1920.0, 1080.0),
         )
-        .expect("pan is valid");
-        *app.world_mut()
-            .get_mut::<Transform>(main)
-            .expect("main transform") = panned.transform();
+        .expect("pan");
+        *app.world_mut().get_mut::<Transform>(main).unwrap() = panned.transform();
         app.update();
         assert_eq!(
             app.world().get::<Transform>(output),
             Some(&panned.transform())
         );
-
         let dollied = crate::framing::camera_control::geometry::dolly(
             panned,
             1.0,
             crate::framing::camera_control::CameraControlConfig::default(),
         )
-        .expect("dolly is valid");
-        *app.world_mut()
-            .get_mut::<Transform>(main)
-            .expect("main transform") = dollied.transform();
+        .expect("dolly");
+        *app.world_mut().get_mut::<Transform>(main).unwrap() = dollied.transform();
         app.update();
         assert_eq!(
             app.world().get::<Transform>(output),
             Some(&dollied.transform())
         );
-
-        *app.world_mut()
-            .get_mut::<Transform>(main)
-            .expect("main transform") = initial;
+        *app.world_mut().get_mut::<Transform>(main).unwrap() = initial;
         app.update();
         assert_eq!(app.world().get::<Transform>(output), Some(&initial));
         let Projection::Perspective(mirrored) = app.world().get::<Projection>(output).unwrap()
         else {
-            panic!("output camera must remain perspective");
+            panic!("perspective");
         };
         assert_eq!(mirrored.fov, projection.fov);
     }
@@ -662,7 +589,7 @@ mod tests {
             fov: crate::framing::fixed_fov_fit::FIXED_VERTICAL_FOV,
             ..default()
         };
-        spawn_mirrored_cameras(&mut app, first, projection.clone());
+        spawn_mirrored_cameras(&mut app, first, projection);
         app.update();
         assert_eq!(
             app.world().resource::<AvatarViewportSnapshot>().generation,
@@ -672,22 +599,16 @@ mod tests {
             app.world().resource::<AvatarViewportSnapshot>().transform,
             Some(first)
         );
-
         let next_root = app.world_mut().spawn_empty().id();
-        {
-            let mut lifecycle = app
-                .world_mut()
-                .resource_mut::<crate::lifecycle::AvatarLifecycle>();
-            lifecycle
-                .request_replace(next_root)
-                .expect("ready avatar can be replaced");
-        }
+        app.world_mut()
+            .resource_mut::<crate::lifecycle::AvatarLifecycle>()
+            .request_replace(next_root)
+            .expect("replace");
         app.update();
         assert_eq!(
             app.world().resource::<AvatarViewportSnapshot>().generation,
             AvatarGeneration(2)
         );
-
         {
             let mut lifecycle = app
                 .world_mut()
@@ -698,11 +619,8 @@ mod tests {
         }
         let replacement = Transform::from_xyz(4.0, 5.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y);
         let main = camera_entity(&mut app, true);
-        *app.world_mut()
-            .get_mut::<Transform>(main)
-            .expect("main transform") = replacement;
+        *app.world_mut().get_mut::<Transform>(main).unwrap() = replacement;
         app.update();
-
         let snapshot = app.world().resource::<AvatarViewportSnapshot>();
         assert_eq!(snapshot.generation, AvatarGeneration(2));
         assert_eq!(snapshot.transform, Some(replacement));
@@ -725,19 +643,18 @@ mod tests {
             .activate();
         app.update();
         let output = camera_entity(&mut app, false);
-        assert!(app.world().get::<Camera>(output).expect("camera").is_active);
+        assert!(app.world().get::<Camera>(output).unwrap().is_active);
         assert!(
             app.world()
                 .get::<AvatarOutputReadbackInFlight>(output)
                 .is_some()
         );
         assert!(app.world().get::<Readback>(output).is_some());
-
         app.world_mut()
             .resource_mut::<AvatarOutputState>()
             .deactivate();
         app.update();
-        assert!(!app.world().get::<Camera>(output).expect("camera").is_active);
+        assert!(!app.world().get::<Camera>(output).unwrap().is_active);
         assert!(
             app.world()
                 .get::<AvatarOutputReadbackInFlight>(output)
@@ -753,27 +670,61 @@ mod tests {
     }
 
     #[test]
+    fn local_preview_renders_without_readback_and_survives_stopping_ndi() {
+        let mut app = output_sync_app(AvatarGeneration(1));
+        let output = spawn_mirrored_cameras(
+            &mut app,
+            Transform::default(),
+            PerspectiveProjection::default(),
+        );
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .set_preview_visible(true);
+        app.update();
+        assert!(app.world().get::<Camera>(output).unwrap().is_active);
+        assert!(!app.world().resource::<AvatarOutputState>().is_active());
+        assert!(app.world().get::<Readback>(output).is_none());
+        assert!(
+            app.world()
+                .get::<AvatarOutputReadbackInFlight>(output)
+                .is_none()
+        );
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .activate();
+        app.update();
+        assert!(app.world().get::<Readback>(output).is_some());
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .deactivate();
+        app.update();
+        assert!(app.world().get::<Camera>(output).unwrap().is_active);
+        assert!(app.world().get::<Readback>(output).is_none());
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .set_preview_visible(false);
+        app.update();
+        assert!(!app.world().get::<Camera>(output).unwrap().is_active);
+    }
+
+    #[test]
     fn output_camera_uses_an_image_target_isolated_from_ui_layers() {
         let output = RenderLayers::layer(AVATAR_RENDER_LAYER);
         let ground = RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER);
-        assert!(
-            !output.intersects(&ground),
-            "ground stays on the viewport-only layer"
-        );
-
+        assert!(!output.intersects(&ground));
         let mut app = output_sync_app(AvatarGeneration(1));
-        let output_entity = spawn_mirrored_cameras(
+        let entity = spawn_mirrored_cameras(
             &mut app,
             Transform::from_xyz(0.0, 0.0, 2.5).looking_at(Vec3::ZERO, Vec3::Y),
             PerspectiveProjection::default(),
         );
         app.update();
         assert!(matches!(
-            app.world().get::<RenderTarget>(output_entity),
+            app.world().get::<RenderTarget>(entity),
             Some(RenderTarget::Image(_))
         ));
         assert_eq!(
-            app.world().get::<RenderLayers>(output_entity),
+            app.world().get::<RenderLayers>(entity),
             Some(&RenderLayers::layer(AVATAR_RENDER_LAYER))
         );
     }

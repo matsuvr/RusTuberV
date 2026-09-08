@@ -158,13 +158,22 @@ impl MetricsExportState {
 
     fn status(&self, lang: UiLanguage) -> String {
         match &self.phase {
-            ExportPhase::Disabled => lang.pick("無効", "disabled").to_string(),
-            ExportPhase::WaitingForTracking => {
-                lang.pick("ライブトラッキング待ち", "waiting for live tracking").to_string()
-            }
+            ExportPhase::Disabled => lang
+                .pick("無効", "disabled", "已禁用", "비활성화")
+                .to_string(),
+            ExportPhase::WaitingForTracking => lang
+                .pick(
+                    "ライブトラッキング待ち",
+                    "waiting for live tracking",
+                    "等待实时跟踪",
+                    "실시간 트래킹 대기 중",
+                )
+                .to_string(),
             ExportPhase::WarmingUp => match lang {
                 UiLanguage::Ja => format!("ウォームアップ中（{:.0}秒）", WARMUP_SECONDS),
                 UiLanguage::En => format!("warming up ({:.0}s)", WARMUP_SECONDS),
+                UiLanguage::Zh => format!("预热中（{:.0}秒）", WARMUP_SECONDS),
+                UiLanguage::Ko => format!("준비 중 ({:.0}초)", WARMUP_SECONDS),
             },
             ExportPhase::Recording => match lang {
                 UiLanguage::Ja => format!(
@@ -175,14 +184,26 @@ impl MetricsExportState {
                     "recording {}/{} at {:.0}s cadence",
                     self.samples_written, MAX_SAMPLES, SAMPLE_INTERVAL_SECONDS
                 ),
+                UiLanguage::Zh => format!(
+                    "记录中 {}/{}（间隔{:.0}秒）",
+                    self.samples_written, MAX_SAMPLES, SAMPLE_INTERVAL_SECONDS
+                ),
+                UiLanguage::Ko => format!(
+                    "기록 중 {}/{} ({:.0}초 간격)",
+                    self.samples_written, MAX_SAMPLES, SAMPLE_INTERVAL_SECONDS
+                ),
             },
             ExportPhase::Complete => match lang {
                 UiLanguage::Ja => format!("完了（{MAX_SAMPLES}サンプル）"),
                 UiLanguage::En => format!("complete ({MAX_SAMPLES} samples)"),
+                UiLanguage::Zh => format!("完成（{MAX_SAMPLES}个样本）"),
+                UiLanguage::Ko => format!("완료 ({MAX_SAMPLES}개 샘플)"),
             },
             ExportPhase::Failed(error) => match lang {
                 UiLanguage::Ja => format!("失敗: {error}"),
                 UiLanguage::En => format!("failed: {error}"),
+                UiLanguage::Zh => format!("失败: {error}"),
+                UiLanguage::Ko => format!("실패: {error}"),
             },
         }
     }
@@ -193,7 +214,7 @@ pub(crate) fn export_diagnostics_system(
     time: Res<Time<Real>>,
     mut snapshot: ResMut<DiagnosticsSnapshot>,
     mut exporter: ResMut<MetricsExportState>,
-    mut last_rendered: Local<Option<(ExportPhase, usize)>>,
+    mut last_rendered: Local<Option<(ExportPhase, usize, UiLanguage)>>,
     settings: Option<Res<crate::settings::ArmPoseSettings>>,
 ) {
     let lang = settings
@@ -201,9 +222,9 @@ pub(crate) fn export_diagnostics_system(
         .map(|settings| settings.language())
         .unwrap_or_default();
     exporter.tick(time.elapsed_secs_f64(), &snapshot);
-    // The status string depends only on the phase and the sample count; skip
+    // The status string depends on the phase, sample count, and language; skip
     // the per-frame formatting while both are unchanged.
-    let rendered = (exporter.phase.clone(), exporter.samples_written);
+    let rendered = (exporter.phase.clone(), exporter.samples_written, lang);
     if last_rendered.as_ref() != Some(&rendered) {
         snapshot.metrics_export_status = exporter.status(lang);
         *last_rendered = Some(rendered);

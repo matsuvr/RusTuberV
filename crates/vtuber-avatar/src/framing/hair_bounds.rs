@@ -62,9 +62,7 @@ pub(crate) fn collect_hair_bounds(
                 .get(entity)
                 .is_ok_and(|name| is_hair_name(name.as_str()));
 
-        if is_hair
-            && let Ok(mesh_3d) = renderables.get(entity)
-        {
+        if is_hair && let Ok(mesh_3d) = renderables.get(entity) {
             renderable_count += 1;
             let Some(mesh) = mesh_assets.get(&mesh_3d.0) else {
                 pending = true;
@@ -277,11 +275,7 @@ mod tests {
         let handle = mesh(&mut app, &cube());
         let body = app
             .world_mut()
-            .spawn((
-                Name::new("Body"),
-                Mesh3d(handle),
-                GlobalTransform::IDENTITY,
-            ))
+            .spawn((Name::new("Body"), Mesh3d(handle), GlobalTransform::IDENTITY))
             .id();
         app.world_mut().entity_mut(root).add_child(body);
 

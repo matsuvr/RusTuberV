@@ -177,9 +177,7 @@ fn intermediate_node_receives_fresh_global_transform() {
     // Both globals compose the same chain of rotations, so any difference is
     // f32 normalization noise; compare with a dot-product tolerance instead
     // of a raw angle.
-    let dot = spine_global
-        .rotation()
-        .dot(intermediate_global.rotation());
+    let dot = spine_global.rotation().dot(intermediate_global.rotation());
     assert!((dot - 1.0).abs() < 1.0e-5);
     assert!(
         app.world()

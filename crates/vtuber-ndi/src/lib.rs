@@ -32,8 +32,7 @@ pub const fn is_sdk_feature_enabled() -> bool {
 
 /// File names of the supported NDI Standard runtime DLLs (current and legacy).
 #[cfg(any(target_os = "windows", test))]
-const RUNTIME_FILE_NAMES: [&str; 2] =
-    ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
+const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
 
 /// Returns whether an NDI Standard runtime DLL is discoverable on this machine.
 ///
@@ -84,11 +83,8 @@ fn candidate_runtime_dirs() -> Vec<std::path::PathBuf> {
 
 #[cfg(any(target_os = "windows", test))]
 fn runtime_dll_present_in(dirs: &[std::path::PathBuf], file_names: &[&str]) -> bool {
-    dirs.iter().any(|dir| {
-        file_names
-            .iter()
-            .any(|file| dir.join(file).is_file())
-    })
+    dirs.iter()
+        .any(|dir| file_names.iter().any(|file| dir.join(file).is_file()))
 }
 
 /// Stable error codes emitted by the optional output backend.
@@ -249,6 +245,14 @@ pub enum NdiSubmitResult {
     /// The sender is not active or is shutting down.
     RejectedNotRunning,
 }
+
+/// Timecode requesting per-send synthesis by the NDI SDK.
+///
+/// This is `NDIlib_send_timecode_synthesize` (`INT64_MAX`). A fixed `0` would
+/// stamp every frame with the same epoch timecode, which freezes or stutters
+/// receivers such as OBS. The send-side `timestamp` stays `0`, which is the
+/// SDK default for sending.
+pub const NDI_SEND_TIMECODE_SYNTHESIZE: i64 = i64::MAX;
 
 /// A transport-neutral description of the NDI High Bandwidth video mapping.
 ///
@@ -998,13 +1002,29 @@ fn run_scripted_worker(
 }
 
 #[cfg(feature = "ndi-sdk")]
+fn build_ndi_video_frame(
+    mapping: &NdiVideoFrameMapping,
+) -> Result<grafton_ndi::VideoFrame, grafton_ndi::Error> {
+    use grafton_ndi::{PixelFormat, ScanType, VideoFrame};
+
+    VideoFrame::builder()
+        .resolution(mapping.width, mapping.height)
+        .pixel_format(PixelFormat::BGRA)
+        .frame_rate(mapping.frame_rate_n, mapping.frame_rate_d)
+        .aspect_ratio(mapping.picture_aspect_ratio)
+        .scan_type(ScanType::Progressive)
+        .timecode(NDI_SEND_TIMECODE_SYNTHESIZE)
+        .build()
+}
+
+#[cfg(feature = "ndi-sdk")]
 fn run_ndi_worker(
     shared: Arc<SharedState>,
     mailbox: Arc<LatestFrameMailbox>,
     config: NdiOutputConfig,
     stop: vtuber_core::StopToken,
 ) -> WorkerExit {
-    use grafton_ndi::{NDI, PixelFormat, ScanType, Sender, SenderOptions, VideoFrame};
+    use grafton_ndi::{NDI, Sender, SenderOptions, VideoFrame};
 
     let ndi = match NDI::new() {
         Ok(ndi) => ndi,
@@ -1063,14 +1083,7 @@ fn run_ndi_worker(
         };
         let dims = (mapping.width, mapping.height);
         if ndi_frame.is_none() || ndi_frame_dims != dims {
-            let mut built = match VideoFrame::builder()
-                .resolution(mapping.width, mapping.height)
-                .pixel_format(PixelFormat::BGRA)
-                .frame_rate(mapping.frame_rate_n, mapping.frame_rate_d)
-                .aspect_ratio(mapping.picture_aspect_ratio)
-                .scan_type(ScanType::Progressive)
-                .build()
-            {
+            let mut built = match build_ndi_video_frame(&mapping) {
                 Ok(frame) => frame,
                 Err(_error) => {
                     let mapped = NdiOutputError::new(
@@ -1094,9 +1107,7 @@ fn run_ndi_worker(
         } else if let Some(existing) = ndi_frame.as_mut()
             && existing.data().len() == frame.data.len()
         {
-            existing
-                .data_mut()
-                .copy_from_slice(&frame.data);
+            existing.data_mut().copy_from_slice(&frame.data);
         } else if let Some(existing) = ndi_frame.as_mut() {
             // Defensive length fallback: rebuild with a fresh buffer when the
             // validated frame data no longer matches the reused layout.
@@ -1207,18 +1218,22 @@ mod tests {
     #[test]
     fn runtime_probe_finds_current_dll_name() {
         let dir = runtime_probe_dir("current");
-        std::fs::write(dir.join(RUNTIME_FILE_NAMES[0]), b"stub")
-            .expect("current stub is writable");
-        assert!(runtime_dll_present_in(std::slice::from_ref(&dir), &RUNTIME_FILE_NAMES));
+        std::fs::write(dir.join(RUNTIME_FILE_NAMES[0]), b"stub").expect("current stub is writable");
+        assert!(runtime_dll_present_in(
+            std::slice::from_ref(&dir),
+            &RUNTIME_FILE_NAMES
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn runtime_probe_accepts_legacy_dll_name() {
         let dir = runtime_probe_dir("legacy");
-        std::fs::write(dir.join(RUNTIME_FILE_NAMES[1]), b"stub")
-            .expect("legacy stub is writable");
-        assert!(runtime_dll_present_in(std::slice::from_ref(&dir), &RUNTIME_FILE_NAMES));
+        std::fs::write(dir.join(RUNTIME_FILE_NAMES[1]), b"stub").expect("legacy stub is writable");
+        assert!(runtime_dll_present_in(
+            std::slice::from_ref(&dir),
+            &RUNTIME_FILE_NAMES
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1511,6 +1526,20 @@ mod tests {
         assert_eq!(backend.sent_frames(), 0);
         assert!(controller.metrics().rejected_frames >= 1);
         controller.stop().expect("stop");
+    }
+
+    #[test]
+    fn send_timecode_requests_sdk_synthesis() {
+        assert_eq!(NDI_SEND_TIMECODE_SYNTHESIZE, i64::MAX);
+    }
+
+    #[cfg(feature = "ndi-sdk")]
+    #[test]
+    fn built_ndi_frame_asks_sdk_to_synthesize_timecodes() {
+        let mapping = map_video_frame(&frame(1), test_profile()).expect("valid frame maps");
+        let built = super::build_ndi_video_frame(&mapping).expect("validated mapping builds");
+        assert_eq!(built.timecode(), i64::MAX);
+        assert_eq!(built.timestamp(), 0);
     }
 
     #[cfg(feature = "ndi-sdk")]

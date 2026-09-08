@@ -92,11 +92,7 @@ impl ExpressionStateTracker {
 
         // Check new/changed values.
         for cmd in new_commands {
-            let prev = self
-                .previous
-                .get(cmd.name.as_str())
-                .copied()
-                .unwrap_or(0.0);
+            let prev = self.previous.get(cmd.name.as_str()).copied().unwrap_or(0.0);
             if (cmd.weight - prev).abs() > self.epsilon {
                 has_significant_change = true;
                 break;
@@ -124,8 +120,7 @@ impl ExpressionStateTracker {
 
         // Add explicit zeros for previously non-zero expressions that are now gone.
         for (name, &prev_weight) in &self.previous {
-            if prev_weight.abs() > self.epsilon
-                && !new_commands.iter().any(|cmd| cmd.name == *name)
+            if prev_weight.abs() > self.epsilon && !new_commands.iter().any(|cmd| cmd.name == *name)
             {
                 output.push(ExpressionCommand {
                     name: name.clone(),
@@ -136,8 +131,11 @@ impl ExpressionStateTracker {
 
         // Update previous state.
         self.previous.clear();
-        self.previous
-            .extend(new_commands.iter().map(|cmd| (cmd.name.clone(), cmd.weight)));
+        self.previous.extend(
+            new_commands
+                .iter()
+                .map(|cmd| (cmd.name.clone(), cmd.weight)),
+        );
 
         Some(output)
     }
