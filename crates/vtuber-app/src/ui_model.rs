@@ -2,6 +2,7 @@
 //! These types hide Bevy queries from the UI, which emits UiAction commands.
 
 use crate::import::VrmGeneration;
+use crate::license_review::VrmLicenseReview;
 use bevy::prelude::Resource;
 use std::path::PathBuf;
 use vtuber_avatar::ArmPoseProfile;
@@ -105,6 +106,15 @@ pub struct ImportedModelSummary {
     pub has_required_bones: bool,
     /// Expression preset count.
     pub expression_count: usize,
+}
+
+/// License review sheet for a selected-but-unimported VRM.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AvatarImportReviewViewModel {
+    /// Review payload. `Some` while the sheet is open.
+    pub review: Option<VrmLicenseReview>,
+    /// Whether the acceptance checkbox is checked.
+    pub accepted: bool,
 }
 
 /// Avatar lifecycle state for display.
@@ -225,6 +235,8 @@ pub struct UiViewModel {
     pub tracking: TrackingViewModel,
     /// NDI state.
     pub ndi_output: NdiOutputViewModel,
+    /// License review sheet state.
+    pub avatar_import_review: AvatarImportReviewViewModel,
     /// Camera-preview mirroring.
     pub mirror_preview: bool,
     /// Operator-facing avatar mirroring.

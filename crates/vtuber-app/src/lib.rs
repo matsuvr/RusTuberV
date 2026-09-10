@@ -39,6 +39,9 @@ pub mod import;
 /// Application bridge for the pure-Rust face inference worker.
 pub mod inference_runtime;
 
+/// VRM license review extracted before an avatar import.
+pub mod license_review;
+
 /// Manifest-driven inference model catalog.
 pub mod model_catalog;
 

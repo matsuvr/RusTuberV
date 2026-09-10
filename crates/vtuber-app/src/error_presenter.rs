@@ -110,6 +110,19 @@ pub fn present_error(
             ),
             suggested_actions: vec![UiAction::DismissError],
         },
+        OrchestratorError::LicenseReviewFailed(detail) => ErrorPresentation {
+            code: "LICENSE_REVIEW_FAILED",
+            user_message: format!(
+                "{}: {detail}",
+                language.pick(
+                    "ライセンス情報を確認できないため、この VRM は読み込めません",
+                    "This VRM cannot be imported because its license could not be reviewed",
+                    "无法确认许可信息，因此不能加载该 VRM",
+                    "라이선스 정보를 확인할 수 없어 이 VRM을 불러올 수 없습니다"
+                )
+            ),
+            suggested_actions: vec![UiAction::DismissError],
+        },
         OrchestratorError::CameraFailed(_) => ErrorPresentation {
             code: "CAMERA_FAILED",
             user_message: message(

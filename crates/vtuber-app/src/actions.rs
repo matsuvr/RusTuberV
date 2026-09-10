@@ -38,6 +38,21 @@ pub enum UiAction {
         /// Path to the VRM file.
         path: PathBuf,
     },
+    /// Read a selected VRM and open the license review sheet without
+    /// importing it.
+    RequestAvatarImportReview {
+        /// Path to the VRM file.
+        path: PathBuf,
+    },
+    /// Update the license review acceptance checkbox.
+    SetAvatarImportReviewAccepted {
+        /// Whether the reviewer checked the acceptance box.
+        accepted: bool,
+    },
+    /// Import the reviewed VRM. Ignored unless the reviewer accepted.
+    AcceptAvatarImportReview,
+    /// Dismiss the license review sheet without importing.
+    CancelAvatarImportReview,
     /// Unload the current avatar.
     UnloadAvatar,
 
@@ -157,6 +172,27 @@ mod tests {
             UiAction::ImportAvatar { path: p } => assert_eq!(p, path),
             _ => panic!("expected ImportAvatar"),
         }
+    }
+
+    #[test]
+    fn actions_request_avatar_import_review_carries_path() {
+        let path = PathBuf::from("/tmp/model.vrm");
+        let action = UiAction::RequestAvatarImportReview { path: path.clone() };
+        match action {
+            UiAction::RequestAvatarImportReview { path: p } => assert_eq!(p, path),
+            _ => panic!("expected RequestAvatarImportReview"),
+        }
+    }
+
+    #[test]
+    fn actions_review_decisions_are_distinct_one_shot_actions() {
+        assert!(!UiAction::AcceptAvatarImportReview.is_navigation());
+        assert!(!UiAction::CancelAvatarImportReview.is_navigation());
+        assert!(!UiAction::AcceptAvatarImportReview.requires_running_pipeline());
+        assert_ne!(
+            UiAction::SetAvatarImportReviewAccepted { accepted: true },
+            UiAction::SetAvatarImportReviewAccepted { accepted: false }
+        );
     }
 
     #[test]

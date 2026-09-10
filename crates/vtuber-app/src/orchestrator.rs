@@ -10,13 +10,14 @@
 //! emits the corresponding `LoadImportedAvatarRequest` message that the avatar
 //! plugin consumes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
 use crate::actions::UiAction;
 use crate::import::VrmGeneration;
 use crate::import::{self, ImportedModel, ModelImportError};
+use crate::license_review::{self, VrmLicenseReview, VrmLicenseReviewError};
 use crate::ndi_output::NdiOutputIntent;
 use crate::preview::PreviewState;
 use crate::settings::ArmPoseSettings;
@@ -41,6 +42,17 @@ pub struct PendingLoadRequest {
     pub model: ImportedModel,
 }
 
+/// A selected VRM awaiting explicit license acceptance before import.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAvatarImport {
+    /// Source path chosen by the user.
+    pub path: PathBuf,
+    /// Review shown in the consent sheet.
+    pub review: VrmLicenseReview,
+    /// Whether the user checked the acceptance checkbox.
+    pub accepted: bool,
+}
+
 /// Resource managing the application orchestration state.
 #[derive(Resource, Debug)]
 pub struct Orchestrator {
@@ -62,6 +74,8 @@ pub struct Orchestrator {
     current_pane: Pane,
     /// Pending avatar load request not yet submitted to the lifecycle.
     pending_load: Option<PendingLoadRequest>,
+    /// Selected VRM awaiting license acceptance.
+    pending_avatar_import: Option<PendingAvatarImport>,
     /// Next avatar load request correlation identifier.
     next_load_request_id: u64,
     /// Mirror of the avatar lifecycle state, updated by the sync system.
@@ -76,6 +90,8 @@ pub struct Orchestrator {
     calibration_request: Option<CalibrationRequest>,
     /// Whether inference should be restarted after a recoverable worker error.
     inference_retry_requested: bool,
+    /// Whether the automatic start after setup completion is still pending.
+    auto_start_armed: bool,
 }
 
 /// Calibration intent passed from UI orchestration to the tracking domain.
@@ -138,6 +154,8 @@ pub enum OrchestratorError {
     AvatarLifecycleFailed(String),
     /// Persistent avatar pose settings could not be written.
     ArmPoseSettingsFailed(String),
+    /// The selected model's license metadata could not be reviewed.
+    LicenseReviewFailed(String),
     /// Camera enumeration, opening, capture, or reconnect failed.
     CameraFailed(String),
     /// Inference model load, execution, or worker failure.
@@ -155,6 +173,7 @@ impl std::fmt::Display for OrchestratorError {
             Self::AvatarLoadRejected(msg) => write!(f, "Avatar load rejected: {msg}"),
             Self::AvatarLifecycleFailed(msg) => write!(f, "Avatar lifecycle failed: {msg}"),
             Self::ArmPoseSettingsFailed(msg) => write!(f, "Arm-pose settings failed: {msg}"),
+            Self::LicenseReviewFailed(msg) => write!(f, "License review failed: {msg}"),
             Self::CameraFailed(msg) => write!(f, "Camera failed: {msg}"),
             Self::InferenceFailed(msg) => write!(f, "Inference failed: {msg}"),
         }
@@ -173,6 +192,7 @@ impl Default for Orchestrator {
             pipeline_state: PipelineState::Idle,
             current_pane: Pane::default(),
             pending_load: None,
+            pending_avatar_import: None,
             next_load_request_id: 1,
             lifecycle_state: AvatarLifecycleState::None,
             capture_desired: false,
@@ -180,6 +200,7 @@ impl Default for Orchestrator {
             camera_refresh_requested: true,
             calibration_request: None,
             inference_retry_requested: false,
+            auto_start_armed: true,
         }
     }
 }
@@ -210,6 +231,18 @@ impl Orchestrator {
             }
             UiAction::ImportAvatar { path } => {
                 self.import_avatar(path);
+            }
+            UiAction::RequestAvatarImportReview { path } => {
+                self.request_avatar_import_review(path);
+            }
+            UiAction::SetAvatarImportReviewAccepted { accepted } => {
+                self.set_avatar_import_review_accepted(*accepted);
+            }
+            UiAction::AcceptAvatarImportReview => {
+                self.accept_avatar_import_review();
+            }
+            UiAction::CancelAvatarImportReview => {
+                self.cancel_avatar_import_review();
             }
             UiAction::UnloadAvatar => {
                 self.unload_avatar();
@@ -276,6 +309,9 @@ impl Orchestrator {
     fn select_camera(&mut self, index: usize) {
         if index < self.cameras.len() {
             self.selected_camera = Some(index);
+            // Choosing a camera completes the camera setup step, so tracking
+            // may start once the avatar is also ready.
+            self.auto_start_armed = true;
         }
     }
 
@@ -298,6 +334,9 @@ impl Orchestrator {
                 });
                 self.imported_model = Some(model);
                 self.import_state = ImportState::Success;
+                // A fresh successful import is a setup completion; tracking
+                // starts once the avatar is ready and a camera is selected.
+                self.auto_start_armed = true;
                 // Reset lifecycle from any previous Failed state so the new
                 // load can proceed.
                 if self.lifecycle_state == AvatarLifecycleState::Failed {
@@ -320,6 +359,55 @@ impl Orchestrator {
         self.imported_model = None;
         self.import_state = ImportState::Idle;
         self.pending_load = None;
+    }
+
+    /// Reads the selected file and opens a license review.
+    ///
+    /// The model is not imported here. A failed extraction clears any previous
+    /// review and surfaces a recoverable error; there is no bypass that would
+    /// import a model whose license could not be reviewed.
+    fn request_avatar_import_review(&mut self, path: &Path) {
+        self.last_error = None;
+        let result = read_reviewable_bytes(path)
+            .and_then(|bytes| license_review::extract_vrm_license_review(path, &bytes));
+        match result {
+            Ok(review) => {
+                self.pending_avatar_import = Some(PendingAvatarImport {
+                    path: path.to_path_buf(),
+                    review,
+                    accepted: false,
+                });
+            }
+            Err(error) => {
+                self.pending_avatar_import = None;
+                self.last_error = Some(OrchestratorError::LicenseReviewFailed(error.to_string()));
+            }
+        }
+    }
+
+    /// Records the review checkbox state.
+    fn set_avatar_import_review_accepted(&mut self, accepted: bool) {
+        if let Some(pending) = &mut self.pending_avatar_import {
+            pending.accepted = accepted;
+        }
+    }
+
+    /// Imports the reviewed model only after explicit acceptance.
+    fn accept_avatar_import_review(&mut self) {
+        let Some(pending) = &self.pending_avatar_import else {
+            return;
+        };
+        if !pending.accepted {
+            return;
+        }
+        let path = pending.path.clone();
+        self.pending_avatar_import = None;
+        self.import_avatar(&path);
+    }
+
+    /// Dismisses the review without importing.
+    fn cancel_avatar_import_review(&mut self) {
+        self.pending_avatar_import = None;
     }
 
     /// Retry a failed avatar load by re-submitting the current imported model.
@@ -356,10 +444,31 @@ impl Orchestrator {
         self.capture_desired = true;
         self.capture_ack = false;
         self.inference_retry_requested = false;
+        self.auto_start_armed = false;
+    }
+
+    /// Starts tracking automatically once setup is complete: the avatar is
+    /// ready and a camera is selected.
+    ///
+    /// A successful import or an explicit camera selection arms this start,
+    /// which then fires once the lifecycle reports ready. Starting (manually
+    /// or automatically) and stopping disarm it, so a user-requested stop is
+    /// not overridden on the next frame.
+    pub fn maybe_auto_start_tracking(&mut self) {
+        if !self.auto_start_armed
+            || self.pipeline_state != PipelineState::Idle
+            || self.lifecycle_state != AvatarLifecycleState::Ready
+            || self.selected_camera.is_none()
+            || self.imported_model.is_none()
+        {
+            return;
+        }
+        self.start_pipeline();
     }
 
     /// Stop the tracking pipeline.
     fn stop_pipeline(&mut self) {
+        self.auto_start_armed = false;
         if self.pipeline_state == PipelineState::Idle
             || self.pipeline_state == PipelineState::Stopping
         {
@@ -436,6 +545,13 @@ impl Orchestrator {
             },
             (None, Some(_)) => return false,
         }
+        let pending_import = self.pending_avatar_import.as_ref();
+        if vm.avatar_import_review.review.as_ref() != pending_import.map(|pending| &pending.review)
+            || vm.avatar_import_review.accepted
+                != pending_import.is_some_and(|pending| pending.accepted)
+        {
+            return false;
+        }
         vm.avatar.lifecycle == self.lifecycle_state
     }
 
@@ -480,6 +596,16 @@ impl Orchestrator {
         vm.avatar.lifecycle = self.lifecycle_state;
         vm.avatar.is_ready = self.lifecycle_state == AvatarLifecycleState::Ready;
         vm.avatar.load_failed = self.lifecycle_state == AvatarLifecycleState::Failed;
+
+        // License review — present only while an import waits for acceptance.
+        vm.avatar_import_review.review = self
+            .pending_avatar_import
+            .as_ref()
+            .map(|pending| pending.review.clone());
+        vm.avatar_import_review.accepted = self
+            .pending_avatar_import
+            .as_ref()
+            .is_some_and(|pending| pending.accepted);
     }
 
     /// Get the last error, if any.
@@ -622,6 +748,18 @@ impl Orchestrator {
         self.inference_retry_requested = false;
         requested
     }
+}
+
+/// Reads a file for review under the same size policy as `import_vrm`.
+fn read_reviewable_bytes(path: &Path) -> Result<Vec<u8>, VrmLicenseReviewError> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > import::DEFAULT_SIZE_LIMIT {
+        return Err(VrmLicenseReviewError::SizeExceeded {
+            size: metadata.len(),
+            limit: import::DEFAULT_SIZE_LIMIT,
+        });
+    }
+    Ok(std::fs::read(path)?)
 }
 
 /// Format an import error for user display.
@@ -1274,6 +1412,93 @@ mod tests {
     }
 
     #[test]
+    fn auto_start_fires_when_setup_is_complete() {
+        let mut orch = Orchestrator {
+            imported_model: Some(stub_imported_model()),
+            selected_camera: Some(0),
+            lifecycle_state: AvatarLifecycleState::Ready,
+            ..Default::default()
+        };
+
+        orch.maybe_auto_start_tracking();
+
+        assert_eq!(orch.pipeline_state(), PipelineState::Starting);
+        assert!(orch.capture_desired());
+        assert!(!orch.capture_ack());
+    }
+
+    #[test]
+    fn auto_start_waits_for_ready_lifecycle() {
+        let mut orch = Orchestrator {
+            imported_model: Some(stub_imported_model()),
+            selected_camera: Some(0),
+            lifecycle_state: AvatarLifecycleState::Binding,
+            ..Default::default()
+        };
+
+        orch.maybe_auto_start_tracking();
+
+        assert_eq!(orch.pipeline_state(), PipelineState::Idle);
+        assert!(!orch.capture_desired());
+    }
+
+    #[test]
+    fn auto_start_waits_for_camera_selection() {
+        let mut orch = Orchestrator {
+            imported_model: Some(stub_imported_model()),
+            lifecycle_state: AvatarLifecycleState::Ready,
+            ..Default::default()
+        };
+
+        orch.maybe_auto_start_tracking();
+
+        assert_eq!(orch.pipeline_state(), PipelineState::Idle);
+        assert!(!orch.capture_desired());
+    }
+
+    #[test]
+    fn manual_stop_disarms_auto_start() {
+        let mut orch = Orchestrator {
+            imported_model: Some(stub_imported_model()),
+            selected_camera: Some(0),
+            lifecycle_state: AvatarLifecycleState::Ready,
+            ..Default::default()
+        };
+        orch.maybe_auto_start_tracking();
+        orch.process_action(&UiAction::Stop);
+        orch.complete_capture_stop();
+        assert_eq!(orch.pipeline_state(), PipelineState::Idle);
+
+        orch.maybe_auto_start_tracking();
+
+        assert_eq!(orch.pipeline_state(), PipelineState::Idle);
+        assert!(!orch.capture_desired());
+    }
+
+    #[test]
+    fn selecting_a_camera_rearms_auto_start_after_stop() {
+        let mut orch = Orchestrator {
+            imported_model: Some(stub_imported_model()),
+            selected_camera: Some(0),
+            lifecycle_state: AvatarLifecycleState::Ready,
+            ..Default::default()
+        };
+        orch.maybe_auto_start_tracking();
+        orch.process_action(&UiAction::Stop);
+        orch.complete_capture_stop();
+
+        orch.set_camera_list(vec![CameraDescriptor {
+            id: "test:0".into(),
+            label: "Test camera".into(),
+        }]);
+        orch.process_action(&UiAction::SelectCamera { index: 0 });
+        orch.maybe_auto_start_tracking();
+
+        assert_eq!(orch.pipeline_state(), PipelineState::Starting);
+        assert!(orch.capture_desired());
+    }
+
+    #[test]
     fn orchestrator_dismiss_error() {
         let mut orch = Orchestrator {
             last_error: Some(OrchestratorError::NoCameraSelected),
@@ -1517,5 +1742,173 @@ mod tests {
             map_avatar_lifecycle_state(Engine::Failed),
             AvatarLifecycleState::Failed
         );
+    }
+
+    const REVIEW_FIXTURE_JSON: &str = r#"{
+        "asset": {"version": "2.0"},
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": "Hips", "children": [1]}, {"name": "Head"}],
+        "extensionsUsed": ["VRMC_vrm"],
+        "extensions": {
+            "VRMC_vrm": {
+                "specVersion": "1.0",
+                "meta": {
+                    "name": "Review Fixture",
+                    "authors": ["Fixture Author"],
+                    "avatarPermission": "onlyAuthor",
+                    "allowExcessivelyViolentUsage": false,
+                    "allowExcessivelySexualUsage": false,
+                    "commercialUsage": "personalNonProfit",
+                    "modification": "prohibited",
+                    "licenseUrl": "https://vrm.dev/licenses/1.0/"
+                },
+                "humanoid": {
+                    "humanBones": {
+                        "hips": {"node": 0},
+                        "head": {"node": 1}
+                    }
+                }
+            }
+        }
+    }"#;
+
+    fn write_review_fixture(dir: &tempfile::TempDir) -> PathBuf {
+        let mut json_chunk = REVIEW_FIXTURE_JSON.as_bytes().to_vec();
+        while !json_chunk.len().is_multiple_of(4) {
+            json_chunk.push(b' ');
+        }
+        let bin_chunk = [0_u8; 12];
+        let total_length = 12 + 8 + json_chunk.len() + 8 + bin_chunk.len();
+        let mut bytes = Vec::with_capacity(total_length);
+        bytes.extend_from_slice(&0x46546C67_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&(total_length as u32).to_le_bytes());
+        bytes.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0x4E4F534A_u32.to_le_bytes());
+        bytes.extend_from_slice(&json_chunk);
+        bytes.extend_from_slice(&(bin_chunk.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0x004E4942_u32.to_le_bytes());
+        bytes.extend_from_slice(&bin_chunk);
+
+        let path = dir.path().join("review.vrm");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn review_request_holds_the_model_until_explicit_acceptance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_review_fixture(&dir);
+        let mut orch = Orchestrator::new(dir.path().join("assets"));
+
+        orch.process_action(&UiAction::RequestAvatarImportReview { path: path.clone() });
+
+        let pending = orch.pending_avatar_import.as_ref().expect("review pending");
+        assert_eq!(pending.path, path);
+        assert!(!pending.accepted);
+        assert!(!orch.has_imported_model());
+
+        orch.process_action(&UiAction::SetAvatarImportReviewAccepted { accepted: true });
+        assert!(
+            orch.pending_avatar_import
+                .as_ref()
+                .expect("review pending")
+                .accepted
+        );
+        assert!(!orch.has_imported_model());
+
+        orch.process_action(&UiAction::AcceptAvatarImportReview);
+
+        assert!(orch.has_imported_model());
+        assert!(orch.pending_avatar_import.is_none());
+        assert!(orch.take_pending_load_request().is_some());
+    }
+
+    #[test]
+    fn import_is_blocked_while_the_review_is_unchecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_review_fixture(&dir);
+        let mut orch = Orchestrator::new(dir.path().join("assets"));
+
+        orch.process_action(&UiAction::RequestAvatarImportReview { path });
+        orch.process_action(&UiAction::AcceptAvatarImportReview);
+
+        assert!(!orch.has_imported_model());
+        assert!(orch.pending_avatar_import.is_some());
+    }
+
+    #[test]
+    fn cancel_discards_the_pending_review_and_allows_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_review_fixture(&dir);
+        let mut orch = Orchestrator::new(dir.path().join("assets"));
+
+        orch.process_action(&UiAction::RequestAvatarImportReview { path: path.clone() });
+        orch.process_action(&UiAction::SetAvatarImportReviewAccepted { accepted: true });
+        orch.process_action(&UiAction::CancelAvatarImportReview);
+
+        assert!(orch.pending_avatar_import.is_none());
+        assert!(!orch.has_imported_model());
+
+        // The same file must be reviewed again; acceptance is never remembered.
+        orch.process_action(&UiAction::RequestAvatarImportReview { path });
+        let pending = orch.pending_avatar_import.as_ref().expect("review pending");
+        assert!(!pending.accepted);
+    }
+
+    #[test]
+    fn unreviewable_model_is_rejected_without_a_pending_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.vrm");
+        std::fs::write(&path, b"not a glb").unwrap();
+        let mut orch = Orchestrator::new(dir.path().join("assets"));
+
+        orch.process_action(&UiAction::RequestAvatarImportReview { path });
+
+        assert!(orch.pending_avatar_import.is_none());
+        assert!(!orch.has_imported_model());
+        assert!(matches!(
+            orch.last_error(),
+            Some(OrchestratorError::LicenseReviewFailed(_))
+        ));
+    }
+
+    #[test]
+    fn oversized_file_is_rejected_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.vrm");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(import::DEFAULT_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        let mut orch = Orchestrator::new(dir.path().join("assets"));
+
+        orch.process_action(&UiAction::RequestAvatarImportReview { path });
+
+        assert!(orch.pending_avatar_import.is_none());
+        assert!(matches!(
+            orch.last_error(),
+            Some(OrchestratorError::LicenseReviewFailed(_))
+        ));
+    }
+
+    #[test]
+    fn view_model_exposes_review_and_acceptance_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_review_fixture(&dir);
+        let mut orch = Orchestrator::new(dir.path().join("assets"));
+        let mut vm = UiViewModel::default();
+
+        orch.process_action(&UiAction::RequestAvatarImportReview { path });
+        orch.process_action(&UiAction::SetAvatarImportReviewAccepted { accepted: true });
+        orch.update_view_model(&mut vm);
+
+        assert!(vm.avatar_import_review.review.is_some());
+        assert!(vm.avatar_import_review.accepted);
+
+        orch.process_action(&UiAction::CancelAvatarImportReview);
+        orch.update_view_model(&mut vm);
+
+        assert!(vm.avatar_import_review.review.is_none());
+        assert!(!vm.avatar_import_review.accepted);
     }
 }

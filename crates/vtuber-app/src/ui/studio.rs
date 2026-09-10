@@ -6,6 +6,7 @@ use super::shell::UiState;
 use crate::actions::UiAction;
 use crate::diagnostics::DiagnosticsSnapshot;
 use crate::error_presenter::ErrorPresentation;
+use crate::license_review::VrmLicenseReview;
 use crate::preview::PreviewState;
 use crate::preview_landmarks::PreviewLandmarkState;
 use crate::settings::UiLanguage;
@@ -103,6 +104,118 @@ fn use_sidebar(width: f32) -> bool {
     width >= 1000.0
 }
 
+const FLOATING_CONTROL_MARGIN: f32 = 16.0;
+const FLOATING_CONTROL_SIZE: f32 = 40.0;
+
+fn paint_settings_glyph(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let stroke = egui::Stroke::new(1.7, color);
+    let half_track = 10.0;
+    for (dy, knob_dx) in [(-6.0_f32, -3.0_f32), (0.0, 4.0), (6.0, -5.0)] {
+        let y = center.y + dy;
+        painter.line_segment(
+            [
+                egui::pos2(center.x - half_track, y),
+                egui::pos2(center.x + half_track, y),
+            ],
+            stroke,
+        );
+        painter.circle_filled(egui::pos2(center.x + knob_dx, y), 2.7, color);
+    }
+}
+
+/// Minimal shield-and-check glyph for the license consent sheet, drawn in the
+/// same monochrome style as the other controls.
+fn paint_license_glyph(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    let width = 11.0;
+    let top = center.y - 12.5;
+    let shoulder = center.y + 1.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(center.x, top),
+            egui::pos2(center.x + width, top + 4.0),
+            egui::pos2(center.x + width, shoulder),
+            egui::pos2(center.x, top + 24.0),
+            egui::pos2(center.x - width, shoulder),
+            egui::pos2(center.x - width, top + 4.0),
+        ],
+        Color32::TRANSPARENT,
+        stroke,
+    ));
+    painter.line_segment(
+        [
+            egui::pos2(center.x - 5.0, center.y - 1.0),
+            egui::pos2(center.x - 1.5, center.y + 2.5),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center.x - 1.5, center.y + 2.5),
+            egui::pos2(center.x + 5.5, center.y - 4.5),
+        ],
+        stroke,
+    );
+}
+
+// The settings toggle keeps the top-right corner in both states: a floating
+// accent control while the avatar fills the window, and the toolbar's
+// rightmost button while the workspace is open (Apple HIG: consistent placement).
+fn floating_settings_control(
+    ctx: &egui::Context,
+    state: &mut UiState,
+    lang: UiLanguage,
+) -> egui::Response {
+    let area = egui::Area::new(Id::new("floating_settings_control"))
+        .anchor(
+            egui::Align2::RIGHT_TOP,
+            vec2(-FLOATING_CONTROL_MARGIN, FLOATING_CONTROL_MARGIN),
+        )
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(
+                vec2(FLOATING_CONTROL_SIZE, FLOATING_CONTROL_SIZE),
+                egui::Sense::click(),
+            );
+            let hover = ui
+                .ctx()
+                .animate_bool_with_time(response.id, response.hovered(), 0.12);
+            // macOS system accent blue, with the pressed and hover variants
+            // macOS applies to a filled accent button.
+            let accent = Color32::from_rgb(0, 122, 255);
+            let fill = if response.is_pointer_button_down_on() {
+                accent.gamma_multiply(0.80)
+            } else {
+                accent.gamma_multiply(1.0 + 0.18 * hover)
+            };
+            let border = Color32::from_white_alpha((50.0 + 50.0 * hover) as u8);
+            let painter = ui.painter();
+            let center = rect.center();
+            let radius = FLOATING_CONTROL_SIZE / 2.0;
+            painter.add(
+                egui::epaint::Shadow {
+                    offset: [0, 3],
+                    blur: 10,
+                    spread: 0,
+                    color: Color32::from_black_alpha(80),
+                }
+                .as_shape(rect, radius),
+            );
+            painter.circle_filled(center, radius, fill);
+            painter.circle_stroke(center, radius - 0.5, egui::Stroke::new(1.0, border));
+            paint_settings_glyph(painter, center, Color32::from_white_alpha(235));
+            response
+        });
+    let response = area
+        .inner
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("{} (F1)", page_title(Pane::Settings, lang)));
+    if response.clicked() {
+        state.set_controls_open(true);
+    }
+    response
+}
+
 fn navigation(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
     for pane in NAVIGATION {
         let group = match pane {
@@ -178,17 +291,19 @@ fn toolbar(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, sidebar: bool, la
         {
             state.emit(UiAction::Start);
         }
-        if ui
-            .button(lang.pick(
-                "アバターのみ (F1)",
-                "Avatar only (F1)",
-                "仅虚拟形象 (F1)",
-                "아바타만 (F1)",
-            ))
-            .clicked()
-        {
-            state.set_controls_open(false);
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .button(lang.pick(
+                    "アバターのみ (F1)",
+                    "Avatar only (F1)",
+                    "仅虚拟形象 (F1)",
+                    "아바타만 (F1)",
+                ))
+                .clicked()
+            {
+                state.set_controls_open(false);
+            }
+        });
     });
 }
 
@@ -258,20 +373,11 @@ pub(crate) fn render_studio(
     lang: UiLanguage,
 ) -> bool {
     if !state.controls_open {
-        let handle = egui::Area::new(Id::new("open_studio"))
-            .anchor(egui::Align2::LEFT_CENTER, vec2(0.0, 0.0))
-            .movable(false)
-            .show(ctx, |ui| {
-                if ui
-                    .button(lang.pick("設定 (F1)", "Settings (F1)", "设置 (F1)", "설정 (F1)"))
-                    .clicked()
-                {
-                    state.set_controls_open(true);
-                }
-            });
-        return ctx
+        let response = floating_settings_control(ctx, state, lang);
+        let over_ui = ctx
             .input(|input| input.pointer.interact_pos())
-            .is_some_and(|pos| handle.response.rect.contains(pos));
+            .is_some_and(|pos| response.rect.contains(pos));
+        return render_avatar_import_review(ctx, vm, state, lang, over_ui);
     }
     let sidebar = use_sidebar(ctx.viewport_rect().width());
     let mut root = Ui::new(
@@ -381,8 +487,268 @@ pub(crate) fn render_studio(
                     ui.add_space(16.0);
                 });
         });
-    ctx.input(|input| input.pointer.interact_pos())
-        .is_some_and(|pos| ctx.viewport_rect().contains(pos))
+    let over_ui = ctx
+        .input(|input| input.pointer.interact_pos())
+        .is_some_and(|pos| ctx.viewport_rect().contains(pos));
+    render_avatar_import_review(ctx, vm, state, lang, over_ui)
+}
+
+/// Renders the license review sheet on top of the workspace when a model is
+/// waiting for acceptance. Returns whether the pointer is over any UI.
+fn render_avatar_import_review(
+    ctx: &egui::Context,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+    over_ui: bool,
+) -> bool {
+    let Some(review) = &vm.avatar_import_review.review else {
+        return over_ui;
+    };
+    avatar_import_review_modal(ctx, review, vm.avatar_import_review.accepted, state, lang);
+    true
+}
+
+/// Apple-style centered consent sheet shown before an imported VRM reaches the
+/// asset store. The newly selected model stays unloaded until this sheet is
+/// accepted.
+fn avatar_import_review_modal(
+    ctx: &egui::Context,
+    review: &VrmLicenseReview,
+    accepted: bool,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
+    let mut checked = accepted;
+    let mut import_requested = false;
+    let mut cancel_requested = false;
+    let modal = egui::Modal::new(Id::new("avatar_import_review")).show(ctx, |ui| {
+        ui.set_width(540.0);
+        review_sheet_header(ui, review, lang);
+        ui.add_space(12.0);
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("avatar_import_review_details")
+            .max_height(330.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| review_sheet_details(ui, review, lang));
+        ui.separator();
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut checked,
+            lang.pick(
+                "この VRM のライセンス・利用条件を確認しました",
+                "I have reviewed this VRM's license and usage terms",
+                "我已确认该 VRM 的许可与使用条件",
+                "이 VRM의 라이선스 및 이용 조건을 확인했습니다",
+            ),
+        );
+        ui.add_space(8.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if primary_button(
+                ui,
+                lang.pick("読み込む", "Import", "导入", "불러오기"),
+                checked,
+            )
+            .clicked()
+            {
+                import_requested = true;
+            }
+            if ui
+                .button(lang.pick("キャンセル", "Cancel", "取消", "취소"))
+                .clicked()
+            {
+                cancel_requested = true;
+            }
+        });
+    });
+    if checked != accepted {
+        state.emit(UiAction::SetAvatarImportReviewAccepted { accepted: checked });
+    }
+    if modal.should_close() || cancel_requested {
+        state.emit(UiAction::CancelAvatarImportReview);
+    } else if import_requested {
+        state.emit(UiAction::AcceptAvatarImportReview);
+    }
+}
+
+fn review_sheet_header(ui: &mut Ui, review: &VrmLicenseReview, lang: UiLanguage) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(44.0, 44.0), egui::Sense::hover());
+        ui.painter()
+            .circle_filled(rect.center(), 22.0, Color32::from_gray(238));
+        paint_license_glyph(ui.painter(), rect.center(), Color32::from_gray(80));
+        ui.add_space(10.0);
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(lang.pick(
+                    "ライセンス確認",
+                    "License review",
+                    "许可确认",
+                    "라이선스 확인",
+                ))
+                .size(19.0)
+                .strong(),
+            );
+            ui.label(RichText::new(&review.model_name).size(15.0));
+            ui.label(
+                RichText::new(match review.generation {
+                    crate::import::VrmGeneration::Vrm0 => "VRM 0.x",
+                    crate::import::VrmGeneration::Vrm1 => "VRM 1.0",
+                })
+                .small()
+                .weak(),
+            );
+        });
+    });
+}
+
+fn review_sheet_details(ui: &mut Ui, review: &VrmLicenseReview, lang: UiLanguage) {
+    review_sheet_group(
+        ui,
+        lang.pick("モデル情報", "Model information", "模型信息", "모델 정보"),
+    );
+    review_field(
+        ui,
+        lang.pick("バージョン", "Version", "版本", "버전"),
+        review.version.as_deref(),
+        lang,
+    );
+    let authors = joined_values(&review.authors);
+    review_field(
+        ui,
+        lang.pick("作者", "Author", "作者", "제작자"),
+        authors.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick("連絡先", "Contact", "联系方式", "연락처"),
+        review.contact_information.as_deref(),
+        lang,
+    );
+    let references = joined_values(&review.references);
+    review_field(
+        ui,
+        lang.pick("参照", "Reference", "参考", "참조"),
+        references.as_deref(),
+        lang,
+    );
+
+    review_sheet_group(
+        ui,
+        lang.pick("利用条件", "Usage permission", "使用条件", "이용 조건"),
+    );
+    review_field(
+        ui,
+        lang.pick(
+            "アバター利用",
+            "Avatar permission",
+            "虚拟形象使用",
+            "아바타 이용",
+        ),
+        review.avatar_permission.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick("暴力表現", "Violent", "暴力表现", "폭력 표현"),
+        review.allow_violent_usage.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick("性的表現", "Sexual", "性表现", "성적 표현"),
+        review.allow_sexual_usage.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick("商用利用", "Commercial", "商业用途", "상업적 이용"),
+        review.commercial_usage.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick("その他の許諾", "Other permission", "其他许可", "기타 허가"),
+        review.other_permission_url.as_deref(),
+        lang,
+    );
+
+    review_sheet_group(
+        ui,
+        lang.pick(
+            "配布・改変ライセンス",
+            "Distribution & modification",
+            "分发与修改许可",
+            "배포·개조 라이선스",
+        ),
+    );
+    review_field(
+        ui,
+        lang.pick("改変", "Modification", "修改", "개조"),
+        review.modification_license.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick("ライセンス名", "License name", "许可名称", "라이선스 이름"),
+        review.license_name.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick("ライセンスURL", "License URL", "许可URL", "라이선스 URL"),
+        review.license_url.as_deref(),
+        lang,
+    );
+    review_field(
+        ui,
+        lang.pick(
+            "その他ライセンスURL",
+            "Other license URL",
+            "其他许可URL",
+            "기타 라이선스 URL",
+        ),
+        review.other_license_url.as_deref(),
+        lang,
+    );
+}
+
+fn review_sheet_group(ui: &mut Ui, title: &str) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(title).size(14.0).strong());
+    ui.add_space(4.0);
+}
+
+fn review_field(ui: &mut Ui, label: &str, value: Option<&str>, lang: UiLanguage) {
+    ui.horizontal_top(|ui| {
+        ui.add_sized(
+            [150.0, 18.0],
+            egui::Label::new(RichText::new(label).weak()).truncate(),
+        );
+        match value.filter(|value| !value.is_empty()) {
+            Some(value) if is_external_url(value) => {
+                ui.hyperlink_to(value, value);
+            }
+            Some(value) => {
+                ui.label(value);
+            }
+            None => {
+                ui.label(
+                    RichText::new(lang.pick("未指定", "Not specified", "未指定", "미지정")).weak(),
+                );
+            }
+        }
+    });
+}
+
+fn joined_values(values: &[String]) -> Option<String> {
+    (!values.is_empty()).then(|| values.join(", "))
+}
+
+fn is_external_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
 }
 
 fn import_controls(
@@ -481,10 +847,10 @@ fn overview(
     lang: UiLanguage,
 ) {
     ui.label(lang.pick(
-        "アバターを読み込み、カメラを選んでトラッキングを開始します。",
-        "Load an avatar, select a camera, then start tracking.",
-        "加载虚拟形象、选择摄像头，然后开始跟踪。",
-        "아바타를 불러오고 카메라를 선택한 뒤 트래킹을 시작하세요.",
+        "アバターを読み込み、カメラを選ぶとトラッキングが自動で始まります。",
+        "Load an avatar and select a camera; tracking starts automatically.",
+        "加载虚拟形象并选择摄像头后，将自动开始跟踪。",
+        "아바타를 불러오고 카메라를 선택하면 트래킹이 자동으로 시작됩니다.",
     ));
     section(
         ui,
@@ -535,7 +901,7 @@ fn overview(
             "3. 움직임과 출력 확인",
         ),
         |ui| {
-            ui.label(lang.pick("上部でトラッキングを開始し、常時表示のアバタープレビューで動きを確認してください。", "Start tracking in the toolbar and check motion in the persistent avatar preview.", "在顶部开始跟踪，通过常驻的虚拟形象预览检查动作。", "상단에서 트래킹을 시작하고 항상 표시되는 아바타 미리 보기로 움직임을 확인하세요."));
+            ui.label(lang.pick("アバターとカメラが揃うと自動で始まります。動きは常時表示のアバタープレビューで確認できます。停止後は上部のボタンで再開できます。", "Tracking starts automatically once the avatar and camera are ready. Check motion in the persistent avatar preview; use the toolbar button to resume after stopping.", "虚拟形象与摄像头就绪后将自动开始。可在常驻预览中确认动作，停止后可用顶部按钮重新开始。", "아바타와 카메라가 준비되면 자동으로 시작됩니다. 항상 표시되는 미리 보기에서 움직임을 확인하고, 중지 후에는 상단 버튼으로 다시 시작할 수 있습니다."));
             ui.horizontal_wrapped(|ui| {
                 if ui.button(page_title(Pane::Calibration, lang)).clicked() {
                     state.emit(UiAction::SwitchPane(Pane::Calibration));
@@ -1184,6 +1550,39 @@ mod tests {
         assert!(!NAVIGATION.contains(&Pane::Preview));
     }
     #[test]
+    fn floating_control_reopens_settings_on_click() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        state.set_controls_open(false);
+        // Frame 1 is the area sizing pass (invisible); frame 2 registers the
+        // interactive widget for egui's next-frame hit test.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja);
+        });
+        let mut rect = egui::Rect::NOTHING;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            rect = floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja).rect;
+        });
+        assert!(!state.controls_open);
+        assert!(rect.width() > 0.0 && rect.height() > 0.0);
+        let pos = rect.center();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            input.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        let _ = ctx.run_ui(input, |ui| {
+            floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja);
+        });
+        assert!(state.controls_open);
+    }
+
+    #[test]
     fn every_destination_has_a_label_in_all_four_languages() {
         for pane in NAVIGATION {
             for lang in [
@@ -1195,5 +1594,64 @@ mod tests {
                 assert!(!page_title(pane, lang).is_empty());
             }
         }
+    }
+
+    fn review_fixture() -> VrmLicenseReview {
+        VrmLicenseReview {
+            generation: crate::import::VrmGeneration::Vrm1,
+            model_name: "Test model".to_string(),
+            version: None,
+            authors: vec!["Author".to_string()],
+            contact_information: None,
+            references: Vec::new(),
+            avatar_permission: Some("everyone".to_string()),
+            allow_violent_usage: Some("false".to_string()),
+            allow_sexual_usage: Some("false".to_string()),
+            commercial_usage: Some("personalNonProfit".to_string()),
+            other_permission_url: None,
+            modification_license: Some("prohibited".to_string()),
+            license_name: None,
+            license_url: None,
+            other_license_url: None,
+            source_path: std::path::PathBuf::from("model.vrm"),
+        }
+    }
+
+    #[test]
+    fn license_review_modal_escape_emits_cancel() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let review = review_fixture();
+        // Frame 1 registers the modal; frame 2 receives the Escape.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+        });
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(input, |ui| {
+            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+        });
+        assert!(
+            state
+                .pending_actions
+                .contains(&UiAction::CancelAvatarImportReview)
+        );
+    }
+
+    #[test]
+    fn license_review_modal_does_not_import_while_unchecked() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let review = review_fixture();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+        });
+        assert!(state.pending_actions.is_empty());
     }
 }

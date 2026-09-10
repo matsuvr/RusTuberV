@@ -69,6 +69,7 @@ impl UiState {
                 | UiAction::SelectCamera { .. }
                 | UiAction::Stop
                 | UiAction::UnloadAvatar
+                | UiAction::RequestAvatarImportReview { .. }
         ) {
             self.preview_event(CameraPreviewEvent::Hide);
         }
