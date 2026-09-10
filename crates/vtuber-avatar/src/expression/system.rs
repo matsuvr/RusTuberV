@@ -708,6 +708,8 @@ mod tests {
                     declared_morph_bind_count: 1,
                     resolved_morph_bind_count: 1,
                     declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
                     unsupported_material_bind_count: 0,
                 },
                 ExpressionCatalogInput {
@@ -716,6 +718,8 @@ mod tests {
                     declared_morph_bind_count: 1,
                     resolved_morph_bind_count: 1,
                     declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
                     unsupported_material_bind_count: 0,
                 },
                 ExpressionCatalogInput {
@@ -724,6 +728,8 @@ mod tests {
                     declared_morph_bind_count: 1,
                     resolved_morph_bind_count: 1,
                     declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
                     unsupported_material_bind_count: 0,
                 },
             ],

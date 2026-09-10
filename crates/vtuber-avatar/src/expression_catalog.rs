@@ -85,7 +85,12 @@ pub struct ExpressionCatalogInput<'a> {
     pub resolved_morph_bind_count: usize,
     /// Material/texture binds declared by the source.
     pub declared_material_bind_count: usize,
-    /// Declared binds with an unknown target property.
+    /// Material/texture binds whose index resolved and whose target property
+    /// is representable by the resolved material.
+    pub resolved_material_bind_count: usize,
+    /// Declared binds whose glTF index did not resolve to a scene material.
+    pub unresolved_material_bind_count: usize,
+    /// Declared binds with an unknown or unrepresentable target property.
     pub unsupported_material_bind_count: usize,
 }
 
@@ -99,7 +104,15 @@ impl ExpressionCatalogInput<'_> {
                 ),
             };
         }
-        if self.resolved_morph_bind_count > 0 || self.declared_material_bind_count > 0 {
+        if self.unresolved_material_bind_count > 0 {
+            return ExpressionAvailability::Unresolved {
+                reason: format!(
+                    "{} material bind(s) did not resolve to a scene material",
+                    self.unresolved_material_bind_count
+                ),
+            };
+        }
+        if self.resolved_morph_bind_count > 0 || self.resolved_material_bind_count > 0 {
             return ExpressionAvailability::Ready;
         }
         if self.declared_morph_bind_count > 0 {
@@ -223,6 +236,8 @@ pub fn build_catalog(
                 declared_morph_bind_count: status.declared_morph_bind_count,
                 resolved_morph_bind_count: status.resolved_morph_bind_count,
                 declared_material_bind_count: status.declared_material_bind_count,
+                resolved_material_bind_count: status.resolved_material_bind_count,
+                unresolved_material_bind_count: status.unresolved_material_bind_count,
                 unsupported_material_bind_count: status.unsupported_material_bind_count,
             }
         }),
@@ -291,6 +306,8 @@ mod tests {
             declared_morph_bind_count: resolved,
             resolved_morph_bind_count: resolved,
             declared_material_bind_count: 0,
+            resolved_material_bind_count: 0,
+            unresolved_material_bind_count: 0,
             unsupported_material_bind_count: 0,
         }
     }
@@ -410,6 +427,24 @@ mod tests {
         );
     }
 
+    fn material_input<'a>(
+        id: &'a str,
+        resolved: usize,
+        unresolved: usize,
+        unsupported: usize,
+    ) -> ExpressionCatalogInput<'a> {
+        ExpressionCatalogInput {
+            id,
+            declared_as_preset: false,
+            declared_morph_bind_count: 0,
+            resolved_morph_bind_count: 0,
+            declared_material_bind_count: resolved + unresolved + unsupported,
+            resolved_material_bind_count: resolved,
+            unresolved_material_bind_count: unresolved,
+            unsupported_material_bind_count: unsupported,
+        }
+    }
+
     #[test]
     fn availability_distinguishes_empty_unresolved_and_unsupported() {
         assert_eq!(
@@ -422,33 +457,59 @@ mod tests {
             declared_morph_bind_count: 2,
             resolved_morph_bind_count: 0,
             declared_material_bind_count: 0,
+            resolved_material_bind_count: 0,
+            unresolved_material_bind_count: 0,
             unsupported_material_bind_count: 0,
         };
         assert!(matches!(
             declared_unresolved.availability(),
             ExpressionAvailability::Unresolved { .. }
         ));
-        let unsupported = ExpressionCatalogInput {
+        assert!(matches!(
+            material_input("a", 0, 1, 0).availability(),
+            ExpressionAvailability::Unresolved { .. }
+        ));
+        assert!(matches!(
+            material_input("a", 0, 0, 1).availability(),
+            ExpressionAvailability::Unsupported { .. }
+        ));
+        assert_eq!(
+            material_input("a", 1, 0, 0).availability(),
+            ExpressionAvailability::Ready,
+            "a color-only expression with a resolved bind is Ready"
+        );
+    }
+
+    #[test]
+    fn unresolved_or_unsupported_binds_override_resolved_morphs() {
+        let with_unresolved = ExpressionCatalogInput {
+            id: "a",
+            declared_as_preset: false,
+            declared_morph_bind_count: 1,
+            resolved_morph_bind_count: 1,
+            declared_material_bind_count: 1,
+            resolved_material_bind_count: 0,
+            unresolved_material_bind_count: 1,
+            unsupported_material_bind_count: 0,
+        };
+        assert!(matches!(
+            with_unresolved.availability(),
+            ExpressionAvailability::Unresolved { .. }
+        ));
+        let with_unsupported = ExpressionCatalogInput {
             id: "a",
             declared_as_preset: false,
             declared_morph_bind_count: 0,
             resolved_morph_bind_count: 0,
             declared_material_bind_count: 1,
+            resolved_material_bind_count: 1,
+            unresolved_material_bind_count: 0,
             unsupported_material_bind_count: 1,
         };
         assert!(matches!(
-            unsupported.availability(),
+            with_unsupported.availability(),
             ExpressionAvailability::Unsupported { .. }
         ));
-        let color_only = ExpressionCatalogInput {
-            id: "a",
-            declared_as_preset: false,
-            declared_morph_bind_count: 0,
-            resolved_morph_bind_count: 0,
-            declared_material_bind_count: 1,
-            unsupported_material_bind_count: 0,
-        };
-        assert_eq!(color_only.availability(), ExpressionAvailability::Ready);
     }
 
     #[test]
@@ -464,6 +525,8 @@ mod tests {
                     declared_morph_bind_count: 1,
                     resolved_morph_bind_count: 0,
                     declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
                     unsupported_material_bind_count: 0,
                 },
             ],

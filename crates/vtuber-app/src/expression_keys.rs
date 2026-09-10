@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
-use vtuber_avatar::{AvatarExpressionCatalog, is_excluded_expression};
+use vtuber_avatar::{
+    AvatarExpressionCatalog, AvatarGeneration, ManualExpressionRequest, is_excluded_expression,
+};
 
 /// Number of assignable expression keys.
 pub const EXPRESSION_KEY_COUNT: usize = 36;
@@ -454,6 +456,24 @@ pub fn effective_bindings(
     catalog.map_or_else(ExpressionBindings::default, ExpressionBindings::default_for)
 }
 
+/// Builds the manual toggle request for a key against the bindings snapshot
+/// captured when the input was issued.
+///
+/// The generation is passed through unchanged; callers must not re-attach the
+/// current generation after a model swap.
+#[must_use]
+pub fn manual_request_for_key(
+    generation: AvatarGeneration,
+    key: ExpressionKey,
+    bindings: &ExpressionBindings,
+) -> Option<ManualExpressionRequest> {
+    let expression = bindings.expression_for(key)?;
+    Some(ManualExpressionRequest::Toggle {
+        generation,
+        expression: expression.to_owned(),
+    })
+}
+
 /// Returns `true` when an expression may be newly assigned: it exists in the
 /// catalog, is `Ready`, and is not the excluded tongue channel.
 #[must_use]
@@ -483,6 +503,8 @@ mod tests {
                 declared_morph_bind_count: 1,
                 resolved_morph_bind_count: 1,
                 declared_material_bind_count: 0,
+                resolved_material_bind_count: 0,
+                unresolved_material_bind_count: 0,
                 unsupported_material_bind_count: 0,
             }),
         )
@@ -547,6 +569,8 @@ mod tests {
                 declared_morph_bind_count: 1,
                 resolved_morph_bind_count: 1,
                 declared_material_bind_count: 0,
+                resolved_material_bind_count: 0,
+                unresolved_material_bind_count: 0,
                 unsupported_material_bind_count: 0,
             }),
         );
@@ -669,6 +693,24 @@ mod tests {
         assert_eq!(bindings.expression_for(ExpressionKey::Digit1), Some("笑顔"));
         bindings.assign(ExpressionKey::KeyM, "笑顔");
         assert_eq!(bindings.key_for("笑顔"), Some(ExpressionKey::KeyM));
+    }
+
+    #[test]
+    fn manual_request_for_key_passes_the_issued_generation_through() {
+        let mut bindings = ExpressionBindings::default();
+        bindings.assign(ExpressionKey::Digit1, "happy");
+        let generation = AvatarGeneration(7);
+        assert_eq!(
+            manual_request_for_key(generation, ExpressionKey::Digit1, &bindings),
+            Some(ManualExpressionRequest::Toggle {
+                generation,
+                expression: "happy".into(),
+            })
+        );
+        assert_eq!(
+            manual_request_for_key(generation, ExpressionKey::KeyM, &bindings),
+            None
+        );
     }
 
     #[test]

@@ -771,34 +771,22 @@ fn normalized_legacy_expression_name(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let Some(source) = preset.or(name) else {
+    // Only a known `presetName` selects a standard semantic. Custom author
+    // names are never translated, so a custom `joy` does not collide with the
+    // standard `joy` in duplicate diagnostics.
+    if let Some(runtime_name) =
+        preset.and_then(crate::vrm::gltf::extensions::vrm0_preset_runtime_name)
+    {
+        return runtime_name.to_string();
+    }
+    let Some(source) = name else {
         warnings.push(VrmCompatibilityWarning::new(
             VrmCompatibilityWarningCode::EmptyLegacyExpressionName,
             format!("VRM.blendShapeMaster.blendShapeGroups[{group_index}]"),
         ));
         return format!("custom_{group_index}");
     };
-    match source {
-        "A" | "a" => "aa",
-        "I" | "i" => "ih",
-        "U" | "u" => "ou",
-        "E" | "e" => "ee",
-        "O" | "o" => "oh",
-        "Blink" | "blink" => "blink",
-        "Blink_L" | "blink_l" => "blinkLeft",
-        "Blink_R" | "blink_r" => "blinkRight",
-        "Joy" | "joy" => "happy",
-        "Angry" | "angry" => "angry",
-        "Sorrow" | "sorrow" => "sad",
-        "Fun" | "fun" => "relaxed",
-        "LookUp" | "lookup" => "lookUp",
-        "LookDown" | "lookdown" => "lookDown",
-        "LookLeft" | "lookleft" => "lookLeft",
-        "LookRight" | "lookright" => "lookRight",
-        "Neutral" | "neutral" => "neutral",
-        other => other,
-    }
-    .to_string()
+    source.to_string()
 }
 
 fn parse_vrm1_meta(meta: Option<&Value>) -> VrmMeta {

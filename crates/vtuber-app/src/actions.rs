@@ -94,26 +94,41 @@ pub enum UiAction {
     ResetArmPoseProfile,
 
     // --- Expression key bindings ---
-    /// Assign or unassign a fixed expression key for the active model.
+    /// Assign or unassign a fixed expression key for a specific model
+    /// generation.
     ///
-    /// `expression: None` means "unassigned". The orchestrator moves the
-    /// expression off any old key, persists, and clears the manual layer on
-    /// success.
+    /// `expression: None` means "unassigned". The target model and generation
+    /// are captured when the UI issues the action, so a swap that happens
+    /// before processing cannot apply the operation to the new model.
     AssignExpressionKey {
+        /// Model ID the UI displayed when the action was issued.
+        model_id: String,
+        /// Avatar generation the UI displayed when the action was issued.
+        generation: vtuber_avatar::AvatarGeneration,
         /// Fixed physical key.
         key: crate::expression_keys::ExpressionKey,
         /// Exact runtime expression ID, or `None` to unassign.
         expression: Option<String>,
     },
-    /// Restore the active model's deterministic initial assignment.
-    ResetExpressionBindings,
+    /// Restore the initial assignment for a specific model generation.
+    ResetExpressionBindings {
+        /// Model ID the UI displayed when the action was issued.
+        model_id: String,
+        /// Avatar generation the UI displayed when the action was issued.
+        generation: vtuber_avatar::AvatarGeneration,
+    },
     /// Toggle the expression currently assigned to a key.
     ToggleExpressionKey {
+        /// Avatar generation the input was collected against.
+        generation: vtuber_avatar::AvatarGeneration,
         /// Fixed physical key.
         key: crate::expression_keys::ExpressionKey,
     },
     /// Remove the manual expression layer without selecting another.
-    ClearManualExpression,
+    ClearManualExpression {
+        /// Avatar generation the UI displayed when the action was issued.
+        generation: vtuber_avatar::AvatarGeneration,
+    },
 
     // --- Error actions ---
     /// Dismiss the current error (does not clear domain failure state).
@@ -242,20 +257,30 @@ mod tests {
     #[test]
     fn expression_key_actions_carry_their_key_and_expression() {
         let key = crate::expression_keys::ExpressionKey::Digit1;
+        let generation = vtuber_avatar::AvatarGeneration(3);
         let assign = UiAction::AssignExpressionKey {
+            model_id: "model-a".into(),
+            generation,
             key,
             expression: Some("happy".into()),
         };
         match assign {
-            UiAction::AssignExpressionKey { key: k, expression } => {
+            UiAction::AssignExpressionKey {
+                model_id,
+                generation: g,
+                key: k,
+                expression,
+            } => {
+                assert_eq!(model_id, "model-a");
+                assert_eq!(g, generation);
                 assert_eq!(k, key);
                 assert_eq!(expression.as_deref(), Some("happy"));
             }
             _ => panic!("expected AssignExpressionKey"),
         }
         assert_ne!(
-            UiAction::ToggleExpressionKey { key },
-            UiAction::ClearManualExpression
+            UiAction::ToggleExpressionKey { generation, key },
+            UiAction::ClearManualExpression { generation }
         );
     }
 

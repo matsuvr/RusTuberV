@@ -960,41 +960,44 @@ fn validate_vrm0_expression_binds(
 }
 
 fn normalize_legacy_expression_name(group: &serde_json::Value, group_index: usize) -> String {
+    // Only the source `presetName` selects a standard semantic. Custom groups
+    // keep the author's name exactly, so a custom `joy` or `A` is never
+    // rewritten into a standard or tracking runtime ID.
     let preset = group
         .get("presetName")
         .and_then(|value| value.as_str())
-        .map(str::trim);
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
+    if let Some(source) = preset {
+        let mapped = match source {
+            "A" | "a" => "aa",
+            "I" | "i" => "ih",
+            "U" | "u" => "ou",
+            "E" | "e" => "ee",
+            "O" | "o" => "oh",
+            "Blink" | "blink" => "blink",
+            "Blink_L" | "blink_l" => "blinkLeft",
+            "Blink_R" | "blink_r" => "blinkRight",
+            "Joy" | "joy" => "happy",
+            "Angry" | "angry" => "angry",
+            "Sorrow" | "sorrow" => "sad",
+            "Fun" | "fun" => "relaxed",
+            "LookUp" | "lookup" => "lookUp",
+            "LookDown" | "lookdown" => "lookDown",
+            "LookLeft" | "lookleft" => "lookLeft",
+            "LookRight" | "lookright" => "lookRight",
+            "Neutral" | "neutral" => "neutral",
+            other => other,
+        };
+        return mapped.into();
+    }
     let name = group
         .get("name")
         .and_then(|value| value.as_str())
-        .map(str::trim);
-    let source = preset
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
-        .or(name)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("custom_{group_index}"));
-    match source.as_str() {
-        "A" | "a" => "aa",
-        "I" | "i" => "ih",
-        "U" | "u" => "ou",
-        "E" | "e" => "ee",
-        "O" | "o" => "oh",
-        "Blink" | "blink" => "blink",
-        "Blink_L" | "blink_l" => "blinkLeft",
-        "Blink_R" | "blink_r" => "blinkRight",
-        "Joy" | "joy" => "happy",
-        "Angry" | "angry" => "angry",
-        "Sorrow" | "sorrow" => "sad",
-        "Fun" | "fun" => "relaxed",
-        "LookUp" | "lookup" => "lookUp",
-        "LookDown" | "lookdown" => "lookDown",
-        "LookLeft" | "lookleft" => "lookLeft",
-        "LookRight" | "lookright" => "lookRight",
-        "Neutral" | "neutral" => "neutral",
-        other => other,
-    }
-    .into()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    name.map(str::to_owned)
+        .unwrap_or_else(|| format!("custom_{group_index}"))
 }
 
 fn index_legacy_human_bones(

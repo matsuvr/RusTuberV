@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use crate::actions::UiAction;
 use crate::expression_keys::{
     ExpressionBindingStore, ExpressionBindings, ExpressionKey, can_assign_expression,
-    effective_bindings,
+    effective_bindings, manual_request_for_key,
 };
 use crate::import::VrmGeneration;
 use crate::import::{self, ImportedModel, ModelImportError};
@@ -29,7 +29,8 @@ use crate::ui::UiState;
 use crate::ui_model::*;
 use vtuber_avatar::{
     ArmPoseOverrideStore, ArmPoseProfileChange, ArmPoseProfileOverride, AvatarAssetId,
-    AvatarLifecycle, AvatarMotionMirror, ManualExpressionRequest, ManualExpressionSelection,
+    AvatarGeneration, AvatarLifecycle, AvatarMotionMirror, ManualExpressionRequest,
+    ManualExpressionSelection,
 };
 use vtuber_camera::device::CameraDescriptor;
 
@@ -882,10 +883,19 @@ pub fn process_ui_actions_system(
                     )));
                 }
             }
-            UiAction::AssignExpressionKey { key, expression } => {
+            UiAction::AssignExpressionKey {
+                model_id,
+                generation,
+                key,
+                expression,
+            } => {
                 apply_expression_binding_action(
                     &mut orchestrator,
                     ExpressionBindingAction::Assign {
+                        target: ExpressionTarget {
+                            model_id: model_id.clone(),
+                            generation: *generation,
+                        },
                         key: *key,
                         expression: expression.clone(),
                     },
@@ -895,27 +905,36 @@ pub fn process_ui_actions_system(
                     &mut manual_requests,
                 );
             }
-            UiAction::ResetExpressionBindings => {
+            UiAction::ResetExpressionBindings {
+                model_id,
+                generation,
+            } => {
                 apply_expression_binding_action(
                     &mut orchestrator,
-                    ExpressionBindingAction::Reset,
+                    ExpressionBindingAction::Reset {
+                        target: ExpressionTarget {
+                            model_id: model_id.clone(),
+                            generation: *generation,
+                        },
+                    },
                     &mut expression_store,
                     arm_pose_settings.as_deref(),
                     lifecycle.as_deref(),
                     &mut manual_requests,
                 );
             }
-            UiAction::ToggleExpressionKey { key } => {
+            UiAction::ToggleExpressionKey { generation, key } => {
                 toggle_expression_key_action(
                     &orchestrator,
+                    *generation,
                     *key,
                     expression_store.as_deref(),
                     lifecycle.as_deref(),
                     &mut manual_requests,
                 );
             }
-            UiAction::ClearManualExpression => {
-                clear_manual_expression_action(lifecycle.as_deref(), &mut manual_requests);
+            UiAction::ClearManualExpression { generation } => {
+                clear_manual_expression_action(*generation, &mut manual_requests);
             }
             _ => orchestrator.process_action(action),
         }
@@ -931,22 +950,52 @@ pub fn process_ui_actions_system(
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
 }
 
+/// Model and generation captured when the UI issued an action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExpressionTarget {
+    model_id: String,
+    generation: AvatarGeneration,
+}
+
+impl ExpressionTarget {
+    /// Returns `true` when the live model, generation, and catalog still match
+    /// the target captured at issuance.
+    fn is_current(&self, orchestrator: &Orchestrator, lifecycle: &AvatarLifecycle) -> bool {
+        orchestrator.active_model_id() == Some(self.model_id.as_str())
+            && lifecycle.current_generation() == self.generation
+            && lifecycle
+                .expression_catalog()
+                .is_some_and(|catalog| catalog.generation == self.generation.0)
+    }
+}
+
 /// Expression key mutation requested by the UI.
 enum ExpressionBindingAction {
     /// Assign an expression (or unassign with `None`) to one key.
     Assign {
+        target: ExpressionTarget,
         key: ExpressionKey,
         expression: Option<String>,
     },
-    /// Restore the active model's deterministic default assignment.
-    Reset,
+    /// Restore the target model's deterministic default assignment.
+    Reset { target: ExpressionTarget },
+}
+
+impl ExpressionBindingAction {
+    fn target(&self) -> &ExpressionTarget {
+        match self {
+            Self::Assign { target, .. } | Self::Reset { target } => target,
+        }
+    }
 }
 
 /// Applies one expression binding mutation through copy-save-commit.
 ///
-/// The candidate is written to `settings.toml` first; only a successful save
-/// commits it to the runtime store and clears the manual selection. A failed
-/// save keeps the previous assignment and reports the existing typed error.
+/// The target model and generation must still be current; an action collected
+/// before a model swap never changes the new model's settings. The candidate
+/// is written to `settings.toml` first; only a successful save commits it to
+/// the runtime store and clears the manual selection. A failed save keeps the
+/// previous assignment and reports the existing typed error.
 fn apply_expression_binding_action(
     orchestrator: &mut Orchestrator,
     action: ExpressionBindingAction,
@@ -955,17 +1004,24 @@ fn apply_expression_binding_action(
     lifecycle: Option<&AvatarLifecycle>,
     manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
 ) {
-    let Some(model_id) = orchestrator.active_model_id().map(str::to_owned) else {
+    let Some(lifecycle) = lifecycle else {
         return;
     };
-    let catalog = lifecycle.and_then(AvatarLifecycle::expression_catalog);
+    let target = action.target().clone();
+    if !target.is_current(orchestrator, lifecycle) {
+        return;
+    }
+    let catalog = lifecycle.expression_catalog();
+    let model_id = target.model_id;
     let Some(store) = store.as_deref_mut() else {
         return;
     };
     let current = effective_bindings(store, &model_id, catalog);
     let mut candidate = current.clone();
     match action {
-        ExpressionBindingAction::Assign { key, expression } => match expression {
+        ExpressionBindingAction::Assign {
+            expression, key, ..
+        } => match expression {
             Some(expression) => {
                 if !can_assign_expression(catalog, &expression) {
                     return;
@@ -974,7 +1030,7 @@ fn apply_expression_binding_action(
             }
             None => candidate.unassign(key),
         },
-        ExpressionBindingAction::Reset => {
+        ExpressionBindingAction::Reset { .. } => {
             let Some(catalog) = catalog else {
                 return;
             };
@@ -995,27 +1051,39 @@ fn apply_expression_binding_action(
         return;
     }
     *store = next;
-    if let (Some(lifecycle), Some(requests)) = (lifecycle, manual_requests.as_mut()) {
+    if let Some(requests) = manual_requests.as_mut() {
         requests.write(ManualExpressionRequest::Clear {
-            generation: lifecycle.current_generation(),
+            generation: target.generation,
         });
     }
 }
 
-/// Resolves the key's current binding and emits a toggle intent.
+/// Resolves the key's binding snapshot and emits a toggle intent for the
+/// generation the input was collected against.
 ///
-/// Missing or not-ready expressions are dropped rather than substituted.
+/// Missing or not-ready expressions are dropped rather than substituted, and
+/// the issued generation is passed through unchanged.
 fn toggle_expression_key_action(
     orchestrator: &Orchestrator,
+    generation: AvatarGeneration,
     key: ExpressionKey,
     store: Option<&ExpressionBindingStore>,
     lifecycle: Option<&AvatarLifecycle>,
     manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
 ) {
+    let Some(lifecycle) = lifecycle else {
+        return;
+    };
+    if lifecycle.current_generation() != generation {
+        return;
+    }
     let Some(model_id) = orchestrator.active_model_id() else {
         return;
     };
-    let catalog = lifecycle.and_then(AvatarLifecycle::expression_catalog);
+    let catalog = lifecycle.expression_catalog();
+    if catalog.is_none_or(|catalog| catalog.generation != generation.0) {
+        return;
+    }
     let Some(store) = store else {
         return;
     };
@@ -1026,34 +1094,23 @@ fn toggle_expression_key_action(
     if !can_assign_expression(catalog, expression) {
         return;
     }
-    clear_or_toggle_manual(lifecycle, manual_requests, Some(expression));
-}
-
-/// Emits a manual clear for the active generation.
-fn clear_manual_expression_action(
-    lifecycle: Option<&AvatarLifecycle>,
-    manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
-) {
-    clear_or_toggle_manual(lifecycle, manual_requests, None);
-}
-
-fn clear_or_toggle_manual(
-    lifecycle: Option<&AvatarLifecycle>,
-    manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
-    expression: Option<&str>,
-) {
-    let (Some(lifecycle), Some(requests)) = (lifecycle, manual_requests.as_mut()) else {
+    let Some(request) = manual_request_for_key(generation, key, &bindings) else {
         return;
     };
-    let generation = lifecycle.current_generation();
-    let request = match expression {
-        Some(expression) => ManualExpressionRequest::Toggle {
-            generation,
-            expression: expression.to_owned(),
-        },
-        None => ManualExpressionRequest::Clear { generation },
+    if let Some(requests) = manual_requests.as_mut() {
+        requests.write(request);
+    }
+}
+
+/// Emits a manual clear for exactly the generation the UI acted on.
+fn clear_manual_expression_action(
+    generation: AvatarGeneration,
+    manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
+) {
+    let Some(requests) = manual_requests.as_mut() else {
+        return;
     };
-    requests.write(request);
+    requests.write(ManualExpressionRequest::Clear { generation });
 }
 
 /// Cheap view-model rebuild key: model, catalog generation, store revision,
@@ -1095,6 +1152,15 @@ pub fn sync_expression_view_model(
     *last_signature = Some(signature);
 
     let selected = manual.as_deref().and_then(|manual| manual.selected.clone());
+    // Actions emitted from this snapshot carry exactly the model/generation
+    // shown here so a later swap cannot apply them to the new avatar.
+    let (snapshot_model_id, snapshot_generation) = match catalog {
+        Some(catalog) => (
+            (!model_id.is_empty()).then(|| model_id.clone()),
+            Some(AvatarGeneration(catalog.generation)),
+        ),
+        None => (None, None),
+    };
     let bindings = store.as_deref().map_or_else(
         || catalog.map_or_else(ExpressionBindings::default, ExpressionBindings::default_for),
         |store| effective_bindings(store, &model_id, catalog),
@@ -1127,6 +1193,8 @@ pub fn sync_expression_view_model(
         })
         .collect();
     view_model.expression = ExpressionViewModel {
+        model_id: snapshot_model_id,
+        generation: snapshot_generation,
         has_catalog: catalog.is_some(),
         entries,
         bindings: binding_rows,
@@ -2182,6 +2250,8 @@ mod tests {
                 declared_morph_bind_count: 1,
                 resolved_morph_bind_count: 1,
                 declared_material_bind_count: 0,
+                resolved_material_bind_count: 0,
+                unresolved_material_bind_count: 0,
                 unsupported_material_bind_count: 0,
             }),
         );
@@ -2213,14 +2283,27 @@ mod tests {
             .collect()
     }
 
+    /// Model ID and generation of the currently loaded test avatar.
+    fn expression_target(app: &App) -> (String, vtuber_avatar::AvatarGeneration) {
+        (
+            "model-a".to_string(),
+            app.world()
+                .resource::<vtuber_avatar::AvatarLifecycle>()
+                .current_generation(),
+        )
+    }
+
     #[test]
     fn assigning_a_far_catalog_expression_persists_and_clears_manual() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.toml");
         let mut app = expression_action_app(path.clone());
+        let (model_id, generation) = expression_target(&app);
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
+                model_id,
+                generation,
                 key: ExpressionKey::Digit1,
                 expression: Some("custom49".into()),
             });
@@ -2260,9 +2343,12 @@ mod tests {
         let path = directory.path().join("settings.toml");
         let mut app = expression_action_app(path);
         // Default: Digit1=happy, Digit2=angry.
+        let (model_id, generation) = expression_target(&app);
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
+                model_id,
+                generation,
                 key: ExpressionKey::Digit1,
                 expression: Some("angry".into()),
             });
@@ -2283,9 +2369,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.toml");
         let mut app = expression_action_app(path);
+        let (model_id, generation) = expression_target(&app);
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
+                model_id,
+                generation,
                 key: ExpressionKey::Digit1,
                 expression: None,
             });
@@ -2299,9 +2388,13 @@ mod tests {
             None
         );
 
+        let (model_id, generation) = expression_target(&app);
         app.world_mut()
             .resource_mut::<UiState>()
-            .emit(UiAction::ResetExpressionBindings);
+            .emit(UiAction::ResetExpressionBindings {
+                model_id,
+                generation,
+            });
         app.update();
         assert_eq!(
             app.world()
@@ -2328,9 +2421,12 @@ mod tests {
         app.world_mut()
             .resource_mut::<ExpressionBindingStore>()
             .set("model-a".into(), defaults);
+        let (model_id, generation) = expression_target(&app);
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
+                model_id,
+                generation,
                 key: ExpressionKey::Digit1,
                 expression: Some("smile".into()),
             });
@@ -2364,6 +2460,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::ToggleExpressionKey {
+                generation,
                 key: ExpressionKey::Digit1,
             });
         app.update();
@@ -2380,10 +2477,106 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::ToggleExpressionKey {
+                generation,
                 key: ExpressionKey::KeyM,
             });
         app.update();
         assert!(take_manual_requests(&mut app).is_empty());
+    }
+
+    #[test]
+    fn stale_model_actions_never_reach_the_replacement_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path);
+        let (model_a, generation_a) = expression_target(&app);
+
+        // Actions issued from model A's snapshot are already queued.
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ToggleExpressionKey {
+                generation: generation_a,
+                key: ExpressionKey::Digit1,
+            });
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ClearManualExpression {
+                generation: generation_a,
+            });
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::AssignExpressionKey {
+                model_id: model_a.clone(),
+                generation: generation_a,
+                key: ExpressionKey::Digit1,
+                expression: Some("smile".into()),
+            });
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ResetExpressionBindings {
+                model_id: model_a.clone(),
+                generation: generation_a,
+            });
+
+        // Replace model A with model B before the orchestrator consumes them.
+        let root_b = app.world_mut().spawn_empty().id();
+        let generation_b = {
+            let mut lifecycle = app
+                .world_mut()
+                .resource_mut::<vtuber_avatar::AvatarLifecycle>();
+            lifecycle.request_replace(root_b).unwrap();
+            lifecycle.finish_unload();
+            lifecycle.start_binding(root_b);
+            let catalog = vtuber_avatar::AvatarExpressionCatalog::build(
+                "model-b".into(),
+                lifecycle.current_generation().0,
+                [vtuber_avatar::ExpressionCatalogInput {
+                    id: "happy",
+                    declared_as_preset: true,
+                    declared_morph_bind_count: 1,
+                    resolved_morph_bind_count: 1,
+                    declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
+                    unsupported_material_bind_count: 0,
+                }],
+            );
+            lifecycle.set_expression_catalog(Some(catalog));
+            lifecycle.finish_ready();
+            lifecycle.current_generation()
+        };
+        assert_ne!(generation_a, generation_b);
+        app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .set_imported_model_for_tests(Some(stub_imported_model_with_id("model-b")));
+
+        app.update();
+
+        let requests = take_manual_requests(&mut app);
+        assert!(
+            !requests.iter().any(|request| matches!(
+                request,
+                vtuber_avatar::ManualExpressionRequest::Toggle { .. }
+            )),
+            "an A toggle must not become a B toggle"
+        );
+        assert!(
+            requests.iter().all(|request| !matches!(
+                request,
+                vtuber_avatar::ManualExpressionRequest::Clear { generation } if *generation == generation_b
+            )),
+            "an A clear must not clear B"
+        );
+
+        let store = app.world().resource::<ExpressionBindingStore>();
+        assert!(
+            store.bindings_for("model-b").is_none(),
+            "an A assignment must not be saved for B"
+        );
+        assert!(
+            store.bindings_for("model-a").is_none(),
+            "a stale assignment must not be saved at all"
+        );
     }
 
     #[test]
@@ -2392,16 +2585,15 @@ mod tests {
         let path = directory.path().join("settings.toml");
         let mut app = expression_action_app(path);
         app.add_systems(Update, sync_expression_view_model);
+        let (model_id, generation) = expression_target(&app);
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
+                model_id,
+                generation,
                 key: ExpressionKey::Digit1,
                 expression: Some("custom49".into()),
             });
-        let generation = app
-            .world()
-            .resource::<vtuber_avatar::AvatarLifecycle>()
-            .current_generation();
         app.world_mut()
             .resource_mut::<vtuber_avatar::ManualExpressionSelection>()
             .toggle(generation, "smile");
@@ -2416,6 +2608,8 @@ mod tests {
             Some("custom49")
         );
         assert!(vm.expression.has_catalog);
+        assert_eq!(vm.expression.model_id.as_deref(), Some("model-a"));
+        assert_eq!(vm.expression.generation, Some(generation));
         assert_eq!(vm.expression.selected.as_deref(), Some("smile"));
         let smile_row = vm
             .expression

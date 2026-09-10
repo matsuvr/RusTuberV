@@ -1495,14 +1495,20 @@ fn settings_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLan
 
 /// Translates standard presets and keeps the exact runtime ID visible.
 fn expression_entry_name(entry: &ExpressionEntryViewModel, lang: UiLanguage) -> String {
-    let standard = match entry.id.as_str() {
-        "happy" => Some(lang.pick("喜", "Happy", "喜悦", "기쁨")),
-        "angry" => Some(lang.pick("怒", "Angry", "愤怒", "분노")),
-        "sad" => Some(lang.pick("哀", "Sad", "悲伤", "슬픔")),
-        "relaxed" => Some(lang.pick("楽", "Relaxed", "放松", "편안함")),
-        "surprised" => Some(lang.pick("驚き", "Surprised", "惊讶", "놀람")),
-        "neutral" => Some(lang.pick("通常", "Neutral", "自然", "중립")),
-        _ => None,
+    // Only expressions classified as standard presets get a translated label.
+    // A custom expression that happens to be named `happy` keeps its author
+    // string and is never displayed as the standard 喜 label.
+    let standard = match entry.kind {
+        ExpressionKind::EmotionalPreset | ExpressionKind::Neutral => match entry.id.as_str() {
+            "happy" => Some(lang.pick("喜", "Happy", "喜悦", "기쁨")),
+            "angry" => Some(lang.pick("怒", "Angry", "愤怒", "분노")),
+            "sad" => Some(lang.pick("哀", "Sad", "悲伤", "슬픔")),
+            "relaxed" => Some(lang.pick("楽", "Relaxed", "放松", "편안함")),
+            "surprised" => Some(lang.pick("驚き", "Surprised", "惊讶", "놀람")),
+            "neutral" => Some(lang.pick("通常", "Neutral", "自然", "중립")),
+            _ => None,
+        },
+        ExpressionKind::Custom | ExpressionKind::Tracking => None,
     };
     let base = match standard {
         Some(label) => format!("{label} ({})", entry.id),
@@ -1574,6 +1580,9 @@ fn expression_settings_section(
                 ui.label(message);
                 return;
             }
+            // Every assignment action carries the exact model/generation this
+            // snapshot was built for.
+            let target = vm.expression.model_id.clone().zip(vm.expression.generation);
             ui.label(lang.pick(
                 "最大36個のキーに割り当てられます。自動割り当てに含まれなかった表情も、ここで選択できます。",
                 "Up to 36 keys can be assigned. You can also choose expressions that were not assigned automatically.",
@@ -1619,8 +1628,11 @@ fn expression_settings_section(
                                 )
                                 .clicked()
                                 && row.expression.is_some()
+                                && let Some((model_id, generation)) = target.clone()
                             {
                                 state.emit(UiAction::AssignExpressionKey {
+                                    model_id,
+                                    generation,
                                     key: row.key,
                                     expression: None,
                                 });
@@ -1664,8 +1676,11 @@ fn expression_settings_section(
                                         egui::Button::selectable(selected, label),
                                     )
                                     .clicked()
+                                    && let Some((model_id, generation)) = target.clone()
                                 {
                                     state.emit(UiAction::AssignExpressionKey {
+                                        model_id,
+                                        generation,
                                         key: row.key,
                                         expression: Some(entry.id.clone()),
                                     });
@@ -1687,8 +1702,9 @@ fn expression_settings_section(
                 if ui
                     .button(lang.pick("表情を解除", "Clear Expression", "取消表情", "표정 해제"))
                     .clicked()
+                    && let Some(generation) = vm.expression.generation
                 {
-                    state.emit(UiAction::ClearManualExpression);
+                    state.emit(UiAction::ClearManualExpression { generation });
                 }
                 if ui
                     .button(lang.pick(
@@ -1698,8 +1714,12 @@ fn expression_settings_section(
                         "기본 키 할당 복원",
                     ))
                     .clicked()
+                    && let Some((model_id, generation)) = target.clone()
                 {
-                    state.emit(UiAction::ResetExpressionBindings);
+                    state.emit(UiAction::ResetExpressionBindings {
+                        model_id,
+                        generation,
+                    });
                 }
             });
             ui.label(
@@ -1722,6 +1742,9 @@ fn expression_status_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
     if !vm.expression.has_catalog {
         return;
     }
+    let Some(generation) = vm.expression.generation else {
+        return;
+    };
     section(
         ui,
         lang.pick("表情キー", "Expression keys", "表情按键", "표정 키"),
@@ -1752,7 +1775,10 @@ fn expression_status_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
                     .add(egui::Button::selectable(row.selected, text))
                     .clicked()
                 {
-                    state.emit(UiAction::ToggleExpressionKey { key: row.key });
+                    state.emit(UiAction::ToggleExpressionKey {
+                        generation,
+                        key: row.key,
+                    });
                 }
             }
             if !any {
@@ -1837,6 +1863,9 @@ pub(crate) fn expression_key_input(
     if ctx.egui_wants_keyboard_input() || ctx.any_popup_open() {
         return;
     }
+    let Some(generation) = vm.expression.generation else {
+        return;
+    };
     let toggles: Vec<ExpressionKey> = ctx.input(|input| {
         if !input.focused {
             return Vec::new();
@@ -1857,7 +1886,7 @@ pub(crate) fn expression_key_input(
             .collect()
     });
     for key in toggles {
-        state.emit(UiAction::ToggleExpressionKey { key });
+        state.emit(UiAction::ToggleExpressionKey { generation, key });
     }
 }
 
@@ -2029,10 +2058,16 @@ mod tests {
         assert!(state.pending_actions.is_empty());
     }
 
+    fn test_generation() -> vtuber_avatar::AvatarGeneration {
+        vtuber_avatar::AvatarGeneration(1)
+    }
+
     fn ready_expression_view_model() -> UiViewModel {
         let mut vm = UiViewModel::default();
         vm.avatar.is_ready = true;
         vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+        vm.expression.model_id = Some("model".into());
+        vm.expression.generation = Some(test_generation());
         vm
     }
 
@@ -2088,6 +2123,7 @@ mod tests {
         assert_eq!(
             state.take_actions(),
             vec![UiAction::ToggleExpressionKey {
+                generation: test_generation(),
                 key: ExpressionKey::Digit1
             }]
         );
@@ -2110,9 +2146,11 @@ mod tests {
             state.take_actions(),
             vec![
                 UiAction::ToggleExpressionKey {
+                    generation: test_generation(),
                     key: ExpressionKey::Digit1
                 },
                 UiAction::ToggleExpressionKey {
+                    generation: test_generation(),
                     key: ExpressionKey::KeyQ
                 },
             ]
