@@ -653,13 +653,21 @@ fn inspect_vrm1(
     let head = required_bone_index(human_bones, "head", node_count)?;
     let neck = optional_bone_index(human_bones, "neck", node_count)?;
 
-    let mut expression_presets = vrmc
-        .get("expressions")
-        .and_then(|expressions| expressions.get("preset"))
-        .and_then(|preset| preset.as_object())
-        .map(|preset| preset.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+    // VRM 1.0 keeps standard presets and author-defined custom expressions in
+    // separate maps. The inspection summary lists both so custom-only models
+    // do not look expression-less before the runtime catalog is built.
+    let expressions = vrmc.get("expressions");
+    let mut expression_presets = ["preset", "custom"]
+        .into_iter()
+        .filter_map(|section| {
+            expressions
+                .and_then(|expressions| expressions.get(section))
+                .and_then(|section| section.as_object())
+        })
+        .flat_map(|section| section.keys().cloned())
+        .collect::<Vec<_>>();
     expression_presets.sort();
+    expression_presets.dedup();
 
     let look_at_type = vrmc
         .get("lookAt")
@@ -1660,6 +1668,16 @@ mod tests {
                         "hips": {"node": 0},
                         "head": {"node": 1}
                     }
+                },
+                "expressions": {
+                    "preset": {
+                        "happy": {"isBinary": false},
+                        "neutral": {"isBinary": false}
+                    },
+                    "custom": {
+                        "JawOpen": {"isBinary": false},
+                        "笑顔": {"isBinary": false}
+                    }
                 }
             },
             "VRMC_springBone": {}
@@ -1748,6 +1766,12 @@ mod tests {
         assert!(summary.humanoid_nodes.hips < 1000);
         assert!(summary.humanoid_nodes.head < 1000);
         assert!(summary.has_spring_bone);
+        // Both standard presets and author-defined custom expressions are
+        // surfaced; Unicode custom names stay exact.
+        assert_eq!(
+            summary.expression_presets,
+            vec!["JawOpen", "happy", "neutral", "笑顔"]
+        );
     }
 
     #[test]

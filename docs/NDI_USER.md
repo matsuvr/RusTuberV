@@ -32,7 +32,36 @@ runtime DLL は application フォルダへ置き、System32 や PATH へは入�
 
 既定の映像 profile は 1920x1080 / 60fps / straight-alpha BGRA です。
 
-## 3. sender 側に追加導入が必要な場合
+## 3. 表情キー
+
+モデルが定義した Expression を、次の 36 キーで選べます（数字列のあとに
+QWERTY の行順）。大文字表示は Shift を意味しません。
+
+```text
+1 2 3 4 5 6 7 8 9 0
+Q W E R T Y U I O P
+A S D F G H J K L
+Z X C V B N M
+```
+
+- 喜怒哀楽（喜 happy、怒 angry、哀 sad、楽 relaxed）と驚き surprised を
+  優先して初期割り当てします。モデルにない表情は表示も生成もしません。
+- キーを押すと選択、同じキーでもう一度押すと解除、別のキーを押すと置換します。
+- 設定の「表情・キー割り当て」で変更できます。同じ表情を別のキーへ移すと
+  元のキーは未割り当てになり、割り当てはモデルごとに保存されます。
+- 自動割り当ての 36 件を超える表情も、設定の一覧から選べます。
+  「追跡用」と表示される表情は単体プレビュー用で、自動割り当てには入りません。
+- アプリのウインドウにフォーカスがある時だけ反応します。文字入力、IME 変換、
+  コンボボックス、ライセンス確認、ファイルダイアログの表示中は反応しません。
+  キーを押し続けても一度しか切り替わりません。
+- 手動で表情を選んでいる間は、標準の blink / 口 / 視線に手動の 1 件を
+  重ねます。解除すると現在のトラッキング入力へ戻ります。カメラを開始して
+  いなくても選択・解除できます。
+- custom 表情の名前は作者の原文のまま表示します。
+- TongueOut / tongueOut、グローバルホットキー、修飾キーの組み合わせ、
+  テンキー、キーシーケンスは対象外です。
+
+## 4. sender 側に追加導入が必要な場合
 
 この ZIP は Standard SDK の x64 runtime DLL を application-local に同梱します。
 通常は sender 側で NDI SDK / NDI Tools / 別途 Runtime installer は不要です。
@@ -45,7 +74,7 @@ runtime DLL は application フォルダへ置き、System32 や PATH へは入�
   - redistributable の案内: http://ndi.link/NDIRedistV6
 - 非公式 mirror や出所不明の DLL は使わない。
 
-## 4. OBS Studio + DistroAV で受信する
+## 5. OBS Studio + DistroAV で受信する
 
 OBS / DistroAV / receiver 側 NDI Runtime はこの ZIP から再配布しません。
 receiver マシンで各自導入してください。
@@ -61,7 +90,7 @@ receiver マシンで各自導入してください。
 
 version 番号は公式情報が将来変わる前提です。導入前に DistroAV README を再確認してください。
 
-## 5. トラブルシュート
+## 6. トラブルシュート
 
 - source が見えない: 同一 LAN か、ファイアウォールが NDI discovery を落としていないかを確認する。
   このアプリはファイアウォール規則を勝手に追加しません。

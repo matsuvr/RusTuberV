@@ -5,6 +5,7 @@
 //! read-only snapshot for the UI. No `bevy_vrm1` types are used here.
 
 use crate::capabilities::AvatarCapabilities;
+use crate::expression_catalog::AvatarExpressionCatalog;
 use crate::load::ExpectedVrmGeneration;
 use bevy::ecs::message::Message;
 use bevy::prelude::*;
@@ -83,6 +84,8 @@ pub struct AvatarLifecycleSnapshot {
     pub pending_root: Option<Entity>,
     /// Capability snapshot of the active avatar, if binding has completed.
     pub capabilities: Option<AvatarCapabilities>,
+    /// Expression catalog of the active avatar, if binding has completed.
+    pub expression_catalog: Option<AvatarExpressionCatalog>,
     /// Generation of the active or in-progress avatar instance.
     pub generation: AvatarGeneration,
     /// Failure reason when the lifecycle is in `Failed`.
@@ -211,6 +214,7 @@ pub struct AvatarLifecycle {
     pending_root: Option<Entity>,
     load_started: Option<Instant>,
     capabilities: Option<AvatarCapabilities>,
+    expression_catalog: Option<AvatarExpressionCatalog>,
     failure: Option<AvatarLifecycleFailure>,
     current_generation: AvatarGeneration,
     next_generation: u64,
@@ -224,6 +228,7 @@ impl Default for AvatarLifecycle {
             pending_root: None,
             load_started: None,
             capabilities: None,
+            expression_catalog: None,
             failure: None,
             current_generation: AvatarGeneration::default(),
             next_generation: 1,
@@ -266,6 +271,21 @@ impl AvatarLifecycle {
     #[must_use]
     pub fn capabilities(&self) -> Option<&AvatarCapabilities> {
         self.capabilities.as_ref()
+    }
+
+    /// Expression catalog of the currently active avatar, if binding has completed.
+    #[must_use]
+    pub fn expression_catalog(&self) -> Option<&AvatarExpressionCatalog> {
+        self.expression_catalog.as_ref()
+    }
+
+    /// Sets or clears the expression catalog.
+    ///
+    /// The binding system owns the catalog lifecycle; the setter is public so
+    /// the application composition layer and integration tests can install a
+    /// snapshot without rebuilding the runtime.
+    pub fn set_expression_catalog(&mut self, catalog: Option<AvatarExpressionCatalog>) {
+        self.expression_catalog = catalog;
     }
 
     /// Failure reason for the current failed load, if any.
@@ -312,6 +332,7 @@ impl AvatarLifecycle {
             active_root: self.active_root,
             pending_root: self.pending_root,
             capabilities: self.capabilities.clone(),
+            expression_catalog: self.expression_catalog.clone(),
             generation: self.current_generation,
             failure: self.failure.clone(),
         }
@@ -328,6 +349,7 @@ impl AvatarLifecycle {
                 self.pending_root = None;
                 self.load_started = Some(Instant::now());
                 self.capabilities = None;
+                self.expression_catalog = None;
                 self.failure = None;
                 self.current_generation = AvatarGeneration(self.next_generation);
                 self.next_generation += 1;
@@ -349,6 +371,7 @@ impl AvatarLifecycle {
                 self.state = AvatarLifecycleState::Unloading;
                 self.pending_root = None;
                 self.capabilities = None;
+                self.expression_catalog = None;
                 self.failure = None;
                 Ok(())
             }
@@ -380,6 +403,7 @@ impl AvatarLifecycle {
                 self.state = AvatarLifecycleState::Unloading;
                 self.pending_root = Some(root);
                 self.capabilities = None;
+                self.expression_catalog = None;
                 self.failure = None;
                 Ok(())
             }
@@ -429,12 +453,14 @@ impl AvatarLifecycle {
             self.active_root = Some(pending);
             self.load_started = Some(Instant::now());
             self.capabilities = None;
+            self.expression_catalog = None;
             self.failure = None;
         } else {
             self.state = AvatarLifecycleState::NoAvatar;
             self.active_root = None;
             self.load_started = None;
             self.capabilities = None;
+            self.expression_catalog = None;
             self.failure = None;
         }
     }
@@ -446,6 +472,7 @@ impl AvatarLifecycle {
         self.pending_root = None;
         self.load_started = None;
         self.capabilities = None;
+        self.expression_catalog = None;
         self.failure = Some(error);
     }
 }
@@ -734,6 +761,56 @@ mod tests {
         lifecycle.request_replace(entity(11)).unwrap();
         assert!(lifecycle.capabilities().is_none());
         assert!(lifecycle.snapshot().capabilities.is_none());
+    }
+
+    #[test]
+    fn expression_catalog_clears_on_replace_unload_and_failure() {
+        use crate::expression_catalog::{AvatarExpressionCatalog, ExpressionCatalogInput};
+
+        let catalog = |generation: u64| {
+            AvatarExpressionCatalog::build(
+                "model".into(),
+                generation,
+                [ExpressionCatalogInput {
+                    id: "happy",
+                    declared_as_preset: true,
+                    declared_morph_bind_count: 1,
+                    resolved_morph_bind_count: 1,
+                    declared_material_bind_count: 0,
+                    unsupported_material_bind_count: 0,
+                }],
+            )
+        };
+
+        let mut lifecycle = AvatarLifecycle::new();
+        let root = entity(20);
+        lifecycle.request_load(root).unwrap();
+        lifecycle.start_binding(root);
+        lifecycle.set_expression_catalog(Some(catalog(1)));
+        lifecycle.finish_ready();
+        assert_eq!(lifecycle.expression_catalog(), Some(&catalog(1)));
+        assert_eq!(lifecycle.snapshot().expression_catalog, Some(catalog(1)));
+
+        // Replacement clears the model-A catalog before model B binds.
+        lifecycle.request_replace(entity(21)).unwrap();
+        assert!(lifecycle.expression_catalog().is_none());
+        assert!(lifecycle.snapshot().expression_catalog.is_none());
+
+        lifecycle.finish_unload();
+        lifecycle.start_binding(entity(21));
+        lifecycle.set_expression_catalog(Some(catalog(2)));
+        lifecycle.finish_ready();
+        assert_eq!(lifecycle.expression_catalog(), Some(&catalog(2)));
+
+        lifecycle.request_unload().unwrap();
+        assert!(lifecycle.expression_catalog().is_none());
+
+        lifecycle.finish_unload();
+        lifecycle.request_load(entity(22)).unwrap();
+        lifecycle.start_binding(entity(22));
+        lifecycle.set_expression_catalog(Some(catalog(3)));
+        lifecycle.fail(AvatarLifecycleFailure::BindingTimeout);
+        assert!(lifecycle.expression_catalog().is_none());
     }
 
     #[test]

@@ -346,6 +346,17 @@ pub fn bind_humanoid_bones(
             );
 
             let expression_map = expression_maps.get(root_entity).ok().flatten();
+            let expression_catalog = expression_map.map(|map| {
+                crate::expression_catalog::build_catalog(
+                    root_ref
+                        .get::<AvatarAssetId>()
+                        .map(|id| id.0.clone())
+                        .unwrap_or_default(),
+                    binding.generation.0,
+                    map,
+                    |entity| expression_status.get(entity).ok().flatten().copied(),
+                )
+            });
             let expression_caps = ExpressionCapabilities::from_map(expression_map);
             let perfect_sync = PerfectSyncCapabilities::from_map_with_effective(
                 expression_map,
@@ -422,6 +433,7 @@ pub fn bind_humanoid_bones(
             }
             commands.entity(root_entity).remove::<BindingDeadline>();
             lifecycle.set_capabilities(Some(capabilities));
+            lifecycle.set_expression_catalog(expression_catalog);
             lifecycle.finish_ready();
         }
         Err(error) => {

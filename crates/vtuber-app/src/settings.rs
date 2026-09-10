@@ -8,10 +8,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bevy::prelude::{Res, Resource};
+use bevy::prelude::{Res, ResMut, Resource};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::expression_keys::{ExpressionBindingStore, ExpressionBindings};
 use vtuber_avatar::{ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride};
 
 /// Version of the application settings document.
@@ -49,11 +50,12 @@ impl UiLanguage {
     }
 }
 
-/// Application resource that owns the persistent arm-pose settings location.
+/// Application resource that owns the persistent settings document location.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct ArmPoseSettings {
     path: Option<PathBuf>,
     restored: ArmPoseOverrideStore,
+    restored_expression_bindings: ExpressionBindingStore,
     language: UiLanguage,
 }
 
@@ -62,6 +64,7 @@ impl Default for ArmPoseSettings {
         Self {
             path: default_settings_path(),
             restored: ArmPoseOverrideStore::default(),
+            restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
         }
     }
@@ -84,10 +87,18 @@ impl ArmPoseSettings {
                 ArmPoseOverrideStore::default()
             }
         };
+        let restored_expression_bindings = match load_expression_bindings(&path) {
+            Ok(store) => store,
+            Err(error) => {
+                bevy::log::warn!("expression bindings ignored: {error}");
+                ExpressionBindingStore::default()
+            }
+        };
         let language = load_language(&path);
         Self {
             path: Some(path),
             restored,
+            restored_expression_bindings,
             language,
         }
     }
@@ -107,6 +118,7 @@ impl ArmPoseSettings {
         Self {
             path: Some(path.into()),
             restored: ArmPoseOverrideStore::default(),
+            restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
         }
     }
@@ -128,6 +140,23 @@ impl ArmPoseSettings {
             return Err(ArmPoseSettingsError::NoConfigDirectory);
         };
         save_arm_pose_overrides(path, store)
+    }
+
+    /// Returns the expression bindings read before the Bevy app started.
+    #[must_use]
+    pub fn restored_expression_bindings(&self) -> &ExpressionBindingStore {
+        &self.restored_expression_bindings
+    }
+
+    /// Saves expression bindings, preserving every other settings section.
+    pub fn save_expression_bindings(
+        &self,
+        store: &ExpressionBindingStore,
+    ) -> Result<(), ArmPoseSettingsError> {
+        let Some(path) = &self.path else {
+            return Err(ArmPoseSettingsError::NoConfigDirectory);
+        };
+        save_expression_bindings(path, store)
     }
 
     /// Returns the UI language loaded at startup.
@@ -161,6 +190,19 @@ pub fn restore_arm_pose_settings_system(
     );
 }
 
+/// Copies startup expression bindings into the runtime store.
+pub fn restore_expression_binding_settings_system(
+    settings: Res<ArmPoseSettings>,
+    mut store: ResMut<ExpressionBindingStore>,
+) {
+    store.replace_entries(
+        settings
+            .restored_expression_bindings()
+            .entries()
+            .map(|(model_id, bindings)| (model_id.to_owned(), bindings.clone())),
+    );
+}
+
 /// Returns the application settings path for the current platform.
 #[must_use]
 pub fn default_settings_path() -> Option<PathBuf> {
@@ -189,9 +231,62 @@ pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSet
             language,
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
+            expression_bindings: BTreeMap::new(),
         }
     };
     document.language = language;
+    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+}
+
+/// Loads and validates model-specific expression bindings.
+pub fn load_expression_bindings(
+    path: &Path,
+) -> Result<ExpressionBindingStore, ArmPoseSettingsError> {
+    if !path.is_file() {
+        return Ok(ExpressionBindingStore::default());
+    }
+    let text = fs::read_to_string(path)?;
+    let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
+    if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
+        return Err(ArmPoseSettingsError::UnsupportedSchema {
+            version: document.schema_version,
+        });
+    }
+    for (model_id, bindings) in &document.expression_bindings {
+        if bindings.has_duplicate_expressions() {
+            return Err(ArmPoseSettingsError::InvalidExpressionBinding {
+                model_id: model_id.clone(),
+            });
+        }
+    }
+    let mut store = ExpressionBindingStore::default();
+    store.replace_entries(document.expression_bindings);
+    Ok(store)
+}
+
+/// Saves expression bindings, preserving language, arm pose, and every other
+/// model's assignments.
+pub fn save_expression_bindings(
+    path: &Path,
+    store: &ExpressionBindingStore,
+) -> Result<(), ArmPoseSettingsError> {
+    let mut document = if path.is_file() {
+        let text = fs::read_to_string(path)?;
+        toml::from_str::<ArmPoseSettingsDocument>(&text)?
+    } else {
+        ArmPoseSettingsDocument {
+            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
+            language: load_language(path),
+            arm_pose_overrides: BTreeMap::new(),
+            dynamic_arm_profiles: BTreeMap::new(),
+            expression_bindings: BTreeMap::new(),
+        }
+    };
+    document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
+    document.expression_bindings = store
+        .entries()
+        .map(|(model_id, bindings)| (model_id.to_owned(), bindings.clone()))
+        .collect();
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
@@ -240,6 +335,7 @@ pub fn save_arm_pose_overrides(
             language: load_language(path),
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
+            expression_bindings: BTreeMap::new(),
         }
     };
     document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
@@ -286,6 +382,11 @@ struct ArmPoseSettingsDocument {
     arm_pose_overrides: BTreeMap<String, PersistedArmPoseProfile>,
     #[serde(default)]
     dynamic_arm_profiles: BTreeMap<String, PersistedDynamicArmProfile>,
+    /// Model-specific expression key assignments. A present entry with an
+    /// empty `keys` map means the user removed every assignment; a missing
+    /// entry means the model still uses the initial assignment.
+    #[serde(default)]
+    expression_bindings: BTreeMap<String, ExpressionBindings>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -392,11 +493,18 @@ pub enum ArmPoseSettingsError {
     /// Invalid persisted profile.
     #[error("settings contain an invalid arm-pose profile")]
     InvalidEntry,
+    /// Duplicate or unreadable expression binding for one model.
+    #[error("settings contain an invalid expression binding for model {model_id}")]
+    InvalidExpressionBinding {
+        /// Model ID whose assignment is invalid.
+        model_id: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expression_keys::ExpressionKey;
     use tempfile::tempdir;
     use vtuber_avatar::{ArmPoseProfile, AvatarAssetId};
 
@@ -483,6 +591,150 @@ mod tests {
                 expected
             );
         }
+    }
+
+    fn bindings(pairs: &[(ExpressionKey, &str)]) -> ExpressionBindings {
+        let mut bindings = ExpressionBindings::default();
+        for (key, expression) in pairs {
+            bindings.assign(*key, *expression);
+        }
+        bindings
+    }
+
+    #[test]
+    fn expression_bindings_round_trip_and_distinguish_saved_empty() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let mut store = ExpressionBindingStore::default();
+        store.set(
+            "sha256:first".into(),
+            bindings(&[
+                (ExpressionKey::Digit1, "happy"),
+                (ExpressionKey::KeyQ, "笑顔"),
+            ]),
+        );
+        store.set("sha256:empty".into(), ExpressionBindings::default());
+        save_expression_bindings(&path, &store).expect("settings save");
+
+        let restored = load_expression_bindings(&path).expect("settings reload");
+        assert_eq!(
+            restored
+                .bindings_for("sha256:first")
+                .expect("first model")
+                .expression_for(ExpressionKey::Digit1),
+            Some("happy")
+        );
+        assert_eq!(
+            restored
+                .bindings_for("sha256:first")
+                .expect("first model")
+                .expression_for(ExpressionKey::KeyQ),
+            Some("笑顔")
+        );
+        assert!(
+            restored
+                .bindings_for("sha256:empty")
+                .expect("saved empty entry")
+                .is_empty()
+        );
+        assert!(restored.bindings_for("sha256:missing").is_none());
+    }
+
+    #[test]
+    fn every_settings_writer_preserves_expression_bindings() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let first = AvatarAssetId::new("sha256:first");
+
+        save_language(&path, UiLanguage::En).expect("language save");
+        let mut expression_store = ExpressionBindingStore::default();
+        expression_store.set(first.0.clone(), bindings(&[(ExpressionKey::KeyA, "smile")]));
+        save_expression_bindings(&path, &expression_store).expect("bindings save");
+        let mut arm_store = ArmPoseOverrideStore::default();
+        arm_store.set(first.0.clone(), profile(0.55)).unwrap();
+        save_arm_pose_overrides(&path, &arm_store).expect("arm save");
+        // Reverse order: language last.
+        save_language(&path, UiLanguage::Ko).expect("language save");
+
+        let restored = ArmPoseSettings::load(&path);
+        assert_eq!(restored.language(), UiLanguage::Ko);
+        let restored_arm = load_arm_pose_overrides(&path).expect("arm reload");
+        assert_eq!(
+            restored_arm.profile_for(&first).unwrap().arm_drop_radians,
+            0.55
+        );
+        let restored_bindings = load_expression_bindings(&path).expect("bindings reload");
+        assert_eq!(
+            restored_bindings
+                .bindings_for(&first.0)
+                .expect("model entry")
+                .expression_for(ExpressionKey::KeyA),
+            Some("smile")
+        );
+    }
+
+    #[test]
+    fn expression_settings_keep_other_models_and_sections() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        save_language(&path, UiLanguage::Zh).expect("language save");
+        let mut store = ExpressionBindingStore::default();
+        store.set("a".into(), bindings(&[(ExpressionKey::Digit1, "happy")]));
+        store.set("b".into(), bindings(&[(ExpressionKey::Digit1, "angry")]));
+        save_expression_bindings(&path, &store).expect("save");
+
+        let restored = load_expression_bindings(&path).expect("reload");
+        assert_eq!(
+            restored
+                .bindings_for("a")
+                .expect("model a")
+                .expression_for(ExpressionKey::Digit1),
+            Some("happy")
+        );
+        assert_eq!(
+            restored
+                .bindings_for("b")
+                .expect("model b")
+                .expression_for(ExpressionKey::Digit1),
+            Some("angry")
+        );
+        assert_eq!(load_language(&path), UiLanguage::Zh);
+    }
+
+    #[test]
+    fn old_settings_without_expression_section_load_defaults() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        fs::write(&path, "schema_version = 1\nlanguage = \"ja\"\n").unwrap();
+        let restored = load_expression_bindings(&path).expect("old settings parse");
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn duplicate_expression_assignments_are_rejected() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        fs::write(
+            &path,
+            "schema_version = 1\n[expression_bindings.\"model\".keys]\nDigit1 = \"happy\"\nDigit2 = \"happy\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            load_expression_bindings(&path),
+            Err(ArmPoseSettingsError::InvalidExpressionBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_expression_key_is_a_typed_error() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        fs::write(
+            &path,
+            "schema_version = 1\n[expression_bindings.\"model\".keys]\nNumpad1 = \"happy\"\n",
+        )
+        .unwrap();
+        assert!(load_expression_bindings(&path).is_err());
     }
 
     #[test]

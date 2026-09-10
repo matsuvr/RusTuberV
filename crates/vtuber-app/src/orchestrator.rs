@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 
 use crate::actions::UiAction;
+use crate::expression_keys::{
+    ExpressionBindingStore, ExpressionBindings, ExpressionKey, can_assign_expression,
+    effective_bindings,
+};
 use crate::import::VrmGeneration;
 use crate::import::{self, ImportedModel, ModelImportError};
 use crate::license_review::{self, VrmLicenseReview, VrmLicenseReviewError};
@@ -25,7 +29,7 @@ use crate::ui::UiState;
 use crate::ui_model::*;
 use vtuber_avatar::{
     ArmPoseOverrideStore, ArmPoseProfileChange, ArmPoseProfileOverride, AvatarAssetId,
-    AvatarMotionMirror,
+    AvatarLifecycle, AvatarMotionMirror, ManualExpressionRequest, ManualExpressionSelection,
 };
 use vtuber_camera::device::CameraDescriptor;
 
@@ -154,6 +158,8 @@ pub enum OrchestratorError {
     AvatarLifecycleFailed(String),
     /// Persistent avatar pose settings could not be written.
     ArmPoseSettingsFailed(String),
+    /// Persistent expression-key bindings could not be written.
+    ExpressionSettingsFailed(String),
     /// The selected model's license metadata could not be reviewed.
     LicenseReviewFailed(String),
     /// Camera enumeration, opening, capture, or reconnect failed.
@@ -173,6 +179,9 @@ impl std::fmt::Display for OrchestratorError {
             Self::AvatarLoadRejected(msg) => write!(f, "Avatar load rejected: {msg}"),
             Self::AvatarLifecycleFailed(msg) => write!(f, "Avatar lifecycle failed: {msg}"),
             Self::ArmPoseSettingsFailed(msg) => write!(f, "Arm-pose settings failed: {msg}"),
+            Self::ExpressionSettingsFailed(msg) => {
+                write!(f, "Expression settings failed: {msg}")
+            }
             Self::LicenseReviewFailed(msg) => write!(f, "License review failed: {msg}"),
             Self::CameraFailed(msg) => write!(f, "Camera failed: {msg}"),
             Self::InferenceFailed(msg) => write!(f, "Inference failed: {msg}"),
@@ -812,6 +821,8 @@ pub fn process_ui_actions_system(
     mut arm_pose_changes: Option<MessageWriter<ArmPoseProfileChange>>,
     lifecycle: Option<Res<vtuber_avatar::AvatarLifecycle>>,
     mut reset_camera_requests: Option<MessageWriter<vtuber_avatar::ResetCameraRequest>>,
+    mut expression_store: Option<ResMut<ExpressionBindingStore>>,
+    mut manual_requests: Option<MessageWriter<ManualExpressionRequest>>,
 ) {
     let actions = ui_state.take_actions();
     for action in &actions {
@@ -871,6 +882,41 @@ pub fn process_ui_actions_system(
                     )));
                 }
             }
+            UiAction::AssignExpressionKey { key, expression } => {
+                apply_expression_binding_action(
+                    &mut orchestrator,
+                    ExpressionBindingAction::Assign {
+                        key: *key,
+                        expression: expression.clone(),
+                    },
+                    &mut expression_store,
+                    arm_pose_settings.as_deref(),
+                    lifecycle.as_deref(),
+                    &mut manual_requests,
+                );
+            }
+            UiAction::ResetExpressionBindings => {
+                apply_expression_binding_action(
+                    &mut orchestrator,
+                    ExpressionBindingAction::Reset,
+                    &mut expression_store,
+                    arm_pose_settings.as_deref(),
+                    lifecycle.as_deref(),
+                    &mut manual_requests,
+                );
+            }
+            UiAction::ToggleExpressionKey { key } => {
+                toggle_expression_key_action(
+                    &orchestrator,
+                    *key,
+                    expression_store.as_deref(),
+                    lifecycle.as_deref(),
+                    &mut manual_requests,
+                );
+            }
+            UiAction::ClearManualExpression => {
+                clear_manual_expression_action(lifecycle.as_deref(), &mut manual_requests);
+            }
             _ => orchestrator.process_action(action),
         }
     }
@@ -883,6 +929,209 @@ pub fn process_ui_actions_system(
     view_model.preview_visible = preview.visible;
     view_model.mirror_preview = preview.mirrored;
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
+}
+
+/// Expression key mutation requested by the UI.
+enum ExpressionBindingAction {
+    /// Assign an expression (or unassign with `None`) to one key.
+    Assign {
+        key: ExpressionKey,
+        expression: Option<String>,
+    },
+    /// Restore the active model's deterministic default assignment.
+    Reset,
+}
+
+/// Applies one expression binding mutation through copy-save-commit.
+///
+/// The candidate is written to `settings.toml` first; only a successful save
+/// commits it to the runtime store and clears the manual selection. A failed
+/// save keeps the previous assignment and reports the existing typed error.
+fn apply_expression_binding_action(
+    orchestrator: &mut Orchestrator,
+    action: ExpressionBindingAction,
+    store: &mut Option<ResMut<ExpressionBindingStore>>,
+    settings: Option<&ArmPoseSettings>,
+    lifecycle: Option<&AvatarLifecycle>,
+    manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
+) {
+    let Some(model_id) = orchestrator.active_model_id().map(str::to_owned) else {
+        return;
+    };
+    let catalog = lifecycle.and_then(AvatarLifecycle::expression_catalog);
+    let Some(store) = store.as_deref_mut() else {
+        return;
+    };
+    let current = effective_bindings(store, &model_id, catalog);
+    let mut candidate = current.clone();
+    match action {
+        ExpressionBindingAction::Assign { key, expression } => match expression {
+            Some(expression) => {
+                if !can_assign_expression(catalog, &expression) {
+                    return;
+                }
+                candidate.assign(key, expression);
+            }
+            None => candidate.unassign(key),
+        },
+        ExpressionBindingAction::Reset => {
+            let Some(catalog) = catalog else {
+                return;
+            };
+            candidate.reset_to_defaults(catalog);
+        }
+    }
+    if candidate == current {
+        return;
+    }
+    let mut next = store.clone();
+    next.set(model_id, candidate);
+    if let Some(settings) = settings
+        && let Err(error) = settings.save_expression_bindings(&next)
+    {
+        orchestrator.set_last_error(Some(OrchestratorError::ExpressionSettingsFailed(
+            error.to_string(),
+        )));
+        return;
+    }
+    *store = next;
+    if let (Some(lifecycle), Some(requests)) = (lifecycle, manual_requests.as_mut()) {
+        requests.write(ManualExpressionRequest::Clear {
+            generation: lifecycle.current_generation(),
+        });
+    }
+}
+
+/// Resolves the key's current binding and emits a toggle intent.
+///
+/// Missing or not-ready expressions are dropped rather than substituted.
+fn toggle_expression_key_action(
+    orchestrator: &Orchestrator,
+    key: ExpressionKey,
+    store: Option<&ExpressionBindingStore>,
+    lifecycle: Option<&AvatarLifecycle>,
+    manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
+) {
+    let Some(model_id) = orchestrator.active_model_id() else {
+        return;
+    };
+    let catalog = lifecycle.and_then(AvatarLifecycle::expression_catalog);
+    let Some(store) = store else {
+        return;
+    };
+    let bindings = effective_bindings(store, model_id, catalog);
+    let Some(expression) = bindings.expression_for(key) else {
+        return;
+    };
+    if !can_assign_expression(catalog, expression) {
+        return;
+    }
+    clear_or_toggle_manual(lifecycle, manual_requests, Some(expression));
+}
+
+/// Emits a manual clear for the active generation.
+fn clear_manual_expression_action(
+    lifecycle: Option<&AvatarLifecycle>,
+    manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
+) {
+    clear_or_toggle_manual(lifecycle, manual_requests, None);
+}
+
+fn clear_or_toggle_manual(
+    lifecycle: Option<&AvatarLifecycle>,
+    manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
+    expression: Option<&str>,
+) {
+    let (Some(lifecycle), Some(requests)) = (lifecycle, manual_requests.as_mut()) else {
+        return;
+    };
+    let generation = lifecycle.current_generation();
+    let request = match expression {
+        Some(expression) => ManualExpressionRequest::Toggle {
+            generation,
+            expression: expression.to_owned(),
+        },
+        None => ManualExpressionRequest::Clear { generation },
+    };
+    requests.write(request);
+}
+
+/// Cheap view-model rebuild key: model, catalog generation, store revision,
+/// manual generation, and the selected ID.
+type ExpressionViewModelSignature = (String, u64, u64, u64, String);
+
+/// Rebuilds the expression catalog/binding view model.
+///
+/// Registered by the shell after manual request processing so the selected
+/// marker is consistent with the same frame that handled the toggle.
+pub fn sync_expression_view_model(
+    orchestrator: Res<Orchestrator>,
+    lifecycle: Option<Res<AvatarLifecycle>>,
+    store: Option<Res<ExpressionBindingStore>>,
+    manual: Option<Res<ManualExpressionSelection>>,
+    mut view_model: ResMut<UiViewModel>,
+    mut last_signature: Local<Option<ExpressionViewModelSignature>>,
+) {
+    let model_id = orchestrator
+        .active_model_id()
+        .unwrap_or_default()
+        .to_owned();
+    let catalog = lifecycle
+        .as_deref()
+        .and_then(AvatarLifecycle::expression_catalog);
+    let signature = (
+        model_id.clone(),
+        catalog.map_or(0, |catalog| catalog.generation),
+        store.as_deref().map_or(0, ExpressionBindingStore::revision),
+        manual.as_deref().map_or(0, |manual| manual.generation.0),
+        manual
+            .as_deref()
+            .and_then(|manual| manual.selected.clone())
+            .unwrap_or_default(),
+    );
+    if last_signature.as_ref() == Some(&signature) {
+        return;
+    }
+    *last_signature = Some(signature);
+
+    let selected = manual.as_deref().and_then(|manual| manual.selected.clone());
+    let bindings = store.as_deref().map_or_else(
+        || catalog.map_or_else(ExpressionBindings::default, ExpressionBindings::default_for),
+        |store| effective_bindings(store, &model_id, catalog),
+    );
+    let entries = catalog
+        .map(|catalog| {
+            catalog
+                .selectable_entries()
+                .iter()
+                .map(|entry| ExpressionEntryViewModel {
+                    id: entry.id.clone(),
+                    source_name: entry.source_name.clone(),
+                    kind: entry.kind,
+                    availability: entry.availability.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let binding_rows = ExpressionKey::ALL
+        .into_iter()
+        .map(|key| {
+            let expression = bindings.expression_for(key).map(str::to_owned);
+            ExpressionKeyBindingViewModel {
+                key,
+                selected: expression
+                    .as_deref()
+                    .is_some_and(|id| Some(id) == selected.as_deref()),
+                expression,
+            }
+        })
+        .collect();
+    view_model.expression = ExpressionViewModel {
+        has_catalog: catalog.is_some(),
+        entries,
+        bindings: binding_rows,
+        selected,
+    };
 }
 
 fn apply_arm_pose_profile_action(
@@ -1889,6 +2138,295 @@ mod tests {
             orch.last_error(),
             Some(OrchestratorError::LicenseReviewFailed(_))
         ));
+    }
+
+    fn expression_action_app(settings_path: PathBuf) -> App {
+        let mut app = App::new();
+        app.init_resource::<Orchestrator>()
+            .init_resource::<UiState>()
+            .init_resource::<UiViewModel>()
+            .init_resource::<PreviewState>()
+            .init_resource::<AvatarMotionMirror>()
+            .init_resource::<vtuber_avatar::AvatarLifecycle>()
+            .init_resource::<ExpressionBindingStore>()
+            .init_resource::<vtuber_avatar::ManualExpressionSelection>()
+            .init_resource::<crate::ndi_output::NdiOutputIntent>()
+            .insert_resource(ArmPoseSettings::empty_at(settings_path))
+            .add_message::<vtuber_avatar::ManualExpressionRequest>()
+            .add_message::<vtuber_avatar::ArmPoseProfileChange>()
+            .add_message::<vtuber_avatar::ResetCameraRequest>()
+            .add_systems(Update, process_ui_actions_system);
+        let root = app.world_mut().spawn_empty().id();
+        let generation = {
+            let mut lifecycle = app
+                .world_mut()
+                .resource_mut::<vtuber_avatar::AvatarLifecycle>();
+            lifecycle.request_load(root).unwrap();
+            lifecycle.start_binding(root);
+            lifecycle.finish_ready();
+            lifecycle.current_generation()
+        };
+        let catalog = vtuber_avatar::AvatarExpressionCatalog::build(
+            "model-a".into(),
+            generation.0,
+            [
+                ("happy", true),
+                ("angry", true),
+                ("smile", false),
+                ("custom49", false),
+            ]
+            .into_iter()
+            .map(|(id, preset)| vtuber_avatar::ExpressionCatalogInput {
+                id,
+                declared_as_preset: preset,
+                declared_morph_bind_count: 1,
+                resolved_morph_bind_count: 1,
+                declared_material_bind_count: 0,
+                unsupported_material_bind_count: 0,
+            }),
+        );
+        app.world_mut()
+            .resource_mut::<vtuber_avatar::AvatarLifecycle>()
+            .set_expression_catalog(Some(catalog));
+        app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .set_imported_model_for_tests(Some(stub_imported_model_with_id("model-a")));
+        app
+    }
+
+    fn stub_imported_model_with_id(id: &str) -> ImportedModel {
+        ImportedModel {
+            id: id.into(),
+            name: "Test Model".into(),
+            asset_path: PathBuf::new(),
+            meta_path: PathBuf::new(),
+            summary: Default::default(),
+            original_path: PathBuf::new(),
+            size: 0,
+        }
+    }
+
+    fn take_manual_requests(app: &mut App) -> Vec<vtuber_avatar::ManualExpressionRequest> {
+        app.world_mut()
+            .resource_mut::<Messages<vtuber_avatar::ManualExpressionRequest>>()
+            .drain()
+            .collect()
+    }
+
+    #[test]
+    fn assigning_a_far_catalog_expression_persists_and_clears_manual() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path.clone());
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::AssignExpressionKey {
+                key: ExpressionKey::Digit1,
+                expression: Some("custom49".into()),
+            });
+        app.update();
+
+        let store = app.world().resource::<ExpressionBindingStore>();
+        assert_eq!(
+            store
+                .bindings_for("model-a")
+                .expect("saved entry")
+                .expression_for(ExpressionKey::Digit1),
+            Some("custom49")
+        );
+        let saved = crate::settings::load_expression_bindings(&path).expect("reload");
+        assert_eq!(
+            saved
+                .bindings_for("model-a")
+                .expect("persisted model")
+                .expression_for(ExpressionKey::Digit1),
+            Some("custom49")
+        );
+        assert!(matches!(
+            take_manual_requests(&mut app).as_slice(),
+            [vtuber_avatar::ManualExpressionRequest::Clear { .. }]
+        ));
+        assert!(
+            app.world()
+                .resource::<Orchestrator>()
+                .last_error()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reassign_moves_the_expression_and_vacates_the_old_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path);
+        // Default: Digit1=happy, Digit2=angry.
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::AssignExpressionKey {
+                key: ExpressionKey::Digit1,
+                expression: Some("angry".into()),
+            });
+        app.update();
+
+        let store = app.world().resource::<ExpressionBindingStore>();
+        let bindings = store.bindings_for("model-a").expect("saved entry");
+        assert_eq!(
+            bindings.expression_for(ExpressionKey::Digit1),
+            Some("angry")
+        );
+        assert_eq!(bindings.expression_for(ExpressionKey::Digit2), None);
+        assert_eq!(bindings.key_for("happy"), None);
+    }
+
+    #[test]
+    fn reset_restores_the_deterministic_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path);
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::AssignExpressionKey {
+                key: ExpressionKey::Digit1,
+                expression: None,
+            });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ExpressionBindingStore>()
+                .bindings_for("model-a")
+                .expect("saved entry")
+                .expression_for(ExpressionKey::Digit1),
+            None
+        );
+
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ResetExpressionBindings);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ExpressionBindingStore>()
+                .bindings_for("model-a")
+                .expect("saved entry")
+                .expression_for(ExpressionKey::Digit1),
+            Some("happy")
+        );
+    }
+
+    #[test]
+    fn save_failure_keeps_the_previous_assignment_and_reports_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        // A directory path makes the atomic settings write fail.
+        let path = directory.path().to_path_buf();
+        let mut app = expression_action_app(path);
+        let defaults = ExpressionBindings::default_for(
+            app.world()
+                .resource::<vtuber_avatar::AvatarLifecycle>()
+                .expression_catalog()
+                .expect("catalog"),
+        );
+        app.world_mut()
+            .resource_mut::<ExpressionBindingStore>()
+            .set("model-a".into(), defaults);
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::AssignExpressionKey {
+                key: ExpressionKey::Digit1,
+                expression: Some("smile".into()),
+            });
+        app.update();
+
+        let store = app.world().resource::<ExpressionBindingStore>();
+        assert_eq!(
+            store
+                .bindings_for("model-a")
+                .expect("previous entry")
+                .expression_for(ExpressionKey::Digit1),
+            Some("happy"),
+            "a failed save must not apply the candidate"
+        );
+        assert!(matches!(
+            app.world().resource::<Orchestrator>().last_error(),
+            Some(OrchestratorError::ExpressionSettingsFailed(_))
+        ));
+        assert!(take_manual_requests(&mut app).is_empty());
+    }
+
+    #[test]
+    fn toggle_key_emits_a_generation_bound_manual_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path);
+        let generation = app
+            .world()
+            .resource::<vtuber_avatar::AvatarLifecycle>()
+            .current_generation();
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ToggleExpressionKey {
+                key: ExpressionKey::Digit1,
+            });
+        app.update();
+
+        assert_eq!(
+            take_manual_requests(&mut app),
+            vec![vtuber_avatar::ManualExpressionRequest::Toggle {
+                generation,
+                expression: "happy".into(),
+            }]
+        );
+
+        // A key with no binding emits nothing.
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ToggleExpressionKey {
+                key: ExpressionKey::KeyM,
+            });
+        app.update();
+        assert!(take_manual_requests(&mut app).is_empty());
+    }
+
+    #[test]
+    fn expression_view_model_lists_every_entry_and_all_36_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path);
+        app.add_systems(Update, sync_expression_view_model);
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::AssignExpressionKey {
+                key: ExpressionKey::Digit1,
+                expression: Some("custom49".into()),
+            });
+        let generation = app
+            .world()
+            .resource::<vtuber_avatar::AvatarLifecycle>()
+            .current_generation();
+        app.world_mut()
+            .resource_mut::<vtuber_avatar::ManualExpressionSelection>()
+            .toggle(generation, "smile");
+        app.update();
+        app.update();
+
+        let vm = app.world().resource::<UiViewModel>();
+        assert_eq!(vm.expression.entries.len(), 4);
+        assert_eq!(vm.expression.bindings.len(), 36);
+        assert_eq!(
+            vm.expression.bindings[0].expression.as_deref(),
+            Some("custom49")
+        );
+        assert!(vm.expression.has_catalog);
+        assert_eq!(vm.expression.selected.as_deref(), Some("smile"));
+        let smile_row = vm
+            .expression
+            .bindings
+            .iter()
+            .find(|row| row.expression.as_deref() == Some("smile"))
+            .expect("smile keeps its default key");
+        assert!(
+            smile_row.selected,
+            "selection is marked on the assigned key"
+        );
     }
 
     #[test]

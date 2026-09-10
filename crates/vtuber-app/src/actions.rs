@@ -93,6 +93,28 @@ pub enum UiAction {
     /// Remove the active model's override and return to geometry-derived pose.
     ResetArmPoseProfile,
 
+    // --- Expression key bindings ---
+    /// Assign or unassign a fixed expression key for the active model.
+    ///
+    /// `expression: None` means "unassigned". The orchestrator moves the
+    /// expression off any old key, persists, and clears the manual layer on
+    /// success.
+    AssignExpressionKey {
+        /// Fixed physical key.
+        key: crate::expression_keys::ExpressionKey,
+        /// Exact runtime expression ID, or `None` to unassign.
+        expression: Option<String>,
+    },
+    /// Restore the active model's deterministic initial assignment.
+    ResetExpressionBindings,
+    /// Toggle the expression currently assigned to a key.
+    ToggleExpressionKey {
+        /// Fixed physical key.
+        key: crate::expression_keys::ExpressionKey,
+    },
+    /// Remove the manual expression layer without selecting another.
+    ClearManualExpression,
+
     // --- Error actions ---
     /// Dismiss the current error (does not clear domain failure state).
     DismissError,
@@ -215,6 +237,26 @@ mod tests {
         let a = UiAction::Start;
         let b = a.clone();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn expression_key_actions_carry_their_key_and_expression() {
+        let key = crate::expression_keys::ExpressionKey::Digit1;
+        let assign = UiAction::AssignExpressionKey {
+            key,
+            expression: Some("happy".into()),
+        };
+        match assign {
+            UiAction::AssignExpressionKey { key: k, expression } => {
+                assert_eq!(k, key);
+                assert_eq!(expression.as_deref(), Some("happy"));
+            }
+            _ => panic!("expected AssignExpressionKey"),
+        }
+        assert_ne!(
+            UiAction::ToggleExpressionKey { key },
+            UiAction::ClearManualExpression
+        );
     }
 
     #[test]

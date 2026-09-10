@@ -4,10 +4,10 @@ mod setup;
 
 use crate::error::vrm_error;
 use crate::prelude::*;
-use crate::vrm::gltf::extensions::{classify_legacy_shader, LegacyShaderKind};
+use crate::vrm::gltf::extensions::{LegacyShaderKind, classify_legacy_shader};
 use crate::vrm::gltf::materials::{
-    convert_legacy_material_properties_with_render_queue_offset,
-    plan_legacy_render_queue_offsets, VrmcMaterialsExtensitions,
+    VrmcMaterialsExtensitions, convert_legacy_material_properties_with_render_queue_offset,
+    plan_legacy_render_queue_offsets,
 };
 use crate::vrm::mtoon::outline_pass::MToonOutlinePlugin;
 use crate::vrm::mtoon::setup::MToonMaterialSetupPlugin;
@@ -68,6 +68,9 @@ impl Plugin for MtoonMaterialPlugin {
 pub struct VrmcMaterialRegistry {
     pub images: Vec<Handle<Image>>,
     pub materials: HashMap<AssetId<StandardMaterial>, VrmcMaterialsExtensitions>,
+    /// glTF material index for each loaded `StandardMaterial` asset id.
+    /// Expression material binds reference materials by this stable index.
+    pub indices: HashMap<AssetId<StandardMaterial>, usize>,
 }
 
 impl VrmcMaterialRegistry {
@@ -102,6 +105,7 @@ impl VrmcMaterialRegistry {
         let render_queue_offsets =
             plan_legacy_render_queue_offsets(&legacy_properties, source.materials().count());
         let mut materials = HashMap::new();
+        let mut indices = HashMap::new();
         for material in source.materials() {
             let Some(index) = material.index() else {
                 continue;
@@ -116,6 +120,7 @@ impl VrmcMaterialRegistry {
                 .clone()
                 .with_label(format!("{label}/std"));
             let asset_id = asset_server.load::<StandardMaterial>(std_path).id();
+            indices.insert(asset_id, index);
             let modern = material
                 .extensions()
                 .and_then(|extensions| extensions.get("VRMC_materials_mtoon"))
@@ -132,11 +137,13 @@ impl VrmcMaterialRegistry {
             {
                 match classify_legacy_shader(shader) {
                     LegacyShaderKind::SupportedUnlit => {
-                        if let Some(mut properties) = convert_legacy_material_properties_with_render_queue_offset(
-                            legacy.as_ref().unwrap_or(&Value::Null),
-                            Some(source.textures().count()),
-                            render_queue_offset,
-                        ) {
+                        if let Some(mut properties) =
+                            convert_legacy_material_properties_with_render_queue_offset(
+                                legacy.as_ref().unwrap_or(&Value::Null),
+                                Some(source.textures().count()),
+                                render_queue_offset,
+                            )
+                        {
                             properties.legacy_standard_fallback = true;
                             properties.legacy_z_write_requested =
                                 shader == "VRM/UnlitTransparentZWrite";
@@ -179,6 +186,10 @@ impl VrmcMaterialRegistry {
             };
             materials.insert(asset_id, properties);
         }
-        Some(Self { materials, images })
+        Some(Self {
+            materials,
+            images,
+            indices,
+        })
     }
 }

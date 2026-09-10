@@ -36,6 +36,9 @@ pub mod error_presenter;
 /// VRM 0.x/1.0 import and preflight inspection.
 pub mod import;
 
+/// Fixed 36-key expression assignment and per-model bindings.
+pub mod expression_keys;
+
 /// Application bridge for the pure-Rust face inference worker.
 pub mod inference_runtime;
 
