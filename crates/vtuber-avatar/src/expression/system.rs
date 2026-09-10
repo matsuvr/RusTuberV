@@ -16,6 +16,7 @@ use vtuber_core::ArkitBlendshape;
 use crate::capabilities::SelectedGazeBackend;
 use crate::expression::blink::{RawBlinkInput, map_blink_with_fallback};
 use crate::expression::command::{ExpressionCommand, build_face_commands};
+use crate::expression::manual::ManualExpressionSelection;
 use crate::expression::mouth::{RawMouthInput, map_mouth_with_fallback};
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 use crate::mirror::AvatarMotionMirror;
@@ -170,71 +171,119 @@ pub fn coalesce_commands(command_lists: &[Vec<ExpressionCommand>]) -> Vec<Expres
 /// The system only emits [`ModifyExpressions`] for names present in the
 /// runtime-generated [`ExpressionEntityMap`]. Unsupported capabilities are
 /// therefore a normal no-op rather than a runtime error.
+///
+/// Manual selection composites as follows:
+/// - no manual selection keeps the existing 51-channel / standard face route;
+/// - a general/neutral/custom manual expression uses the standard
+///   blink/mouth/LookAt commands plus the one manual expression;
+/// - a tracking-classified manual expression suppresses automatic face
+///   commands entirely and applies only that expression.
+///
+/// The manual layer is evaluated even without a control frame, so camera-off
+/// selection and explicit clearing reach the writer. When both are absent the
+/// previous tracking state is intentionally left untouched.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_tracked_expressions(
     mut commands: Commands,
     lifecycle: Res<AvatarLifecycle>,
     control_frame: Res<ActiveControlFrame>,
+    manual: Res<ManualExpressionSelection>,
     mirror: Option<Res<AvatarMotionMirror>>,
     expression_maps: Query<(&ExpressionEntityMap, Option<&LookAtExpressionWeights>)>,
     expression_statuses: Query<&ExpressionBindingStatus>,
     mut tracker: Local<ExpressionStateTracker>,
+    mut had_manual: Local<bool>,
 ) {
     if lifecycle.state() != AvatarLifecycleState::Ready {
         tracker.force_reset();
+        *had_manual = false;
         return;
     }
     let Some(root) = lifecycle.active_root() else {
         tracker.force_reset();
+        *had_manual = false;
         return;
     };
-    let Some(frame) = control_frame.frame.as_ref() else {
+    let current_generation = lifecycle.current_generation();
+    let catalog = lifecycle.expression_catalog();
+    let selected: Option<String> = manual
+        .selected_in(current_generation, catalog)
+        .map(str::to_owned);
+    let manual_tracking = selected
+        .as_deref()
+        .is_some_and(|id| catalog.is_some_and(|catalog| catalog.is_tracking(id)));
+    let frame = control_frame.frame.as_ref();
+    if frame.is_none() && selected.is_none() && !*had_manual {
         return;
-    };
+    }
     let Ok((expression_map, look_at_weights)) = expression_maps.get(root) else {
         tracker.force_reset();
+        *had_manual = false;
         return;
     };
     let Some(capabilities) = lifecycle.capabilities() else {
         return;
     };
 
-    let blink = map_blink_with_fallback(
-        &blink_input(frame, mirror.is_none_or(|mirror| mirror.is_enabled())),
-        capabilities.blink,
-    );
-    let mouth = map_mouth_with_fallback(
-        &RawMouthInput {
-            openness: frame.expressions.aa,
-            aa: frame.expressions.aa,
-            ih: frame.expressions.ih,
-            ou: frame.expressions.ou,
-            ee: frame.expressions.ee,
-            oh: frame.expressions.oh,
-        },
-        capabilities.mouth,
-    );
-    let gaze = look_at_expression_commands(capabilities.gaze_backend, look_at_weights.copied());
-    let built = build_face_commands(
-        frame.detailed_face.as_ref(),
-        capabilities,
-        &blink,
-        &mouth,
-        &gaze,
-        |channel| {
-            resolve_detailed_expression_name(expression_map, channel, |entity| {
-                expression_statuses
-                    .get(entity)
-                    .is_ok_and(|status| status.resolved_morph_bind_count > 0)
-            })
-        },
-    );
+    let mut built = if manual_tracking {
+        // Tracking-classified manual expressions are applied alone; the
+        // automatic face commands are not overlaid.
+        Vec::new()
+    } else if let Some(frame) = frame {
+        let blink = map_blink_with_fallback(
+            &blink_input(frame, mirror.is_none_or(|mirror| mirror.is_enabled())),
+            capabilities.blink,
+        );
+        let mouth = map_mouth_with_fallback(
+            &RawMouthInput {
+                openness: frame.expressions.aa,
+                aa: frame.expressions.aa,
+                ih: frame.expressions.ih,
+                ou: frame.expressions.ou,
+                ee: frame.expressions.ee,
+                oh: frame.expressions.oh,
+            },
+            capabilities.mouth,
+        );
+        let gaze = look_at_expression_commands(capabilities.gaze_backend, look_at_weights.copied());
+        // A general manual expression suppresses the 51-channel detailed path
+        // and uses the standard blink/mouth/LookAt base instead.
+        let detailed_face = if selected.is_some() {
+            None
+        } else {
+            frame.detailed_face.as_ref()
+        };
+        build_face_commands(
+            detailed_face,
+            capabilities,
+            &blink,
+            &mouth,
+            &gaze,
+            |channel| {
+                resolve_detailed_expression_name(expression_map, channel, |entity| {
+                    expression_statuses
+                        .get(entity)
+                        .is_ok_and(|status| status.resolved_morph_bind_count > 0)
+                })
+            },
+        )
+    } else {
+        Vec::new()
+    };
+    if let Some(selected) = &selected {
+        built.push(ExpressionCommand {
+            name: selected.clone(),
+            weight: 1.0,
+        });
+    }
     let available = built.into_iter().filter(|command| {
         expression_map
             .0
             .contains_key(&VrmExpression::from(command.name.as_str()))
     });
     let available: Vec<ExpressionCommand> = available.collect();
-    let Some(changed) = tracker.compute_commands(&available, control_frame.generation.0) else {
+    *had_manual = selected.is_some();
+    let Some(changed) = tracker.compute_commands(&available, current_generation.0) else {
         return;
     };
 
@@ -315,11 +364,13 @@ mod tests {
         let canonical_entity = world
             .spawn(ExpressionBindingStatus {
                 resolved_morph_bind_count: canonical_bind_count,
+                ..Default::default()
             })
             .id();
         let lower_camel_entity = world
             .spawn(ExpressionBindingStatus {
                 resolved_morph_bind_count: lower_camel_bind_count,
+                ..Default::default()
             })
             .id();
         let expression_map = ExpressionEntityMap(
@@ -553,5 +604,301 @@ mod tests {
             }),
         );
         assert!(commands.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Manual selection end-to-end through the real expression writer
+    // -----------------------------------------------------------------------
+
+    #[derive(Resource, Default)]
+    struct CapturedTriggers(Vec<std::collections::HashMap<VrmExpression, f32>>);
+
+    fn manual_expression_app() -> (App, Entity) {
+        use crate::capabilities::{
+            AvatarCapabilities, BlinkMode, BonePresence, DeclaredLookAtType, LookDirectionSet,
+            MouthMode, PerfectSyncCapabilities, SelectedGazeBackend,
+        };
+        use crate::expression::manual::ManualExpressionSelection;
+        use crate::expression_catalog::{AvatarExpressionCatalog, ExpressionCatalogInput};
+        use bevy::platform::collections::HashMap;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<AvatarLifecycle>()
+            .init_resource::<ActiveControlFrame>()
+            .init_resource::<ManualExpressionSelection>()
+            .init_resource::<CapturedTriggers>()
+            .add_systems(Update, apply_tracked_expressions);
+        app.add_observer(
+            |trigger: On<ModifyExpressions>, mut captured: ResMut<CapturedTriggers>| {
+                captured.0.push(
+                    trigger
+                        .weights
+                        .iter()
+                        .map(|(expression, weight)| (expression.clone(), *weight))
+                        .collect(),
+                );
+            },
+        );
+
+        let root = app.world_mut().spawn_empty().id();
+        let generation = {
+            let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
+            lifecycle.request_load(root).unwrap();
+            lifecycle.start_binding(root);
+            lifecycle.finish_ready();
+            lifecycle.current_generation()
+        };
+
+        let mut map = HashMap::default();
+        for name in [
+            "happy",
+            "angry",
+            "blink",
+            "blinkLeft",
+            "blinkRight",
+            "aa",
+            "JawOpen",
+        ] {
+            let entity = app
+                .world_mut()
+                .spawn(ExpressionBindingStatus {
+                    resolved_morph_bind_count: 1,
+                    ..Default::default()
+                })
+                .id();
+            map.insert(VrmExpression::from(name), entity);
+        }
+        app.world_mut()
+            .entity_mut(root)
+            .insert(ExpressionEntityMap(map));
+
+        let bones = BonePresence {
+            head: true,
+            left_eye: true,
+            right_eye: true,
+            ..Default::default()
+        };
+        let expression_caps = crate::capabilities::ExpressionCapabilities {
+            blink: BlinkMode::PerEye,
+            mouth: MouthMode::Full,
+            look: LookDirectionSet::default(),
+            emotions: Default::default(),
+            unknown: Vec::new(),
+        };
+        let mut capabilities = AvatarCapabilities::from_bones_and_expression_capabilities(
+            bones,
+            &expression_caps,
+            false,
+        );
+        capabilities.gaze_backend = SelectedGazeBackend::Expression;
+        capabilities.declared_look_at = DeclaredLookAtType::Expression;
+        capabilities.perfect_sync = PerfectSyncCapabilities::from_names(
+            vtuber_core::ArkitBlendshape::ALL
+                .into_iter()
+                .map(vtuber_core::ArkitBlendshape::canonical_name),
+        );
+        let catalog = AvatarExpressionCatalog::build(
+            "model".into(),
+            generation.0,
+            [
+                ExpressionCatalogInput {
+                    id: "happy",
+                    declared_as_preset: true,
+                    declared_morph_bind_count: 1,
+                    resolved_morph_bind_count: 1,
+                    declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
+                    unsupported_material_bind_count: 0,
+                },
+                ExpressionCatalogInput {
+                    id: "blink",
+                    declared_as_preset: true,
+                    declared_morph_bind_count: 1,
+                    resolved_morph_bind_count: 1,
+                    declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
+                    unsupported_material_bind_count: 0,
+                },
+                ExpressionCatalogInput {
+                    id: "JawOpen",
+                    declared_as_preset: false,
+                    declared_morph_bind_count: 1,
+                    resolved_morph_bind_count: 1,
+                    declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
+                    unsupported_material_bind_count: 0,
+                },
+            ],
+        );
+        let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
+        lifecycle.set_capabilities(Some(capabilities));
+        lifecycle.set_expression_catalog(Some(catalog));
+        (app, root)
+    }
+
+    fn take_triggers(app: &mut App) -> Vec<std::collections::HashMap<VrmExpression, f32>> {
+        std::mem::take(&mut app.world_mut().resource_mut::<CapturedTriggers>().0)
+    }
+
+    fn sample_frame() -> vtuber_core::AvatarControlFrame {
+        vtuber_core::AvatarControlFrame {
+            source_seq: vtuber_core::FrameSeq(7),
+            captured_at: vtuber_core::MonoTimeNs(1),
+            produced_at: vtuber_core::MonoTimeNs(2),
+            confidence: 1.0,
+            state: vtuber_core::TrackingState::Tracking,
+            head: vtuber_core::HeadPose::default(),
+            head_translation: vtuber_core::HeadTranslationSignal::UNAVAILABLE,
+            gaze: vtuber_core::GazeSignal::UNAVAILABLE,
+            expressions: vtuber_core::ExpressionCoefficients {
+                aa: 0.5,
+                ..Default::default()
+            },
+            detailed_face: None,
+        }
+    }
+
+    #[test]
+    fn camera_off_manual_select_reaches_writer_and_clear_emits_zero() {
+        use crate::expression::manual::ManualExpressionSelection;
+
+        let (mut app, _root) = manual_expression_app();
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
+        {
+            let mut manual = app.world_mut().resource_mut::<ManualExpressionSelection>();
+            manual.toggle(generation, "happy");
+        }
+        // No ActiveControlFrame.frame at all: camera never started.
+        app.update();
+        let triggers = take_triggers(&mut app);
+        assert_eq!(triggers.len(), 1, "manual selection is one writer call");
+        assert_eq!(
+            triggers[0].get(&VrmExpression::from("happy")).copied(),
+            Some(1.0)
+        );
+
+        // Steady state does not re-send.
+        app.update();
+        assert!(take_triggers(&mut app).is_empty());
+
+        {
+            let mut manual = app.world_mut().resource_mut::<ManualExpressionSelection>();
+            manual.clear(generation);
+        }
+        app.update();
+        let triggers = take_triggers(&mut app);
+        assert_eq!(triggers.len(), 1, "clear must reach the writer");
+        assert_eq!(
+            triggers[0].get(&VrmExpression::from("happy")).copied(),
+            Some(0.0),
+            "the disappeared manual expression gets an explicit zero"
+        );
+    }
+
+    #[test]
+    fn manual_tracking_expression_suppresses_automatic_face_commands() {
+        use crate::expression::manual::ManualExpressionSelection;
+
+        let (mut app, _root) = manual_expression_app();
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
+        {
+            let mut manual = app.world_mut().resource_mut::<ManualExpressionSelection>();
+            manual.toggle(generation, "JawOpen");
+        }
+        let mut frame = sample_frame();
+        frame.expressions.blink_left = 0.7;
+        frame.expressions.blink_right = 0.7;
+        frame.detailed_face = Some(
+            vtuber_core::Arkit52Coefficients::try_from_array({
+                let mut values = [0.0; vtuber_core::ARKIT52_CHANNEL_COUNT];
+                values[vtuber_core::ArkitBlendshape::JawOpen.index()] = 0.8;
+                values
+            })
+            .unwrap(),
+        );
+        app.world_mut()
+            .resource_mut::<ActiveControlFrame>()
+            .generation = generation;
+        app.world_mut().resource_mut::<ActiveControlFrame>().frame = Some(frame);
+
+        app.update();
+        let triggers = take_triggers(&mut app);
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(
+            triggers[0].get(&VrmExpression::from("JawOpen")).copied(),
+            Some(1.0)
+        );
+        assert!(
+            triggers[0].len() == 1,
+            "tracking-classified manual expressions replace the automatic face commands"
+        );
+    }
+
+    #[test]
+    fn manual_general_expression_uses_coarse_path_not_detailed_51() {
+        use crate::expression::manual::ManualExpressionSelection;
+
+        let (mut app, _root) = manual_expression_app();
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
+        {
+            let mut manual = app.world_mut().resource_mut::<ManualExpressionSelection>();
+            manual.toggle(generation, "happy");
+        }
+        let mut frame = sample_frame();
+        frame.detailed_face = Some(
+            vtuber_core::Arkit52Coefficients::try_from_array({
+                let mut values = [0.0; vtuber_core::ARKIT52_CHANNEL_COUNT];
+                values[vtuber_core::ArkitBlendshape::JawOpen.index()] = 0.8;
+                values
+            })
+            .unwrap(),
+        );
+        app.world_mut()
+            .resource_mut::<ActiveControlFrame>()
+            .generation = generation;
+        app.world_mut().resource_mut::<ActiveControlFrame>().frame = Some(frame);
+
+        app.update();
+        let triggers = take_triggers(&mut app);
+        assert_eq!(triggers.len(), 1, "one writer call per avatar/frame");
+        assert!(
+            !triggers[0].contains_key(&VrmExpression::from("JawOpen")),
+            "the 51-channel detailed path must not be overlaid in manual mode"
+        );
+        assert_eq!(
+            triggers[0].get(&VrmExpression::from("happy")).copied(),
+            Some(1.0)
+        );
+        assert!(
+            triggers[0].get(&VrmExpression::from("aa")).copied() == Some(0.5),
+            "standard mouth commands still drive the base"
+        );
+    }
+
+    #[test]
+    fn stale_generation_manual_request_never_reaches_a_new_model() {
+        use crate::expression::manual::ManualExpressionSelection;
+
+        let (mut app, _root) = manual_expression_app();
+        {
+            let mut manual = app.world_mut().resource_mut::<ManualExpressionSelection>();
+            // Generation 999 does not exist; selected_in must reject it.
+            manual.toggle(crate::lifecycle::AvatarGeneration(999), "happy");
+        }
+        app.update();
+        assert!(take_triggers(&mut app).is_empty());
     }
 }

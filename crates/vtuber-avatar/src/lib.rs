@@ -27,6 +27,7 @@ pub mod body_scale;
 pub mod capabilities;
 pub mod compatibility;
 pub mod expression;
+pub mod expression_catalog;
 mod framing;
 pub mod gaze;
 pub mod idle;
@@ -78,6 +79,15 @@ pub use capabilities::{
     AvatarCapabilities, BlinkMode, BonePresence, DeclaredLookAtType, EmotionSet,
     ExpressionCapabilities, GazeFallbackReason, LookDirectionSet, MouthMode,
     PerfectSyncCapabilities, SelectedGazeBackend, select_gaze_backend,
+};
+pub use expression::manual::{
+    ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
+    apply_manual_expression_requests, is_tracking_selection,
+};
+pub use expression_catalog::{
+    AvatarExpressionCatalog, EMOTIONAL_PRESETS, ExpressionAvailability, ExpressionCatalogEntry,
+    ExpressionCatalogInput, ExpressionKind, NEUTRAL_PRESET, build_catalog, classify_expression,
+    is_excluded_expression, is_tracking_expression,
 };
 pub use framing::AvatarViewportCamera;
 pub use framing::camera_control::geometry as camera_control_geometry;

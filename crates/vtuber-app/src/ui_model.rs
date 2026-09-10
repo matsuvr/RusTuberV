@@ -1,11 +1,12 @@
 //! UI view models — immutable snapshots for rendering the UI.
 //! These types hide Bevy queries from the UI, which emits UiAction commands.
 
+use crate::expression_keys::ExpressionKey;
 use crate::import::VrmGeneration;
 use crate::license_review::VrmLicenseReview;
 use bevy::prelude::Resource;
 use std::path::PathBuf;
-use vtuber_avatar::ArmPoseProfile;
+use vtuber_avatar::{ArmPoseProfile, ExpressionAvailability, ExpressionKind};
 
 /// Destination selected by the navigation-only sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -89,6 +90,47 @@ pub struct ArmPoseViewModel {
     pub profile: ArmPoseProfile,
     /// Whether there is a model-specific persisted override.
     pub has_override: bool,
+}
+
+/// One selectable expression for the settings UI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpressionEntryViewModel {
+    /// Exact runtime ID.
+    pub id: String,
+    /// Author string for custom entries.
+    pub source_name: String,
+    /// Classification for display/tracking distinction.
+    pub kind: ExpressionKind,
+    /// Availability with reason.
+    pub availability: ExpressionAvailability,
+}
+
+/// One row of the fixed 36-key assignment table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpressionKeyBindingViewModel {
+    /// Fixed physical key.
+    pub key: ExpressionKey,
+    /// Assigned runtime expression ID, if any.
+    pub expression: Option<String>,
+    /// Whether this expression is the current manual selection.
+    pub selected: bool,
+}
+
+/// Expression catalog and assignment snapshot for the UI.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpressionViewModel {
+    /// Stable model ID the snapshot was built for.
+    pub model_id: Option<String>,
+    /// Avatar generation the snapshot was built for.
+    pub generation: Option<vtuber_avatar::AvatarGeneration>,
+    /// Whether the active model exposes an expression catalog.
+    pub has_catalog: bool,
+    /// Every catalog entry, including not-ready definitions.
+    pub entries: Vec<ExpressionEntryViewModel>,
+    /// The fixed 36-key table in key order.
+    pub bindings: Vec<ExpressionKeyBindingViewModel>,
+    /// Current manual selection, if any.
+    pub selected: Option<String>,
 }
 
 /// Summary of an imported model.
@@ -229,6 +271,8 @@ pub struct UiViewModel {
     pub avatar: AvatarViewModel,
     /// Arm pose settings.
     pub arm_pose: ArmPoseViewModel,
+    /// Expression catalog and key assignments.
+    pub expression: ExpressionViewModel,
     /// Calibration state.
     pub calibration: CalibrationViewModel,
     /// Tracking state.

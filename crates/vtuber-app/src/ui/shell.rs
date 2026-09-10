@@ -13,6 +13,7 @@ use crate::capture_runtime::{
 };
 use crate::diagnostics::{DiagnosticsSnapshot, sync_engine_diagnostics};
 use crate::error_presenter::ErrorPresenter;
+use crate::expression_keys::ExpressionBindingStore;
 use crate::inference_runtime::{
     InferenceProjectRoot, InferenceRuntime, inference_bridge_system, read_inference_output_system,
 };
@@ -21,10 +22,15 @@ use crate::ndi_output::{
     NdiOutputIntent, NdiOutputRuntime, ndi_output_bridge_system, shutdown_ndi_output,
     sync_ndi_output_view_model_system,
 };
-use crate::orchestrator::{Orchestrator, process_ui_actions_system, sync_avatar_lifecycle_system};
+use crate::orchestrator::{
+    Orchestrator, process_ui_actions_system, sync_avatar_lifecycle_system,
+    sync_expression_view_model,
+};
 use crate::preview::PreviewState;
 use crate::preview_landmarks::{PreviewLandmarkState, sync_preview_landmark_system};
-use crate::settings::{ArmPoseSettings, restore_arm_pose_settings_system};
+use crate::settings::{
+    ArmPoseSettings, restore_arm_pose_settings_system, restore_expression_binding_settings_system,
+};
 use crate::tracking_runtime::{TrackingRuntime, tracking_bridge_system};
 use crate::ui_model::{Pane, UiViewModel};
 use bevy::prelude::*;
@@ -136,6 +142,7 @@ impl Plugin for UiShellPlugin {
             .init_resource::<UiViewModel>()
             .init_resource::<Orchestrator>()
             .init_resource::<ArmPoseSettings>()
+            .init_resource::<ExpressionBindingStore>()
             .insert_resource(PreviewState {
                 visible: false,
                 ..Default::default()
@@ -163,7 +170,13 @@ impl Plugin for UiShellPlugin {
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         app.insert_resource(InferenceRuntime::new(frame_slot, project_root))
             .init_resource::<TrackingRuntime>()
-            .add_systems(Startup, restore_arm_pose_settings_system)
+            .add_systems(
+                Startup,
+                (
+                    restore_arm_pose_settings_system,
+                    restore_expression_binding_settings_system,
+                ),
+            )
             .add_systems(
                 Update,
                 (
@@ -172,6 +185,16 @@ impl Plugin for UiShellPlugin {
                     sync_avatar_lifecycle_system,
                 )
                     .chain(),
+            )
+            .configure_sets(
+                Update,
+                vtuber_avatar::ManualExpressionSet.after(process_ui_actions_system),
+            )
+            .add_systems(
+                Update,
+                sync_expression_view_model
+                    .after(process_ui_actions_system)
+                    .after(vtuber_avatar::ManualExpressionSet),
             )
             .add_systems(
                 Update,
@@ -402,6 +425,10 @@ fn ui_render_system(
         settings.language(),
     );
     hover.set(over_ui);
+    // Expression keys are collected after the UI pass so the same frame's
+    // keyboard ownership (text edit, combo popup, modal) is respected. This
+    // runs outside `render_studio`, so avatar-only (F1 hidden) still works.
+    super::studio::expression_key_input(ctx, &vm, &mut state, file_dialog.is_active());
     // Uploads depend on explicit session consent; capture and inference do not.
     preview.visible = state.controls_open
         && matches!(vm.pane, Pane::Camera | Pane::Preview)

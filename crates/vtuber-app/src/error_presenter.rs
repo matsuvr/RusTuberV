@@ -110,6 +110,16 @@ pub fn present_error(
             ),
             suggested_actions: vec![UiAction::DismissError],
         },
+        OrchestratorError::ExpressionSettingsFailed(_) => ErrorPresentation {
+            code: "EXPRESSION_SETTINGS_FAILED",
+            user_message: message(
+                "表情キーの設定を保存できませんでした。以前の割り当てを維持します。",
+                "The expression key bindings could not be saved. The previous assignment is kept.",
+                "无法保存表情按键设置。将保留之前的分配。",
+                "표정 키 설정을 저장하지 못했습니다. 이전 할당을 유지합니다.",
+            ),
+            suggested_actions: vec![UiAction::DismissError],
+        },
         OrchestratorError::LicenseReviewFailed(detail) => ErrorPresentation {
             code: "LICENSE_REVIEW_FAILED",
             user_message: format!(

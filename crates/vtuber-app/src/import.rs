@@ -653,13 +653,21 @@ fn inspect_vrm1(
     let head = required_bone_index(human_bones, "head", node_count)?;
     let neck = optional_bone_index(human_bones, "neck", node_count)?;
 
-    let mut expression_presets = vrmc
-        .get("expressions")
-        .and_then(|expressions| expressions.get("preset"))
-        .and_then(|preset| preset.as_object())
-        .map(|preset| preset.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+    // VRM 1.0 keeps standard presets and author-defined custom expressions in
+    // separate maps. The inspection summary lists both so custom-only models
+    // do not look expression-less before the runtime catalog is built.
+    let expressions = vrmc.get("expressions");
+    let mut expression_presets = ["preset", "custom"]
+        .into_iter()
+        .filter_map(|section| {
+            expressions
+                .and_then(|expressions| expressions.get(section))
+                .and_then(|section| section.as_object())
+        })
+        .flat_map(|section| section.keys().cloned())
+        .collect::<Vec<_>>();
     expression_presets.sort();
+    expression_presets.dedup();
 
     let look_at_type = vrmc
         .get("lookAt")
@@ -952,41 +960,44 @@ fn validate_vrm0_expression_binds(
 }
 
 fn normalize_legacy_expression_name(group: &serde_json::Value, group_index: usize) -> String {
+    // Only the source `presetName` selects a standard semantic. Custom groups
+    // keep the author's name exactly, so a custom `joy` or `A` is never
+    // rewritten into a standard or tracking runtime ID.
     let preset = group
         .get("presetName")
         .and_then(|value| value.as_str())
-        .map(str::trim);
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
+    if let Some(source) = preset {
+        let mapped = match source {
+            "A" | "a" => "aa",
+            "I" | "i" => "ih",
+            "U" | "u" => "ou",
+            "E" | "e" => "ee",
+            "O" | "o" => "oh",
+            "Blink" | "blink" => "blink",
+            "Blink_L" | "blink_l" => "blinkLeft",
+            "Blink_R" | "blink_r" => "blinkRight",
+            "Joy" | "joy" => "happy",
+            "Angry" | "angry" => "angry",
+            "Sorrow" | "sorrow" => "sad",
+            "Fun" | "fun" => "relaxed",
+            "LookUp" | "lookup" => "lookUp",
+            "LookDown" | "lookdown" => "lookDown",
+            "LookLeft" | "lookleft" => "lookLeft",
+            "LookRight" | "lookright" => "lookRight",
+            "Neutral" | "neutral" => "neutral",
+            other => other,
+        };
+        return mapped.into();
+    }
     let name = group
         .get("name")
         .and_then(|value| value.as_str())
-        .map(str::trim);
-    let source = preset
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
-        .or(name)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("custom_{group_index}"));
-    match source.as_str() {
-        "A" | "a" => "aa",
-        "I" | "i" => "ih",
-        "U" | "u" => "ou",
-        "E" | "e" => "ee",
-        "O" | "o" => "oh",
-        "Blink" | "blink" => "blink",
-        "Blink_L" | "blink_l" => "blinkLeft",
-        "Blink_R" | "blink_r" => "blinkRight",
-        "Joy" | "joy" => "happy",
-        "Angry" | "angry" => "angry",
-        "Sorrow" | "sorrow" => "sad",
-        "Fun" | "fun" => "relaxed",
-        "LookUp" | "lookup" => "lookUp",
-        "LookDown" | "lookdown" => "lookDown",
-        "LookLeft" | "lookleft" => "lookLeft",
-        "LookRight" | "lookright" => "lookRight",
-        "Neutral" | "neutral" => "neutral",
-        other => other,
-    }
-    .into()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    name.map(str::to_owned)
+        .unwrap_or_else(|| format!("custom_{group_index}"))
 }
 
 fn index_legacy_human_bones(
@@ -1660,6 +1671,16 @@ mod tests {
                         "hips": {"node": 0},
                         "head": {"node": 1}
                     }
+                },
+                "expressions": {
+                    "preset": {
+                        "happy": {"isBinary": false},
+                        "neutral": {"isBinary": false}
+                    },
+                    "custom": {
+                        "JawOpen": {"isBinary": false},
+                        "笑顔": {"isBinary": false}
+                    }
                 }
             },
             "VRMC_springBone": {}
@@ -1748,6 +1769,12 @@ mod tests {
         assert!(summary.humanoid_nodes.hips < 1000);
         assert!(summary.humanoid_nodes.head < 1000);
         assert!(summary.has_spring_bone);
+        // Both standard presets and author-defined custom expressions are
+        // surfaced; Unicode custom names stay exact.
+        assert_eq!(
+            summary.expression_presets,
+            vec!["JawOpen", "happy", "neutral", "笑顔"]
+        );
     }
 
     #[test]

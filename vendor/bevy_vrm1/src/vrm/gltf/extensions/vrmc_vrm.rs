@@ -16,24 +16,38 @@ pub struct VrmcVrm {
     pub spec_version: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct Expressions {
+    #[serde(default)]
     pub preset: HashMap<String, VrmPreset>,
+    /// Author-defined expressions. VRM 1.0 keeps these separate from the
+    /// standard preset map; the runtime registry merges both with a
+    /// source-preset flag so catalogs can distinguish them.
+    #[serde(default)]
+    pub custom: HashMap<String, VrmPreset>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct VrmPreset {
     /// If this value is `true`, `weight` value greater than 0.5 is 1.0, otherwise 0.0.
-    #[serde(rename = "isBinary")]
+    #[serde(rename = "isBinary", default)]
     pub is_binary: bool,
     #[serde(rename = "morphTargetBinds")]
     pub morph_target_binds: Option<Vec<MorphTargetBind>>,
-    #[serde(rename = "overrideBlink")]
+    #[serde(rename = "materialColorBinds", default)]
+    pub material_color_binds: Vec<MaterialColorBind>,
+    #[serde(rename = "textureTransformBinds", default)]
+    pub texture_transform_binds: Vec<TextureTransformBind>,
+    #[serde(rename = "overrideBlink", default = "default_override")]
     pub override_blink: String,
-    #[serde(rename = "overrideLookAt")]
+    #[serde(rename = "overrideLookAt", default = "default_override")]
     pub override_look_at: String,
-    #[serde(rename = "overrideMouth")]
+    #[serde(rename = "overrideMouth", default = "default_override")]
     pub override_mouth: String,
+}
+
+pub(crate) fn default_override() -> String {
+    "none".into()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -41,6 +55,28 @@ pub struct MorphTargetBind {
     pub index: usize,
     pub node: usize,
     pub weight: f32,
+}
+
+/// VRM 1.0 `materialColorBinds` entry. `target_value` is a linear RGBA color
+/// for the standard `targetValue` property.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MaterialColorBind {
+    pub material: usize,
+    #[serde(rename = "type")]
+    pub bind_type: String,
+    #[serde(rename = "targetValue")]
+    pub target_value: [f32; 4],
+}
+
+/// VRM 1.0 `textureTransformBinds` entry. Both `scale` and `offset` are
+/// optional in the specification and default to `[1, 1]` and `[0, 0]`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TextureTransformBind {
+    pub material: usize,
+    #[serde(default)]
+    pub scale: Option<[f32; 2]>,
+    #[serde(default)]
+    pub offset: Option<[f32; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

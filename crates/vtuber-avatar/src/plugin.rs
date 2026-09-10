@@ -19,6 +19,10 @@ use crate::body_motion::{
     update_body_tracking_position_input,
 };
 use crate::expression::apply_tracked_expressions;
+use crate::expression::manual::{
+    ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
+    apply_manual_expression_requests,
+};
 use crate::framing::camera_control::AvatarCameraControl;
 use crate::framing::camera_control::CameraPointerInputGate;
 use crate::framing::camera_input::{
@@ -62,6 +66,12 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<crate::arm_pipeline::ArmSourceSelection>()
             .add_message::<crate::arm_pose::ArmPoseProfileChange>()
             .init_resource::<ActiveControlFrame>()
+            .init_resource::<ManualExpressionSelection>()
+            .add_message::<ManualExpressionRequest>()
+            .add_systems(
+                Update,
+                apply_manual_expression_requests.in_set(ManualExpressionSet),
+            )
             .init_resource::<AvatarMotionMirror>()
             .init_resource::<PoseApplyMetrics>()
             .init_resource::<PositionInputMetrics>()

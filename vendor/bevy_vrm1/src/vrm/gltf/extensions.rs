@@ -4,10 +4,10 @@ pub mod vrmc_spring_bone;
 pub mod vrmc_vrm;
 
 pub use runtime_descriptor::{
-    classify_legacy_shader, collect_legacy_compatibility_warnings, CoordinateBasis,
-    LegacyShaderKind, VrmFirstPerson, VrmFirstPersonFlag, VrmGeneration, VrmHumanoid, VrmLookAt,
-    Vrm0MetaDiagnostics, VrmCompatibilityWarning, VrmCompatibilityWarningCode, VrmLookAtType,
-    VrmMeshAnnotation, VrmMeta, VrmParseError, VrmRangeMap, VrmRuntimeDescriptor,
+    CoordinateBasis, LegacyShaderKind, Vrm0MetaDiagnostics, VrmCompatibilityWarning,
+    VrmCompatibilityWarningCode, VrmFirstPerson, VrmFirstPersonFlag, VrmGeneration, VrmHumanoid,
+    VrmLookAt, VrmLookAtType, VrmMeshAnnotation, VrmMeta, VrmParseError, VrmRangeMap,
+    VrmRuntimeDescriptor, classify_legacy_shader, collect_legacy_compatibility_warnings,
     parse_runtime_descriptor,
 };
 
@@ -191,12 +191,23 @@ fn normalized_legacy_expressions(
     let Some(groups) = groups else {
         return Ok(None);
     };
+    let material_indices = legacy_material_indices(root);
     let mut preset = HashMap::default();
+    let mut custom = HashMap::default();
     for (group_index, group) in groups.iter().enumerate() {
         let Some(name) = normalized_legacy_expression_name(group, group_index) else {
             continue;
         };
-        if preset.contains_key(&name) {
+        // The source presetName decides the destination map. A custom group
+        // whose author name happens to spell a standard preset name stays a
+        // custom expression; only known VRM 0.x semantics enter `preset`.
+        let is_standard = legacy_expression_is_standard(group);
+        let target = if is_standard {
+            &mut preset
+        } else {
+            &mut custom
+        };
+        if target.contains_key(&name) {
             continue;
         }
         let morph_target_binds = group
@@ -247,7 +258,7 @@ fn normalized_legacy_expressions(
                     .map(|binds| binds.into_iter().flatten().collect())
             })
             .transpose()?;
-        preset.insert(
+        target.insert(
             name,
             VrmPreset {
                 is_binary: group
@@ -255,15 +266,132 @@ fn normalized_legacy_expressions(
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 morph_target_binds,
+                material_color_binds: normalized_legacy_material_color_binds(
+                    group,
+                    &material_indices,
+                ),
+                texture_transform_binds: Vec::new(),
                 override_blink: "none".into(),
                 override_look_at: "none".into(),
                 override_mouth: "none".into(),
             },
         );
     }
-    Ok(Some(Expressions { preset }))
+    Ok(Some(Expressions { preset, custom }))
 }
 
+/// Maps glTF material names to their glTF material index. The index is the
+/// stable identity; VRM 0.x `materialValues` reference materials by name.
+fn legacy_material_indices(root: &Value) -> HashMap<String, usize> {
+    let mut indices = HashMap::default();
+    for (index, material) in root
+        .get("materials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let Some(name) = material
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        indices.entry(name.to_owned()).or_insert(index);
+    }
+    indices
+}
+
+/// Maps a known VRM 0.x `presetName` to the VRM 1.0 runtime ID.
+///
+/// This is the only standard-semantic table. It is applied exclusively to the
+/// source `presetName`; author names are never translated, so a custom
+/// expression that happens to be named `joy` or `A` keeps its own ID.
+pub(crate) fn vrm0_preset_runtime_name(preset_name: &str) -> Option<&'static str> {
+    Some(match preset_name {
+        "A" | "a" => "aa",
+        "I" | "i" => "ih",
+        "U" | "u" => "ou",
+        "E" | "e" => "ee",
+        "O" | "o" => "oh",
+        "Blink" | "blink" => "blink",
+        "Blink_L" | "blink_l" => "blinkLeft",
+        "Blink_R" | "blink_r" => "blinkRight",
+        "LookUp" | "lookup" => "lookUp",
+        "LookDown" | "lookdown" => "lookDown",
+        "LookLeft" | "lookleft" => "lookLeft",
+        "LookRight" | "lookright" => "lookRight",
+        "Joy" | "joy" => "happy",
+        "Angry" | "angry" => "angry",
+        "Sorrow" | "sorrow" => "sad",
+        "Fun" | "fun" => "relaxed",
+        "Neutral" | "neutral" => "neutral",
+        _ => return None,
+    })
+}
+
+/// Returns `true` when a legacy group's `presetName` is a known VRM 0.x
+/// semantic. `Unknown`/missing preset names stay custom even when the author
+/// name spells a standard preset name.
+fn legacy_expression_is_standard(group: &Value) -> bool {
+    group
+        .get("presetName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+        .and_then(vrm0_preset_runtime_name)
+        .is_some()
+}
+
+/// Converts the known subset of legacy `materialValues` into the VRM 1.0
+/// `materialColorBinds` runtime shape. Unknown Unity shader properties are
+/// intentionally dropped here; `collect_legacy_compatibility_warnings`
+/// already reports them as unsupported.
+fn normalized_legacy_material_color_binds(
+    group: &Value,
+    material_indices: &HashMap<String, usize>,
+) -> Vec<crate::vrm::gltf::extensions::vrmc_vrm::MaterialColorBind> {
+    let Some(values) = group.get("materialValues").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(|value| {
+            let material_name = value.get("materialName").and_then(Value::as_str)?;
+            let material = *material_indices.get(material_name)?;
+            let property = value.get("propertyName").and_then(Value::as_str)?;
+            let bind_type = match property {
+                "_Color" | "_MainColor" | "_BaseColor" => "color",
+                "_EmissionColor" => "emissionColor",
+                "_ShadeColor" => "shadeColor",
+                "_RimColor" => "rimColor",
+                "_OutlineColor" => "outlineColor",
+                _ => return None,
+            };
+            let target = value
+                .get("targetValue")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(Value::as_f64)
+                .map(|component| component as f32)
+                .collect::<Vec<_>>();
+            let target_value: [f32; 4] = target.try_into().ok()?;
+            Some(crate::vrm::gltf::extensions::vrmc_vrm::MaterialColorBind {
+                material,
+                bind_type: bind_type.into(),
+                target_value,
+            })
+        })
+        .collect()
+}
+
+/// Resolves the runtime ID for one legacy expression group.
+///
+/// Only the source `presetName` may select a standard semantic. Custom groups
+/// (`presetName` missing or `unknown`) keep the author's `name` exactly, so a
+/// custom `joy` never collides with the standard `joy` and a custom `A` is
+/// never re-classified as the `aa` tracking preset.
 fn normalized_legacy_expression_name(
     group: &Value,
     group_index: usize,
@@ -271,39 +399,19 @@ fn normalized_legacy_expression_name(
     let preset = group
         .get("presetName")
         .and_then(Value::as_str)
-        .map(str::trim);
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
+    if let Some(runtime_name) = preset.and_then(vrm0_preset_runtime_name) {
+        return Some(runtime_name.into());
+    }
     let name = group
         .get("name")
         .and_then(Value::as_str)
-        .map(str::trim);
-    let source = preset
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
-        .or(name)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("custom_{group_index}"));
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     Some(
-        match source.as_str() {
-            "A" | "a" => "aa",
-            "I" | "i" => "ih",
-            "U" | "u" => "ou",
-            "E" | "e" => "ee",
-            "O" | "o" => "oh",
-            "Blink" | "blink" => "blink",
-            "Blink_L" | "blink_l" => "blinkLeft",
-            "Blink_R" | "blink_r" => "blinkRight",
-            "LookUp" | "lookup" => "lookUp",
-            "LookDown" | "lookdown" => "lookDown",
-            "LookLeft" | "lookleft" => "lookLeft",
-            "LookRight" | "lookright" => "lookRight",
-            "Joy" | "joy" => "happy",
-            "Angry" | "angry" => "angry",
-            "Sorrow" | "sorrow" => "sad",
-            "Fun" | "fun" => "relaxed",
-            "Neutral" | "neutral" => "neutral",
-            other => other,
-        }
-        .into(),
+        name.map(str::to_owned)
+            .unwrap_or_else(|| format!("custom_{group_index}")),
     )
 }
 
@@ -770,8 +878,8 @@ pub(crate) fn obtain_vrmc_vrm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::prelude::{Quat, Vec3};
     use crate::vrm::gltf::extensions::vrmc_spring_bone::ColliderShape;
+    use bevy::prelude::{Quat, Vec3};
     use serde_json::json;
 
     #[test]
@@ -865,11 +973,93 @@ mod tests {
         let expressions = normalized_legacy_expressions(&legacy, &root, &[])
             .expect("groups should parse")
             .expect("expressions should exist");
-        for name in [
-            "aa", "ih", "ou", "ee", "oh", "blink", "happy", "lookUp", "custom",
-        ] {
-            assert!(expressions.preset.contains_key(name), "missing {name}");
+        for name in ["aa", "ih", "ou", "ee", "oh", "blink", "happy", "lookUp"] {
+            assert!(
+                expressions.preset.contains_key(name),
+                "missing preset {name}"
+            );
         }
+        // An `Unknown` preset name stays in the custom map even when the
+        // author name spells a known word.
+        assert!(expressions.custom.contains_key("custom"));
+    }
+
+    #[test]
+    fn legacy_expression_map_preserves_standard_and_custom_provenance() {
+        let groups = json!([
+            {"name": "author-happy", "presetName": "Unknown"},
+            {"name": "joy", "presetName": "joy"},
+            {"name": "custom-material", "presetName": "Unknown", "materialValues": [
+                {"materialName": "Face", "propertyName": "_Color", "targetValue": [0.1, 0.2, 0.3, 1.0]},
+                {"materialName": "Missing", "propertyName": "_Color", "targetValue": [1.0, 1.0, 1.0, 1.0]},
+                {"materialName": "Face", "propertyName": "_Unknown", "targetValue": [1.0, 1.0, 1.0, 1.0]}
+            ]}
+        ]);
+        let legacy = json!({"blendShapeMaster": {"blendShapeGroups": groups}});
+        let root = json!({
+            "nodes": [],
+            "meshes": [],
+            "materials": [{"name": "Face"}]
+        });
+        let expressions = normalized_legacy_expressions(&legacy, &root, &[])
+            .expect("groups should parse")
+            .expect("expressions should exist");
+        assert!(expressions.preset.contains_key("happy"));
+        assert!(expressions.custom.contains_key("author-happy"));
+        let custom = &expressions.custom["custom-material"];
+        assert_eq!(custom.material_color_binds.len(), 1);
+        assert_eq!(custom.material_color_binds[0].material, 0);
+        assert_eq!(custom.material_color_binds[0].bind_type, "color");
+        assert_eq!(
+            custom.material_color_binds[0].target_value,
+            [0.1, 0.2, 0.3, 1.0]
+        );
+    }
+
+    #[test]
+    fn legacy_standard_and_custom_names_do_not_collide() {
+        let groups = json!([
+            {"name": "std-joy", "presetName": "joy", "binds": [{"mesh": 0, "index": 0, "weight": 100}]},
+            {"name": "joy", "presetName": "unknown", "binds": [{"mesh": 0, "index": 1, "weight": 50}]},
+            {"name": "A", "presetName": "unknown", "binds": [{"mesh": 0, "index": 2, "weight": 100}]},
+            {"name": "fun", "presetName": "unknown"},
+            {"name": "笑顔", "presetName": "unknown"}
+        ]);
+        let legacy = json!({"blendShapeMaster": {"blendShapeGroups": groups}});
+        let root = json!({
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"targets": [{}, {}, {}]}]}]
+        });
+        let expressions = normalized_legacy_expressions(&legacy, &root, &[])
+            .expect("groups should parse")
+            .expect("expressions should exist");
+
+        // The standard `joy` maps to `happy`; the custom `joy` keeps its own
+        // ID and bind instead of being folded into the standard entry.
+        assert!(expressions.preset.contains_key("happy"));
+        assert!(expressions.custom.contains_key("joy"));
+        assert_eq!(
+            expressions.preset["happy"]
+                .morph_target_binds
+                .as_ref()
+                .expect("standard bind")[0]
+                .index,
+            0
+        );
+        assert_eq!(
+            expressions.custom["joy"]
+                .morph_target_binds
+                .as_ref()
+                .expect("custom bind")[0]
+                .index,
+            1
+        );
+
+        // Author names that spell standard semantics stay custom.
+        assert!(expressions.custom.contains_key("A"));
+        assert!(!expressions.preset.contains_key("aa"));
+        assert!(expressions.custom.contains_key("fun"));
+        assert!(expressions.custom.contains_key("笑顔"));
     }
 
     #[test]
@@ -952,18 +1142,18 @@ mod tests {
         let basis = Quat::from_rotation_y(std::f32::consts::PI);
         let world = basis * Vec3::from(source_offset);
         assert!((world - Vec3::new(-0.25, 0.5, 0.75)).length() < 1.0e-5);
-        let double_converted_world = basis * Vec3::from([
-            -source_offset[0],
-            source_offset[1],
-            -source_offset[2],
-        ]);
+        let double_converted_world =
+            basis * Vec3::from([-source_offset[0], source_offset[1], -source_offset[2]]);
         assert!((double_converted_world - Vec3::from(source_offset)).length() < 1.0e-5);
     }
 
     #[test]
     fn legacy_gravity_basis_is_applied_once_for_vertical_and_horizontal_vectors() {
         assert_eq!(legacy_gravity_direction([0.0, 1.0, 0.0]), [0.0, 1.0, 0.0]);
-        assert_eq!(legacy_gravity_direction([1.0, 0.0, 0.25]), [-1.0, 0.0, -0.25]);
+        assert_eq!(
+            legacy_gravity_direction([1.0, 0.0, 0.25]),
+            [-1.0, 0.0, -0.25]
+        );
     }
 
     #[test]
@@ -1000,5 +1190,4 @@ mod tests {
             [6]
         );
     }
-
 }
