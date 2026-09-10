@@ -40,8 +40,12 @@ use crate::lifecycle::AvatarLifecycle;
 /// never changes. Counter-rotating the anchor by a fraction of the chest's
 /// actual rotation makes the hands trail the turn like a real body's inert
 /// arms, so motion propagates through the shoulder, elbow, and wrist instead
-/// of stopping at the shoulder.
-pub const TORSO_LAG_SHARE: f32 = 0.6;
+/// of stopping at the shoulder. The share must stay moderate: with a large
+/// share the hand stays pinned near the hips while the shoulder swings away
+/// with the torso, and the elbow ends up absorbing the whole difference as a
+/// pendulum-like swing. The wrists keep most of the turn, and the elbow only
+/// the small remainder.
+pub const TORSO_LAG_SHARE: f32 = 0.3;
 
 /// Which arm-pose authority produces hand targets for the compositor.
 ///

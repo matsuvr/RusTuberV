@@ -100,7 +100,10 @@ fn main() {
         .add_plugins(VtuberAvatarPlugin)
         .insert_resource(tracking.body)
         .insert_resource(ArmSourceSelection {
-            mode: ArmPoseSourceKind::default(),
+            // The hips-relative virtual-hand source is the documented default
+            // authority (arm_pipeline.rs); the enum's `#[default]` names the
+            // fallback-only static pose, which must not win at startup.
+            mode: ArmPoseSourceKind::VirtualHandAnchor,
             profile: tracking.arm,
         })
         .insert_resource(ArmPoseSettings::load_default())

@@ -10,7 +10,10 @@ use vtuber_core::metrics::FixedStats;
 use vtuber_core::monotonic_now;
 use vtuber_core::types::{AvatarControlFrame, TrackingState};
 
-use bevy_vrm1::prelude::BodyTrackingPoseInput;
+use bevy_vrm1::prelude::{
+    BodyTrackingPoseInput, BodyTrackingProfile, ChestBoneEntity, HeadBoneEntity, HipsBoneEntity,
+    RestTransform, UpperChestBoneEntity, VrmPath,
+};
 
 use crate::binding::AvatarBinding;
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
@@ -259,6 +262,157 @@ pub fn reset_pose_metrics_on_lifecycle_change(
         *metrics = PoseApplyMetrics::default();
         *last_state = Some(current);
     }
+}
+
+/// Temporary propagation diagnosis (remove after the investigation).
+///
+/// Appends one line per second to `propagation_debug.log` next to the
+/// executable's working directory (the GUI subsystem has no stderr).
+#[allow(clippy::too_many_arguments)]
+pub fn debug_propagation_probe(
+    lifecycle: Res<AvatarLifecycle>,
+    mut frame_counter: Local<u64>,
+    mut log_file: Local<Option<std::fs::File>>,
+    control_frame: Res<ActiveControlFrame>,
+    inputs: Query<&BodyTrackingPoseInput>,
+    profiles: Query<&BodyTrackingProfile>,
+    bindings: Query<&AvatarBinding>,
+    hips: Query<&HipsBoneEntity>,
+    upper_chest_markers: Query<&UpperChestBoneEntity>,
+    chest_markers: Query<&ChestBoneEntity>,
+    head_markers: Query<&HeadBoneEntity>,
+    root_paths: Query<&VrmPath>,
+    bones: Query<(&Transform, &RestTransform)>,
+) {
+    *frame_counter += 1;
+    if log_file.is_none() {
+        *log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("propagation_debug.log")
+            .ok();
+    }
+    if *frame_counter % 60 != 1 {
+        return;
+    }
+    let Some(file) = log_file.as_mut() else {
+        return;
+    };
+    use std::io::Write;
+    let line = propagation_line(
+        &lifecycle,
+        *frame_counter,
+        &control_frame,
+        inputs.get(lifecycle.active_root().unwrap_or(Entity::PLACEHOLDER)),
+        profiles.get(lifecycle.active_root().unwrap_or(Entity::PLACEHOLDER)),
+        bindings.get(lifecycle.active_root().unwrap_or(Entity::PLACEHOLDER)),
+        hips,
+        upper_chest_markers,
+        chest_markers,
+        head_markers,
+        root_paths,
+        &bones,
+    );
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagation_line(
+    lifecycle: &AvatarLifecycle,
+    frame_counter: u64,
+    control_frame: &ActiveControlFrame,
+    input: Result<&BodyTrackingPoseInput, bevy::ecs::query::QueryEntityError>,
+    profile: Result<&BodyTrackingProfile, bevy::ecs::query::QueryEntityError>,
+    binding: Result<&AvatarBinding, bevy::ecs::query::QueryEntityError>,
+    hips: Query<&HipsBoneEntity>,
+    upper_chest_markers: Query<&UpperChestBoneEntity>,
+    chest_markers: Query<&ChestBoneEntity>,
+    head_markers: Query<&HeadBoneEntity>,
+    root_paths: Query<&VrmPath>,
+    bones: &Query<(&Transform, &RestTransform)>,
+) -> String {
+    let root = lifecycle.active_root();
+    let input_text = root
+        .zip(input.ok())
+        .map(|(_, i)| {
+            format!(
+                "yaw={:+.1}deg pitch={:+.1}deg roll={:+.1}deg weight={:.2} active={}",
+                i.yaw_radians.to_degrees(),
+                i.pitch_radians.to_degrees(),
+                i.roll_radians.to_degrees(),
+                i.weight,
+                i.active
+            )
+        })
+        .unwrap_or_else(|| "<none>".to_string());
+    let profile_text = root
+        .and_then(|_| profile.ok())
+        .map(|p| {
+            format!(
+                "small=({:.2},{:.2},{:.2},{:.2},{:.2},{:.2}) large=({:.2},{:.2},{:.2},{:.2},{:.2},{:.2}) pitch=({:.2},{:.2},{:.2},{:.2},{:.2},{:.2}) roll=({:.2},{:.2},{:.2},{:.2},{:.2},{:.2})",
+                p.small_yaw_weights.head, p.small_yaw_weights.neck, p.small_yaw_weights.upper_chest, p.small_yaw_weights.chest, p.small_yaw_weights.spine, p.small_yaw_weights.hips,
+                p.large_yaw_weights.head, p.large_yaw_weights.neck, p.large_yaw_weights.upper_chest, p.large_yaw_weights.chest, p.large_yaw_weights.spine, p.large_yaw_weights.hips,
+                p.pitch_weights.head, p.pitch_weights.neck, p.pitch_weights.upper_chest, p.pitch_weights.chest, p.pitch_weights.spine, p.pitch_weights.hips,
+                p.roll_weights.head, p.roll_weights.neck, p.roll_weights.upper_chest, p.roll_weights.chest, p.roll_weights.spine, p.roll_weights.hips,
+            )
+        })
+        .unwrap_or_else(|| "<none>".to_string());
+    let mut bone_report = String::new();
+    if let Some(root) = root {
+        bone_report.push_str(&format!(
+            "model={:?} ",
+            root_paths
+                .get(root)
+                .map(|p| p.0.display().to_string())
+                .unwrap_or("?".to_string())
+        ));
+        if let Ok(binding) = binding {
+            let marker = |present: bool| if present { "Y" } else { "N" };
+            bone_report.push_str(&format!(
+                "markers(upperChest={} chest={} head={}) ",
+                marker(upper_chest_markers.get(root).is_ok()),
+                marker(chest_markers.get(root).is_ok()),
+                marker(head_markers.get(root).is_ok()),
+            ));
+            let entries = [
+                ("head", Some(binding.head)),
+                ("neck", binding.neck),
+                ("upperChest", binding.upper_chest),
+                ("chest", binding.chest),
+                ("spine", binding.spine),
+                ("hips", hips.get(root).ok().map(|h| h.0)),
+                (
+                    "lShoulder",
+                    binding.left_arm.as_ref().and_then(|a| a.shoulder),
+                ),
+                ("lUpperArm", binding.left_arm.as_ref().map(|a| a.upper_arm)),
+                ("lLowerArm", binding.left_arm.as_ref().map(|a| a.lower_arm)),
+            ];
+            for (label, entity) in entries {
+                let Some(entity) = entity else {
+                    bone_report.push_str(&format!("{label}=- "));
+                    continue;
+                };
+                match bones.get(entity) {
+                    Ok((transform, rest)) => {
+                        let delta = rest.0.rotation.inverse() * transform.rotation;
+                        bone_report.push_str(&format!(
+                            "{label}={:+.2}deg ",
+                            delta.angle_between(Quat::IDENTITY).to_degrees()
+                        ));
+                    }
+                    Err(_) => bone_report.push_str(&format!("{label}=<no-rest> ")),
+                }
+            }
+        }
+    }
+    format!(
+        "[propagation] frame={frame_counter}|state={:?}|input=({input_text})|profile({profile_text})|bones: {bone_report}|control_frame={}",
+        lifecycle.state(),
+        control_frame.frame.is_some()
+    )
 }
 
 #[cfg(test)]

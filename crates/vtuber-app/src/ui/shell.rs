@@ -174,6 +174,10 @@ impl Plugin for UiShellPlugin {
             )
             .add_systems(
                 Update,
+                auto_start_tracking_system.after(sync_avatar_lifecycle_system),
+            )
+            .add_systems(
+                Update,
                 sync_error_presenter
                     .after(sync_avatar_lifecycle_system)
                     .after(sync_capture_diagnostics),
@@ -249,6 +253,12 @@ impl Plugin for UiShellPlugin {
                 sync_avatar_diagnostics.after(crate::synthetic_tracking::synthetic_tracking_system),
             );
     }
+}
+
+/// Starts tracking as soon as the avatar is ready and a camera is selected,
+/// so completing setup is enough and no extra Start press is needed.
+fn auto_start_tracking_system(mut orchestrator: ResMut<Orchestrator>) {
+    orchestrator.maybe_auto_start_tracking();
 }
 
 fn attach_primary_egui_context_to_viewport_camera(
@@ -523,5 +533,60 @@ mod tests {
             Some("NO_CAMERA")
         );
         assert!(app.world().resource::<ErrorPresenter>().current().is_some());
+    }
+
+    #[test]
+    fn auto_start_system_starts_tracking_when_lifecycle_reports_ready() {
+        let mut app = App::new();
+        app.init_resource::<Orchestrator>()
+            .init_resource::<UiState>()
+            .init_resource::<UiViewModel>()
+            .init_resource::<PreviewState>()
+            .init_resource::<AvatarMotionMirror>()
+            .init_resource::<vtuber_avatar::AvatarLifecycle>()
+            .add_message::<vtuber_avatar::LoadImportedAvatarRequest>()
+            .add_message::<vtuber_avatar::LoadImportedAvatarResult>()
+            .add_message::<vtuber_avatar::lifecycle::UnloadAvatarRequest>()
+            .add_systems(
+                Update,
+                (sync_avatar_lifecycle_system, auto_start_tracking_system).chain(),
+            );
+
+        {
+            let mut orchestrator = app.world_mut().resource_mut::<Orchestrator>();
+            orchestrator.set_imported_model_for_tests(Some(crate::import::ImportedModel {
+                id: "test".into(),
+                name: "test".into(),
+                asset_path: std::path::PathBuf::new(),
+                meta_path: std::path::PathBuf::new(),
+                summary: crate::import::VrmInspectionSummary::default(),
+                original_path: std::path::PathBuf::new(),
+                size: 0,
+            }));
+            orchestrator.set_camera_list(vec![vtuber_camera::device::CameraDescriptor {
+                id: "test:0".into(),
+                label: "Test camera".into(),
+            }]);
+            orchestrator.process_action(&UiAction::SelectCamera { index: 0 });
+        }
+
+        let root = app.world_mut().spawn_empty().id();
+        {
+            let mut lifecycle = app
+                .world_mut()
+                .resource_mut::<vtuber_avatar::AvatarLifecycle>();
+            lifecycle.request_load(root).expect("test load is valid");
+            lifecycle.start_binding(root);
+            lifecycle.finish_ready();
+        }
+
+        app.update();
+
+        let orchestrator = app.world().resource::<Orchestrator>();
+        assert_eq!(
+            orchestrator.pipeline_state(),
+            crate::orchestrator::PipelineState::Starting
+        );
+        assert!(orchestrator.capture_desired());
     }
 }

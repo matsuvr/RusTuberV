@@ -421,8 +421,8 @@ mod tests {
         assert!((body.pitch_weights.head - 0.7).abs() < EPSILON);
         assert!((body.pitch_weights.neck - 0.3).abs() < EPSILON);
         // Untouched fields keep the default.
-        assert!((body.pitch_weights.upper_chest - 0.13).abs() < EPSILON);
-        assert!((body.roll_weights.head - 0.47).abs() < EPSILON);
+        assert!((body.pitch_weights.upper_chest - 0.14).abs() < EPSILON);
+        assert!((body.roll_weights.head - 0.38).abs() < EPSILON);
         assert!((body.small_yaw_weights.head - 0.60).abs() < EPSILON);
         assert!((body.yaw_body_engagement_full_radians - 40.0_f32.to_radians()).abs() < EPSILON);
         assert!((body.yaw_body_engagement_start_radians - 8.0_f32.to_radians()).abs() < EPSILON);

@@ -245,7 +245,10 @@ impl Default for ArmPoseProfile {
             reach_ratio: 0.99,
             forward_hand_offset_ratio: 0.081,
             elbow_pole_offset_ratio: 0.05,
-            shoulder_follow_weight: 0.18,
+            // Strong enough that the hand-target pull visibly reaches the
+            // shoulder (capped by SHOULDER_FOLLOW_MAX_RADIANS), so the arm
+            // leans with the anchor instead of the elbow swinging alone.
+            shoulder_follow_weight: 0.35,
             finger_curl_radians: 10.0_f32.to_radians(),
         }
     }

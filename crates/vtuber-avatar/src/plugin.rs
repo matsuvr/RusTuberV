@@ -154,7 +154,8 @@ impl Plugin for VtuberAvatarPlugin {
                     .before(VrmSystemSets::Expressions),
             )
             .add_systems(Update, reset_pose_metrics_on_lifecycle_change)
-            .add_systems(Update, reset_position_metrics_on_lifecycle_change);
+            .add_systems(Update, reset_position_metrics_on_lifecycle_change)
+            .add_systems(Update, crate::pose::debug_propagation_probe);
         register_output_systems(app);
     }
 }

@@ -6,7 +6,8 @@
 
 pub mod system;
 pub use system::{
-    PoseApplyMetrics, reset_pose_metrics_on_lifecycle_change, update_body_tracking_pose_input,
+    PoseApplyMetrics, debug_propagation_probe, reset_pose_metrics_on_lifecycle_change,
+    update_body_tracking_pose_input,
 };
 
 use bevy_vrm1::prelude::{
@@ -32,10 +33,12 @@ fn limit_degrees(yaw: f32, pitch: f32, roll: f32) -> BoneRotationLimit {
 /// roughly two thirds of the head share on every axis and its smoothing
 /// half-life stays close to the head's, while the torso keeps a visible,
 /// slower share so large turns propagate into the chest, shoulders, and
-/// spine instead of kinking at the neck. The hips keep a faint share with
-/// the slowest half-life so every rotation propagates through the whole
-/// body to the legs and feet, like a real body shifting its weight. Torso
-/// engagement starts early (8 degrees) and is complete by 35 degrees,
+/// spine instead of kinking at the neck. The hips keep a real share so every
+/// rotation propagates through the whole body to the legs and feet, like a
+/// real body shifting its weight; their half-life still lags well behind
+/// the head and neck so the sway reads as weight shift, but no longer so
+/// slow that oscillating head motion cancels out before reaching them.
+/// Torso engagement starts early (8 degrees) and is complete by 35 degrees,
 /// mirroring the low "body stiffness" default of established trackers.
 pub fn natural_body_tracking_profile() -> BodyTrackingProfile {
     BodyTrackingProfile {
@@ -48,28 +51,28 @@ pub fn natural_body_tracking_profile() -> BodyTrackingProfile {
             hips: 0.0,
         },
         large_yaw_weights: BodyBoneWeights {
-            head: 0.34,
-            neck: 0.21,
-            upper_chest: 0.19,
-            chest: 0.12,
+            head: 0.28,
+            neck: 0.17,
+            upper_chest: 0.15,
+            chest: 0.10,
             spine: 0.10,
-            hips: 0.04,
+            hips: 0.20,
         },
         pitch_weights: BodyBoneWeights {
-            head: 0.47,
-            neck: 0.26,
-            upper_chest: 0.13,
-            chest: 0.07,
-            spine: 0.04,
-            hips: 0.03,
+            head: 0.38,
+            neck: 0.21,
+            upper_chest: 0.14,
+            chest: 0.08,
+            spine: 0.06,
+            hips: 0.13,
         },
         roll_weights: BodyBoneWeights {
-            head: 0.47,
-            neck: 0.26,
-            upper_chest: 0.13,
-            chest: 0.07,
-            spine: 0.04,
-            hips: 0.03,
+            head: 0.38,
+            neck: 0.21,
+            upper_chest: 0.14,
+            chest: 0.08,
+            spine: 0.06,
+            hips: 0.13,
         },
         yaw_body_engagement_start_radians: 8.0_f32.to_radians(),
         yaw_body_engagement_full_radians: 35.0_f32.to_radians(),
@@ -79,7 +82,7 @@ pub fn natural_body_tracking_profile() -> BodyTrackingProfile {
             upper_chest_seconds: 0.180,
             chest_seconds: 0.285,
             spine_seconds: 0.450,
-            hips_seconds: 0.650,
+            hips_seconds: 0.350,
         },
         bone_rotation_limits: BodyBoneRotationLimits {
             head: limit_degrees(45.0, 30.0, 25.0),
@@ -87,7 +90,7 @@ pub fn natural_body_tracking_profile() -> BodyTrackingProfile {
             upper_chest: limit_degrees(18.0, 10.0, 10.0),
             chest: limit_degrees(12.0, 6.0, 5.0),
             spine: limit_degrees(8.0, 5.0, 4.0),
-            hips: limit_degrees(10.0, 4.0, 4.0),
+            hips: limit_degrees(13.0, 9.0, 9.0),
         },
     }
 }
@@ -141,16 +144,19 @@ mod tests {
     }
 
     #[test]
-    fn hips_receive_a_faint_share_of_large_motion() {
+    fn hips_receive_a_visible_share_of_large_motion() {
         let profile = natural_body_tracking_profile();
         // Small yaw keeps the body planted; large yaw, pitch, and roll all
         // reach the hips so the legs follow as child bones.
         assert_eq!(profile.small_yaw_weights.hips, 0.0);
-        assert!(profile.large_yaw_weights.hips > 0.0);
-        assert!(profile.pitch_weights.hips > 0.0);
-        assert!(profile.roll_weights.hips > 0.0);
-        // Hips respond slowest so the sway reads as weight shift.
-        assert!(profile.bone_half_lives.hips_seconds > profile.bone_half_lives.spine_seconds);
+        assert!(profile.large_yaw_weights.hips >= 0.20);
+        assert!(profile.pitch_weights.hips >= 0.13);
+        assert!(profile.roll_weights.hips >= 0.13);
+        // Hips respond slower than the head and neck so the sway reads as
+        // weight shift, but fast enough that oscillating head motion still
+        // arrives instead of cancelling out.
+        assert!(profile.bone_half_lives.hips_seconds > profile.bone_half_lives.neck_seconds);
+        assert!(profile.bone_half_lives.hips_seconds <= profile.bone_half_lives.spine_seconds);
     }
 
     #[test]
@@ -171,16 +177,16 @@ mod tests {
         );
         // Large yaw: the torso takes a visible share so big head turns turn
         // the chest and shoulders instead of kinking at the neck, and the
-        // hips keep a faint share for whole-body propagation.
+        // hips keep a real share for whole-body propagation.
         assert_eq!(
             profile.large_yaw_weights,
             BodyBoneWeights {
-                head: 0.34,
-                neck: 0.21,
-                upper_chest: 0.19,
-                chest: 0.12,
+                head: 0.28,
+                neck: 0.17,
+                upper_chest: 0.15,
+                chest: 0.10,
                 spine: 0.10,
-                hips: 0.04,
+                hips: 0.20,
             }
         );
         // Torso engagement starts early and completes by 35 degrees, the
