@@ -29,8 +29,8 @@ use crate::ui::UiState;
 use crate::ui_model::*;
 use vtuber_avatar::{
     ArmPoseOverrideStore, ArmPoseProfileChange, ArmPoseProfileOverride, AvatarAssetId,
-    AvatarGeneration, AvatarLifecycle, AvatarMotionMirror, ManualExpressionRequest,
-    ManualExpressionSelection,
+    AvatarExpressionCatalog, AvatarGeneration, AvatarLifecycle, AvatarMotionMirror,
+    ManualExpressionRequest, ManualExpressionSelection,
 };
 use vtuber_camera::device::CameraDescriptor;
 
@@ -950,6 +950,24 @@ pub fn process_ui_actions_system(
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
 }
 
+/// Returns the one catalog that expression operations may use right now.
+///
+/// The imported-model ID and the render-side catalog can disagree while a
+/// pending load has not reached the lifecycle yet. Only a `Ready` avatar whose
+/// catalog generation matches the lifecycle generation and whose catalog
+/// model matches the orchestrator's imported model yields a consistent
+/// snapshot; otherwise expression operations are unavailable.
+fn current_expression_catalog<'a>(
+    orchestrator: &Orchestrator,
+    lifecycle: &'a AvatarLifecycle,
+) -> Option<&'a AvatarExpressionCatalog> {
+    let catalog = lifecycle.expression_catalog()?;
+    (lifecycle.state() == vtuber_avatar::AvatarLifecycleState::Ready
+        && catalog.generation == lifecycle.current_generation().0
+        && orchestrator.active_model_id() == Some(catalog.model_id.as_str()))
+    .then_some(catalog)
+}
+
 /// Model and generation captured when the UI issued an action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExpressionTarget {
@@ -958,14 +976,12 @@ struct ExpressionTarget {
 }
 
 impl ExpressionTarget {
-    /// Returns `true` when the live model, generation, and catalog still match
-    /// the target captured at issuance.
+    /// Returns `true` when the consistent catalog still matches the target
+    /// captured at issuance.
     fn is_current(&self, orchestrator: &Orchestrator, lifecycle: &AvatarLifecycle) -> bool {
-        orchestrator.active_model_id() == Some(self.model_id.as_str())
-            && lifecycle.current_generation() == self.generation
-            && lifecycle
-                .expression_catalog()
-                .is_some_and(|catalog| catalog.generation == self.generation.0)
+        current_expression_catalog(orchestrator, lifecycle).is_some_and(|catalog| {
+            catalog.model_id == self.model_id && catalog.generation == self.generation.0
+        })
     }
 }
 
@@ -1074,24 +1090,23 @@ fn toggle_expression_key_action(
     let Some(lifecycle) = lifecycle else {
         return;
     };
-    if lifecycle.current_generation() != generation {
-        return;
-    }
-    let Some(model_id) = orchestrator.active_model_id() else {
+    // The catalog must be the one consistent with the live model; a pending
+    // replacement must not contribute its saved bindings to an old-generation
+    // toggle.
+    let Some(catalog) = current_expression_catalog(orchestrator, lifecycle) else {
         return;
     };
-    let catalog = lifecycle.expression_catalog();
-    if catalog.is_none_or(|catalog| catalog.generation != generation.0) {
+    if catalog.generation != generation.0 {
         return;
     }
     let Some(store) = store else {
         return;
     };
-    let bindings = effective_bindings(store, model_id, catalog);
+    let bindings = effective_bindings(store, &catalog.model_id, Some(catalog));
     let Some(expression) = bindings.expression_for(key) else {
         return;
     };
-    if !can_assign_expression(catalog, expression) {
+    if !can_assign_expression(Some(catalog), expression) {
         return;
     }
     let Some(request) = manual_request_for_key(generation, key, &bindings) else {
@@ -1129,15 +1144,15 @@ pub fn sync_expression_view_model(
     mut view_model: ResMut<UiViewModel>,
     mut last_signature: Local<Option<ExpressionViewModelSignature>>,
 ) {
-    let model_id = orchestrator
-        .active_model_id()
-        .unwrap_or_default()
-        .to_owned();
-    let catalog = lifecycle
-        .as_deref()
-        .and_then(AvatarLifecycle::expression_catalog);
+    // A pending import may have updated the orchestrator model while the
+    // render-side catalog is still the old one. Only the consistent catalog
+    // may produce an operable snapshot; the avatar itself keeps rendering.
+    let catalog = match lifecycle.as_deref() {
+        Some(lifecycle) => current_expression_catalog(&orchestrator, lifecycle),
+        None => None,
+    };
     let signature = (
-        model_id.clone(),
+        catalog.map_or_else(String::new, |catalog| catalog.model_id.clone()),
         catalog.map_or(0, |catalog| catalog.generation),
         store.as_deref().map_or(0, ExpressionBindingStore::revision),
         manual.as_deref().map_or(0, |manual| manual.generation.0),
@@ -1154,17 +1169,13 @@ pub fn sync_expression_view_model(
     let selected = manual.as_deref().and_then(|manual| manual.selected.clone());
     // Actions emitted from this snapshot carry exactly the model/generation
     // shown here so a later swap cannot apply them to the new avatar.
-    let (snapshot_model_id, snapshot_generation) = match catalog {
-        Some(catalog) => (
-            (!model_id.is_empty()).then(|| model_id.clone()),
-            Some(AvatarGeneration(catalog.generation)),
-        ),
-        None => (None, None),
+    let snapshot_model_id = catalog.map(|catalog| catalog.model_id.clone());
+    let snapshot_generation = catalog.map(|catalog| AvatarGeneration(catalog.generation));
+    let bindings = match (catalog, store.as_deref()) {
+        (Some(catalog), Some(store)) => effective_bindings(store, &catalog.model_id, Some(catalog)),
+        (Some(catalog), None) => ExpressionBindings::default_for(catalog),
+        (None, _) => ExpressionBindings::default(),
     };
-    let bindings = store.as_deref().map_or_else(
-        || catalog.map_or_else(ExpressionBindings::default, ExpressionBindings::default_for),
-        |store| effective_bindings(store, &model_id, catalog),
-    );
     let entries = catalog
         .map(|catalog| {
             catalog
@@ -2576,6 +2587,137 @@ mod tests {
         assert!(
             store.bindings_for("model-a").is_none(),
             "a stale assignment must not be saved at all"
+        );
+    }
+
+    #[test]
+    fn expression_snapshot_rejects_pending_model_catalog_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path);
+        app.add_systems(Update, sync_expression_view_model);
+
+        // The import of B succeeded, but the lifecycle and catalog still
+        // describe the rendered model A.
+        app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .set_imported_model_for_tests(Some(stub_imported_model_with_id("model-b")));
+        app.update();
+
+        let vm = app.world().resource::<UiViewModel>();
+        assert!(
+            !vm.expression.has_catalog,
+            "a mixed B/gA/A snapshot must not be operable"
+        );
+        assert!(vm.expression.model_id.is_none());
+        assert!(vm.expression.generation.is_none());
+        assert!(vm.expression.entries.is_empty());
+        assert!(vm.expression.selected.is_none());
+    }
+
+    #[test]
+    fn pending_model_bindings_are_not_used_for_old_generation_actions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = expression_action_app(path.clone());
+        let generation_a = app
+            .world()
+            .resource::<vtuber_avatar::AvatarLifecycle>()
+            .current_generation();
+
+        // A's default is Digit1=happy; B has a conflicting saved binding.
+        let mut b_bindings = ExpressionBindings::default();
+        b_bindings.assign(ExpressionKey::Digit1, "angry");
+        app.world_mut()
+            .resource_mut::<ExpressionBindingStore>()
+            .set("model-b".into(), b_bindings);
+
+        // Pending-import state: only the orchestrator model changed.
+        app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .set_imported_model_for_tests(Some(stub_imported_model_with_id("model-b")));
+
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ToggleExpressionKey {
+                generation: generation_a,
+                key: ExpressionKey::Digit1,
+            });
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::AssignExpressionKey {
+                model_id: "model-b".into(),
+                generation: generation_a,
+                key: ExpressionKey::Digit1,
+                expression: Some("smile".into()),
+            });
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ResetExpressionBindings {
+                model_id: "model-b".into(),
+                generation: generation_a,
+            });
+        app.update();
+
+        assert!(
+            take_manual_requests(&mut app).is_empty(),
+            "an A-generation toggle must not use pending B bindings"
+        );
+        let store = app.world().resource::<ExpressionBindingStore>();
+        assert_eq!(
+            store
+                .bindings_for("model-b")
+                .expect("B entry")
+                .expression_for(ExpressionKey::Digit1),
+            Some("angry"),
+            "B settings must be unchanged"
+        );
+        assert!(store.bindings_for("model-a").is_none());
+        assert!(
+            !path.is_file(),
+            "a mismatched action must not write the settings file"
+        );
+
+        // Complete the swap; normal B operations still work.
+        let root_b = app.world_mut().spawn_empty().id();
+        let generation_b = {
+            let mut lifecycle = app
+                .world_mut()
+                .resource_mut::<vtuber_avatar::AvatarLifecycle>();
+            lifecycle.request_replace(root_b).unwrap();
+            lifecycle.finish_unload();
+            lifecycle.start_binding(root_b);
+            let catalog = vtuber_avatar::AvatarExpressionCatalog::build(
+                "model-b".into(),
+                lifecycle.current_generation().0,
+                [vtuber_avatar::ExpressionCatalogInput {
+                    id: "angry",
+                    declared_as_preset: true,
+                    declared_morph_bind_count: 1,
+                    resolved_morph_bind_count: 1,
+                    declared_material_bind_count: 0,
+                    resolved_material_bind_count: 0,
+                    unresolved_material_bind_count: 0,
+                    unsupported_material_bind_count: 0,
+                }],
+            );
+            lifecycle.set_expression_catalog(Some(catalog));
+            lifecycle.finish_ready();
+            lifecycle.current_generation()
+        };
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ToggleExpressionKey {
+                generation: generation_b,
+                key: ExpressionKey::Digit1,
+            });
+        app.update();
+        assert_eq!(
+            take_manual_requests(&mut app),
+            vec![vtuber_avatar::ManualExpressionRequest::Toggle {
+                generation: generation_b,
+                expression: "angry".into(),
+            }]
         );
     }
 
