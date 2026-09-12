@@ -16,6 +16,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Pure observed-arm adapter for the existing two-bone IK.
+pub mod tracked_arm;
+
 pub mod arm;
 pub mod arm_motion_geometry;
 pub mod arm_pipeline;

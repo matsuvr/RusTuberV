@@ -15,6 +15,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Pure observed-arm retargeting and observation-rate filtering.
+pub mod arm_tracking;
+
 /// Axis-selective root compensation and virtual head/body targets (#165).
 pub mod body_targets;
 /// Calibration: neutral reference collection and session state.
