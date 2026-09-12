@@ -100,6 +100,13 @@ fn lit_color(uv: vec2<f32>) -> vec4<f32> {
             base_color.a = 1.0;
         }
     }
+    // Fully transparent fragments must not write depth. A blend material with
+    // `transparentWithZWrite` would otherwise let an overlay quad's transparent
+    // background occlude coplanar transparent layers behind it (for example a
+    // shape-key symbol quad drawn over a speech-bubble quad).
+    if((material.flags & ALPHA_MODE_BLEND) != 0u && base_color.a <= 0.0) {
+        discard;
+    }
 #ifdef OUTLINE_PASS
     if((material.flags & ALPHA_MODE_BLEND) != 0u) {
         base_color.a = 1.0;
