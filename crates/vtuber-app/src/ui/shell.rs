@@ -36,7 +36,7 @@ use crate::ui_model::{Pane, UiViewModel};
 use bevy::prelude::*;
 use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPostUpdateSet, EguiPrimaryContextPass,
-    EguiTextureHandle, EguiUserTextures, PrimaryEguiContext,
+    EguiTextureHandle, EguiUserTextures, PrimaryEguiContext, egui,
 };
 use vtuber_avatar::{
     AvatarMotionMirror, AvatarOutputCamera, AvatarOutputState, AvatarOutputTarget,
@@ -49,6 +49,14 @@ pub struct UiState {
     /// Commands awaiting the application orchestrator.
     pub pending_actions: Vec<UiAction>,
     pub(crate) controls_open: bool,
+    /// Avatar-only transition progress owned by egui: `0.0` is the full
+    /// workspace, `1.0` is avatar-only. Intermediate values mean the workspace
+    /// is collapsing (or expanding) and the monitor preview is expanding (or
+    /// collapsing) with it.
+    pub(crate) avatar_only_progress: f32,
+    /// Last laid-out avatar monitor image rectangle, reused as the starting
+    /// rect of the next preview transition.
+    pub(crate) monitor_image_rect: Option<egui::Rect>,
     pub(crate) camera_consent: CameraPreviewConsent,
     last_pane: Option<Pane>,
     pub(crate) import_requested: bool,
@@ -59,6 +67,8 @@ impl Default for UiState {
         Self {
             pending_actions: Vec::new(),
             controls_open: true,
+            avatar_only_progress: 0.0,
+            monitor_image_rect: None,
             camera_consent: CameraPreviewConsent::Hidden,
             last_pane: None,
             import_requested: false,
@@ -137,6 +147,14 @@ impl Plugin for UiShellPlugin {
             .resource_mut::<EguiGlobalSettings>()
             .auto_create_primary_context = false;
         app.add_systems(Update, attach_primary_egui_context_to_viewport_camera);
+        // One background color for the 3D avatar-only view and the egui
+        // transition mask, so the preview card can dissolve into the scene.
+        let background = super::studio::STUDIO_BACKGROUND;
+        app.insert_resource(ClearColor(Color::srgb_u8(
+            background.r(),
+            background.g(),
+            background.b(),
+        )));
         app.init_resource::<UiState>()
             .init_resource::<UiFonts>()
             .init_resource::<UiViewModel>()
@@ -433,8 +451,11 @@ fn ui_render_system(
     preview.visible = state.controls_open
         && matches!(vm.pane, Pane::Camera | Pane::Preview)
         && state.camera_consent == CameraPreviewConsent::Visible;
+    // A running transition samples the same avatar texture the monitor uses,
+    // so the offscreen render outlives the settings until the card is gone.
+    let transitioning = state.avatar_only_progress > 0.0 && state.avatar_only_progress < 1.0;
     if let Some(output) = output.as_deref_mut() {
-        output.set_preview_visible(state.controls_open && vm.avatar.is_ready);
+        output.set_preview_visible(vm.avatar.is_ready && (state.controls_open || transitioning));
     }
     // The UI requests a dialog; this boundary owns filesystem/dialog effects.
     if std::mem::take(&mut state.import_requested) {

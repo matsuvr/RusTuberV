@@ -38,7 +38,12 @@ fn page_title(pane: Pane, lang: UiLanguage) -> &'static str {
         Pane::Camera | Pane::Preview => lang.pick("カメラ", "Camera", "摄像头", "카메라"),
         Pane::Calibration => lang.pick("キャリブレーション", "Calibration", "校准", "캘리브레이션"),
         Pane::NdiOutput => lang.pick("出力", "Output", "输出", "출력"),
-        Pane::Settings => lang.pick("設定", "Settings", "设置", "설정"),
+        Pane::Settings => lang.pick(
+            "表情のキー割り当て",
+            "Expression Key Bindings",
+            "表情按键绑定",
+            "표정 키 할당",
+        ),
         Pane::Diagnostics => lang.pick("診断", "Diagnostics", "诊断", "진단"),
     }
 }
@@ -110,6 +115,24 @@ fn use_sidebar(width: f32) -> bool {
 
 const FLOATING_CONTROL_MARGIN: f32 = 16.0;
 const FLOATING_CONTROL_SIZE: f32 = 40.0;
+/// egui-managed duration of the workspace <-> avatar-only transition. Long
+/// enough that the workspace collapse into the settings icon stays readable.
+const AVATAR_ONLY_TRANSITION_SECONDS: f32 = 0.36;
+/// Corner radius shared by the avatar monitor card and the expanding preview.
+const MONITOR_CARD_RADIUS: u8 = 8;
+/// Background of the avatar-only view. `UiShellPlugin` installs the same color
+/// as Bevy's window `ClearColor`, so the preview card can dissolve into the 3D
+/// scene without a seam.
+pub(crate) const STUDIO_BACKGROUND: Color32 = Color32::from_rgb(43, 44, 47);
+
+/// Center of the floating settings control, and therefore the point the
+/// workspace collapses into when the avatar-only view opens.
+fn settings_icon_center(viewport: egui::Rect) -> egui::Pos2 {
+    egui::pos2(
+        viewport.right() - FLOATING_CONTROL_MARGIN - FLOATING_CONTROL_SIZE / 2.0,
+        viewport.top() + FLOATING_CONTROL_MARGIN + FLOATING_CONTROL_SIZE / 2.0,
+    )
+}
 
 fn paint_settings_glyph(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
     let stroke = egui::Stroke::new(1.7, color);
@@ -165,10 +188,13 @@ fn paint_license_glyph(painter: &egui::Painter, center: egui::Pos2, color: Color
 // The settings toggle keeps the top-right corner in both states: a floating
 // accent control while the avatar fills the window, and the toolbar's
 // rightmost button while the workspace is open (Apple HIG: consistent placement).
+// During a transition it fades and scales with `progress`, appearing to grow
+// out of the collapsing workspace it replaces.
 fn floating_settings_control(
     ctx: &egui::Context,
     state: &mut UiState,
     lang: UiLanguage,
+    progress: f32,
 ) -> egui::Response {
     let area = egui::Area::new(Id::new("floating_settings_control"))
         .anchor(
@@ -193,21 +219,30 @@ fn floating_settings_control(
                 accent.gamma_multiply(1.0 + 0.18 * hover)
             };
             let border = Color32::from_white_alpha((50.0 + 50.0 * hover) as u8);
-            let painter = ui.painter();
             let center = rect.center();
             let radius = FLOATING_CONTROL_SIZE / 2.0;
-            painter.add(
-                egui::epaint::Shadow {
-                    offset: [0, 3],
-                    blur: 10,
-                    spread: 0,
-                    color: Color32::from_black_alpha(80),
-                }
-                .as_shape(rect, radius),
-            );
-            painter.circle_filled(center, radius, fill);
-            painter.circle_stroke(center, radius - 0.5, egui::Stroke::new(1.0, border));
-            paint_settings_glyph(painter, center, Color32::from_white_alpha(235));
+            let scale = 0.75 + 0.25 * progress;
+            ui.scope(|ui| {
+                ui.multiply_opacity(progress);
+                ui.with_visual_transform(
+                    egui::emath::TSTransform::new(center.to_vec2() * (1.0 - scale), scale),
+                    |ui| {
+                        let painter = ui.painter();
+                        painter.add(
+                            egui::epaint::Shadow {
+                                offset: [0, 3],
+                                blur: 10,
+                                spread: 0,
+                                color: Color32::from_black_alpha(80),
+                            }
+                            .as_shape(rect, radius),
+                        );
+                        painter.circle_filled(center, radius, fill);
+                        painter.circle_stroke(center, radius - 0.5, egui::Stroke::new(1.0, border));
+                        paint_settings_glyph(painter, center, Color32::from_white_alpha(235));
+                    },
+                );
+            });
             response
         });
     let response = area
@@ -316,8 +351,9 @@ fn avatar_monitor(
     vm: &UiViewModel,
     texture: Option<(TextureId, VideoOutputProfile)>,
     max_width: f32,
+    draw_preview: bool,
     lang: UiLanguage,
-) {
+) -> Option<egui::Rect> {
     ui.label(
         RichText::new(lang.pick(
             "アバタープレビュー",
@@ -328,20 +364,30 @@ fn avatar_monitor(
         .strong(),
     );
     ui.add_space(8.0);
+    let mut preview_rect = None;
     if vm.avatar.is_ready {
         if let Some((texture, profile)) = texture {
             let width = ui.available_width().min(max_width);
             let height = width * profile.height as f32 / profile.width as f32;
             Frame::new()
                 .fill(Color32::from_gray(228))
-                .corner_radius(CornerRadius::same(8))
+                .corner_radius(CornerRadius::same(MONITOR_CARD_RADIUS))
                 .show(ui, |ui| {
-                    ui.add(
-                        egui::Image::from_texture((texture, vec2(width, height)))
-                            .corner_radius(CornerRadius::same(8)),
-                    );
+                    let size = vec2(width, height);
+                    // The expanding transition card owns the texture while the
+                    // workspace collapses; the monitor keeps its layout only,
+                    // so the preview is never drawn twice.
+                    let response = if draw_preview {
+                        ui.add(
+                            egui::Image::from_texture((texture, size))
+                                .corner_radius(CornerRadius::same(MONITOR_CARD_RADIUS)),
+                        )
+                    } else {
+                        ui.allocate_exact_size(size, egui::Sense::hover()).1
+                    };
+                    preview_rect = Some(response.rect);
                 });
-        } else {
+        } else if draw_preview {
             ui.spinner();
         }
     } else {
@@ -358,6 +404,7 @@ fn avatar_monitor(
         .small()
         .weak(),
     );
+    preview_rect
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -376,125 +423,232 @@ pub(crate) fn render_studio(
     font_error: Option<&str>,
     lang: UiLanguage,
 ) -> bool {
-    if !state.controls_open {
-        let response = floating_settings_control(ctx, state, lang);
+    let viewport = ctx.viewport_rect();
+    // `avatar_only` is the single linear animation clock: 0.0 is the
+    // workspace, 1.0 is the fullscreen avatar. egui stores it per `Id`,
+    // advances it while it requests repaints, and reverses from the current
+    // value when F1 toggles. Each element below shapes its own curve so the
+    // collapse into the settings icon is the primary, readable motion.
+    let avatar_only = ctx.animate_bool_with_time(
+        Id::new("studio_avatar_only_transition"),
+        !state.controls_open,
+        AVATAR_ONLY_TRANSITION_SECONDS,
+    );
+    state.avatar_only_progress = avatar_only;
+    let transitioning = avatar_only > 0.0 && avatar_only < 1.0;
+    // The workspace holds its size, then accelerates into the icon.
+    let collapse = egui::emath::easing::quadratic_in(avatar_only);
+    // The preview card trails the collapse, then finishes fullscreen.
+    let expand =
+        egui::emath::easing::cubic_out(egui::emath::remap_clamp(avatar_only, 0.3..=1.0, 0.0..=1.0));
+    // The workspace stays opaque while collapsing and only fades at the end,
+    // so the shrink itself is what the viewer tracks.
+    let fade = egui::emath::easing::quadratic_in(egui::emath::remap_clamp(
+        avatar_only,
+        0.6..=1.0,
+        0.0..=1.0,
+    ));
+    let floating_control =
+        (avatar_only > 0.0).then(|| floating_settings_control(ctx, state, lang, collapse));
+    if avatar_only >= 1.0 {
         let over_ui = ctx
             .input(|input| input.pointer.interact_pos())
-            .is_some_and(|pos| response.rect.contains(pos));
+            .is_some_and(|pos| floating_control.is_some_and(|control| control.rect.contains(pos)));
         return render_avatar_import_review(ctx, vm, state, lang, over_ui);
     }
-    let sidebar = use_sidebar(ctx.viewport_rect().width());
+    let sidebar = use_sidebar(viewport.width());
     let mut root = Ui::new(
         ctx.clone(),
         Id::new("studio_root"),
         egui::UiBuilder::new()
             .layer_id(egui::LayerId::background())
-            .max_rect(ctx.viewport_rect()),
+            .max_rect(viewport),
     );
-    egui::Panel::top("studio_toolbar")
-        .resizable(false)
-        .frame(panel_frame(250))
-        .show(&mut root, |ui| toolbar(ui, vm, state, sidebar, lang));
-    if sidebar {
-        egui::Panel::left("studio_sidebar")
-            .exact_size(200.0)
-            .resizable(false)
-            .frame(panel_frame(242))
-            .show(&mut root, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| navigation(ui, vm, state, lang));
-            });
-        egui::Panel::right("studio_monitor")
-            .exact_size(300.0)
+    let previous_monitor_rect = state.monitor_image_rect;
+    let mut monitor_rect = previous_monitor_rect;
+    let mut draw_workspace = |ui: &mut Ui| {
+        egui::Panel::top("studio_toolbar")
             .resizable(false)
             .frame(panel_frame(250))
-            .show(&mut root, |ui| {
-                avatar_monitor(ui, vm, avatar_texture, 268.0, lang)
-            });
-    } else {
-        // On smaller windows keep the monitor outside the settings scroll area.
-        egui::Panel::top("studio_compact_monitor")
-            .resizable(false)
-            .frame(panel_frame(250))
-            .show(&mut root, |ui| {
-                avatar_monitor(ui, vm, avatar_texture, 200.0, lang)
-            });
-    }
-    egui::CentralPanel::default()
-        .frame(panel_frame(247))
-        .show(&mut root, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt(("studio_detail", vm.pane as u8))
-                .auto_shrink([false, false])
+            .show(ui, |ui| toolbar(ui, vm, state, sidebar, lang));
+        if sidebar {
+            egui::Panel::left("studio_sidebar")
+                .exact_size(200.0)
+                .resizable(false)
+                .frame(panel_frame(242))
                 .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new(page_title(vm.pane, lang)).size(26.0).strong());
-                    if let Some(detail) = font_error {
-                        section(ui, "Font could not be loaded", |ui| {
-                            ui.label(detail);
-                            ui.horizontal(|ui| {
-                                if ui.button("Japanese").clicked() {
-                                    state.emit(UiAction::SetLanguage(UiLanguage::Ja));
-                                }
-                                if ui.button("English").clicked() {
-                                    state.emit(UiAction::SetLanguage(UiLanguage::En));
-                                }
-                            });
-                        });
-                    }
-                    if let Some(error) = error {
-                        section(
-                            ui,
-                            lang.pick(
-                                "操作を確認してください",
-                                "Check this operation",
-                                "请检查此操作",
-                                "작업을 확인하세요",
-                            ),
-                            |ui| {
-                                ui.label(&error.user_message);
-                                for action in &error.suggested_actions {
-                                    let label = match action {
-                                        UiAction::RefreshCameras => lang.pick(
-                                            "カメラを再検出",
-                                            "Refresh cameras",
-                                            "重新检测摄像头",
-                                            "카메라 새로 고침",
-                                        ),
-                                        UiAction::RetryAfterError => {
-                                            lang.pick("再試行", "Retry", "重试", "다시 시도")
-                                        }
-                                        UiAction::DismissError => {
-                                            lang.pick("閉じる", "Dismiss", "关闭", "닫기")
-                                        }
-                                        _ => continue,
-                                    };
-                                    if ui.button(label).clicked() {
-                                        state.emit(action.clone());
-                                    }
-                                }
-                            },
-                        );
-                    }
-                    match vm.pane {
-                        Pane::Studio => overview(ui, vm, state, dialog_active, lang),
-                        Pane::Avatar => {
-                            avatar_page(ui, vm, state, avatar_mirror, dialog_active, lang)
-                        }
-                        Pane::Camera | Pane::Preview => {
-                            camera_page(ui, vm, state, preview, landmarks, camera_texture, lang)
-                        }
-                        Pane::Calibration => calibration_page(ui, vm, state, lang),
-                        Pane::NdiOutput => output_page(ui, vm, state, lang),
-                        Pane::Settings => settings_page(ui, vm, state, lang),
-                        Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
-                    }
-                    ui.add_space(16.0);
+                    egui::ScrollArea::vertical().show(ui, |ui| navigation(ui, vm, state, lang));
                 });
-        });
+            egui::Panel::right("studio_monitor")
+                .exact_size(300.0)
+                .resizable(false)
+                .frame(panel_frame(250))
+                .show(ui, |ui| {
+                    if let Some(rect) =
+                        avatar_monitor(ui, vm, avatar_texture, 268.0, !transitioning, lang)
+                    {
+                        monitor_rect = Some(rect);
+                    }
+                });
+        } else {
+            // On smaller windows keep the monitor outside the settings scroll area.
+            egui::Panel::top("studio_compact_monitor")
+                .resizable(false)
+                .frame(panel_frame(250))
+                .show(ui, |ui| {
+                    if let Some(rect) =
+                        avatar_monitor(ui, vm, avatar_texture, 200.0, !transitioning, lang)
+                    {
+                        monitor_rect = Some(rect);
+                    }
+                });
+        }
+        egui::CentralPanel::default()
+            .frame(panel_frame(247))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(("studio_detail", vm.pane as u8))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(page_title(vm.pane, lang)).size(26.0).strong());
+                        if let Some(detail) = font_error {
+                            section(ui, "Font could not be loaded", |ui| {
+                                ui.label(detail);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Japanese").clicked() {
+                                        state.emit(UiAction::SetLanguage(UiLanguage::Ja));
+                                    }
+                                    if ui.button("English").clicked() {
+                                        state.emit(UiAction::SetLanguage(UiLanguage::En));
+                                    }
+                                });
+                            });
+                        }
+                        if let Some(error) = error {
+                            section(
+                                ui,
+                                lang.pick(
+                                    "操作を確認してください",
+                                    "Check this operation",
+                                    "请检查此操作",
+                                    "작업을 확인하세요",
+                                ),
+                                |ui| {
+                                    ui.label(&error.user_message);
+                                    for action in &error.suggested_actions {
+                                        let label = match action {
+                                            UiAction::RefreshCameras => lang.pick(
+                                                "カメラを再検出",
+                                                "Refresh cameras",
+                                                "重新检测摄像头",
+                                                "카메라 새로 고침",
+                                            ),
+                                            UiAction::RetryAfterError => {
+                                                lang.pick("再試行", "Retry", "重试", "다시 시도")
+                                            }
+                                            UiAction::DismissError => {
+                                                lang.pick("閉じる", "Dismiss", "关闭", "닫기")
+                                            }
+                                            _ => continue,
+                                        };
+                                        if ui.button(label).clicked() {
+                                            state.emit(action.clone());
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                        match vm.pane {
+                            Pane::Studio => overview(ui, vm, state, dialog_active, lang),
+                            Pane::Avatar => {
+                                avatar_page(ui, vm, state, avatar_mirror, dialog_active, lang)
+                            }
+                            Pane::Camera | Pane::Preview => {
+                                camera_page(ui, vm, state, preview, landmarks, camera_texture, lang)
+                            }
+                            Pane::Calibration => calibration_page(ui, vm, state, lang),
+                            Pane::NdiOutput => output_page(ui, vm, state, lang),
+                            Pane::Settings => settings_page(ui, vm, state, lang),
+                            Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
+                        }
+                        ui.add_space(16.0);
+                    });
+            });
+    };
+    if transitioning {
+        paint_avatar_transition(
+            &mut root,
+            viewport,
+            expand,
+            avatar_texture,
+            previous_monitor_rect,
+        );
+        let transform = egui::emath::TSTransform::new(
+            settings_icon_center(viewport).to_vec2() * collapse,
+            1.0 - collapse,
+        );
+        root.multiply_opacity(1.0 - fade);
+        root.with_visual_transform(transform, |ui| draw_workspace(ui));
+        transition_input_blocker(ctx, viewport);
+    } else {
+        draw_workspace(&mut root);
+    }
+    state.monitor_image_rect = monitor_rect;
     let over_ui = ctx
         .input(|input| input.pointer.interact_pos())
-        .is_some_and(|pos| ctx.viewport_rect().contains(pos));
+        .is_some_and(|pos| viewport.contains(pos));
     render_avatar_import_review(ctx, vm, state, lang, over_ui)
+}
+
+/// Paints the avatar preview card expanding from the monitor rectangle to the
+/// whole viewport. Drawn before the workspace, so the collapsing panels stay
+/// on top of it while it grows underneath; `expand` is already delayed and
+/// eased so the workspace collapse remains the primary motion.
+fn paint_avatar_transition(
+    root: &mut Ui,
+    viewport: egui::Rect,
+    expand: f32,
+    texture: Option<(TextureId, VideoOutputProfile)>,
+    monitor_rect: Option<egui::Rect>,
+) {
+    // Mask the live 3D scene with the avatar-only background: the workspace is
+    // translucent during the transition, and the card must be the only avatar
+    // surface the viewer can read.
+    root.painter()
+        .rect_filled(viewport, CornerRadius::ZERO, STUDIO_BACKGROUND);
+    let (Some((texture, _profile)), Some(monitor)) = (texture, monitor_rect) else {
+        return;
+    };
+    let card = monitor.lerp_towards(&viewport, expand);
+    let radius = ((1.0 - expand) * f32::from(MONITOR_CARD_RADIUS)).round() as u8;
+    let background_alpha = (255.0 * (1.0 - expand)).round() as u8;
+    root.painter().rect_filled(
+        card,
+        CornerRadius::same(radius),
+        Color32::from_rgba_unmultiplied(228, 228, 228, background_alpha),
+    );
+    let mut overlay = root.new_child(
+        egui::UiBuilder::new()
+            .id_salt("studio_transition_preview")
+            .max_rect(viewport),
+    );
+    overlay.put(
+        card,
+        egui::Image::from_texture((texture, card.size())).corner_radius(CornerRadius::same(radius)),
+    );
+}
+
+/// Swallows pointer input while the workspace is visually transformed away
+/// from its layout rectangles. The floating settings control lives in a higher
+/// layer and therefore stays clickable.
+fn transition_input_blocker(ctx: &egui::Context, viewport: egui::Rect) {
+    egui::Area::new(Id::new("studio_transition_input_blocker"))
+        .order(egui::Order::Middle)
+        .fixed_pos(viewport.min)
+        .show(ctx, |ui| {
+            ui.allocate_exact_size(viewport.size(), egui::Sense::click_and_drag());
+        });
 }
 
 /// Renders the license review sheet on top of the workspace when a model is
@@ -1561,6 +1715,13 @@ fn expression_settings_section(
             "표정 및 키 할당",
         ),
         |ui| {
+            ui.label(lang.pick(
+                "ESCまたはスペースキーで標準の表情に戻ります",
+                "Press Escape or Space to return to the standard expression.",
+                "按 Esc 或空格键可恢复为标准表情。",
+                "Esc 또는 스페이스 키를 누르면 표준 표정으로 돌아갑니다.",
+            ));
+            ui.add_space(6.0);
             if !vm.expression.has_catalog {
                 let message = if vm.avatar.imported_model.is_some() {
                     lang.pick(
@@ -1841,7 +2002,8 @@ pub(crate) fn expression_key_from_egui(key: egui::Key) -> Option<ExpressionKey> 
     })
 }
 
-/// Emits expression toggles for new, unmodified physical key-downs.
+/// Emits expression toggles for new, unmodified physical key-downs, and a
+/// manual clear for unmodified Escape/Space.
 ///
 /// The gate mirrors the product contract: window focused, avatar ready, no
 /// text edit / IME / popup / modal / file dialog owning the keyboard, no
@@ -1866,7 +2028,7 @@ pub(crate) fn expression_key_input(
     let Some(generation) = vm.expression.generation else {
         return;
     };
-    let toggles: Vec<ExpressionKey> = ctx.input(|input| {
+    let actions: Vec<UiAction> = ctx.input(|input| {
         if !input.focused {
             return Vec::new();
         }
@@ -1880,13 +2042,19 @@ pub(crate) fn expression_key_input(
                     repeat: false,
                     modifiers,
                     ..
-                } if modifiers.is_none() => expression_key_from_egui(*key),
+                } if modifiers.is_none() => match key {
+                    egui::Key::Escape | egui::Key::Space => {
+                        Some(UiAction::ClearManualExpression { generation })
+                    }
+                    key => expression_key_from_egui(*key)
+                        .map(|key| UiAction::ToggleExpressionKey { generation, key }),
+                },
                 _ => None,
             })
             .collect()
     });
-    for key in toggles {
-        state.emit(UiAction::ToggleExpressionKey { generation, key });
+    for action in actions {
+        state.emit(action);
     }
 }
 
@@ -1960,11 +2128,11 @@ mod tests {
         // Frame 1 is the area sizing pass (invisible); frame 2 registers the
         // interactive widget for egui's next-frame hit test.
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja);
+            floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja, 1.0);
         });
         let mut rect = egui::Rect::NOTHING;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            rect = floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja).rect;
+            rect = floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja, 1.0).rect;
         });
         assert!(!state.controls_open);
         assert!(rect.width() > 0.0 && rect.height() > 0.0);
@@ -1980,9 +2148,95 @@ mod tests {
             });
         }
         let _ = ctx.run_ui(input, |ui| {
-            floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja);
+            floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja, 1.0);
         });
         assert!(state.controls_open);
+    }
+
+    #[test]
+    fn transition_card_expands_from_the_monitor_to_the_whole_viewport() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1280.0, 720.0));
+        let monitor = egui::Rect::from_min_size(egui::pos2(940.0, 60.0), vec2(268.0, 150.75));
+        assert_eq!(monitor.lerp_towards(&viewport, 0.0), monitor);
+        assert_eq!(monitor.lerp_towards(&viewport, 1.0), viewport);
+        let half = monitor.lerp_towards(&viewport, 0.5);
+        assert!(half.min.x < monitor.min.x && half.max.x > monitor.max.x);
+        assert!(half.min.y < monitor.min.y && half.max.y > monitor.max.y);
+    }
+
+    #[test]
+    fn collapse_transform_converges_on_the_settings_icon() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1280.0, 720.0));
+        let icon = settings_icon_center(viewport);
+        let transformed = |progress: f32| {
+            let transform = egui::emath::TSTransform::new(
+                settings_icon_center(viewport).to_vec2() * progress,
+                1.0 - progress,
+            );
+            (
+                transform.mul_pos(viewport.min),
+                transform.mul_pos(viewport.max),
+            )
+        };
+        assert_eq!(transformed(0.0), (viewport.min, viewport.max));
+        let (min, max) = transformed(1.0);
+        assert!(min.distance(icon) < f32::EPSILON);
+        assert!(max.distance(icon) < f32::EPSILON);
+        let (min, max) = transformed(0.5);
+        assert!(min.x > viewport.min.x && max.x < viewport.max.x);
+    }
+
+    #[test]
+    fn transition_advances_and_paints_the_collapsing_workspace() {
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(1280.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let mut vm = UiViewModel::default();
+        vm.avatar.is_ready = true;
+        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+        let mut state = UiState::default();
+        let diagnostics = DiagnosticsSnapshot::default();
+        let preview = PreviewState::default();
+        let landmarks = PreviewLandmarkState::default();
+        let render = |state: &mut UiState| {
+            let _ = ctx.run_ui(input(), |ui| {
+                render_studio(
+                    ui.ctx(),
+                    &vm,
+                    state,
+                    &diagnostics,
+                    None,
+                    &preview,
+                    &landmarks,
+                    AvatarMotionMirror::default(),
+                    None,
+                    Some((egui::TextureId::User(0), VideoOutputProfile::default())),
+                    false,
+                    None,
+                    UiLanguage::Ja,
+                );
+            });
+        };
+        render(&mut state);
+        assert_eq!(state.avatar_only_progress, 0.0);
+        assert!(state.monitor_image_rect.is_some());
+        state.set_controls_open(false);
+        let mut saw_mid_transition = false;
+        for _ in 0..40 {
+            render(&mut state);
+            let progress = state.avatar_only_progress;
+            saw_mid_transition |= progress > 0.0 && progress < 1.0;
+        }
+        assert!(
+            saw_mid_transition,
+            "the transition must animate over frames"
+        );
+        assert_eq!(state.avatar_only_progress, 1.0);
     }
 
     #[test]
@@ -2126,6 +2380,78 @@ mod tests {
                 generation: test_generation(),
                 key: ExpressionKey::Digit1
             }]
+        );
+    }
+
+    #[test]
+    fn expression_key_input_escape_and_space_clear_the_manual_expression() {
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![
+                expression_key_event(egui::Key::Escape, false, egui::Modifiers::NONE),
+                expression_key_event(egui::Key::Space, false, egui::Modifiers::NONE),
+            ]),
+            false,
+        );
+        assert_eq!(
+            state.take_actions(),
+            vec![
+                UiAction::ClearManualExpression {
+                    generation: test_generation()
+                },
+                UiAction::ClearManualExpression {
+                    generation: test_generation()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn expression_key_input_ignores_modified_and_repeated_clear_keys() {
+        let ctx = egui::Context::default();
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        // Frame 1: Escape goes down once and clears.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Escape,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert_eq!(state.take_actions().len(), 1);
+
+        // Frame 2: the OS repeats the held Escape. egui marks the event as a
+        // repeat, which must not clear again.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Escape,
+                true,
+                egui::Modifiers::NONE,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert!(
+            state.take_actions().is_empty(),
+            "OS key repeat never clears again"
+        );
+
+        // A modified Space stays with the existing shortcut handling.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Space,
+                false,
+                egui::Modifiers::SHIFT,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert!(
+            state.take_actions().is_empty(),
+            "modifiers never clear the expression"
         );
     }
 
