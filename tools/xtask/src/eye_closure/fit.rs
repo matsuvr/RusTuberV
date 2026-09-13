@@ -732,6 +732,7 @@ mod end_to_end {
             labels: Some(root.join("labels.csv")),
             split: Some(root.join("split.json")),
             profile: None,
+            config_dir: None,
             output,
             project_root: root.to_path_buf(),
         }

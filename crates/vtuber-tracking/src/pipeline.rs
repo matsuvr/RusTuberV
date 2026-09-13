@@ -25,7 +25,10 @@ use vtuber_core::types::{
     AvatarControlFrame, FrameSeq, GazeSignal, HeadPose, HeadTranslationSignal, Landmark3,
     LandmarkSchemaId, MonoTimeNs, NamedCoefficient, RawFaceObservation, TrackingState,
 };
-use vtuber_core::{Arkit52Coefficients, CameraFaceTransform, FaceTrackingSample, NormalizedRect};
+use vtuber_core::{
+    Arkit52Coefficients, ArkitBlendshape, CameraFaceTransform, FaceTrackingSample,
+    MediaPipeBlendshape, NormalizedRect,
+};
 
 use crate::calibration::{GazeNeutralBaseline, NeutralProfile, NeutralValidationSettings};
 use crate::confidence::{
@@ -35,6 +38,9 @@ use crate::confidence::{
 use crate::expressions::{
     fuse_binocular_gaze, map_mediapipe_perfect_sync, map_mediapipe_raw_expressions,
     observe_mediapipe_gaze,
+};
+use crate::eye_closure::{
+    EyeClosureObservation, EyeClosureState, EyeClosureThresholds, EyeClosureTracker,
 };
 use crate::filter::{
     DetailedExpressionFilter, ExpressionCalibration, ExpressionCalibrationError, ExpressionFilter,
@@ -447,6 +453,9 @@ struct MediapipeSampleCache {
     observation: RawFaceObservation,
     gaze: GazeSignal,
     detailed_input: Arkit52Coefficients,
+    raw_blink_left: f32,
+    raw_blink_right: f32,
+    closure: Option<EyeClosureState>,
     pose_result: Option<Result<HeadPoseFrame, HeadPoseFailure>>,
 }
 
@@ -463,6 +472,9 @@ impl MediapipeSampleCache {
             observation: media_pipe_sample_to_observation(sample),
             gaze: calibrated_mediapipe_gaze(sample, gaze_baseline),
             detailed_input: map_mediapipe_perfect_sync(&sample.blendshapes),
+            raw_blink_left: sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkLeft),
+            raw_blink_right: sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkRight),
+            closure: None,
             pose_result: neutral
                 .map(|neutral| media_pipe_pose_frame(sample, neutral, MonoTimeNs(0))),
         }
@@ -498,6 +510,7 @@ pub struct TrackingPipeline {
     state_machine: TrackingStateMachine,
     loss_recovery: LossRecovery,
     mediapipe_cache: Option<MediapipeSampleCache>,
+    eye_closure: Option<EyeClosureTracker>,
 }
 
 impl TrackingPipeline {
@@ -532,6 +545,7 @@ impl TrackingPipeline {
             state_machine,
             loss_recovery,
             mediapipe_cache: None,
+            eye_closure: None,
         })
     }
 
@@ -545,6 +559,27 @@ impl TrackingPipeline {
     #[must_use]
     pub fn is_calibrated(&self) -> bool {
         self.profile.is_some()
+    }
+
+    /// Installs validated per-eye closure thresholds.
+    ///
+    /// Passing thresholds here is the only way to enable correction; there is
+    /// no default threshold and no automatic fallback.
+    pub fn set_eye_closure_thresholds(&mut self, thresholds: EyeClosureThresholds) {
+        self.eye_closure = Some(EyeClosureTracker::new(thresholds));
+        self.mediapipe_cache = None;
+    }
+
+    /// Disables eye-closure correction and drops its latched state.
+    pub fn clear_eye_closure(&mut self) {
+        self.eye_closure = None;
+        self.mediapipe_cache = None;
+    }
+
+    /// Returns `true` when an eye-closure profile is active.
+    #[must_use]
+    pub fn eye_closure_active(&self) -> bool {
+        self.eye_closure.is_some()
     }
 
     /// Applies a new neutral profile and resets filters so that smoothing
@@ -565,6 +600,7 @@ impl TrackingPipeline {
         self.head_filter.reset();
         self.translation_filter.reset();
         self.gaze_filter.reset();
+        self.reset_eye_closure_state();
         self.mediapipe_cache = None;
         self.profile = Some(profile);
         Ok(())
@@ -581,6 +617,7 @@ impl TrackingPipeline {
             self.config.expression_filter,
         );
         self.detailed_expression_filter.reset();
+        self.reset_eye_closure_state();
         self.mediapipe_cache = None;
     }
 
@@ -594,6 +631,7 @@ impl TrackingPipeline {
         self.gaze_filter.reset();
         self.expression_filter.reset();
         self.detailed_expression_filter.reset();
+        self.reset_eye_closure_state();
         self.mediapipe_cache = None;
         self.confidence_gate.reset();
         self.state_machine = TrackingStateMachine::new(self.config.state_machine)
@@ -605,6 +643,13 @@ impl TrackingPipeline {
     /// Resets only eye-gaze smoothing after a neutral gaze baseline change.
     pub fn reset_gaze_filter(&mut self) {
         self.gaze_filter.reset();
+    }
+
+    /// Drops the latched closure without changing the installed thresholds.
+    fn reset_eye_closure_state(&mut self) {
+        if let Some(tracker) = self.eye_closure.as_mut() {
+            tracker.reset();
+        }
     }
 
     /// Runs one frame through the pipeline.
@@ -634,6 +679,7 @@ impl TrackingPipeline {
 
         self.update_with_pose(
             observation,
+            None,
             None,
             None,
             now,
@@ -677,13 +723,39 @@ impl TrackingPipeline {
         if !cache_valid {
             cache =
                 sample.map(|sample| MediapipeSampleCache::build(sample, neutral, gaze_baseline));
+            if let (Some(cached), Some(tracker)) = (cache.as_mut(), self.eye_closure.as_mut()) {
+                cached.closure = Some(tracker.observe(
+                    cached.source_seq.0,
+                    EyeClosureObservation {
+                        left_openness: Some(1.0 - cached.raw_blink_left),
+                        right_openness: Some(1.0 - cached.raw_blink_right),
+                    },
+                ));
+            }
+        }
+        if sample.is_none() {
+            // Face loss drops the latch; a later reacquisition is judged from
+            // the current eyes, never from a stale closure.
+            self.reset_eye_closure_state();
         }
 
         let update = match &cache {
             Some(cached) => {
-                let detailed = self
+                let mut detailed = self
                     .detailed_expression_filter
                     .update(&cached.detailed_input, now);
+                if let Some(closure) = cached.closure {
+                    if closure.left.is_closed() {
+                        detailed = self
+                            .detailed_expression_filter
+                            .force_channel(ArkitBlendshape::EyeBlinkLeft, 1.0);
+                    }
+                    if closure.right.is_closed() {
+                        detailed = self
+                            .detailed_expression_filter
+                            .force_channel(ArkitBlendshape::EyeBlinkRight, 1.0);
+                    }
+                }
                 let pose_result = cached.pose_result.map(|result| {
                     result.map(|frame| HeadPoseFrame {
                         produced_at: now,
@@ -694,13 +766,14 @@ impl TrackingPipeline {
                     Some(&cached.observation),
                     Some(cached.gaze),
                     Some(detailed),
+                    cached.closure,
                     now,
                     dt,
                     pose_result,
                     neutral.is_some(),
                 )
             }
-            None => self.update_with_pose(None, None, None, now, dt, None, neutral.is_some()),
+            None => self.update_with_pose(None, None, None, None, now, dt, None, neutral.is_some()),
         };
         self.mediapipe_cache = cache;
         update
@@ -712,6 +785,7 @@ impl TrackingPipeline {
         observation: Option<&RawFaceObservation>,
         direct_gaze: Option<GazeSignal>,
         detailed_face: Option<Arkit52Coefficients>,
+        closure: Option<EyeClosureState>,
         now: MonoTimeNs,
         dt: Duration,
         pose_result: Option<Result<HeadPoseFrame, HeadPoseFailure>>,
@@ -747,6 +821,7 @@ impl TrackingPipeline {
                     self.expression_filter.reset();
                     self.detailed_expression_filter.reset();
                     self.gaze_filter.reset();
+                    self.reset_eye_closure_state();
                 }
                 crate::state_machine::TrackingAction::StartHold
                 | crate::state_machine::TrackingAction::StartReturnToNeutral => {}
@@ -766,7 +841,17 @@ impl TrackingPipeline {
         let translation = self.translation_filter.update(raw_translation, now);
         let tracked = observation.map(|obs| {
             let head = self.update_head_filter(&pose_result, now);
-            let expressions = self.expression_filter.update(&obs.expressions, now);
+            let mut expressions = self.expression_filter.update(&obs.expressions, now);
+            if let Some(closure) = closure {
+                self.expression_filter
+                    .force_blink_closed(closure.left.is_closed(), closure.right.is_closed());
+                if closure.left.is_closed() {
+                    expressions.blink_left = 1.0;
+                }
+                if closure.right.is_closed() {
+                    expressions.blink_right = 1.0;
+                }
+            }
 
             AvatarControlFrame {
                 source_seq: obs.source_seq,

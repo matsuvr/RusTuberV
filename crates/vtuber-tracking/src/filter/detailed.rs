@@ -38,6 +38,18 @@ impl DetailedExpressionFilter {
         self.last_time = None;
     }
 
+    /// Forces one channel to an exact value and returns the new coefficients.
+    ///
+    /// Used to pin a latched-closed eye to `1.0` after smoothing, so the
+    /// attack/release state itself holds the endpoint instead of drifting back
+    /// toward the raw input on the next tick.
+    pub fn force_channel(&mut self, channel: ArkitBlendshape, value: f32) -> Arkit52Coefficients {
+        if let Some(slot) = self.values.get_mut(channel.index()) {
+            *slot = value.clamp(0.0, 1.0);
+        }
+        self.coefficients()
+    }
+
     /// Smooths `input` toward the stored state and returns the new values.
     pub fn update(&mut self, input: &Arkit52Coefficients, now: MonoTimeNs) -> Arkit52Coefficients {
         let Some(last_time) = self.last_time else {
