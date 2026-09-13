@@ -557,6 +557,15 @@ pub struct WorldPoint3 {
 }
 
 impl WorldPoint3 {
+    /// Builds a world point from meters in the task's world basis.
+    ///
+    /// This is not a normalized image point: callers must have a real
+    /// world-space measurement, which is why the constructor is named for it
+    /// rather than being a generic `new`.
+    pub const fn from_meters(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
     /// X in meters, image-right.
     pub const fn x(self) -> f32 {
         self.x
