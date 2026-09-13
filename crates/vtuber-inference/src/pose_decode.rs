@@ -1,5 +1,6 @@
 //! Pure extraction at the Pose result boundary. No model execution or avatar policy.
 
+use mediapipe::PoseLandmarkerResult;
 use vtuber_core::arm_tracking::{ArmLandmarks, PoseArmObservation, PoseWorldLandmark};
 
 /// MediaPipe Pose's fixed world-landmark count.
@@ -20,6 +21,40 @@ pub enum PoseDecodeError {
         /// Index in the MediaPipe Pose schema.
         index: usize,
     },
+    /// The one-person task returned a different number of people.
+    #[error("expected at most one person, received {actual}")]
+    PersonCount {
+        /// Number of people actually returned.
+        actual: usize,
+    },
+}
+
+/// Maps one owned MediaPipe Pose result to the engine-neutral arm observation.
+///
+/// The task runs with `num_poses = 1`, so an empty world-landmark array is a
+/// normal no-person result and more than one person is malformed external data,
+/// not a person to pick arbitrarily. Missing quality scores stay missing.
+pub fn decode_pose_result(
+    result: &PoseLandmarkerResult,
+) -> Result<Option<PoseArmObservation>, PoseDecodeError> {
+    let person = match result.pose_world_landmarks.as_slice() {
+        [] => return Ok(None),
+        [person] => person,
+        people => {
+            return Err(PoseDecodeError::PersonCount {
+                actual: people.len(),
+            });
+        }
+    };
+    let world: Vec<PoseWorldLandmark> = person
+        .iter()
+        .map(|landmark| PoseWorldLandmark {
+            meters: landmark.point.to_array(),
+            visibility: landmark.visibility.map(|value| value.get()),
+            presence: landmark.presence.map(|value| value.get()),
+        })
+        .collect();
+    decode_pose_arms(&world).map(Some)
 }
 
 /// Selects shoulders 11/12, elbows 13/14, and wrists 15/16, without mirroring.
@@ -131,5 +166,66 @@ mod tests {
                 Err(PoseDecodeError::InvalidLandmark { index })
             );
         }
+    }
+
+    fn world_landmark(x: f32) -> mediapipe::WorldLandmark {
+        mediapipe::WorldLandmark {
+            point: mediapipe::WorldPoint3::from_meters(x, 1.0, 2.0),
+            visibility: Some(mediapipe::Confidence::new(0.9).unwrap()),
+            presence: None,
+            name: None,
+        }
+    }
+
+    fn one_person() -> mediapipe::PoseLandmarkerResult {
+        mediapipe::PoseLandmarkerResult {
+            pose_landmarks: Vec::new(),
+            pose_world_landmarks: vec![
+                (0..POSE_LANDMARK_COUNT)
+                    .map(|index| world_landmark(index as f32))
+                    .collect(),
+            ],
+        }
+    }
+
+    #[test]
+    fn no_person_result_maps_to_none() {
+        assert_eq!(
+            decode_pose_result(&mediapipe::PoseLandmarkerResult::default()),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn one_person_maps_world_meters_and_keeps_missing_scores() {
+        let arms = decode_pose_result(&one_person()).unwrap().unwrap();
+        assert_eq!(arms.left.shoulder.meters, [11.0, 1.0, 2.0]);
+        assert_eq!(arms.right.wrist.meters, [16.0, 1.0, 2.0]);
+        assert_eq!(arms.left.shoulder.visibility, Some(0.9));
+        assert_eq!(arms.left.shoulder.presence, None);
+    }
+
+    #[test]
+    fn more_than_one_person_is_malformed_not_an_arbitrary_pick() {
+        let mut result = one_person();
+        result
+            .pose_world_landmarks
+            .push(result.pose_world_landmarks[0].clone());
+        assert_eq!(
+            decode_pose_result(&result),
+            Err(PoseDecodeError::PersonCount { actual: 2 })
+        );
+    }
+
+    #[test]
+    fn a_person_with_the_wrong_schema_is_an_error() {
+        let result = mediapipe::PoseLandmarkerResult {
+            pose_landmarks: Vec::new(),
+            pose_world_landmarks: vec![vec![world_landmark(0.0); 3]],
+        };
+        assert_eq!(
+            decode_pose_result(&result),
+            Err(PoseDecodeError::LandmarkCount { actual: 3 })
+        );
     }
 }

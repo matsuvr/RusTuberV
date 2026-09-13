@@ -18,6 +18,8 @@
 /// Pure extraction of arm observations from Pose world landmarks.
 pub mod pose_decode;
 
+pub use pose_decode::{PoseDecodeError, decode_pose_result};
+
 /// Tract-based inference backends.
 pub mod backend;
 /// Composite detector-to-landmark runtime with ROI recovery.
@@ -56,6 +58,9 @@ pub mod state;
 /// Inference worker loop.
 pub mod worker;
 
+pub use backend::mediapipe::{
+    MediaPipePoseRuntime, POSE_TASK_BUNDLE_FILE, POSE_TASK_BUNDLE_SHA256, embedded_pose_task_bundle,
+};
 #[cfg(feature = "onnx")]
 pub use composite::{
     CompositeFrameInference, CompositeRuntime, DetectorStage, LandmarkStage,
@@ -82,4 +87,7 @@ pub use runtime::{
     FaceInference, FaceTrackingInference, FrameFaceInference, FrameInferenceOutcome,
     InferenceOutcome,
 };
-pub use state::{FailureStage, InferenceWorkerState, InferenceWorkerStatus, WorkerFailure};
+pub use state::{
+    FailureStage, InferenceWorkerState, InferenceWorkerStatus, SharedStatus, WorkerFailure,
+};
+pub use worker::run_pose_worker;

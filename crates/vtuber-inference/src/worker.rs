@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use vtuber_core::arm_tracking::PoseArmFrame;
 use vtuber_core::types::{FrameSeq, RawFaceObservation, VideoFrame};
 use vtuber_core::{FaceTrackingOutcome, LatestSlot, ReadResult, StopToken};
 
@@ -760,6 +761,134 @@ fn load_mediapipe_runtime(task: &MediaPipeTaskSource) -> Result<Box<dyn FaceTrac
     Ok(Box::new(runtime))
 }
 
+/// Runs the Pose inference worker loop.
+///
+/// The worker is independent of the face worker: it owns a single
+/// [`crate::backend::mediapipe::MediaPipePoseRuntime`], reads the latest camera
+/// frame from its own capacity-one slot, and publishes the latest completed
+/// [`PoseArmFrame`]. A slow or failed Pose inference never blocks face
+/// publication; the application may start and stop this worker on its own.
+pub fn run_pose_worker(
+    stop: StopToken,
+    status: SharedStatus,
+    frame_slot: Arc<LatestSlot<VideoFrame>>,
+    output_slot: Arc<LatestSlot<PoseArmFrame>>,
+    task: &MediaPipeTaskSource,
+) -> InferenceWorkerResult {
+    update_status(&status, |s| {
+        s.set_pipeline_info(
+            Some("mediapipe-pose-landmarker".into()),
+            Some(crate::backend::mediapipe::POSE_TASK_BUNDLE_SHA256.into()),
+            None,
+        );
+        s.transition_to(InferenceWorkerState::LoadingModel);
+    });
+
+    let mut runtime = match load_pose_runtime(task) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            update_status(&status, |s| {
+                s.record_failure(FailureStage::ModelLoad, error);
+            });
+            return InferenceWorkerResult {
+                final_metrics: status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .metrics(),
+            };
+        }
+    };
+
+    update_status(&status, |s| {
+        s.transition_to(InferenceWorkerState::Running);
+        s.clear_consecutive_errors();
+    });
+
+    let mut last_gen = 0u64;
+    let mut last_processed_seq: Option<FrameSeq> = None;
+
+    'worker: while !stop.is_stopped() {
+        let started = Instant::now();
+        match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
+            Some(ReadResult::New(frame)) => {
+                last_gen = frame_slot.generation();
+                if let Some(last_seq) = last_processed_seq
+                    && frame.seq <= last_seq
+                {
+                    update_status(&status, |s| s.record_duplicate_suppressed());
+                    continue;
+                }
+                last_processed_seq = Some(frame.seq);
+
+                match runtime.infer(&frame) {
+                    Ok(pose) => {
+                        let elapsed = started.elapsed();
+                        let overwritten_before = output_slot.overwritten_count();
+                        if !output_slot.publish(pose) {
+                            update_status(&status, |s| s.record_dropped());
+                        }
+                        let overwritten_delta = output_slot
+                            .overwritten_count()
+                            .saturating_sub(overwritten_before);
+                        let finished_at = vtuber_core::monotonic_now();
+                        update_status(&status, |s| {
+                            s.record_output_overwritten(overwritten_delta);
+                            s.record_stage_duration(InferenceStage::Total, elapsed);
+                            s.record_processed(frame.seq, finished_at, elapsed);
+                            s.clear_consecutive_errors();
+                        });
+                    }
+                    Err(error) => {
+                        let halt = update_status(&status, |s| {
+                            s.record_frame_error(
+                                mediapipe_failure_stage(&error),
+                                error,
+                                MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
+                            )
+                        });
+                        if halt {
+                            break 'worker;
+                        }
+                    }
+                }
+            }
+            Some(ReadResult::Closed) => break,
+            None => {
+                if stop.is_stopped() {
+                    break;
+                }
+            }
+        }
+    }
+
+    update_status(&status, |s| {
+        if s.state != InferenceWorkerState::Failed {
+            s.transition_to(InferenceWorkerState::Stopping);
+        }
+    });
+
+    let final_metrics = status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .metrics();
+    InferenceWorkerResult { final_metrics }
+}
+
+fn load_pose_runtime(
+    task: &MediaPipeTaskSource,
+) -> Result<crate::backend::mediapipe::MediaPipePoseRuntime> {
+    match task {
+        MediaPipeTaskSource::Path(path) => {
+            crate::backend::mediapipe::MediaPipePoseRuntime::from_task_path(path)
+        }
+        MediaPipeTaskSource::Embedded => {
+            crate::backend::mediapipe::MediaPipePoseRuntime::from_task_bytes(
+                crate::backend::mediapipe::embedded_pose_task_bundle(),
+            )
+        }
+    }
+}
+
 fn update_status<F, R>(status: &SharedStatus, f: F) -> R
 where
     F: FnOnce(&mut crate::state::InferenceWorkerStatus) -> R,
@@ -813,15 +942,17 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use vtuber_core::arm_tracking::PoseArmFrame;
     use vtuber_core::types::{
         FrameSeq, LandmarkSchemaId, MonoTimeNs, PixelFormat, RawFaceObservation, VideoFrame,
     };
     use vtuber_core::{LatestSlot, ReadResult};
 
     use super::{
-        InferenceContext, MAX_CONSECUTIVE_RECOVERABLE_ERRORS, update_status, validate_observation,
+        InferenceContext, MAX_CONSECUTIVE_RECOVERABLE_ERRORS, run_pose_worker, update_status,
+        validate_observation,
     };
-    use crate::controller::{InferenceController, InferenceWorkerResult};
+    use crate::controller::{InferenceController, InferenceWorkerResult, MediaPipeTaskSource};
     use crate::descriptor::{
         ChannelOrder, ModelDescriptor, ModelFormat, Normalization, RuntimeSettings,
     };
@@ -2085,5 +2216,51 @@ mod tests {
             5,
             "runtime must be invoked exactly once per frame"
         );
+    }
+
+    #[test]
+    #[ignore = "requires the downloaded pose task bundle and a native libmediapipe"]
+    fn pose_worker_publishes_one_native_frame() {
+        let frame_slot: Arc<LatestSlot<VideoFrame>> = Arc::new(LatestSlot::new());
+        let output_slot: Arc<LatestSlot<PoseArmFrame>> = Arc::new(LatestSlot::new());
+        let status: SharedStatus = Arc::new(std::sync::Mutex::new(InferenceWorkerStatus::new()));
+
+        let handle = WorkerHandle::spawn("pose-worker-native", {
+            let frame_slot = Arc::clone(&frame_slot);
+            let output_slot = Arc::clone(&output_slot);
+            let status = Arc::clone(&status);
+            move |stop| {
+                run_pose_worker(
+                    stop,
+                    status,
+                    frame_slot,
+                    output_slot,
+                    &MediaPipeTaskSource::Embedded,
+                )
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if status.lock().unwrap().state == InferenceWorkerState::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            status.lock().unwrap().state,
+            InferenceWorkerState::Running,
+            "pose worker should reach Running"
+        );
+
+        frame_slot.publish(dummy_video_frame(1));
+        let output = output_slot.wait_read_after(0, Duration::from_secs(30));
+        assert!(
+            matches!(output, Some(ReadResult::New(_))),
+            "pose worker should publish one completed frame"
+        );
+
+        handle.stop();
+        let _ = handle.join();
     }
 }
