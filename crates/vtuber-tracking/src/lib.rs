@@ -29,6 +29,8 @@ pub mod calibration;
 pub mod confidence;
 /// MediaPipe blendshape and gaze mapping.
 pub mod expressions;
+/// Per-eye closure judgement and profile validation (Issues #52/#53).
+pub mod eye_closure;
 /// Tracking filters: rotation smoothing and expression filtering.
 pub mod filter;
 /// Loss hold, neutral decay, and recovery blend.
@@ -68,6 +70,13 @@ pub use expressions::{
     BinocularGazeObservation, PerEyeGazeObservation, fuse_binocular_gaze,
     map_mediapipe_expressions, map_mediapipe_gaze, map_mediapipe_perfect_sync,
     map_mediapipe_raw_expressions, observe_mediapipe_gaze, parse_mediapipe_blendshapes,
+};
+pub use eye_closure::{
+    EYE_CLOSURE_ALGORITHM_VERSION, EYE_CLOSURE_FEATURE, EYE_CLOSURE_PROFILE_SCHEMA_VERSION,
+    EyeClosureFingerprints, EyeClosureObservation, EyeClosureProfileDocument,
+    EyeClosureProfileError, EyeClosureState, EyeClosureThresholds, EyeClosureTracker,
+    EyeClosureVerificationStatus, EyeOpenness, EyeSide, EyeThreshold, EyeThresholdError,
+    EyeThresholdValues,
 };
 pub use filter::{
     DetailedExpressionFilter, ExpressionCalibration, ExpressionCalibrationError, ExpressionChannel,
