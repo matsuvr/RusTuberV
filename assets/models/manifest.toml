@@ -1,13 +1,28 @@
 # Face inference model manifest for RusTuberV G0-05.
 
 [metadata]
-name = "RusTuberV face inference models"
+name = "RusTuberV inference models"
 version = "0.1.0"
 downloaded_at = "2026-08-05"
 notes = [
     "MediaPipe Face Landmarker is the sole production face backend through the pinned native binding in ADR-009.",
+    "MediaPipe Pose Landmarker is the sole production arm-observation backend through the same binding.",
     "The task bundle is consumed as a bundle; internal models are not extracted into an application pipeline.",
     "The legacy composite artifacts below are retained only for explicit research/evaluation commands.",
+]
+
+[[artifacts]]
+file = "pose_landmarker_full.task"
+sha256 = "4EAA5EB7A98365221087693FCC286334CF0858E2EB6E15B506AA4A7ECDCEC4AD"
+purpose = "Official MediaPipe Pose Landmarker Full task bundle (float16)"
+source = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+upstream = "https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker"
+license = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0.html"
+redistribution = "allowed under Apache-2.0; prefer original upstream URL for updates"
+notes = [
+    "Arm-observation pose backend; verified by SHA-256 before worker construction.",
+    "Full is the initial model; Lite is a same-input comparison in evaluation, never a silent runtime fallback.",
 ]
 
 [[artifacts]]

@@ -32,6 +32,17 @@ The Rust sender boundary uses
 under Apache-2.0. Its source and license are obtained through Cargo; the NDI
 SDK runtime remains a separately governed distribution component.
 
+## mediapipe-rs (vendored)
+
+`vendor/mediapipe-rs` is a copy of
+[nikicat/mediapipe-rs](https://github.com/nikicat/mediapipe-rs) at revision
+`527037fa0fe1339750140283930bbb9560460e9e`, licensed under Apache-2.0. Its
+`LICENSE` and `NOTICE` files are retained in the vendored directory. The copy
+adds the MediaPipe Pose Landmarker bindings alongside the existing face tasks;
+the upstream face API and loader are unchanged. See ADR-009. The native
+`libmediapipe` library that binds to is the official MediaPipe Tasks 0.10.35
+build and is fetched, not redistributed, by this repository.
+
 ## Google Neural Mesh (GNM) sparse landmark data
 
 `crates/vtuber-gnm/assets/head_sparse_68.txt` is copied from the Google GNM

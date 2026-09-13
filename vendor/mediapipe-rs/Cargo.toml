@@ -1,0 +1,43 @@
+[package]
+name = "mediapipe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Safe Rust bindings to the Google MediaPipe Tasks C API"
+repository = "https://github.com/nikicat/mediapipe-rs"
+keywords = ["mediapipe", "computer-vision", "face-detection", "landmarks", "ml"]
+categories = ["computer-vision", "api-bindings"]
+exclude = ["/models", "/vendor/lib"]
+
+[features]
+default = ["download"]
+# Fetch libmediapipe from the official PyPI wheel into the XDG cache on first use.
+# Turn off for offline/vendored deployments; then $MEDIAPIPE_LIB or a system path
+# must supply the library.
+download = ["dep:ureq", "dep:zip", "dep:sha2"]
+
+[dependencies]
+libloading = "0.8"
+thiserror = "2"
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
+zip = { version = "6", optional = true, default-features = false, features = ["deflate"] }
+sha2 = { version = "0.10", optional = true }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+# These are set at the level they are because the codebase currently satisfies
+# them. Each one is a convention from CONTRIBUTING.md that would otherwise decay
+# into a comment nobody enforces.
+[lints.clippy]
+# Every unsafe block explains what makes it sound. This is the single most
+# valuable lint here: the crate is nothing but FFI.
+undocumented_unsafe_blocks = "deny"
+# A silently truncated length handed to C is read as a length. Both sites that
+# tripped this are now explicit checks returning Error::TooLarge.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+ptr_as_ptr = "warn"
+semicolon_if_nothing_returned = "warn"
