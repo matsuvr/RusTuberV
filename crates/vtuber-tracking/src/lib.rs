@@ -18,6 +18,9 @@
 /// Pure observed-arm retargeting and observation-rate filtering.
 pub mod arm_tracking;
 
+/// Pure quality evaluation of a recorded arm sequence (Issue #50).
+pub mod arm_evaluation;
+
 /// Axis-selective root compensation and virtual head/body targets (#165).
 pub mod body_targets;
 /// Calibration: neutral reference collection and session state.
@@ -45,6 +48,7 @@ pub mod translation;
 /// Scale-aware soft-cap and dt-aware filtering for translation (Issue #164).
 pub mod translation_shaping;
 
+pub use arm_evaluation::{ArmEvaluationSample, ArmEvaluationSummary, evaluate_arm_sequence};
 pub use body_targets::{
     BodyTranslationCompensation, TranslationMeters, VirtualBodyProfile, VirtualBodyProfileError,
     VirtualBodyTargets, VirtualHeadTarget, build_virtual_body_targets,

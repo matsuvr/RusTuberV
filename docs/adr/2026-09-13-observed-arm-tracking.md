@@ -1,7 +1,8 @@
 # 観測した腕の追跡を既存IKへ接続する
 
-状態: 方針採用。Pose FFIと純粋なtracking状態更新を実装済み。カメラ配信・
-avatar合成・実機評価は後続Issue。
+状態: 方針採用。Pose FFI（#46）、純粋なtracking状態更新（#48）、Pose workerと
+カメラ配信（#47）、既存compositorへの統合（#49）、評価関数（#50）を実装済み。
+実機での映像品質とmacOS実行は未検証。
 
 ## 範囲
 
@@ -51,20 +52,30 @@ Poseは既存顔推論を待たせず、カメラの`Arc`画像を共有する�
 平滑化は新しい観測だけで進め、正のcapture時刻差を`NonZeroU64`で渡す。
 render時刻で同じ観測を再投入しない。描画補間は別段階。
 
-## ライブ接続の残作業
+## ライブ接続
 
-先行コードは左右のvisibility判断、キャリブレーション標本の選別、伸び切り時の
-肘平面の連続性、ロスト/復帰、描画補間、実機での可愛さを完成させたものではない。
-これらを実装・検証するまで実測モードを有効化済みとして表示しない。
+- `vtuber-inference::backend::mediapipe::MediaPipePoseRuntime`が1台のカメラ映像を
+  顔とは別のcapacity-one slotで推論する。`run_pose_worker`は顔workerを待たせない。
+- `vtuber-app`の`pose_runtime`がカメラのfan-out slotを1回だけ配線し、ON/OFFで
+  workerを開始・停止する。`step_arm_tracking`の結果を`TrackedArmControl`へ渡す。
+- `vtuber-avatar`の`update_tracked_arm_targets`が`ArmPoseSourceKind::TrackedPose`
+  のときだけ`DynamicArmTargets`を書き、`apply_default_arm_pose`が唯一のwriterのまま
+  最終Transformを書く。virtual targetとは`ArmBlendWeight`で連続合成する。
+- 設定UIに「腕のトラッキング」の有効/無効と再校正を追加した（初期OFF）。
 
-明示的に採用する遮蔽時の動作は、片腕単位の短い維持→既存の仮想腕への連続復帰と、
-再観測からの連続取得。肘だけが隠れた場合は手首追従と曲げ平面を分ける。
+左右のvisibility判断、キャリブレーション標本の選別、伸び切り時の肘平面の連続性、
+ロスト/復帰は純粋関数として実装・テスト済み。実測モードへ仮想腕用のtorso lag/
+swivel/shoulder trim/twist緩和を無条件に重ねず、観測目標を保つ。
+遮蔽時の動作は片腕単位の短い維持→既存の仮想腕への連続復帰と、再観測からの連続取得。
 欠損を原点や既定長で捏造せず、無期限維持・別推論器への自動切替は入れない。
 
-実測モードへ仮想腕用のtorso lag/swivel/shoulder trim/twist緩和を無条件に重ねない。
-追跡中の肩・捻り補正は実際のFK後の手首/肘が目標を保つように設計する。
-可愛さは観測動作を潰す一律内寄せやランダム揺れではなく、安定した肘・適切な
-肩追従・身体に埋まらない手の軌道・遮蔽時の連続性で評価する。
+## 実機評価
 
-Windows/macOSでのビルド・FFI fixture・着座/机/腕交差/伸び切り/復帰の映像確認は未実施。
-先行の平滑化係数は実測前の出発値であり、品質保証値ではない。
+`vtuber-tracking::arm_evaluation::evaluate_arm_sequence`が記録した腕系列から
+到達誤差、骨長誤差、静止区間の変動、肘平面の最大変化、capture→display遅延を集計する。
+計測値の取得だけをBevy/時刻側に置き、集計は純粋関数にする。
+
+Windows x86_64では`cargo fmt --all -- --check`、`cargo test --workspace`、
+`cargo clippy --workspace --all-targets`、nativeのPose workerテストが通る。
+macOSでのビルド・FFI fixture・着座/机/腕交差/伸び切り/復帰の映像確認は未実施。
+平滑化係数と時間定数は実測前の出発値であり、品質保証値ではない。
