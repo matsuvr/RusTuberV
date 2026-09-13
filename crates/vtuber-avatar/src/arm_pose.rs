@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::arm::{
-    ArmChainBinding, ArmIkInput, ArmPoseProfile, ArmPoseProfileOverride,
+    ArmChainBinding, ArmIkInput, ArmIkSolution, ArmPoseProfile, ArmPoseProfileOverride,
     ArmPoseProfileOverrideError, FingerJointRestBinding, FingerJointRestReferences,
     FingerRestReferences, solve_two_bone_arm,
 };
@@ -599,6 +599,21 @@ pub(crate) fn solve_stage(
     if let Some(params) = twist_relax {
         crate::arm_pipeline::relax_forearm_twist(&mut solution, params)?;
     }
+    resolved_from_solution(chain, &solution, profile)
+}
+
+/// Stages 2..=4 shared by every source: turn a solved analytic pose into the
+/// final rest-relative deltas the compositor writes.
+///
+/// The hand target is produced by an earlier stage; this function never
+/// generates one. `Ok(None)` means the solved pose was degenerate (non-finite
+/// or identity) and the side should stay untouched. Tracked-pose resolution
+/// reuses this exact conversion so the two paths cannot drift.
+pub(crate) fn resolved_from_solution(
+    chain: &ArmChainBinding,
+    solution: &ArmIkSolution,
+    profile: crate::arm::ArmPoseProfile,
+) -> Result<Option<ResolvedArmPose>, crate::arm_pipeline::ArmPipelineError> {
     if !solution.upper_arm_delta.is_finite()
         || !solution.lower_arm_delta.is_finite()
         || solution.upper_arm_delta.length_squared() <= f32::EPSILON

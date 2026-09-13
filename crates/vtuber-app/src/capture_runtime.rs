@@ -140,6 +140,14 @@ impl CaptureRuntime {
         self.controller.frame_slot()
     }
 
+    /// Enables the second capacity-one slot consumed by the Pose worker.
+    ///
+    /// Must be called before the capture worker starts; the application wires
+    /// it once at startup so one camera open feeds both consumers.
+    pub fn set_pose_output(&mut self, pose_slot: Option<Arc<LatestSlot<VideoFrame>>>) {
+        self.controller.set_pose_output(pose_slot);
+    }
+
     /// Tries to read the latest frame from the slot.
     ///
     /// Returns `None` if no new frame is available.

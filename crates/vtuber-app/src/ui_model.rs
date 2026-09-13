@@ -285,6 +285,8 @@ pub struct UiViewModel {
     pub mirror_preview: bool,
     /// Operator-facing avatar mirroring.
     pub mirror_avatar_motion: bool,
+    /// Whether observed webcam arm tracking is enabled.
+    pub arm_tracking_enabled: bool,
     /// Camera-preview visibility.
     pub preview_visible: bool,
 }

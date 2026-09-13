@@ -84,6 +84,15 @@ pub enum UiAction {
     /// Toggle mirror-style avatar motion.
     ToggleAvatarMotionMirror,
 
+    // --- Observed arm tracking ---
+    /// Enable or disable webcam shoulder/elbow/wrist tracking.
+    SetArmTrackingEnabled {
+        /// Whether observed arms should replace the virtual hand anchors.
+        enabled: bool,
+    },
+    /// Drop the current subject calibration and start a fresh one.
+    RecalibrateArms,
+
     // --- Avatar pose settings ---
     /// Store a bounded per-model default-arm profile and re-resolve it.
     SetArmPoseProfile {
