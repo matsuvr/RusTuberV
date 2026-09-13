@@ -15,6 +15,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Engine-neutral pose-arm observations and targets.
+pub mod arm_tracking;
+
 /// Re-export core types used across worker boundaries.
 pub mod types;
 

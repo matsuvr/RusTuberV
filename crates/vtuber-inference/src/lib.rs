@@ -15,6 +15,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// Pure extraction of arm observations from Pose world landmarks.
+pub mod pose_decode;
+
 /// Tract-based inference backends.
 pub mod backend;
 /// Composite detector-to-landmark runtime with ROI recovery.
