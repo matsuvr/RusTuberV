@@ -230,6 +230,55 @@ pub fn default_settings_path() -> Option<PathBuf> {
         .map(|dirs| dirs.config_dir().join(ARM_POSE_SETTINGS_FILE_NAME))
 }
 
+/// File name of the optional validated eye-closure profile.
+pub const EYE_CLOSURE_PROFILE_FILE_NAME: &str = "eye_closure_profile.json";
+
+/// Returns the eye-closure profile path next to the application settings.
+///
+/// The profile is optional: a missing file means "no correction", never a
+/// fabricated default threshold.
+#[must_use]
+pub fn default_eye_closure_profile_path() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "RusTuberV")
+        .map(|dirs| dirs.config_dir().join(EYE_CLOSURE_PROFILE_FILE_NAME))
+}
+
+/// Loads and validates an eye-closure profile from an explicit path.
+///
+/// # Errors
+///
+/// Returns a message for read/parse failures, a foreign feature identity, an
+/// inference fingerprint that does not match the current runtime, or invalid
+/// thresholds. The caller must not substitute a default profile on error.
+pub fn load_eye_closure_thresholds(
+    path: &Path,
+) -> Result<Option<vtuber_tracking::EyeClosureThresholds>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let document: vtuber_tracking::EyeClosureProfileDocument = serde_json::from_str(&text)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+    let current = vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256;
+    if document.fingerprints.feature != vtuber_tracking::EYE_CLOSURE_FEATURE
+        || !document
+            .fingerprints
+            .task_bundle_sha256
+            .as_deref()
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(current))
+    {
+        return Err(format!(
+            "{}: inference fingerprints do not match the current runtime",
+            path.display()
+        ));
+    }
+    document
+        .validate()
+        .map(Some)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 /// Loads UI language, defaulting to Japanese when the file is missing or unreadable.
 #[must_use]
 pub fn load_language(path: &Path) -> UiLanguage {
@@ -807,6 +856,56 @@ mod tests {
         let loaded = ArmPoseSettings::load(&path);
         assert_eq!(loaded.restored_entries().count(), 0);
         assert!(path.with_extension("toml.invalid").is_file());
+    }
+
+    fn eye_closure_document() -> vtuber_tracking::EyeClosureProfileDocument {
+        vtuber_tracking::EyeClosureProfileDocument {
+            schema_version: vtuber_tracking::EYE_CLOSURE_PROFILE_SCHEMA_VERSION,
+            algorithm_version: vtuber_tracking::EYE_CLOSURE_ALGORITHM_VERSION,
+            feature: vtuber_tracking::EYE_CLOSURE_FEATURE.into(),
+            status: vtuber_tracking::EyeClosureVerificationStatus::Verified,
+            left: vtuber_tracking::EyeThresholdValues {
+                close_at: 0.4,
+                reopen_at: 0.6,
+            },
+            right: vtuber_tracking::EyeThresholdValues {
+                close_at: 0.4,
+                reopen_at: 0.6,
+            },
+            fingerprints: vtuber_tracking::EyeClosureFingerprints {
+                task_bundle_sha256: Some(
+                    vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256.into(),
+                ),
+                feature: vtuber_tracking::EYE_CLOSURE_FEATURE.into(),
+                preprocess: None,
+            },
+            applies_to: None,
+        }
+    }
+
+    #[test]
+    fn eye_closure_profile_loads_only_with_valid_matching_data() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(EYE_CLOSURE_PROFILE_FILE_NAME);
+        assert!(load_eye_closure_thresholds(&path).unwrap().is_none());
+
+        let document = eye_closure_document();
+        fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
+        let thresholds = load_eye_closure_thresholds(&path)
+            .expect("valid profile")
+            .expect("some thresholds");
+        assert_eq!(thresholds.left().close_at(), 0.4);
+
+        let mut foreign_fingerprint = eye_closure_document();
+        foreign_fingerprint.fingerprints.task_bundle_sha256 = Some("0000".into());
+        fs::write(&path, serde_json::to_string(&foreign_fingerprint).unwrap()).unwrap();
+        assert!(load_eye_closure_thresholds(&path).is_err());
+
+        let mut invalid = eye_closure_document();
+        invalid.left.close_at = 0.9;
+        invalid.left.reopen_at = 0.1;
+        fs::write(&path, serde_json::to_string(&invalid).unwrap()).unwrap();
+        assert!(load_eye_closure_thresholds(&path).is_err());
     }
 }
 

@@ -1838,6 +1838,7 @@ mod tests {
             labels: None,
             split: None,
             profile: None,
+            config_dir: None,
             output: output.clone(),
             project_root: directory.path().to_path_buf(),
         };

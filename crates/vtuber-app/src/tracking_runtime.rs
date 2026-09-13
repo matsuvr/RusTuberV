@@ -140,6 +140,26 @@ impl TrackingRuntime {
     }
 }
 
+/// Loads the optional validated eye-closure profile at startup.
+///
+/// A missing or invalid profile leaves correction disabled. The runner never
+/// substitutes a default threshold and never rewrites an incompatible
+/// profile: it logs the reason and continues without correction.
+pub fn load_eye_closure_profile_system(mut tracking: ResMut<TrackingRuntime>) {
+    tracking.pipeline.clear_eye_closure();
+    let Some(path) = crate::settings::default_eye_closure_profile_path() else {
+        return;
+    };
+    if !path.is_file() {
+        return;
+    }
+    match crate::settings::load_eye_closure_thresholds(&path) {
+        Ok(Some(thresholds)) => tracking.pipeline.set_eye_closure_thresholds(thresholds),
+        Ok(None) => {}
+        Err(error) => bevy::log::warn!("eye-closure profile ignored: {error}"),
+    }
+}
+
 /// Rebuilds a plain `String` diagnostic only when a `Copy` state value changes.
 fn set_debug_cached<T: Copy + PartialEq + std::fmt::Debug>(
     cache: &mut Option<(T, String)>,

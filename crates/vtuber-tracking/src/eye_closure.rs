@@ -128,12 +128,21 @@ impl EyeThreshold {
     /// does not satisfy `0 <= close_at < reopen_at <= 1`.
     pub fn new(close_at: f32, reopen_at: f32) -> Result<Self, EyeThresholdError> {
         if !close_at.is_finite() || !reopen_at.is_finite() {
-            return Err(EyeThresholdError::NonFinite { close_at, reopen_at });
+            return Err(EyeThresholdError::NonFinite {
+                close_at,
+                reopen_at,
+            });
         }
         if close_at < 0.0 || close_at >= reopen_at || reopen_at > 1.0 {
-            return Err(EyeThresholdError::OutOfOrder { close_at, reopen_at });
+            return Err(EyeThresholdError::OutOfOrder {
+                close_at,
+                reopen_at,
+            });
         }
-        Ok(Self { close_at, reopen_at })
+        Ok(Self {
+            close_at,
+            reopen_at,
+        })
     }
 
     /// Openness at or below which an open eye latches closed.
@@ -563,8 +572,14 @@ mod tests {
                 right_openness: Some(0.25),
             },
         );
-        assert!(!state.left.is_closed(), "0.25 is above the left close point");
-        assert!(state.right.is_closed(), "0.25 is below the right close point");
+        assert!(
+            !state.left.is_closed(),
+            "0.25 is above the left close point"
+        );
+        assert!(
+            state.right.is_closed(),
+            "0.25 is below the right close point"
+        );
     }
 
     #[test]

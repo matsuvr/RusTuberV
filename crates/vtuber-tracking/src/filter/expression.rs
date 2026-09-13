@@ -388,6 +388,20 @@ impl ExpressionFilter {
         self.mouth = ChannelState::default();
     }
 
+    /// Forces a latched closed eye to the exact `1.0` endpoint.
+    ///
+    /// The channel's stored value is pinned without advancing its clock, so a
+    /// later release starts from `1.0` with the correct elapsed time instead
+    /// of jumping back to a mid-closure filter state.
+    pub fn force_blink_closed(&mut self, left: bool, right: bool) {
+        if left {
+            self.blink_left.value = 1.0;
+        }
+        if right {
+            self.blink_right.value = 1.0;
+        }
+    }
+
     /// Returns the current smoothed coefficients without consuming a new
     /// observation.
     #[must_use]

@@ -204,6 +204,7 @@ impl Plugin for UiShellPlugin {
                 restore_arm_pose_settings_system,
                 restore_expression_binding_settings_system,
                 crate::pose_runtime::restore_pose_settings_system,
+                crate::tracking_runtime::load_eye_closure_profile_system,
             ),
         )
         .add_systems(

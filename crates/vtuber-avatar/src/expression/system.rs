@@ -25,6 +25,35 @@ use crate::unload::ActiveControlFrame;
 /// Default epsilon for change detection.
 pub const DEFAULT_CHANGE_EPSILON: f32 = 0.01;
 
+/// Blink weights within this band of `0` or `1` are treated as endpoints.
+const ENDPOINT_BAND: f32 = 0.01;
+
+/// Returns `true` for the exact blink expression names this writer emits.
+///
+/// Only the standard preset, the per-eye names, and the canonical/alias
+/// ARKit Perfect Sync names are endpoint-sensitive. Unrelated custom names
+/// are never matched as substrings.
+fn is_endpoint_sensitive_blink(name: &str) -> bool {
+    matches!(
+        name,
+        "blink"
+            | "blinkLeft"
+            | "blinkRight"
+            | "EyeBlinkLeft"
+            | "eyeBlinkLeft"
+            | "EyeBlinkRight"
+            | "eyeBlinkRight"
+    )
+}
+
+/// Returns `true` when a change touches a full-close or full-open endpoint.
+fn touches_endpoint(previous: f32, next: f32) -> bool {
+    previous >= 1.0 - ENDPOINT_BAND
+        || next >= 1.0 - ENDPOINT_BAND
+        || previous <= ENDPOINT_BAND
+        || next <= ENDPOINT_BAND
+}
+
 /// Tracks the previous expression state for coalescing.
 #[derive(Clone, Debug, Default)]
 pub struct ExpressionStateTracker {
@@ -94,7 +123,14 @@ impl ExpressionStateTracker {
         // Check new/changed values.
         for cmd in new_commands {
             let prev = self.previous.get(cmd.name.as_str()).copied().unwrap_or(0.0);
-            if (cmd.weight - prev).abs() > self.epsilon {
+            let difference = (cmd.weight - prev).abs();
+            // Endpoint changes win over epsilon: an actual full close
+            // (0.995 -> 1.0) or release (1.0 -> 0.995, 0.005 -> 0.0) must
+            // reach the morph even though the delta is within epsilon.
+            let endpoint_change = is_endpoint_sensitive_blink(&cmd.name)
+                && difference > f32::EPSILON
+                && touches_endpoint(prev, cmd.weight);
+            if difference > self.epsilon || endpoint_change {
                 has_significant_change = true;
                 break;
             }
@@ -522,6 +558,50 @@ mod tests {
         let result = tracker.compute_commands(&commands, 2);
         assert!(result.is_some(), "generation change should force send");
         assert_eq!(tracker.generation(), 2);
+    }
+
+    #[test]
+    fn blink_endpoints_reach_the_writer_within_epsilon() {
+        for (previous, next) in [(0.995, 1.0), (1.0, 0.995), (0.005, 0.0)] {
+            let mut tracker = ExpressionStateTracker::new();
+            let _ = tracker.compute_commands(&[cmd("blink", previous)], 1);
+            let result = tracker.compute_commands(&[cmd("blink", next)], 1);
+            assert!(
+                result.is_some(),
+                "{previous} -> {next} must reach the writer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_steady_endpoint_is_not_resent() {
+        let mut tracker = ExpressionStateTracker::new();
+        let _ = tracker.compute_commands(&[cmd("blink", 1.0)], 1);
+        assert!(tracker.compute_commands(&[cmd("blink", 1.0)], 1).is_none());
+    }
+
+    #[test]
+    fn unrelated_custom_names_are_not_treated_as_blink_endpoints() {
+        let mut tracker = ExpressionStateTracker::new();
+        let _ = tracker.compute_commands(&[cmd("blinkCustom", 0.995)], 1);
+        assert!(
+            tracker
+                .compute_commands(&[cmd("blinkCustom", 1.0)], 1)
+                .is_none(),
+            "a substring match must not make a custom name endpoint-sensitive"
+        );
+    }
+
+    #[test]
+    fn perfect_sync_eye_blink_aliases_are_endpoint_sensitive() {
+        for name in ["EyeBlinkLeft", "eyeBlinkRight"] {
+            let mut tracker = ExpressionStateTracker::new();
+            let _ = tracker.compute_commands(&[cmd(name, 0.995)], 1);
+            assert!(
+                tracker.compute_commands(&[cmd(name, 1.0)], 1).is_some(),
+                "{name} must reach its endpoint"
+            );
+        }
     }
 
     #[test]

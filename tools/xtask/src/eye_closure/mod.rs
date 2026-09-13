@@ -8,6 +8,7 @@ mod decode;
 mod evaluate;
 mod fit;
 mod input;
+mod install;
 mod labels;
 mod prepare;
 mod replay;
@@ -23,13 +24,16 @@ USAGE:
   cargo run -p xtask --release -- eye-closure prepare-labels --data <dir> --output <review-dir>
   cargo run -p xtask --release -- eye-closure fit --data <dir> --labels <csv> --split <json> --output <dir>
   cargo run -p xtask --release -- eye-closure evaluate --data <dir> --labels <csv> --split <json> --profile <json> --output <dir>
+  cargo run -p xtask --release -- eye-closure install-profile --profile <verified-json> [--config-dir <dir>]
+  cargo run -p xtask --release -- eye-closure remove-profile [--config-dir <dir>]
 
 OPTIONS:
   --inputs <path>          Versioned explicit input list
   --data <path>            Extracted data directory
   --labels <path>          Label CSV
   --split <path>           Train/validation/test split JSON
-  --profile <path>         Candidate profile JSON (evaluate)
+  --profile <path>         Candidate or verified profile JSON
+  --config-dir <path>      Override the per-user config directory (install/remove)
   --output <path>          Output file (inspect) or directory
   --project-root <path>    Workspace root holding assets/models (default: .)
   -h, --help               Show this help";
@@ -68,6 +72,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "prepare-labels" => prepare::run(&Options::parse(rest, Args::PrepareLabels)?),
         "fit" => fit::run_fit(&Options::parse(rest, Args::Fit)?),
         "evaluate" => evaluate::run(&Options::parse(rest, Args::Evaluate)?),
+        "install-profile" => install::run_install(&Options::parse(rest, Args::Install)?),
+        "remove-profile" => install::run_remove(&Options::parse(rest, Args::Remove)?),
         other => Err(format!(
             "unknown eye-closure command: {other}\n\n{HELP_TEXT}"
         )),
@@ -81,6 +87,8 @@ pub(crate) enum Args {
     PrepareLabels,
     Fit,
     Evaluate,
+    Install,
+    Remove,
 }
 
 /// Common options shared across the `eye-closure` commands.
@@ -90,6 +98,7 @@ pub(crate) struct Options {
     pub(crate) labels: Option<PathBuf>,
     pub(crate) split: Option<PathBuf>,
     pub(crate) profile: Option<PathBuf>,
+    pub(crate) config_dir: Option<PathBuf>,
     pub(crate) output: PathBuf,
     pub(crate) project_root: PathBuf,
 }
@@ -101,6 +110,7 @@ impl Options {
         let mut labels = None;
         let mut split = None;
         let mut profile = None;
+        let mut config_dir = None;
         let mut output = None;
         let mut project_root = None;
         let mut iter = args.iter();
@@ -111,19 +121,27 @@ impl Options {
                 "--labels" => labels = Some(next_value(&mut iter, arg)?),
                 "--split" => split = Some(next_value(&mut iter, arg)?),
                 "--profile" => profile = Some(next_value(&mut iter, arg)?),
+                "--config-dir" => config_dir = Some(next_value(&mut iter, arg)?),
                 "--output" => output = Some(next_value(&mut iter, arg)?),
                 "--project-root" => project_root = Some(next_value(&mut iter, arg)?),
                 other => return Err(format!("unknown option: {other}\n\n{HELP_TEXT}")),
             }
         }
-        let output = output.ok_or("missing required option --output")?.into();
+        let needs_output = matches!(
+            kind,
+            Args::Inspect | Args::Extract | Args::PrepareLabels | Args::Fit | Args::Evaluate
+        );
+        if needs_output && output.is_none() {
+            return Err("missing required option --output".into());
+        }
         let options = Self {
             inputs: inputs.map(Into::into),
             data: data.map(Into::into),
             labels: labels.map(Into::into),
             split: split.map(Into::into),
             profile: profile.map(Into::into),
-            output,
+            config_dir: config_dir.map(Into::into),
+            output: output.map(Into::into).unwrap_or_else(|| PathBuf::from(".")),
             project_root: project_root.unwrap_or_else(|| ".".into()).into(),
         };
         match kind {
@@ -157,6 +175,13 @@ impl Options {
                     .as_ref()
                     .ok_or("missing required option --profile")?;
             }
+            Args::Install => {
+                options
+                    .profile
+                    .as_ref()
+                    .ok_or("missing required option --profile")?;
+            }
+            Args::Remove => {}
         }
         if matches!(kind, Args::Fit) {
             options
