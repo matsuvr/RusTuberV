@@ -199,16 +199,18 @@ mod tests {
         let reference = measure_arm_reference(arm()).unwrap();
         let original = retarget_arm_landmarks(arm(), reference);
         near(original.wrist, [3.0 / 7.0, 4.0 / 7.0, 0.0]);
-        let shift = |p: PoseWorldLandmark| {
-            point(array(vector(p.meters) + Vector3::new(1.0, 2.0, 3.0)))
-        };
+        let shift =
+            |p: PoseWorldLandmark| point(array(vector(p.meters) + Vector3::new(1.0, 2.0, 3.0)));
         let a = arm();
         let translated = ArmLandmarks {
             shoulder: shift(a.shoulder),
             elbow: shift(a.elbow),
             wrist: shift(a.wrist),
         };
-        near(retarget_arm_landmarks(translated, reference).wrist, original.wrist);
+        near(
+            retarget_arm_landmarks(translated, reference).wrist,
+            original.wrist,
+        );
         let closer = ArmLandmarks {
             wrist: point([0.3, -0.4, -0.2]),
             ..a
@@ -249,11 +251,17 @@ mod tests {
     fn zero_bone_has_no_calibration_instead_of_a_default_length() {
         let a = arm();
         assert_eq!(
-            measure_arm_reference(ArmLandmarks { elbow: a.shoulder, ..a }),
+            measure_arm_reference(ArmLandmarks {
+                elbow: a.shoulder,
+                ..a
+            }),
             None
         );
         assert_eq!(
-            measure_arm_reference(ArmLandmarks { wrist: a.elbow, ..a }),
+            measure_arm_reference(ArmLandmarks {
+                wrist: a.elbow,
+                ..a
+            }),
             None
         );
     }
@@ -264,8 +272,7 @@ mod tests {
             let target = target(0.3);
             let mut state = ArmFilterState::new(target);
             for _ in 0..60 {
-                let (next, value) =
-                    filter_arm_target(state, target, NonZeroU64::new(ns).unwrap());
+                let (next, value) = filter_arm_target(state, target, NonZeroU64::new(ns).unwrap());
                 assert_eq!(value, target);
                 state = next;
             }

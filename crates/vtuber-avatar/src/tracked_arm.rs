@@ -27,8 +27,7 @@ pub fn tracked_arm_ik_target(
     tracking_to_rest: Quat,
 ) -> ArmIkTarget {
     let position = |[x, y, z]: [f32; 3]| {
-        rest.upper_arm.position
-            + (tracking_to_rest * Vec3::new(x, y, z)) * rest.total_arm_length
+        rest.upper_arm.position + (tracking_to_rest * Vec3::new(x, y, z)) * rest.total_arm_length
     };
     ArmIkTarget {
         wrist: position(target.wrist),
@@ -116,8 +115,7 @@ mod tests {
     fn local_rotations_reconstruct_the_same_elbow_and_wrist() {
         let rest = geometry(1.0);
         let solution = solve_tracked_arm(rest, target(), Quat::IDENTITY).unwrap();
-        let elbow =
-            rest.upper_arm.position + solution.upper_arm_local_rotation * (Vec3::X * 0.4);
+        let elbow = rest.upper_arm.position + solution.upper_arm_local_rotation * (Vec3::X * 0.4);
         let wrist = elbow
             + (solution.upper_arm_local_rotation * solution.lower_arm_local_rotation)
                 * (Vec3::X * 0.3);
@@ -133,8 +131,8 @@ mod tests {
         let view_to_model = Quat::from_rotation_x(-0.1);
         let tracking_to_rest = parent_rest * parent_current.inverse() * view_to_model;
         let solution = solve_tracked_arm(rest, target(), tracking_to_rest).unwrap();
-        let displayed_offset = (parent_current * parent_rest.inverse())
-            * (solution.wrist - rest.upper_arm.position);
+        let displayed_offset =
+            (parent_current * parent_rest.inverse()) * (solution.wrist - rest.upper_arm.position);
         near(
             displayed_offset,
             view_to_model * Vec3::new(0.4, -0.3, 0.5) * rest.total_arm_length,
