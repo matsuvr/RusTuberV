@@ -1,6 +1,7 @@
 # 観測した腕の追跡を既存IKへ接続する
 
-状態: 方針採用、純粋関数の先行実装。ライブ機能は未接続。
+状態: 方針採用。Pose FFIと純粋なtracking状態更新を実装済み。カメラ配信・
+avatar合成・実機評価は後続Issue。
 
 ## 範囲
 
@@ -11,15 +12,17 @@ MediaPipe以外のネイティブランタイム、常駐Python、汎用プラ�
 
 ## 境界
 
-- `mediapipe-rs`: 所有するPose結果と安全な動画API。FFI、ABI、結果解放だけを担当。
-  現在の固定revは顔のみなので、この部分は後続実装。アプリ側へunsafeを移さない。
+- `mediapipe-rs`: 固定revを`vendor/mediapipe-rs`へ取り込み、所有するPose結果と
+  安全な動画APIを追加した。FFI、ABI、結果解放だけを担当。アプリ側へunsafeを移さない。
 - `vtuber-inference::pose_decode`: 世界座標33点から左右の6点を抽出する。
   不正な外部データはResult、人物なしは`PoseArmFrame.observation = None`。
   visibility/presenceの欠損を1へ補完しない。低信頼時の演出はここで決めない。
 - `vtuber-core::arm_tracking`: 固定サイズの観測/目標/撮影時刻。Bevy、MediaPipeの
   ハンドル、骨Entityを持ち込まない。顔の`Landmark3`へPoseを詰め替えない。
 - `vtuber-tracking::arm_tracking`: 固定キャリブレーション長、肩相対座標、
-  観測時刻差での適応平滑化。入力値と前状態から値を返す純粋関数にする。
+  観測時刻差での適応平滑化。`ArmTrackingState`/`ArmTrackingProfile`と
+  `step_arm_tracking`は入力値と前状態と`now`から値を返す純粋関数。左右独立の
+  短い維持→仮想腕への復帰と再取得、伸び切り時の肘平面の連続性を含む。
 - `vtuber-avatar::tracked_arm`: モデル長・rest-spaceへの変換と既存IKのみ。
   Transformを書かない。適用は既存`apply_default_arm_pose`の単一writerへ統合する。
 - `vtuber-app`: カメラ共有、worker/slotの接続、既存の開始・停止・設定UIだけ。

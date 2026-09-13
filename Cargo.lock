@@ -4091,7 +4091,6 @@ dependencies = [
 [[package]]
 name = "mediapipe"
 version = "0.1.0"
-source = "git+https://github.com/nikicat/mediapipe-rs?rev=527037fa0fe1339750140283930bbb9560460e9e#527037fa0fe1339750140283930bbb9560460e9e"
 dependencies = [
  "libloading",
  "sha2",

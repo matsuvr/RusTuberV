@@ -1,0 +1,34 @@
+mediapipe-rs
+Copyright 2026 The mediapipe-rs Authors
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+Third-party material
+--------------------------------------------------------------------------------
+
+vendor/headers/mediapipe/tasks/c/**
+    Copyright The MediaPipe Authors
+    Licensed under the Apache License, Version 2.0
+
+    The public C API headers of MediaPipe Tasks, vendored unmodified from
+    https://github.com/google-ai-edge/mediapipe at the commit recorded in
+    vendor/REF. Their original copyright notices are retained in each file.
+    Only the C++-internal *_converter.h and test headers were removed; no
+    vendored file was edited.
+
+src/sys/bindings.rs
+    Generated from the headers above by rust-bindgen. Derived from Apache-2.0
+    licensed material and covered by the same license.
+
+This crate does not redistribute the MediaPipe library itself. `libmediapipe`
+is downloaded at runtime from the official MediaPipe wheel published on PyPI by
+Google, and remains subject to its own license.
+
+Neither this project nor its authors are affiliated with or endorsed by Google.
+"MediaPipe" is a trademark of Google LLC, used here only to identify the library
+these bindings target.

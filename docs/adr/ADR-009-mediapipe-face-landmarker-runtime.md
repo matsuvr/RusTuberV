@@ -43,6 +43,14 @@ does not access Bevy ECS. The existing capacity-one `LatestSlot<VideoFrame>`
 and latest-only result boundary remain in force. MediaPipe and the legacy
 UltraFace/PeppaPig stack must never run concurrently.
 
+The binding is vendored under `vendor/mediapipe-rs` at the fixed revision above,
+outside the Cargo workspace, so the Pose task can be added without pushing to
+the upstream repository. The vendored copy adds only the `MpPoseLandmarker*`
+bindings and a safe video-mode wrapper; the face API, loader, ABI detection, and
+library distribution paths are unchanged, and `THIRD_PARTY_NOTICES.md` records
+the provenance and license. The native exception still covers only MediaPipe
+Tasks 0.10.35 through this binding; the vendored crate is the same code.
+
 The task bundle is consumed as a task bundle. Its internal TFLite files are not
 extracted into an independent application pipeline. The binding's verified
 download path may fetch the official MediaPipe 0.10.35 native library on first

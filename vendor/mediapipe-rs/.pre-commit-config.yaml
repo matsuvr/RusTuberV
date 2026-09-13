@@ -1,0 +1,51 @@
+# Run with prek (https://github.com/j178/prek) or pre-commit:
+#   prek install      # once, to hook it up
+#   prek run -a       # to check everything now
+#
+# Only fast, local checks live here. `cargo test` deliberately does not: it
+# downloads a 34 MB library on first run and needs the fixtures from
+# scripts/fetch-fixtures.sh, which is CI's job, not a commit hook's.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        # The lint levels live in Cargo.toml; -D warnings makes the ones set to
+        # "warn" there fail the commit too.
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: bindings-fresh
+        name: bindings regenerated after header changes
+        entry: ./scripts/check-bindings-fresh.sh
+        language: system
+        pass_filenames: false
+
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        files: ^scripts/.*\.sh$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Vendored Google headers are kept byte-identical to upstream so that
+        # scripts/abi-diff.sh compares cleanly.
+        exclude: ^vendor/headers/
+      - id: end-of-file-fixer
+        exclude: ^vendor/headers/
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        exclude: ^vendor/headers/

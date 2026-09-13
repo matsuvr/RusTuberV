@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Everything that needs neither the native library nor the model fixtures.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      # Lint levels live in Cargo.toml; -D warnings promotes the "warn" ones.
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # The offline path must keep compiling: library consumers may disable it.
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - run: shellcheck scripts/*.sh
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # MediaPipe creates an EGL/GL context even for CPU inference, so a bare
+      # headless runner needs a software GL stack.
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgles2 libgl1-mesa-dri
+      - run: ./scripts/fetch-fixtures.sh
+      # Caches libmediapipe between runs; the key is the pinned version, which is
+      # what the crate keys its own cache directory on.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/mediapipe-rs
+          key: libmediapipe-${{ runner.os }}-0.10.35
+      - run: cargo test --all-features
+        env:
+          LIBGL_ALWAYS_SOFTWARE: 1
+      # Same suite against an explicitly supplied library, with downloading off.
+      - name: test --no-default-features
+        run: |
+          MEDIAPIPE_LIB="$HOME/.cache/mediapipe-rs/0.10.35/libmediapipe.so" \
+            cargo test --no-default-features
+        env:
+          LIBGL_ALWAYS_SOFTWARE: 1
+
+  # The expensive half of the bindings check: regenerate and diff. Catches both
+  # hand-edits to the generated file and headers changed without regenerating.
+  bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - run: cargo install bindgen-cli --version 0.72.1 --locked
+      - run: ./scripts/gen-bindings.sh
+      - name: bindings are up to date
+        run: git diff --exit-code -- src/sys/bindings.rs
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # The failures this crate's tests structurally cannot see: a missed
+  # Mp*CloseResult still returns correct results, and a use-after-free on a
+  # reclaimed result usually returns plausible numbers. See examples/stress.rs.
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      # libc6-dbg is Memcheck's equivalent of Arch's glibc-debug: without a
+      # matching debug build of ld.so it cannot set up its mandatory redirections
+      # and refuses to start.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgles2 libgl1-mesa-dri valgrind libc6-dbg
+      - run: ./scripts/fetch-fixtures.sh
+
+      # ASAN replaces malloc/free process-wide, so allocations inside the
+      # uninstrumented libmediapipe.so are covered: this is what catches a
+      # double-close or a read of a result MediaPipe already freed.
+      - name: AddressSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=1
+          LIBGL_ALWAYS_SOFTWARE: 1
+        run: cargo +nightly run --target x86_64-unknown-linux-gnu --example stress -- 25
+
+      # MediaPipe leaks a fixed ~152 KB of GL-context state at startup, so the
+      # absolute total is meaningless; only its growth with N is a signal.
+      - name: leak total must not scale with iterations
+        env:
+          RUSTFLAGS: -Zsanitizer=leak
+          LIBGL_ALWAYS_SOFTWARE: 1
+          # MediaPipe always leaks its GL-context state, so LeakSanitizer always
+          # finds something and would always exit 23. "Any leak" is not the
+          # signal here -- growth with N is -- so let the comparison below be
+          # the only thing that can fail this step.
+          LSAN_OPTIONS: exitcode=0
+        run: |
+          set -euo pipefail
+          run_n() {
+            cargo +nightly run -q --target x86_64-unknown-linux-gnu \
+              --example stress -- "$1" 2>&1 \
+              | sed -n 's/.*LeakSanitizer: \([0-9]*\) byte.*/\1/p' | tail -1
+          }
+          one=$(run_n 1)
+          many=$(run_n 50)
+          # An empty capture means the binary never got as far as reporting.
+          # Without this the comparison would be 0 vs 0 and pass vacuously.
+          if [ -z "$one" ] || [ -z "$many" ]; then
+            echo "no LeakSanitizer summary captured (N=1:'$one' N=50:'$many')" >&2
+            exit 1
+          fi
+          echo "N=1: $one bytes, N=50: $many bytes"
+          # Generous slack for thread-pool noise; a real per-call leak would
+          # multiply the total, not nudge it.
+          if [ "$many" -gt "$(( one + 65536 ))" ]; then
+            echo "leak total grew with iteration count" >&2
+            exit 1
+          fi
+
+      # The only check that sees uninitialised reads inside the uninstrumented
+      # libmediapipe.so, which is what every task's mem::zeroed() result struct
+      # depends on not happening. Leak checking is off on purpose: MediaPipe's
+      # static initialisers leak unconditionally, and would drown the signal.
+      - name: Memcheck (memory errors only)
+        env:
+          LIBGL_ALWAYS_SOFTWARE: 1
+        run: |
+          cargo build --example stress
+          valgrind --tool=memcheck --track-origins=yes --leak-check=no \
+            --error-exitcode=1 ./target/debug/examples/stress 1

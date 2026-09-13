@@ -10,7 +10,7 @@ members = [
   "apps/desktop",
   "tools/xtask",
 ]
-exclude = ["vendor/bevy_vrm1"]
+exclude = ["vendor/bevy_vrm1", "vendor/mediapipe-rs"]
 resolver = "2"
 
 [workspace.package]
@@ -27,6 +27,13 @@ rfd = { version = "=0.17.2", default-features = false }
 
 [patch."https://github.com/not-elm/bevy_vrm1"]
 bevy_vrm1 = { path = "vendor/bevy_vrm1" }
+
+# ADR-009 fixes mediapipe-rs at this revision. It is vendored under
+# `vendor/mediapipe-rs` so the Pose task can be added without pushing to the
+# upstream repository. The git revision stays as the provenance in
+# `vendor/mediapipe-rs/vendor/REF`; THIRD_PARTY_NOTICES records the license.
+[patch."https://github.com/nikicat/mediapipe-rs"]
+mediapipe = { path = "vendor/mediapipe-rs" }
 
 # Build artifact disk policy (AGENTS.md): full debug info in dev builds is
 # the single largest contributor to target/ size (tens of GiB). Line tables
