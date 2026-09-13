@@ -101,6 +101,79 @@ impl ArmTrackingTargets {
     }
 }
 
+/// How much an observed channel should replace the avatar's virtual arm.
+///
+/// `wrist` gates the hand position; `pole` gates the observed bend plane. They
+/// are separate so losing an elbow keeps the visible hand following while the
+/// avatar supplies a natural pole. Both are in `0.0..=1.0`; zero means "use the
+/// virtual arm", not "the observation is at the origin".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArmBlendWeight {
+    /// Observed wrist contribution.
+    pub wrist: f32,
+    /// Observed elbow-bend-plane contribution.
+    pub pole: f32,
+}
+
+impl ArmBlendWeight {
+    /// Fully virtual: neither channel is observed.
+    pub const ZERO: Self = Self {
+        wrist: 0.0,
+        pole: 0.0,
+    };
+    /// Fully observed: both channels are trusted.
+    pub const ONE: Self = Self {
+        wrist: 1.0,
+        pole: 1.0,
+    };
+}
+
+impl Default for ArmBlendWeight {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+/// Per-side blend weights, anatomical left/right like [`ArmTrackingTargets`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ArmBlendWeights {
+    /// Weight for the subject's left arm.
+    pub left: ArmBlendWeight,
+    /// Weight for the subject's right arm.
+    pub right: ArmBlendWeight,
+}
+
+impl ArmBlendWeights {
+    /// Exchanges anatomical sides without reflecting either weight.
+    #[must_use]
+    pub fn mirrored(self) -> Self {
+        Self {
+            left: self.right,
+            right: self.left,
+        }
+    }
+}
+
+/// One observation's result, ready for the avatar's existing arm compositor.
+///
+/// The source sequence and capture time belong to the camera image the targets
+/// came from. `produced_at` is when this frame was assembled. A side's weight
+/// of zero pair with a target means "this is the last observed pose; render the
+/// virtual arm instead", never a hand at the origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArmControlFrame {
+    /// Sequence of the camera image the observation came from.
+    pub source_seq: FrameSeq,
+    /// Capture time of the camera image the observation came from.
+    pub captured_at: MonoTimeNs,
+    /// Time this control frame was produced.
+    pub produced_at: MonoTimeNs,
+    /// Latest per-side targets, held across short losses.
+    pub targets: ArmTrackingTargets,
+    /// Per-side per-channel confidence in the targets.
+    pub weights: ArmBlendWeights,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +193,43 @@ mod tests {
         assert_eq!(mirrored.right.unwrap().wrist, [-0.3, 0.2, 0.4]);
         assert_eq!(mirrored.right.unwrap().elbow_pole, [-0.5, -0.1, 0.2]);
         assert_eq!(mirrored.mirrored(), targets);
+    }
+
+    #[test]
+    fn blend_weights_exchange_sides_without_reflecting() {
+        let weights = ArmBlendWeights {
+            left: ArmBlendWeight {
+                wrist: 0.25,
+                pole: 0.5,
+            },
+            right: ArmBlendWeight::ONE,
+        };
+        let mirrored = weights.mirrored();
+        assert_eq!(mirrored.left, ArmBlendWeight::ONE);
+        assert_eq!(mirrored.right.wrist, 0.25);
+        assert_eq!(mirrored.right.pole, 0.5);
+        assert_eq!(mirrored.mirrored(), weights);
+    }
+
+    #[test]
+    fn zero_weight_is_distinct_from_a_fully_observed_frame() {
+        let target = ArmTrackingTarget {
+            wrist: [0.0; 3],
+            elbow_pole: [0.0; 3],
+        };
+        let frame = ArmControlFrame {
+            source_seq: FrameSeq(1),
+            captured_at: MonoTimeNs(2),
+            produced_at: MonoTimeNs(3),
+            targets: ArmTrackingTargets {
+                left: Some(target),
+                right: None,
+            },
+            weights: ArmBlendWeights::default(),
+        };
+        assert_eq!(frame.weights.left, ArmBlendWeight::ZERO);
+        assert_ne!(frame.weights.left, ArmBlendWeight::ONE);
+        assert!(!frame.weights.left.wrist.is_nan());
     }
 
     #[test]
