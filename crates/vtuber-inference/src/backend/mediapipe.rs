@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use mediapipe::{
     Confidence, Delegate, FaceLandmarker, FaceLandmarkerResult, Image, IouThreshold, ModelSource,
-    Size, Timestamp,
+    PoseLandmarker, PoseLandmarkerVideo, Size, Timestamp,
 };
 use sha2::{Digest, Sha256};
+use vtuber_core::arm_tracking::PoseArmFrame;
 use vtuber_core::{
     CameraFaceTransform, FaceBlendshapeSet, FaceLandmark, FaceTrackingOutcome, FaceTrackingQuality,
     FaceTrackingSample, FrameSeq, MEDIAPIPE_FACE_BLENDSHAPE_COUNT, MEDIAPIPE_FACE_LANDMARK_COUNT,
@@ -19,6 +20,7 @@ use vtuber_core::{
 };
 
 use crate::error::{InferenceError, Result};
+use crate::pose_decode::decode_pose_result;
 use crate::runtime::FaceTrackingInference;
 
 /// The packaged MediaPipe task filename.
@@ -26,6 +28,11 @@ pub const TASK_BUNDLE_FILE: &str = "face_landmarker.task";
 /// SHA-256 of the approved MediaPipe task bundle.
 pub const TASK_BUNDLE_SHA256: &str =
     "64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF";
+/// The packaged MediaPipe Pose task filename.
+pub const POSE_TASK_BUNDLE_FILE: &str = "pose_landmarker_full.task";
+/// SHA-256 of the approved MediaPipe Pose Landmarker Full task bundle.
+pub const POSE_TASK_BUNDLE_SHA256: &str =
+    "4EAA5EB7A98365221087693FCC286334CF0858E2EB6E15B506AA4A7ECDCEC4AD";
 const MATRIX_AFFINE_EPSILON: f32 = 0.1;
 
 /// The approved task bundle compiled into this binary.
@@ -40,6 +47,90 @@ pub fn embedded_task_bundle() -> &'static [u8] {
         env!("CARGO_MANIFEST_DIR"),
         "/../../assets/models/face_landmarker.task"
     ))
+}
+
+/// The approved Pose task bundle compiled into this binary.
+///
+/// As with the face bundle, release builds must not depend on the process
+/// working directory or a packaged resource tree, so the same SHA-256-verified
+/// bundle is embedded at compile time.
+#[must_use]
+pub fn embedded_pose_task_bundle() -> &'static [u8] {
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/models/pose_landmarker_full.task"
+    ))
+}
+
+/// A MediaPipe Pose Landmarker runtime owned by one inference worker.
+pub struct MediaPipePoseRuntime {
+    landmarker: PoseLandmarkerVideo,
+    staging: Vec<u8>,
+    last_timestamp_ms: Option<i64>,
+}
+
+impl MediaPipePoseRuntime {
+    /// Verifies the Pose task bundle and constructs a CPU VIDEO-mode landmarker.
+    pub fn from_task_path(path: &Path) -> Result<Self> {
+        verify_pose_task_bundle(path)?;
+        Self::from_verified_source(ModelSource::path(path))
+    }
+
+    /// Verifies an in-memory Pose task bundle and constructs a CPU VIDEO-mode
+    /// landmarker from the bundle bytes.
+    pub fn from_task_bytes(bytes: &[u8]) -> Result<Self> {
+        verify_pose_task_bundle_bytes(bytes)?;
+        Self::from_verified_source(ModelSource::bytes(bytes.to_vec()))
+    }
+
+    fn from_verified_source(source: ModelSource) -> Result<Self> {
+        let landmarker = PoseLandmarker::builder(source)
+            .delegate(Delegate::Cpu)
+            .num_poses(std::num::NonZeroU32::new(1).ok_or_else(|| {
+                InferenceError::MediaPipeLoadFailed("one-pose configuration is invalid".into())
+            })?)
+            .min_pose_detection_confidence(Confidence::HALF)
+            .min_pose_presence_confidence(Confidence::HALF)
+            .min_tracking_confidence(IouThreshold::HALF)
+            .build_for_video()
+            .map_err(|error| InferenceError::MediaPipeLoadFailed(error.to_string()))?;
+
+        Ok(Self {
+            landmarker,
+            staging: Vec::new(),
+            last_timestamp_ms: None,
+        })
+    }
+
+    /// Runs one video inference and returns an owned, engine-neutral arm frame.
+    ///
+    /// The source sequence and capture time come from the camera frame; the
+    /// completion time is retained separately for measurement.
+    pub fn infer(&mut self, frame: &VideoFrame) -> Result<PoseArmFrame> {
+        let timestamp_ms = video_timestamp_ms(frame.captured_at, &mut self.last_timestamp_ms)?;
+        let image_data = frame_rgb(frame, &mut self.staging)?;
+        let image = Image::from_rgb(
+            Size {
+                width: frame.width,
+                height: frame.height,
+            },
+            image_data,
+        )
+        .map_err(|error| InferenceError::MediaPipeFrameConversion(error.to_string()))?;
+        let result = self
+            .landmarker
+            .detect_for_video(&image, Timestamp::from_millis(timestamp_ms))
+            .map_err(|error| InferenceError::MediaPipeFrameInference(error.to_string()))?;
+        let inference_finished_at = vtuber_core::monotonic_now();
+        let observation = decode_pose_result(&result)
+            .map_err(|error| InferenceError::MediaPipeOutputContract(error.to_string()))?;
+        Ok(PoseArmFrame {
+            source_seq: frame.seq,
+            captured_at: frame.captured_at,
+            inference_finished_at,
+            observation,
+        })
+    }
 }
 
 /// A MediaPipe Face Landmarker runtime owned by one inference worker.
@@ -568,6 +659,29 @@ fn verify_task_bundle_bytes(bytes: &[u8]) -> Result<()> {
     }
 }
 
+fn verify_pose_task_bundle(path: &Path) -> Result<()> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        InferenceError::MediaPipeLoadFailed(format!("pose task bundle read failed: {error}"))
+    })?;
+    verify_pose_task_bundle_bytes(&bytes)
+}
+
+fn verify_pose_task_bundle_bytes(bytes: &[u8]) -> Result<()> {
+    let actual = Sha256::digest(bytes);
+    let actual = actual
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    if actual.eq_ignore_ascii_case(POSE_TASK_BUNDLE_SHA256) {
+        Ok(())
+    } else {
+        Err(InferenceError::HashMismatch {
+            expected: POSE_TASK_BUNDLE_SHA256.into(),
+            actual,
+        })
+    }
+}
+
 fn contract_error(message: impl Into<String>) -> InferenceError {
     InferenceError::MediaPipeOutputContract(message.into())
 }
@@ -575,8 +689,8 @@ fn contract_error(message: impl Into<String>) -> InferenceError {
 #[cfg(test)]
 mod tests {
     use super::{
-        embedded_task_bundle, frame_rgb, matrix_from_column_major, verify_task_bundle_bytes,
-        video_timestamp_ms,
+        embedded_pose_task_bundle, embedded_task_bundle, frame_rgb, matrix_from_column_major,
+        verify_pose_task_bundle_bytes, verify_task_bundle_bytes, video_timestamp_ms,
     };
     use std::sync::Arc;
     use vtuber_core::{FrameSeq, MonoTimeNs, PixelFormat, VideoFrame};
@@ -584,6 +698,11 @@ mod tests {
     #[test]
     fn embedded_task_bundle_matches_the_pinned_sha256() {
         assert!(verify_task_bundle_bytes(embedded_task_bundle()).is_ok());
+    }
+
+    #[test]
+    fn embedded_pose_task_bundle_matches_the_pinned_sha256() {
+        assert!(verify_pose_task_bundle_bytes(embedded_pose_task_bundle()).is_ok());
     }
 
     fn frame(

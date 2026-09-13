@@ -78,6 +78,38 @@ struct SharedState {
     metrics: CaptureMetrics,
 }
 
+/// Publishes one captured frame to the face consumer and, when enabled, the
+/// Pose consumer.
+///
+/// Both slots receive the same `VideoFrame`, whose pixel buffer is an `Arc`, so
+/// the image body is never copied and the camera is never opened twice. Returns
+/// whether the face slot accepted the frame; the Pose slot is allowed to be
+/// overwritten because it runs at its own cadence. Each slot keeps its own
+/// single-producer/single-consumer contract.
+#[must_use]
+pub fn publish_tracking_frame(
+    frame: VideoFrame,
+    face_slot: &LatestSlot<VideoFrame>,
+    pose_slot: Option<&LatestSlot<VideoFrame>>,
+) -> bool {
+    let sent = face_slot.publish(frame.clone());
+    if let Some(pose_slot) = pose_slot {
+        let _ = pose_slot.publish(frame);
+    }
+    sent
+}
+
+/// Discards retained frames from both consumers, e.g. across a stop or reconnect.
+fn clear_frame_slots(
+    face_slot: &LatestSlot<VideoFrame>,
+    pose_slot: Option<&LatestSlot<VideoFrame>>,
+) {
+    face_slot.clear();
+    if let Some(pose_slot) = pose_slot {
+        pose_slot.clear();
+    }
+}
+
 /// Production capture service controller.
 ///
 /// The controller lives on the application main thread. It spawns a single
@@ -87,6 +119,7 @@ pub struct CaptureController {
     state: Arc<std::sync::Mutex<SharedState>>,
     command_tx: Option<std::sync::mpsc::Sender<ControlCommand>>,
     frame_slot: Arc<LatestSlot<VideoFrame>>,
+    pose_slot: Option<Arc<LatestSlot<VideoFrame>>>,
     worker: Option<WorkerHandle<CaptureWorkerResult>>,
 }
 
@@ -115,6 +148,7 @@ impl CaptureController {
             state: Arc::new(std::sync::Mutex::new(SharedState::default())),
             command_tx: None,
             frame_slot: Arc::new(LatestSlot::new()),
+            pose_slot: None,
             worker: None,
         }
     }
@@ -123,6 +157,15 @@ impl CaptureController {
     #[must_use]
     pub fn frame_slot(&self) -> Arc<LatestSlot<VideoFrame>> {
         Arc::clone(&self.frame_slot)
+    }
+
+    /// Enables or disables the second capacity-one slot used by the Pose worker.
+    ///
+    /// Must be called before [`CaptureController::start_worker`]. Passing `None`
+    /// disables the arm-tracking fan-out, so a disabled Pose worker is never
+    /// fed frames.
+    pub fn set_pose_output(&mut self, pose_slot: Option<Arc<LatestSlot<VideoFrame>>>) {
+        self.pose_slot = pose_slot;
     }
 
     /// Returns the current service state.
@@ -181,9 +224,10 @@ impl CaptureController {
 
         let state = Arc::clone(&self.state);
         let slot = Arc::clone(&self.frame_slot);
+        let pose_slot = self.pose_slot.clone();
 
         let worker = WorkerHandle::spawn("capture-worker", move |stop| {
-            run_capture_worker(backend, rx, stop, state, slot)
+            run_capture_worker(backend, rx, stop, state, slot, pose_slot)
         });
 
         self.worker = Some(worker);
@@ -289,6 +333,7 @@ fn run_capture_worker<B>(
     stop: StopToken,
     state: Arc<std::sync::Mutex<SharedState>>,
     slot: Arc<LatestSlot<VideoFrame>>,
+    pose_slot: Option<Arc<LatestSlot<VideoFrame>>>,
 ) -> CaptureWorkerResult
 where
     B: CameraBackend,
@@ -328,6 +373,7 @@ where
                         &stop,
                         &state,
                         &slot,
+                        pose_slot.as_deref(),
                         &mut metrics,
                         &mut next_frame_seq,
                     ) {
@@ -353,7 +399,7 @@ where
                     if let Some(mut stream) = active_stream.take() {
                         let _ = stream.stop();
                     }
-                    slot.clear();
+                    clear_frame_slots(&slot, pose_slot.as_deref());
                     update_state(&state, |s| {
                         s.state = CaptureServiceState::Selected;
                     });
@@ -362,7 +408,7 @@ where
                     if let Some(mut stream) = active_stream.take() {
                         let _ = stream.stop();
                     }
-                    slot.clear();
+                    clear_frame_slots(&slot, pose_slot.as_deref());
                     selected_device = None;
                     requested_format = None;
                     reconnect_attempts = 0;
@@ -388,7 +434,7 @@ where
                     reconnect_attempts = 0;
                     let frame = stamp_frame_sequence(frame, &mut next_frame_seq);
                     metrics.frames_captured = metrics.frames_captured.saturating_add(1);
-                    if !slot.publish(frame) {
+                    if !publish_tracking_frame(frame, &slot, pose_slot.as_deref()) {
                         metrics.frames_dropped = metrics.frames_dropped.saturating_add(1);
                     }
                     update_state(&state, |s| {
@@ -400,7 +446,7 @@ where
                 }
                 Err(CameraError::Disconnected) => {
                     active_stream = None;
-                    slot.clear();
+                    clear_frame_slots(&slot, pose_slot.as_deref());
                     metrics.last_error = Some("CAMERA_DISCONNECTED".into());
                     if reconnect_attempts < MAX_RECONNECT_ATTEMPTS && selected_device.is_some() {
                         reconnect_attempts += 1;
@@ -421,6 +467,7 @@ where
                                 &stop,
                                 &state,
                                 &slot,
+                                pose_slot.as_deref(),
                                 &mut metrics,
                                 &mut next_frame_seq,
                             ) {
@@ -477,6 +524,7 @@ fn open_and_stream<B>(
     stop: &StopToken,
     state: &Arc<std::sync::Mutex<SharedState>>,
     slot: &Arc<LatestSlot<VideoFrame>>,
+    pose_slot: Option<&LatestSlot<VideoFrame>>,
     metrics: &mut CaptureMetrics,
     next_frame_seq: &mut u64,
 ) -> Result<Box<dyn crate::device::CameraStream>, CameraError>
@@ -488,14 +536,14 @@ where
 
     // Discard stale slot contents so the consumer does not see an old frame
     // after a reconnect.
-    slot.clear();
+    clear_frame_slots(slot, pose_slot);
 
     // Capture one frame immediately to confirm the device is really alive.
     match stream.next_frame(stop) {
         Ok(frame) => {
             let frame = stamp_frame_sequence(frame, next_frame_seq);
             metrics.frames_captured = metrics.frames_captured.saturating_add(1);
-            if !slot.publish(frame) {
+            if !publish_tracking_frame(frame, slot, pose_slot) {
                 metrics.frames_dropped = metrics.frames_dropped.saturating_add(1);
             }
             update_state(state, |s| {
@@ -697,6 +745,55 @@ mod tests {
         // reconnect; the capture-owned stamp must not do so.
         assert_eq!(stamp_frame_sequence(frame(), &mut next_frame_seq).seq.0, 1);
         assert_eq!(stamp_frame_sequence(frame(), &mut next_frame_seq).seq.0, 2);
+    }
+
+    #[test]
+    fn tracking_fan_out_shares_one_pixel_buffer() {
+        let face: LatestSlot<VideoFrame> = LatestSlot::new();
+        let pose: LatestSlot<VideoFrame> = LatestSlot::new();
+        let frame = VideoFrame {
+            seq: FrameSeq(1),
+            captured_at: vtuber_core::MonoTimeNs(0),
+            width: 1,
+            height: 1,
+            stride_bytes: 1,
+            format: vtuber_core::PixelFormat::Gray8,
+            data: vec![7_u8].into(),
+        };
+        let pointer = Arc::as_ptr(&frame.data);
+        assert!(publish_tracking_frame(frame, &face, Some(&pose)));
+
+        let vtuber_core::ReadResult::New(face_frame) =
+            face.try_read_after(0).expect("face frame published")
+        else {
+            panic!("face slot should contain a new frame");
+        };
+        let vtuber_core::ReadResult::New(pose_frame) =
+            pose.try_read_after(0).expect("pose frame published")
+        else {
+            panic!("pose slot should contain a new frame");
+        };
+        assert_eq!(Arc::as_ptr(&face_frame.data), pointer);
+        assert!(Arc::ptr_eq(&face_frame.data, &pose_frame.data));
+    }
+
+    #[test]
+    fn disabled_pose_output_never_publishes_a_second_slot() {
+        let face: LatestSlot<VideoFrame> = LatestSlot::new();
+        let frame = VideoFrame {
+            seq: FrameSeq(1),
+            captured_at: vtuber_core::MonoTimeNs(0),
+            width: 1,
+            height: 1,
+            stride_bytes: 1,
+            format: vtuber_core::PixelFormat::Gray8,
+            data: vec![0_u8].into(),
+        };
+        assert!(publish_tracking_frame(frame, &face, None));
+        assert!(matches!(
+            face.try_read_after(0),
+            Some(vtuber_core::ReadResult::New(_))
+        ));
     }
 
     #[test]
