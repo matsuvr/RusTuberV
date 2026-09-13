@@ -12,6 +12,7 @@ description = "Calibration, pose solving, filtering, and tracking state for RusT
 vtuber-core = { path = "../vtuber-core" }
 nalgebra = "=0.35.0"
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 approx = "=0.5.1"

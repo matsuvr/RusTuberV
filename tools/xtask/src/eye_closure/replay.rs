@@ -73,7 +73,11 @@ struct InputInventory {
 
 /// Runs `eye-closure inspect`.
 pub(crate) fn run_inspect(options: &Options) -> Result<(), String> {
-    let document = InputsDocument::load(&options.inputs)?;
+    let inputs_path = options
+        .inputs
+        .as_deref()
+        .ok_or("missing required option --inputs")?;
+    let document = InputsDocument::load(inputs_path)?;
     let mut inputs = Vec::new();
     for input in &document.inputs {
         inputs.push(inspect_input(input)?);
@@ -281,7 +285,11 @@ struct TakeExtraction {
 
 /// Runs `eye-closure extract`.
 pub(crate) fn run_extract(options: &Options) -> Result<(), String> {
-    let document = InputsDocument::load(&options.inputs)?;
+    let inputs_path = options
+        .inputs
+        .as_deref()
+        .ok_or("missing required option --inputs")?;
+    let document = InputsDocument::load(inputs_path)?;
     let task_path = options
         .project_root
         .join("assets")
@@ -1825,7 +1833,11 @@ mod tests {
         std::fs::write(&inputs_path, serde_json::to_string(&inputs).unwrap()).unwrap();
         let output = directory.path().join("extracted");
         let options = Options {
-            inputs: inputs_path,
+            inputs: Some(inputs_path),
+            data: None,
+            labels: None,
+            split: None,
+            profile: None,
             output: output.clone(),
             project_root: directory.path().to_path_buf(),
         };
