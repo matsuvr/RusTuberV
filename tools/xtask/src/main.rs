@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 mod acceptance;
+mod eye_closure;
 mod face_image_probe;
 mod face_pipeline_smoke;
 mod mediapipe_face_smoke;
@@ -41,6 +42,7 @@ fn main() {
             "  vrm-managed-compat <path-to-model.vrm>  run the managed user:// lifecycle gate"
         );
         println!("  acceptance <command>      Windows acceptance test support");
+        println!("  eye-closure <command>      Eye-closure data prep and threshold fitting");
         println!("  face-image-probe <path>  Legacy research UltraFace/Peppa probe");
         println!("  face-pipeline-smoke       Legacy research detector/crop/landmark probe");
         println!("  mediapipe-face-smoke      Windows MSMF MediaPipe Face Landmarker gate");
@@ -91,6 +93,13 @@ fn main() {
         "acceptance" => {
             handle_acceptance(&args[1..]);
         }
+        "eye-closure" => match eye_closure::run(&args[1..]) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("eye-closure failed: {error}");
+                process::exit(1);
+            }
+        },
         "face-image-probe" => match face_image_probe::run(&args[1..]) {
             Ok(()) => {}
             Err(error) => {
