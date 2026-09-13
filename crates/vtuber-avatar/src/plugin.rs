@@ -64,6 +64,7 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<CameraPointerGesture>()
             .init_resource::<ArmPoseOverrideStore>()
             .init_resource::<crate::arm_pipeline::ArmSourceSelection>()
+            .init_resource::<crate::arm_pipeline::TrackedArmControl>()
             .add_message::<crate::arm_pose::ArmPoseProfileChange>()
             .init_resource::<ActiveControlFrame>()
             .init_resource::<ManualExpressionSelection>()
@@ -140,6 +141,13 @@ impl Plugin for VtuberAvatarPlugin {
                 crate::arm_pipeline::update_dynamic_arm_targets
                     .after(update_body_tracking_position_input)
                     .before(update_body_tracking_pose_input)
+                    .before(apply_default_arm_pose),
+            )
+            .add_systems(
+                PostUpdate,
+                crate::arm_pipeline::update_tracked_arm_targets
+                    .after(apply_direct_body_tracking)
+                    .after(crate::arm_pipeline::update_dynamic_arm_targets)
                     .before(apply_default_arm_pose),
             )
             .add_systems(

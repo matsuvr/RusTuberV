@@ -60,6 +60,9 @@ pub mod settings;
 /// Placeholder for app subsystem.
 pub mod placeholder;
 
+/// Application bridge for the observed-arm Pose worker.
+pub mod pose_runtime;
+
 /// Camera preview texture pipeline.
 pub mod preview;
 

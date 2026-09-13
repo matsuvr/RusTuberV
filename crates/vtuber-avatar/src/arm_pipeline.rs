@@ -71,6 +71,14 @@ pub enum ArmPoseSourceKind {
     /// never writes hand orientation, so the hand keeps its rest-relative pose
     /// unless a future hand target supplies an explicit rotation.
     VirtualHandAnchor,
+    /// Webcam-observed shoulders/elbows/wrists (Issues #44/#47/#48).
+    ///
+    /// The tracked target is produced outside the virtual-hand generator by
+    /// [`crate::tracked_arm`] and blended with the virtual target by explicit
+    /// per-channel weights. The virtual post-solve modifiers (torso lag,
+    /// swivel, shoulder trim, twist relaxation) are never re-applied to the
+    /// observed target, because that would move a measured hand off its target.
+    TrackedPose,
 }
 
 /// Resource selecting the active arm-pose source.
@@ -672,6 +680,9 @@ fn generate_hand_target(
                 None => legacy_static_target(input, ArmPoseSourceUsed::LegacyFallback),
             }
         }
+        // The observed target is supplied by `crate::tracked_arm`, not
+        // generated from rest geometry. This generator has nothing to add.
+        ArmPoseSourceKind::TrackedPose => None,
     }
 }
 
@@ -1080,6 +1091,180 @@ pub fn update_dynamic_arm_targets(
         left: resolve(binding.left_arm.as_ref(), motion.left.as_ref()),
         right: resolve(binding.right_arm.as_ref(), motion.right.as_ref()),
     };
+}
+
+/// Latest observed-arm control for the active avatar (Issues #47/#48).
+///
+/// The application bridge writes the pure tracking result here; the system
+/// below converts it into the compositor's per-frame targets. A resource is
+/// enough because exactly one avatar is active, and the stored generation
+/// rejects frames from a replaced model.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct TrackedArmControl {
+    /// Avatar generation the stored frame belongs to.
+    pub generation: Option<crate::lifecycle::AvatarGeneration>,
+    /// Latest observed control frame, already mirrored at the output boundary.
+    pub frame: Option<vtuber_core::arm_tracking::ArmControlFrame>,
+    /// Fixed rotation from the canonical tracking basis into the model basis.
+    pub view_to_model: Quat,
+}
+
+impl Default for TrackedArmControl {
+    fn default() -> Self {
+        Self {
+            generation: None,
+            frame: None,
+            view_to_model: Quat::IDENTITY,
+        }
+    }
+}
+
+/// Converts the latest observed control frame into compositor targets.
+///
+/// Runs after [`update_dynamic_arm_targets`] (which clears the virtual targets
+/// while tracked mode is selected) and before `apply_default_arm_pose`. It only
+/// reads the current parent pose and immutable rest geometry; native handles,
+/// the camera, and the clock stay outside.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+pub fn update_tracked_arm_targets(
+    lifecycle: Res<AvatarLifecycle>,
+    selection: Res<ArmSourceSelection>,
+    control: Res<TrackedArmControl>,
+    overrides: Option<Res<crate::arm_pose::ArmPoseOverrideStore>>,
+    mut roots: Query<(
+        &AvatarBinding,
+        &crate::load::AvatarAssetId,
+        &crate::arm_motion_geometry::ArmMotionGeometry,
+        &crate::body_scale::BodyScaleMeters,
+        Option<&mut DynamicArmTargets>,
+    )>,
+    torso_rotations: Query<(&GlobalTransform, &RestGlobalTransform)>,
+) {
+    if selection.mode != ArmPoseSourceKind::TrackedPose {
+        return;
+    }
+    let Ok((binding, model_id, motion, scale, targets)) = roots.single_mut() else {
+        return;
+    };
+    let Some(mut targets) = targets else {
+        return;
+    };
+    let Some(frame) = control
+        .frame
+        .filter(|_| control.generation == Some(binding.generation))
+    else {
+        return;
+    };
+    if lifecycle.state() != crate::lifecycle::AvatarLifecycleState::Ready {
+        return;
+    }
+    if targets.generation == Some(binding.generation)
+        && targets.source_seq == Some(frame.source_seq)
+    {
+        // Same input frame: keep the existing resolution (idempotent).
+        return;
+    }
+
+    let profile = overrides
+        .as_deref()
+        .and_then(|store| store.dynamic_profile_for(model_id))
+        .unwrap_or(selection.profile);
+
+    // Parent rest/current rotations so a torso turn is removed exactly once.
+    let (parent_rest, parent_current) = binding
+        .upper_chest
+        .or(binding.chest)
+        .and_then(|bone| torso_rotations.get(bone).ok())
+        .map(|(global, rest)| (rest.0.rotation(), global.rotation()))
+        .unwrap_or((Quat::IDENTITY, Quat::IDENTITY));
+    let tracking_to_rest = crate::tracked_arm::tracking_to_rest_rotation(
+        parent_rest,
+        parent_current,
+        control.view_to_model,
+    );
+
+    let resolve = |chain: Option<&ArmChainBinding>,
+                   geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>,
+                   target: Option<vtuber_core::arm_tracking::ArmTrackingTarget>,
+                   weights: vtuber_core::arm_tracking::ArmBlendWeight| {
+        resolve_tracked_side(
+            chain,
+            geometry,
+            profile,
+            scale.scale_meters,
+            target,
+            weights,
+            tracking_to_rest,
+        )
+    };
+    *targets = DynamicArmTargets {
+        generation: Some(binding.generation),
+        source_seq: Some(frame.source_seq),
+        left: resolve(
+            binding.left_arm.as_ref(),
+            motion.left.as_ref(),
+            frame.targets.left,
+            frame.weights.left,
+        ),
+        right: resolve(
+            binding.right_arm.as_ref(),
+            motion.right.as_ref(),
+            frame.targets.right,
+            frame.weights.right,
+        ),
+    };
+}
+
+fn resolve_tracked_side(
+    chain: Option<&ArmChainBinding>,
+    geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>,
+    profile: DynamicArmProfile,
+    body_scale_meters: f32,
+    target: Option<vtuber_core::arm_tracking::ArmTrackingTarget>,
+    weights: vtuber_core::arm_tracking::ArmBlendWeight,
+    tracking_to_rest: Quat,
+) -> Option<crate::arm_pose::ResolvedArmPose> {
+    let chain = chain?;
+    let target = target?;
+    let tracked = crate::tracked_arm::tracked_arm_ik_target(chain.rest, target, tracking_to_rest);
+    let blended = match geometry
+        .and_then(|geometry| neutral_virtual_target(chain, geometry, profile, body_scale_meters))
+    {
+        Some(virtual_target) => {
+            crate::tracked_arm::blend_arm_targets(virtual_target, tracked, weights).ok()?
+        }
+        None => tracked,
+    };
+    let solution =
+        crate::arm::solve_two_bone_arm(ArmIkInput::from_geometry(chain.rest, blended)).ok()?;
+    crate::tracked_arm::resolved_tracked_arm_pose(chain, solution).ok()
+}
+
+/// The virtual target used as the blend source for observed arms.
+///
+/// Head/body offsets are zero here: with tracked authority the observed frame
+/// is the authority, and the virtual fallback is the neutral anchor the
+/// compositor returns to. That keeps the arm alive when the face is lost.
+fn neutral_virtual_target(
+    chain: &ArmChainBinding,
+    motion: &crate::arm_motion_geometry::ArmMotionRestGeometry,
+    profile: DynamicArmProfile,
+    body_scale_meters: f32,
+) -> Option<ArmIkTarget> {
+    let input = ArmPipelineInput {
+        chain,
+        motion,
+        legacy_profile: crate::arm::ArmPoseProfile::default(),
+        dynamic_profile: profile,
+        head_offset: Vec3::ZERO,
+        body_offset: Vec3::ZERO,
+        torso_delta: Quat::IDENTITY,
+        body_scale_meters,
+    };
+    resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
+        .ok()
+        .flatten()
+        .map(|(_, outcome)| outcome.hand_target)
 }
 
 #[cfg(test)]

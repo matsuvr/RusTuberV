@@ -824,6 +824,7 @@ pub fn process_ui_actions_system(
     mut reset_camera_requests: Option<MessageWriter<vtuber_avatar::ResetCameraRequest>>,
     mut expression_store: Option<ResMut<ExpressionBindingStore>>,
     mut manual_requests: Option<MessageWriter<ManualExpressionRequest>>,
+    mut pose_runtime: Option<ResMut<crate::pose_runtime::PoseRuntime>>,
 ) {
     let actions = ui_state.take_actions();
     for action in &actions {
@@ -831,6 +832,28 @@ pub fn process_ui_actions_system(
             UiAction::TogglePreview => preview.toggle_visible(),
             UiAction::ToggleMirror => preview.toggle_mirrored(),
             UiAction::ToggleAvatarMotionMirror => avatar_motion_mirror.toggle(),
+            UiAction::SetArmTrackingEnabled { enabled } => {
+                if let Some(pose) = pose_runtime.as_deref_mut() {
+                    pose.set_enabled(*enabled);
+                    if !*enabled {
+                        // Dropping the observation state also returns the arms
+                        // to the virtual anchors on the next compositor frame.
+                        pose.recalibrate();
+                    }
+                }
+                if let Some(settings) = arm_pose_settings.as_mut()
+                    && let Err(error) = settings.set_arm_tracking_enabled(*enabled)
+                {
+                    orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
+                        error.to_string(),
+                    )));
+                }
+            }
+            UiAction::RecalibrateArms => {
+                if let Some(pose) = pose_runtime.as_deref_mut() {
+                    pose.recalibrate();
+                }
+            }
             UiAction::SetArmPoseProfile { profile } => {
                 apply_arm_pose_profile_action(
                     &mut orchestrator,
@@ -948,6 +971,7 @@ pub fn process_ui_actions_system(
     view_model.preview_visible = preview.visible;
     view_model.mirror_preview = preview.mirrored;
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
+    view_model.arm_tracking_enabled = pose_runtime.as_deref().is_some_and(|pose| pose.enabled());
 }
 
 /// Returns the one catalog that expression operations may use right now.

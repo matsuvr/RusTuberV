@@ -59,8 +59,8 @@ pub use arm_pipeline::{
     ArmPipelineError, ArmPipelineInput, ArmPipelineOutcome, ArmPoseSourceKind, ArmPoseSourceUsed,
     ArmSourceSelection, DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION, DynamicArmProfile,
     DynamicArmProfileOverride, DynamicArmProfileOverrideError, DynamicArmTargets,
-    MAX_ARM_DROP_RADIANS, chain_side_label, clamp_upper_arm_swing, resolve_arm_pose, resolve_side,
-    update_dynamic_arm_targets,
+    MAX_ARM_DROP_RADIANS, TrackedArmControl, chain_side_label, clamp_upper_arm_swing,
+    resolve_arm_pose, resolve_side, update_dynamic_arm_targets, update_tracked_arm_targets,
 };
 pub use arm_pose::{
     ArmPoseBlendSide, ArmPoseBlendState, ArmPoseOverrideStore, ArmPoseOverrideStoreError,
@@ -113,6 +113,10 @@ pub use render_output::{
     AVATAR_RENDER_LAYER, AvatarOutputCamera, AvatarOutputFrameSlot, AvatarOutputState,
     AvatarOutputTarget, AvatarViewportSnapshot, VIEWPORT_ONLY_RENDER_LAYER,
     register_output_systems,
+};
+pub use tracked_arm::{
+    blend_arm_targets, resolved_tracked_arm_pose, solve_tracked_arm, tracked_arm_ik_target,
+    tracking_to_rest_rotation,
 };
 pub use tracking_profile::{
     GlobalBodyTrackingProfile, TRACKING_PROFILE_SCHEMA_VERSION, TrackingProfileDocument,

@@ -1481,6 +1481,51 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
             }
         },
     );
+    section(
+        ui,
+        lang.pick("腕のトラッキング", "Arm tracking", "手臂跟踪", "팔 트래킹"),
+        |ui| {
+            let mut enabled = vm.arm_tracking_enabled;
+            if ui
+                .checkbox(
+                    &mut enabled,
+                    lang.pick(
+                        "Webカメラで腕を追跡",
+                        "Track arms from the webcam",
+                        "使用网络摄像头跟踪手臂",
+                        "웹캠으로 팔 추적",
+                    ),
+                )
+                .changed()
+            {
+                state.emit(UiAction::SetArmTrackingEnabled { enabled });
+            }
+            if ui
+                .add_enabled(
+                    vm.arm_tracking_enabled,
+                    egui::Button::new(lang.pick(
+                        "腕の長さを再校正",
+                        "Recalibrate arm length",
+                        "重新校准手臂长度",
+                        "팔 길이 재보정",
+                    )),
+                )
+                .clicked()
+            {
+                state.emit(UiAction::RecalibrateArms);
+            }
+            ui.label(
+                RichText::new(lang.pick(
+                    "肩・肘・手首を画面に入れてください。机で隠れた手首は復帰まで仮想の腕で補います。指・掌の回転は対象外です。",
+                    "Keep shoulders, elbows, and wrists in frame. An occluded wrist is bridged by the virtual arm. Finger and palm rotation are out of scope.",
+                    "请将肩、肘、手腕保持在画面内。被遮挡的手腕会用虚拟手臂过渡。手指与手掌旋转不在范围内。",
+                    "어깨, 팔꿈치, 손목을 화면에 유지하세요. 가려진 손목은 가상 팔로 이어집니다. 손가락/손바닥 회전은 범위 밖입니다.",
+                ))
+                .small()
+                .weak(),
+            );
+        },
+    );
 }
 
 fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {

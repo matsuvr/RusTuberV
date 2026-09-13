@@ -4,11 +4,104 @@
 //! through the existing arm compositor, not register another bone writer.
 
 use bevy::prelude::{Quat, Vec3};
-use vtuber_core::arm_tracking::ArmTrackingTarget;
+use vtuber_core::arm_tracking::{ArmBlendWeight, ArmTrackingTarget};
 
 use crate::arm::{
-    ArmIkError, ArmIkInput, ArmIkSolution, ArmIkTarget, ArmRestGeometry, solve_two_bone_arm,
+    ArmChainBinding, ArmIkError, ArmIkInput, ArmIkSolution, ArmIkTarget, ArmPoseProfile,
+    ArmRestGeometry, solve_two_bone_arm,
 };
+use crate::arm_pipeline::ArmPipelineError;
+use crate::arm_pose::ResolvedArmPose;
+
+/// Rotation that carries the canonical tracking basis into the solver's
+/// model/rest basis while removing the current shoulder-parent motion.
+///
+/// `B` is the parent's rest rotation, `A` its current rotation, and `V` the
+/// fixed rotation from the canonical tracking basis (its +Z points toward the
+/// camera) into the model basis. Removing `A` exactly once prevents a torso
+/// turn from being applied to the arm twice.
+#[must_use]
+pub fn tracking_to_rest_rotation(
+    parent_rest: Quat,
+    parent_current: Quat,
+    view_to_model: Quat,
+) -> Quat {
+    parent_rest * parent_current.inverse() * view_to_model
+}
+
+/// Composes a virtual and an observed target by explicit per-channel weights.
+///
+/// `weights.wrist` moves the hand between the virtual and observed wrist;
+/// `weights.pole` moves the bend plane. Poles are blended by direction from the
+/// blended wrist so an opposed pair cannot interpolate through the shoulder and
+/// flip the elbow; an exactly opposed pair is reported as degenerate rather
+/// than silently inverted. Zero weights reproduce `virtual_target` and one
+/// weights reproduce `tracked_target`.
+pub fn blend_arm_targets(
+    virtual_target: ArmIkTarget,
+    tracked_target: ArmIkTarget,
+    weights: ArmBlendWeight,
+) -> Result<ArmIkTarget, ArmIkError> {
+    if !weights.wrist.is_finite() || !weights.pole.is_finite() {
+        return Err(ArmIkError::NonFiniteInput);
+    }
+    let wrist_weight = weights.wrist.clamp(0.0, 1.0);
+    let pole_weight = weights.pole.clamp(0.0, 1.0);
+    let wrist = virtual_target
+        .wrist
+        .lerp(tracked_target.wrist, wrist_weight);
+    let elbow_pole = blend_pole(
+        virtual_target.elbow_pole,
+        tracked_target.elbow_pole,
+        wrist,
+        pole_weight,
+    )?;
+    if !wrist.is_finite() || !elbow_pole.is_finite() {
+        return Err(ArmIkError::NonFiniteInput);
+    }
+    Ok(ArmIkTarget { wrist, elbow_pole })
+}
+
+fn blend_pole(
+    virtual_pole: Vec3,
+    tracked_pole: Vec3,
+    origin: Vec3,
+    weight: f32,
+) -> Result<Vec3, ArmIkError> {
+    let virtual_offset = virtual_pole - origin;
+    let tracked_offset = tracked_pole - origin;
+    let virtual_direction =
+        crate::arm::finite_normalized(virtual_offset).ok_or(ArmIkError::DegenerateGeometry)?;
+    let tracked_direction =
+        crate::arm::finite_normalized(tracked_offset).ok_or(ArmIkError::DegenerateGeometry)?;
+    if virtual_direction.dot(tracked_direction) < -1.0 + 1.0e-4 {
+        // Interpolating an opposed pair would cross the origin and invert the
+        // bend; report it as undefined instead of fabricating a plane.
+        return Err(ArmIkError::DegenerateGeometry);
+    }
+    let blended = virtual_direction * (1.0 - weight) + tracked_direction * weight;
+    let direction = crate::arm::finite_normalized(blended).ok_or(ArmIkError::DegenerateGeometry)?;
+    let length =
+        virtual_offset.length() + (tracked_offset.length() - virtual_offset.length()) * weight;
+    Ok(origin + direction * length)
+}
+
+/// Converts an observed solve into the compositor's rest-relative pose.
+///
+/// This is the exact conversion the virtual path uses; it is not
+/// reimplemented. Tracked fingers keep their rest pose (no observation exists)
+/// and the virtual shoulder-trim/swivel/twist modifiers are not applied.
+pub fn resolved_tracked_arm_pose(
+    chain: &ArmChainBinding,
+    solution: ArmIkSolution,
+) -> Result<ResolvedArmPose, ArmPipelineError> {
+    let profile = ArmPoseProfile {
+        finger_curl_radians: 0.0,
+        ..ArmPoseProfile::default()
+    };
+    crate::arm_pose::resolved_from_solution(chain, &solution, profile)?
+        .ok_or(ArmPipelineError::DegenerateSolvedPose)
+}
 
 /// Converts subject-arm units into avatar rest-space positions.
 ///
@@ -129,7 +222,8 @@ mod tests {
         let parent_rest = Quat::from_rotation_z(0.2);
         let parent_current = Quat::from_rotation_y(0.8) * parent_rest;
         let view_to_model = Quat::from_rotation_x(-0.1);
-        let tracking_to_rest = parent_rest * parent_current.inverse() * view_to_model;
+        let tracking_to_rest =
+            tracking_to_rest_rotation(parent_rest, parent_current, view_to_model);
         let solution = solve_tracked_arm(rest, target(), tracking_to_rest).unwrap();
         let displayed_offset =
             (parent_current * parent_rest.inverse()) * (solution.wrist - rest.upper_arm.position);
@@ -149,5 +243,94 @@ mod tests {
         let solution = solve_tracked_arm(rest, far, Quat::IDENTITY).unwrap();
         assert!(solution.solved_reach < rest.total_arm_length);
         assert!(solution.solved_reach > 0.69);
+    }
+
+    fn chain() -> ArmChainBinding {
+        let rest = geometry(1.0);
+        ArmChainBinding {
+            side: crate::arm::ArmSide::Left,
+            shoulder: None,
+            upper_arm: bevy::prelude::Entity::from_raw_u32(0).unwrap(),
+            lower_arm: bevy::prelude::Entity::from_raw_u32(1).unwrap(),
+            hand: bevy::prelude::Entity::from_raw_u32(2).unwrap(),
+            fingers: crate::arm::FingerReferences::default(),
+            finger_rest: crate::arm::FingerRestReferences::default(),
+            rest,
+            capabilities: crate::arm::ArmChainCapabilities::default(),
+        }
+    }
+
+    #[test]
+    fn blend_arm_targets_reproduces_both_endpoints() {
+        let virtual_target = ArmIkTarget {
+            wrist: Vec3::new(0.0, 1.0, 0.0),
+            elbow_pole: Vec3::new(0.0, 1.0, 0.4),
+        };
+        let tracked_target = ArmIkTarget {
+            wrist: Vec3::new(0.6, 0.2, 0.1),
+            elbow_pole: Vec3::new(0.6, 0.2, 0.5),
+        };
+        let untouched =
+            blend_arm_targets(virtual_target, tracked_target, ArmBlendWeight::ZERO).unwrap();
+        near(untouched.wrist, virtual_target.wrist);
+        near(untouched.elbow_pole, virtual_target.elbow_pole);
+
+        let observed =
+            blend_arm_targets(virtual_target, tracked_target, ArmBlendWeight::ONE).unwrap();
+        near(observed.wrist, tracked_target.wrist);
+        near(observed.elbow_pole, tracked_target.elbow_pole);
+
+        let half = blend_arm_targets(
+            virtual_target,
+            tracked_target,
+            ArmBlendWeight {
+                wrist: 0.5,
+                pole: 0.5,
+            },
+        )
+        .unwrap();
+        assert!(half.wrist.x > 0.0 && half.wrist.x < 0.6);
+        assert!(half.elbow_pole.is_finite());
+    }
+
+    #[test]
+    fn opposed_poles_are_degenerate_not_flipped() {
+        let origin = Vec3::new(0.0, 1.0, 0.0);
+        let virtual_target = ArmIkTarget {
+            wrist: origin,
+            elbow_pole: origin + Vec3::Z * 0.4,
+        };
+        let tracked_target = ArmIkTarget {
+            wrist: origin,
+            elbow_pole: origin - Vec3::Z * 0.4,
+        };
+        assert_eq!(
+            blend_arm_targets(
+                virtual_target,
+                tracked_target,
+                ArmBlendWeight {
+                    wrist: 0.5,
+                    pole: 0.5,
+                },
+            ),
+            Err(ArmIkError::DegenerateGeometry)
+        );
+    }
+
+    #[test]
+    fn resolved_tracked_arm_pose_reuses_the_shared_conversion() {
+        let chain = chain();
+        let solution = solve_tracked_arm(chain.rest, target(), Quat::IDENTITY).unwrap();
+        let tracked = resolved_tracked_arm_pose(&chain, solution).unwrap();
+        let profile = ArmPoseProfile {
+            finger_curl_radians: 0.0,
+            ..ArmPoseProfile::default()
+        };
+        let shared = crate::arm_pose::resolved_from_solution(&chain, &solution, profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tracked, shared);
+        assert!(tracked.upper_arm_delta.is_finite());
+        assert!(tracked.lower_arm_delta.is_finite());
     }
 }

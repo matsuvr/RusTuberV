@@ -26,6 +26,9 @@ use crate::orchestrator::{
     Orchestrator, process_ui_actions_system, sync_avatar_lifecycle_system,
     sync_expression_view_model,
 };
+use crate::pose_runtime::{
+    PoseRuntime, pose_source_selection_system, pose_worker_bridge_system, read_pose_output_system,
+};
 use crate::preview::PreviewState;
 use crate::preview_landmarks::{PreviewLandmarkState, sync_preview_landmark_system};
 use crate::settings::{
@@ -186,95 +189,114 @@ impl Plugin for UiShellPlugin {
             .get_resource::<InferenceProjectRoot>()
             .map(|root| root.0.clone())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        app.insert_resource(InferenceRuntime::new(frame_slot, project_root))
-            .init_resource::<TrackingRuntime>()
-            .add_systems(
-                Startup,
-                (
-                    restore_arm_pose_settings_system,
-                    restore_expression_binding_settings_system,
-                ),
+        app.insert_resource(InferenceRuntime::new(frame_slot, project_root.clone()))
+            .insert_resource(PoseRuntime::new(project_root))
+            .init_resource::<TrackingRuntime>();
+        // Wire the camera fan-out to the Pose slot before the capture worker is
+        // ever started, so one camera open serves both face and Pose.
+        let pose_slot = app.world().resource::<PoseRuntime>().frame_slot();
+        app.world_mut()
+            .resource_mut::<CaptureRuntime>()
+            .set_pose_output(Some(pose_slot));
+        app.add_systems(
+            Startup,
+            (
+                restore_arm_pose_settings_system,
+                restore_expression_binding_settings_system,
+                crate::pose_runtime::restore_pose_settings_system,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                process_ui_actions_system,
+                apply_arm_pose_profile_changes,
+                sync_avatar_lifecycle_system,
             )
-            .add_systems(
-                Update,
-                (
-                    process_ui_actions_system,
-                    apply_arm_pose_profile_changes,
-                    sync_avatar_lifecycle_system,
-                )
-                    .chain(),
+                .chain(),
+        )
+        .configure_sets(
+            Update,
+            vtuber_avatar::ManualExpressionSet.after(process_ui_actions_system),
+        )
+        .add_systems(
+            Update,
+            sync_expression_view_model
+                .after(process_ui_actions_system)
+                .after(vtuber_avatar::ManualExpressionSet),
+        )
+        .add_systems(
+            Update,
+            auto_start_tracking_system.after(sync_avatar_lifecycle_system),
+        )
+        .add_systems(
+            Update,
+            sync_error_presenter
+                .after(sync_avatar_lifecycle_system)
+                .after(sync_capture_diagnostics),
+        )
+        .add_systems(
+            Update,
+            ndi_output_bridge_system.after(sync_avatar_lifecycle_system),
+        )
+        .add_systems(
+            Update,
+            sync_ndi_output_view_model_system.after(ndi_output_bridge_system),
+        )
+        .add_systems(
+            Update,
+            (
+                capture_bridge_system,
+                read_latest_frame,
+                update_preview_texture_system,
+                register_preview_texture_system,
+                sync_capture_diagnostics,
             )
-            .configure_sets(
-                Update,
-                vtuber_avatar::ManualExpressionSet.after(process_ui_actions_system),
+                .chain(),
+        )
+        .add_systems(Update, register_avatar_preview_texture)
+        .add_systems(
+            Update,
+            (inference_bridge_system, read_inference_output_system)
+                .chain()
+                .before(capture_bridge_system),
+        )
+        .add_systems(
+            Update,
+            sync_preview_landmark_system.after(read_inference_output_system),
+        )
+        .add_systems(
+            Update,
+            tracking_bridge_system.after(read_inference_output_system),
+        )
+        .add_systems(
+            Update,
+            (
+                pose_worker_bridge_system,
+                read_pose_output_system,
+                pose_source_selection_system,
             )
-            .add_systems(
-                Update,
-                sync_expression_view_model
-                    .after(process_ui_actions_system)
-                    .after(vtuber_avatar::ManualExpressionSet),
-            )
-            .add_systems(
-                Update,
-                auto_start_tracking_system.after(sync_avatar_lifecycle_system),
-            )
-            .add_systems(
-                Update,
-                sync_error_presenter
-                    .after(sync_avatar_lifecycle_system)
-                    .after(sync_capture_diagnostics),
-            )
-            .add_systems(
-                Update,
-                ndi_output_bridge_system.after(sync_avatar_lifecycle_system),
-            )
-            .add_systems(
-                Update,
-                sync_ndi_output_view_model_system.after(ndi_output_bridge_system),
-            )
-            .add_systems(
-                Update,
-                (
-                    capture_bridge_system,
-                    read_latest_frame,
-                    update_preview_texture_system,
-                    register_preview_texture_system,
-                    sync_capture_diagnostics,
-                )
-                    .chain(),
-            )
-            .add_systems(Update, register_avatar_preview_texture)
-            .add_systems(
-                Update,
-                (inference_bridge_system, read_inference_output_system)
-                    .chain()
-                    .before(capture_bridge_system),
-            )
-            .add_systems(
-                Update,
-                sync_preview_landmark_system.after(read_inference_output_system),
-            )
-            .add_systems(
-                Update,
-                tracking_bridge_system.after(read_inference_output_system),
-            )
-            .add_systems(
-                Last,
-                (sync_engine_diagnostics, export_diagnostics_system)
-                    .chain()
-                    .before(shutdown_workers_on_exit),
-            )
-            .add_systems(Last, shutdown_workers_on_exit)
-            .add_systems(
-                PostUpdate,
-                sync_camera_pointer_input_gate
-                    .after(EguiPostUpdateSet::ProcessOutput)
-                    .before(CameraInputSet),
-            )
-            .add_systems(
-                EguiPrimaryContextPass,
-                (configure_fonts, ui_render_system).chain(),
-            );
+                .chain()
+                .after(read_inference_output_system)
+                .after(capture_bridge_system),
+        )
+        .add_systems(
+            Last,
+            (sync_engine_diagnostics, export_diagnostics_system)
+                .chain()
+                .before(shutdown_workers_on_exit),
+        )
+        .add_systems(Last, shutdown_workers_on_exit)
+        .add_systems(
+            PostUpdate,
+            sync_camera_pointer_input_gate
+                .after(EguiPostUpdateSet::ProcessOutput)
+                .before(CameraInputSet),
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
+            (configure_fonts, ui_render_system).chain(),
+        );
         #[cfg(not(feature = "dev-synthetic-input"))]
         app.add_systems(
             Update,

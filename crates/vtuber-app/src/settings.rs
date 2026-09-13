@@ -57,6 +57,7 @@ pub struct ArmPoseSettings {
     restored: ArmPoseOverrideStore,
     restored_expression_bindings: ExpressionBindingStore,
     language: UiLanguage,
+    arm_tracking_enabled: bool,
 }
 
 impl Default for ArmPoseSettings {
@@ -66,6 +67,7 @@ impl Default for ArmPoseSettings {
             restored: ArmPoseOverrideStore::default(),
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
+            arm_tracking_enabled: false,
         }
     }
 }
@@ -95,11 +97,13 @@ impl ArmPoseSettings {
             }
         };
         let language = load_language(&path);
+        let arm_tracking_enabled = load_arm_tracking_enabled(&path);
         Self {
             path: Some(path),
             restored,
             restored_expression_bindings,
             language,
+            arm_tracking_enabled,
         }
     }
 
@@ -120,6 +124,7 @@ impl ArmPoseSettings {
             restored: ArmPoseOverrideStore::default(),
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
+            arm_tracking_enabled: false,
         }
     }
 
@@ -171,6 +176,21 @@ impl ArmPoseSettings {
             save_language(path, language)?;
         }
         self.language = language;
+        Ok(())
+    }
+
+    /// Whether observed webcam arm tracking was enabled at load time.
+    #[must_use]
+    pub fn arm_tracking_enabled(&self) -> bool {
+        self.arm_tracking_enabled
+    }
+
+    /// Persists the observed arm-tracking switch.
+    pub fn set_arm_tracking_enabled(&mut self, enabled: bool) -> Result<(), ArmPoseSettingsError> {
+        if let Some(path) = &self.path {
+            save_arm_tracking_enabled(path, enabled)?;
+        }
+        self.arm_tracking_enabled = enabled;
         Ok(())
     }
 }
@@ -229,12 +249,42 @@ pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSet
         ArmPoseSettingsDocument {
             schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
             language,
+            arm_tracking_enabled: false,
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
         }
     };
     document.language = language;
+    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+}
+
+/// Loads the observed arm-tracking switch, defaulting to off.
+#[must_use]
+pub fn load_arm_tracking_enabled(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<ArmPoseSettingsDocument>(&text).ok())
+        .map(|document| document.arm_tracking_enabled)
+        .unwrap_or(false)
+}
+
+/// Persists the observed arm-tracking switch, preserving other sections.
+pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), ArmPoseSettingsError> {
+    let mut document = if path.is_file() {
+        let text = fs::read_to_string(path)?;
+        toml::from_str::<ArmPoseSettingsDocument>(&text)?
+    } else {
+        ArmPoseSettingsDocument {
+            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
+            language: load_language(path),
+            arm_tracking_enabled: enabled,
+            arm_pose_overrides: BTreeMap::new(),
+            dynamic_arm_profiles: BTreeMap::new(),
+            expression_bindings: BTreeMap::new(),
+        }
+    };
+    document.arm_tracking_enabled = enabled;
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
@@ -277,6 +327,7 @@ pub fn save_expression_bindings(
         ArmPoseSettingsDocument {
             schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
             language: load_language(path),
+            arm_tracking_enabled: load_arm_tracking_enabled(path),
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
@@ -333,6 +384,7 @@ pub fn save_arm_pose_overrides(
         ArmPoseSettingsDocument {
             schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
             language: load_language(path),
+            arm_tracking_enabled: load_arm_tracking_enabled(path),
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
@@ -378,6 +430,9 @@ struct ArmPoseSettingsDocument {
     schema_version: u32,
     #[serde(default)]
     language: UiLanguage,
+    /// Observed webcam arm tracking. Defaults off until the operator enables it.
+    #[serde(default)]
+    arm_tracking_enabled: bool,
     #[serde(default)]
     arm_pose_overrides: BTreeMap<String, PersistedArmPoseProfile>,
     #[serde(default)]
