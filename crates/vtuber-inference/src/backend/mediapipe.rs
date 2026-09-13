@@ -204,6 +204,8 @@ impl FaceTrackingInference for MediaPipeRuntime {
         decode_result(
             frame.seq,
             frame.captured_at,
+            frame.width,
+            frame.height,
             inference_started_at,
             inference_finished_at,
             result,
@@ -218,6 +220,8 @@ impl FaceTrackingInference for MediaPipeRuntime {
 fn decode_result(
     source_seq: FrameSeq,
     captured_at: MonoTimeNs,
+    image_width: u32,
+    image_height: u32,
     inference_started_at: MonoTimeNs,
     inference_finished_at: MonoTimeNs,
     result: FaceLandmarkerResult,
@@ -322,6 +326,7 @@ fn decode_result(
         inference_finished_at,
         camera_to_face,
         face_center,
+        [image_width, image_height],
         Arc::from(landmarks),
         blendshapes,
         FaceTrackingQuality {

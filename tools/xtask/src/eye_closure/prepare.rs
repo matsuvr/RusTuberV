@@ -29,7 +29,8 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
 
     let mut template = String::from("take_id,frame_seq,eye,label,label_source,tag,event_id\n");
     let mut proxy = String::from("take_id,frame_seq,eye,label,label_source,tag,event_id\n");
-    let mut index = String::from("sheet,cell,take_id,frame_seq,reason\n");
+    let mut index =
+        String::from("sheet,cell,take_id,frame_seq,timestamp_micros,reason,reference_path\n");
     let mut report = String::from("# Eye-closure label review candidates\n\n");
     let mut sheet_number = 0_usize;
     let mut skipped_images = 0_usize;
@@ -47,14 +48,20 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
             .collect();
         let candidates = select_candidates(&frames);
         let take = data.take(take_id);
+        let seq_gaps = frames.iter().filter(|frame| frame.seq_gap_before).count();
+        let time_gaps = frames.iter().filter(|frame| frame.time_gap_before).count();
         let _ = writeln!(
             report,
-            "## {take_id}\n\n- frames: {}\n- candidates: {}\n- session: {:?}\n",
+            "## {take_id}\n\n- frames: {}\n- candidates: {}\n- sequence gaps: {seq_gaps}\n- capture-time gaps: {time_gaps}\n- session: {:?}\n",
             frames.len(),
             candidates.len(),
             take.and_then(|take| take.session_id.as_deref())
         );
         for candidate in &candidates {
+            let frame = frames
+                .iter()
+                .find(|frame| frame.frame_seq == candidate.frame_seq);
+            let event_id = event_id_for(take_id, candidate, &frames);
             for eye in [EyeSide::Left, EyeSide::Right] {
                 let _ = writeln!(
                     template,
@@ -63,15 +70,9 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
                     candidate.frame_seq,
                     eye.as_str(),
                     csv_field(&candidate.reason),
-                    csv_field(&format!(
-                        "{take_id}:{}:{}",
-                        candidate.frame_seq, candidate.reason
-                    ))
+                    csv_field(&event_id)
                 );
-                if let Some(frame) = frames
-                    .iter()
-                    .find(|frame| frame.frame_seq == candidate.frame_seq)
-                {
+                if let Some(frame) = frame {
                     let arkit = match eye {
                         EyeSide::Left => frame.arkit_blink_left,
                         EyeSide::Right => frame.arkit_blink_right,
@@ -97,9 +98,10 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
         {
             let root = Path::new(root);
             let directory = options.output.join("sheets");
-            for (sheet_index, chunk) in candidates.chunks((COLUMNS * ROWS) as usize).enumerate() {
+            for chunk in candidates.chunks((COLUMNS * ROWS) as usize) {
                 let mut montage = RgbImage::new(COLUMNS * CELL_WIDTH, ROWS * CELL_HEIGHT);
                 let mut filled = 0_u32;
+                let sheet_name = format!("{take_id}-sheet-{sheet_number:03}");
                 for (cell, candidate) in chunk.iter().enumerate() {
                     let Some(frame) = frames
                         .iter()
@@ -126,7 +128,7 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
                             continue;
                         }
                     };
-                    let cell_image = eye_band(&image);
+                    let cell_image = eye_crop(&image, frame);
                     let cell_image = imageops::resize(
                         &cell_image,
                         CELL_WIDTH,
@@ -134,15 +136,16 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
                         imageops::FilterType::Triangle,
                     );
                     paste(&mut montage, &cell_image, cell as u32);
-                    let sheet = format!("{take_id}-sheet-{sheet_index:03}");
                     let _ = writeln!(
                         index,
-                        "{},{},{},{},{}",
-                        csv_field(&sheet),
+                        "{},{},{},{},{},{},{}",
+                        csv_field(&sheet_name),
                         cell,
                         csv_field(take_id),
                         candidate.frame_seq,
-                        csv_field(&candidate.reason)
+                        frame.timestamp_micros,
+                        csv_field(&candidate.reason),
+                        csv_field(&path.display().to_string())
                     );
                     filled += 1;
                 }
@@ -152,7 +155,7 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
                 std::fs::create_dir_all(&directory).map_err(|error| {
                     format!("failed to create {}: {error}", directory.display())
                 })?;
-                let sheet_path = directory.join(format!("{take_id}-sheet-{sheet_number:03}.png"));
+                let sheet_path = directory.join(format!("{sheet_name}.png"));
                 montage
                     .save_with_format(&sheet_path, image::ImageFormat::Png)
                     .map_err(|error| {
@@ -182,6 +185,33 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
 struct Candidate {
     frame_seq: u64,
     reason: String,
+}
+
+/// One closure event id per contiguous proxy-closed run.
+///
+/// Candidates inside the same sustained proxy closure share one id so a
+/// seven-frame wink is reviewed as one event. A candidate outside any
+/// proxy-closed run keeps a frame-scoped id; unlabelled gaps never connect
+/// two runs.
+fn event_id_for(take_id: &str, candidate: &Candidate, frames: &[&FrameRow]) -> String {
+    let closed: std::collections::BTreeMap<u64, bool> = frames
+        .iter()
+        .map(|frame| {
+            let closed = match (frame.arkit_blink_left, frame.arkit_blink_right) {
+                (Some(left), Some(right)) => left.max(right) >= 0.6,
+                _ => false,
+            };
+            (frame.frame_seq, closed)
+        })
+        .collect();
+    if closed.get(&candidate.frame_seq) != Some(&true) {
+        return format!("{take_id}:frame:{}", candidate.frame_seq);
+    }
+    let mut first = candidate.frame_seq;
+    while first > 0 && closed.get(&(first - 1)) == Some(&true) {
+        first -= 1;
+    }
+    format!("{take_id}:proxy:{first}")
 }
 
 fn select_candidates(frames: &[&FrameRow]) -> Vec<Candidate> {
@@ -259,6 +289,58 @@ fn declared_reference(frame: &FrameRow) -> (u32, u32, String) {
             .clone()
             .unwrap_or_else(|| "jpeg-rgb8-srgb".to_owned()),
     )
+}
+
+/// Crops the eye region from the observed lid points, falling back to the
+/// fixed central band when a frame has no stored geometry (trace v1).
+fn eye_crop(image: &RgbImage, frame: &FrameRow) -> RgbImage {
+    let mut points: Vec<[f32; 2]> = Vec::new();
+    for eye in [frame.lid_points_left, frame.lid_points_right]
+        .into_iter()
+        .flatten()
+    {
+        points.extend(eye);
+    }
+    if points.is_empty() {
+        return eye_band(image);
+    }
+    // The stored points are in inference-image pixels; scale them if the
+    // decoded review image is at a different resolution.
+    let scale_x = frame
+        .inference_width
+        .map_or(1.0_f32, |width| image.width() as f32 / width as f32);
+    let scale_y = frame
+        .inference_height
+        .map_or(1.0_f32, |height| image.height() as f32 / height as f32);
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for [x, y] in points {
+        let x = x * scale_x;
+        let y = y * scale_y;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    let width = (max_x - min_x).max(1.0);
+    let height = (max_y - min_y).max(1.0);
+    let margin_x = width * 0.4;
+    let margin_y = height * 0.8;
+    let x0 = (min_x - margin_x).floor().max(0.0) as u32;
+    let y0 = (min_y - margin_y).floor().max(0.0) as u32;
+    let x1 = (max_x + margin_x).ceil().min(image.width() as f32) as u32;
+    let y1 = (max_y + margin_y).ceil().min(image.height() as f32) as u32;
+    let crop_width = x1
+        .saturating_sub(x0)
+        .max(1)
+        .min(image.width().saturating_sub(x0).max(1));
+    let crop_height = y1
+        .saturating_sub(y0)
+        .max(1)
+        .min(image.height().saturating_sub(y0).max(1));
+    imageops::crop_imm(image, x0, y0, crop_width, crop_height).to_image()
 }
 
 /// Crops the central eye band of an upright face.

@@ -1,9 +1,10 @@
-//! Held-out evaluation and validated-profile emission (Issue #52).
+//! Held-out evaluation and validated-profile emission (Issues #52/#66).
 //!
 //! `evaluate` freezes one candidate, reads the test split exactly once, and
-//! writes an installable profile only when both eyes pass with visual labels
-//! and matching inference fingerprints. A failing evaluation still writes a
-//! report but leaves no runtime profile behind.
+//! writes an installable profile only when both eyes pass every measured
+//! metric group with visual labels and matching inference fingerprints. A
+//! failing evaluation still writes a report but leaves no runtime profile
+//! behind.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -11,13 +12,14 @@ use std::path::Path;
 use vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256;
 use vtuber_tracking::{
     EYE_CLOSURE_ALGORITHM_VERSION, EYE_CLOSURE_FEATURE, EYE_CLOSURE_PROFILE_SCHEMA_VERSION,
-    EyeClosureFingerprints, EyeClosureProfileDocument, EyeClosureThresholds,
-    EyeClosureVerificationStatus, EyeSide,
+    EyeClosureFingerprints, EyeClosureProfileDocument, EyeClosureVerificationStatus,
+    EyeGeometryThresholdValues, EyeSide,
 };
 
 use super::Options;
 use super::fit::{
-    MAX_FALSE_CLOSE, MIN_CLOSED_RECALL, build_series, evaluate_candidate, read_profile,
+    MAX_FALSE_CLOSE, MIN_CLOSED_RECALL, MIN_EVENT_ATTAINMENT, build_series,
+    evaluate_geometry_candidate, read_profile,
 };
 use super::labels::{ExtractedData, Labels, Split, SplitFile};
 
@@ -52,34 +54,45 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
             .as_deref()
             .is_some_and(|hash| hash.eq_ignore_ascii_case(TASK_BUNDLE_SHA256));
 
-    let mut report = String::from("# Eye-closure held-out evaluation\n\n");
+    let mut report = String::from("# Eye-closure held-out evaluation (algorithm v2)\n\n");
     let _ = writeln!(
         report,
-        "- feature: `{EYE_CLOSURE_FEATURE}`\n- algorithm: {EYE_CLOSURE_ALGORITHM_VERSION}\n- label sha256: `{}`\n- test takes: {test_takes:?}\n- fingerprint match: {fingerprint_ok}\n- criteria: closed recall >= {MIN_CLOSED_RECALL}, false-close <= {MAX_FALSE_CLOSE}, visual labels required\n",
+        "- feature: `{EYE_CLOSURE_FEATURE}`\n- algorithm: {EYE_CLOSURE_ALGORITHM_VERSION}\n- label sha256: `{}`\n- test takes: {test_takes:?}\n- fingerprint match: {fingerprint_ok}\n- criteria: reviewed-frame recall >= {MIN_CLOSED_RECALL}, reviewed-frame false-close <= {MAX_FALSE_CLOSE}, event attainment >= {MIN_EVENT_ATTAINMENT}, interval recall >= {MIN_CLOSED_RECALL}, interval false-close <= {MAX_FALSE_CLOSE}, visual labels required\n",
         labels.sha256
     );
 
-    let mut verified: Vec<(EyeSide, vtuber_tracking::EyeThreshold)> = Vec::new();
+    let mut verified: Vec<(EyeSide, vtuber_tracking::EyeGeometryThreshold)> = Vec::new();
     for eye in [EyeSide::Left, EyeSide::Right] {
         let series = build_series(&data, &labels, &test_takes, eye);
-        let metrics = evaluate_candidate(&series, thresholds.for_side(eye));
-        let visual_ok = metrics.visual_closed_frames > 0 && metrics.visual_not_closed_frames > 0;
+        let metrics = evaluate_geometry_candidate(&series, thresholds.for_side(eye));
+        let visual_ok =
+            metrics.reviewed.closed_frames > 0 && metrics.reviewed.not_closed_frames > 0;
         let eye_ok = metrics.is_acceptable() && visual_ok;
         let _ = writeln!(
             report,
-            "## {} eye\n\n- close_at={:.3}, reopen_at={:.3}\n- closed recall: {:.4} ({} frames, events {}/{})\n- false-close: {:.4}\n- uncertain/unobservable frames: {}/{}\n- visual fully_closed / not_closed frames: {}/{}\n- result: {}\n",
+            "## {} eye\n\n- close_gap={:.4}, reopen_gap={:.4}, min_blink={:.2}\n- reviewed frames: {} (closed {}, not_closed {}, uncertain {}, unobservable {}), unknown predictions {}\n- frame recall: {} ({} / {}), frame false-close: {}\n- event attainment: {} ({} / {})\n- interval recall: {} ({} ms / {} ms), interval false-close: {}\n- observability: {}\n- result: {}\n",
             eye.as_str(),
-            thresholds.for_side(eye).close_at(),
-            thresholds.for_side(eye).reopen_at(),
-            metrics.closed_recall,
-            metrics.visual_closed_frames,
-            metrics.closed_events_attained,
-            metrics.closed_events,
-            metrics.false_close,
-            metrics.uncertain_frames,
-            metrics.unobservable_frames,
-            metrics.visual_closed_frames,
-            metrics.visual_not_closed_frames,
+            thresholds.for_side(eye).close_gap(),
+            thresholds.for_side(eye).reopen_gap(),
+            thresholds.for_side(eye).min_blink(),
+            metrics.reviewed.frames,
+            metrics.reviewed.closed_frames,
+            metrics.reviewed.not_closed_frames,
+            metrics.reviewed.uncertain_frames,
+            metrics.reviewed.unobservable_frames,
+            metrics.reviewed.unknown_predictions,
+            opt_metric(metrics.reviewed.closed_recall),
+            metrics.reviewed.closed_attained_frames,
+            metrics.reviewed.closed_frames,
+            opt_metric(metrics.reviewed.false_close),
+            opt_metric(metrics.events.event_attainment),
+            metrics.events.attained_events,
+            metrics.events.closed_events,
+            opt_metric(metrics.intervals.closed_recall),
+            metrics.intervals.closed_predicted_ms,
+            metrics.intervals.closed_time_ms,
+            opt_metric(metrics.intervals.false_close),
+            opt_metric(metrics.reviewed.observability),
             if eye_ok { "pass" } else { "unverified" }
         );
         if eye_ok {
@@ -119,27 +132,32 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
         fingerprints: EyeClosureFingerprints {
             task_bundle_sha256: Some(TASK_BUNDLE_SHA256.to_owned()),
             feature: EYE_CLOSURE_FEATURE.into(),
-            preprocess: Some("mediapipe face landmarker raw blendshapes".into()),
+            preprocess: Some("mediapipe face landmarker landmarks and raw blendshapes".into()),
         },
-        applies_to: Some(
-            "held-out iPhone-derived captures; real webcam conditions not yet confirmed".into(),
-        ),
+        applies_to: Some("held-out captures; real webcam conditions not yet confirmed".into()),
     };
     write_json(&options.output.join("eye_closure_profile.json"), &profile)?;
     println!(
-        "validated profile written: left close_at={:.3}/reopen_at={:.3}, right close_at={:.3}/reopen_at={:.3}",
-        left.close_at(),
-        left.reopen_at(),
-        right.close_at(),
-        right.reopen_at()
+        "validated profile written: left close_gap={:.4}/reopen_gap={:.4}/min_blink={:.2}, right close_gap={:.4}/reopen_gap={:.4}/min_blink={:.2}",
+        left.close_gap(),
+        left.reopen_gap(),
+        left.min_blink(),
+        right.close_gap(),
+        right.reopen_gap(),
+        right.min_blink()
     );
     Ok(())
 }
 
-fn values(threshold: vtuber_tracking::EyeThreshold) -> vtuber_tracking::EyeThresholdValues {
-    vtuber_tracking::EyeThresholdValues {
-        close_at: threshold.close_at(),
-        reopen_at: threshold.reopen_at(),
+fn opt_metric(value: Option<f64>) -> String {
+    value.map_or_else(|| "unmeasured".to_owned(), |value| format!("{value:.4}"))
+}
+
+fn values(threshold: vtuber_tracking::EyeGeometryThreshold) -> EyeGeometryThresholdValues {
+    EyeGeometryThresholdValues {
+        close_gap: threshold.close_gap(),
+        reopen_gap: threshold.reopen_gap(),
+        min_blink: threshold.min_blink(),
     }
 }
 
@@ -152,10 +170,4 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String>
     let text = serde_json::to_string_pretty(value)
         .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
     write(path, &text)
-}
-
-/// Retains the threshold bundle type for the loader tests.
-#[allow(dead_code)]
-fn _thresholds(thresholds: &EyeClosureThresholds) -> f32 {
-    thresholds.left().close_at()
 }

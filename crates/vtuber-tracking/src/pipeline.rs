@@ -40,8 +40,9 @@ use crate::expressions::{
     observe_mediapipe_gaze,
 };
 use crate::eye_closure::{
-    EyeClosureObservation, EyeClosureState, EyeClosureThresholds, EyeClosureTracker,
+    EyeClosureState, EyeGeometryThresholds, EyeSide, GeometryEyeClosureTracker,
 };
+use crate::eye_geometry::{EyeClosureFeatures, eye_closure_features};
 use crate::filter::{
     DetailedExpressionFilter, ExpressionCalibration, ExpressionCalibrationError, ExpressionFilter,
     ExpressionFilterParams, ExpressionRange, GazeFilter, GazeFilterParams, HeadFilterParams,
@@ -456,6 +457,7 @@ struct MediapipeSampleCache {
     raw_blink_left: f32,
     raw_blink_right: f32,
     closure: Option<EyeClosureState>,
+    closure_features: [Option<EyeClosureFeatures>; 2],
     pose_result: Option<Result<HeadPoseFrame, HeadPoseFailure>>,
 }
 
@@ -475,6 +477,10 @@ impl MediapipeSampleCache {
             raw_blink_left: sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkLeft),
             raw_blink_right: sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkRight),
             closure: None,
+            closure_features: [
+                eye_closure_features(sample, EyeSide::Left).ok().flatten(),
+                eye_closure_features(sample, EyeSide::Right).ok().flatten(),
+            ],
             pose_result: neutral
                 .map(|neutral| media_pipe_pose_frame(sample, neutral, MonoTimeNs(0))),
         }
@@ -510,7 +516,7 @@ pub struct TrackingPipeline {
     state_machine: TrackingStateMachine,
     loss_recovery: LossRecovery,
     mediapipe_cache: Option<MediapipeSampleCache>,
-    eye_closure: Option<EyeClosureTracker>,
+    eye_closure: Option<GeometryEyeClosureTracker>,
 }
 
 impl TrackingPipeline {
@@ -561,12 +567,12 @@ impl TrackingPipeline {
         self.profile.is_some()
     }
 
-    /// Installs validated per-eye closure thresholds.
+    /// Installs validated per-eye geometry thresholds.
     ///
     /// Passing thresholds here is the only way to enable correction; there is
     /// no default threshold and no automatic fallback.
-    pub fn set_eye_closure_thresholds(&mut self, thresholds: EyeClosureThresholds) {
-        self.eye_closure = Some(EyeClosureTracker::new(thresholds));
+    pub fn set_eye_closure_thresholds(&mut self, thresholds: EyeGeometryThresholds) {
+        self.eye_closure = Some(GeometryEyeClosureTracker::new(thresholds));
         self.mediapipe_cache = None;
     }
 
@@ -723,13 +729,13 @@ impl TrackingPipeline {
         if !cache_valid {
             cache =
                 sample.map(|sample| MediapipeSampleCache::build(sample, neutral, gaze_baseline));
-            if let (Some(cached), Some(tracker)) = (cache.as_mut(), self.eye_closure.as_mut()) {
+            if let (Some(cached), Some(tracker), Some(sample)) =
+                (cache.as_mut(), self.eye_closure.as_mut(), sample)
+            {
                 cached.closure = Some(tracker.observe(
-                    cached.source_seq.0,
-                    EyeClosureObservation {
-                        left_openness: Some(1.0 - cached.raw_blink_left),
-                        right_openness: Some(1.0 - cached.raw_blink_right),
-                    },
+                    sample.source_seq,
+                    sample.captured_at,
+                    cached.closure_features,
                 ));
             }
         }
@@ -1578,6 +1584,7 @@ mod assembly {
             inference_finished_at: MonoTimeNs(3),
             camera_to_face: CameraFaceTransform::identity(),
             face_center: [0.5, 0.5],
+            image_size: [640, 480],
             landmarks: Arc::from(vec![FaceLandmark::default(); 478]),
             blendshapes: FaceBlendshapeSet::from_pairs(&pairs).expect("complete typed set"),
             quality: FaceTrackingQuality {

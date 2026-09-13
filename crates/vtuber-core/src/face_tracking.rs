@@ -430,6 +430,9 @@ pub struct FaceTrackingSample {
     pub camera_to_face: CameraFaceTransform,
     /// Normalized image-space face centre.
     pub face_center: [f32; 2],
+    /// Width and height of the inference image the normalized landmarks and
+    /// face centre are relative to.
+    pub image_size: [u32; 2],
     /// Exactly 478 face landmarks for a valid sample.
     pub landmarks: Arc<[FaceLandmark]>,
     /// Exactly the approved 52 typed blendshape categories.
@@ -451,6 +454,13 @@ impl FaceTrackingSample {
         }
         if !self.face_center.iter().all(|value| value.is_finite()) {
             return Err(FaceTrackingContractError::InvalidFaceCenter);
+        }
+        let [image_width, image_height] = self.image_size;
+        if image_width == 0 || image_height == 0 {
+            return Err(FaceTrackingContractError::InvalidImageSize {
+                width: image_width,
+                height: image_height,
+            });
         }
         if self.landmarks.len() != MEDIAPIPE_FACE_LANDMARK_COUNT {
             return Err(FaceTrackingContractError::LandmarkCount {
@@ -497,6 +507,7 @@ impl FaceTrackingSample {
         inference_finished_at: MonoTimeNs,
         camera_to_face: CameraFaceTransform,
         face_center: [f32; 2],
+        image_size: [u32; 2],
         landmarks: Arc<[FaceLandmark]>,
         blendshapes: FaceBlendshapeSet,
         quality: FaceTrackingQuality,
@@ -508,6 +519,7 @@ impl FaceTrackingSample {
             inference_finished_at,
             camera_to_face,
             face_center,
+            image_size,
             landmarks,
             blendshapes,
             quality,
@@ -583,6 +595,13 @@ pub enum FaceTrackingContractError {
     InvalidTransform,
     /// The normalized face centre contained a non-finite value.
     InvalidFaceCenter,
+    /// The inference image size had a zero dimension.
+    InvalidImageSize {
+        /// Declared image width.
+        width: u32,
+        /// Declared image height.
+        height: u32,
+    },
     /// A landmark coordinate was non-finite.
     NonFiniteLandmark {
         /// Landmark index containing a non-finite coordinate.
@@ -619,6 +638,9 @@ impl fmt::Display for FaceTrackingContractError {
             }
             Self::InvalidTransform => formatter.write_str("invalid camera-to-face transform"),
             Self::InvalidFaceCenter => formatter.write_str("invalid normalized face centre"),
+            Self::InvalidImageSize { width, height } => {
+                write!(formatter, "invalid inference image size {width}x{height}")
+            }
             Self::NonFiniteLandmark { index } => {
                 write!(
                     formatter,
@@ -655,6 +677,7 @@ mod tests {
             inference_finished_at: MonoTimeNs(12),
             camera_to_face: CameraFaceTransform::identity(),
             face_center: [0.5, 0.5],
+            image_size: [640, 480],
             landmarks: vec![FaceLandmark::default(); MEDIAPIPE_FACE_LANDMARK_COUNT].into(),
             blendshapes: FaceBlendshapeSet::from_pairs(&all_pairs()).expect("all names are valid"),
             quality: FaceTrackingQuality {

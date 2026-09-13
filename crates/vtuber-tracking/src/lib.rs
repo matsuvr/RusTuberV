@@ -29,8 +29,10 @@ pub mod calibration;
 pub mod confidence;
 /// MediaPipe blendshape and gaze mapping.
 pub mod expressions;
-/// Per-eye closure judgement and profile validation (Issues #52/#53).
+/// Per-eye closure judgement and profile validation (Issues #52/#53/#64/#66).
 pub mod eye_closure;
+/// Fixed MediaPipe lid geometry features (Issue #65).
+pub mod eye_geometry;
 /// Tracking filters: rotation smoothing and expression filtering.
 pub mod filter;
 /// Loss hold, neutral decay, and recovery blend.
@@ -73,10 +75,16 @@ pub use expressions::{
 };
 pub use eye_closure::{
     EYE_CLOSURE_ALGORITHM_VERSION, EYE_CLOSURE_FEATURE, EYE_CLOSURE_PROFILE_SCHEMA_VERSION,
-    EyeClosureFingerprints, EyeClosureObservation, EyeClosureProfileDocument,
-    EyeClosureProfileError, EyeClosureState, EyeClosureThresholds, EyeClosureTracker,
-    EyeClosureVerificationStatus, EyeOpenness, EyeSide, EyeThreshold, EyeThresholdError,
-    EyeThresholdValues,
+    EYE_CLOSURE_SAMPLE_GAP_NS, EyeClosureFingerprints, EyeClosureObservation,
+    EyeClosureProfileDocument, EyeClosureProfileError, EyeClosureState, EyeClosureThresholds,
+    EyeClosureTracker, EyeClosureVerificationStatus, EyeGeometryThreshold,
+    EyeGeometryThresholdValues, EyeGeometryThresholds, EyeOpenness, EyeSampleStep, EyeSide,
+    EyeThreshold, EyeThresholdError, GeometryEyeClosureTracker, classify_eye_sample,
+    decide_geometry_eye, decide_geometry_pair,
+};
+pub use eye_geometry::{
+    EyeClosureFeatures, EyeGeometryError, LidPoints, eye_closure_features, max_lid_gap_ratio,
+    mediapipe_lid_points,
 };
 pub use filter::{
     DetailedExpressionFilter, ExpressionCalibration, ExpressionCalibrationError, ExpressionChannel,

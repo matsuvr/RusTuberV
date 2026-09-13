@@ -252,7 +252,7 @@ pub fn default_eye_closure_profile_path() -> Option<PathBuf> {
 /// thresholds. The caller must not substitute a default profile on error.
 pub fn load_eye_closure_thresholds(
     path: &Path,
-) -> Result<Option<vtuber_tracking::EyeClosureThresholds>, String> {
+) -> Result<Option<vtuber_tracking::EyeGeometryThresholds>, String> {
     if !path.is_file() {
         return Ok(None);
     }
@@ -864,13 +864,15 @@ mod tests {
             algorithm_version: vtuber_tracking::EYE_CLOSURE_ALGORITHM_VERSION,
             feature: vtuber_tracking::EYE_CLOSURE_FEATURE.into(),
             status: vtuber_tracking::EyeClosureVerificationStatus::Verified,
-            left: vtuber_tracking::EyeThresholdValues {
-                close_at: 0.4,
-                reopen_at: 0.6,
+            left: vtuber_tracking::EyeGeometryThresholdValues {
+                close_gap: 0.2,
+                reopen_gap: 0.5,
+                min_blink: 0.0,
             },
-            right: vtuber_tracking::EyeThresholdValues {
-                close_at: 0.4,
-                reopen_at: 0.6,
+            right: vtuber_tracking::EyeGeometryThresholdValues {
+                close_gap: 0.2,
+                reopen_gap: 0.5,
+                min_blink: 0.0,
             },
             fingerprints: vtuber_tracking::EyeClosureFingerprints {
                 task_bundle_sha256: Some(
@@ -894,7 +896,7 @@ mod tests {
         let thresholds = load_eye_closure_thresholds(&path)
             .expect("valid profile")
             .expect("some thresholds");
-        assert_eq!(thresholds.left().close_at(), 0.4);
+        assert_eq!(thresholds.left().close_gap(), 0.2);
 
         let mut foreign_fingerprint = eye_closure_document();
         foreign_fingerprint.fingerprints.task_bundle_sha256 = Some("0000".into());
@@ -902,8 +904,8 @@ mod tests {
         assert!(load_eye_closure_thresholds(&path).is_err());
 
         let mut invalid = eye_closure_document();
-        invalid.left.close_at = 0.9;
-        invalid.left.reopen_at = 0.1;
+        invalid.left.close_gap = 0.9;
+        invalid.left.reopen_gap = 0.1;
         fs::write(&path, serde_json::to_string(&invalid).unwrap()).unwrap();
         assert!(load_eye_closure_thresholds(&path).is_err());
     }
