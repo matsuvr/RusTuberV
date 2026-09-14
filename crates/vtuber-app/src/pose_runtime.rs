@@ -32,6 +32,7 @@ pub struct PoseRuntime {
     profile: ArmTrackingProfile,
     task_path: std::path::PathBuf,
     output_generation: u64,
+    held_frame: Option<PoseArmFrame>,
 }
 
 impl PoseRuntime {
@@ -53,6 +54,7 @@ impl PoseRuntime {
                 .join("models")
                 .join(POSE_TASK_FILE),
             output_generation: 0,
+            held_frame: None,
         }
     }
 
@@ -76,6 +78,7 @@ impl PoseRuntime {
     /// Drops calibration and observation state for a fresh calibration.
     pub fn recalibrate(&mut self) {
         self.tracking.reset();
+        self.held_frame = None;
     }
 
     /// Whether the Pose worker thread is currently running.
@@ -111,19 +114,29 @@ impl PoseRuntime {
         }
         self.tracking.reset();
         self.output_generation = 0;
+        self.held_frame = None;
         self.output_slot.clear();
     }
 
-    /// Reads one new Pose result and advances the pure tracking state.
+    /// Advances the pure tracking state by one render tick.
+    ///
+    /// Like the face pipeline, the latest completed inference is retained and
+    /// re-fed while no new result exists, so the arm smoother advances on the
+    /// render clock and the hands move continuously between camera frames.
     fn read_latest(&mut self) -> Option<ArmControlFrame> {
-        let Some(ReadResult::New(frame)) = self.output_slot.try_read_after(self.output_generation)
-        else {
-            return None;
-        };
-        self.output_generation = self.output_slot.generation();
+        if let Some(ReadResult::New(frame)) =
+            self.output_slot.try_read_after(self.output_generation)
+        {
+            self.output_generation = self.output_slot.generation();
+            self.held_frame = Some(frame);
+        }
         let profile = self.profile;
-        let (next, control) =
-            step_arm_tracking(&self.tracking, Some(&frame), monotonic_now(), &profile);
+        let (next, control) = step_arm_tracking(
+            &self.tracking,
+            self.held_frame.as_ref(),
+            monotonic_now(),
+            &profile,
+        );
         self.tracking = next;
         control
     }

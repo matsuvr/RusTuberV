@@ -419,6 +419,7 @@ mod tests {
             inference_finished_at: MonoTimeNs(finished_at),
             camera_to_face: vtuber_core::CameraFaceTransform::identity(),
             face_center: [0.5, 0.5],
+            image_size: [640, 480],
             landmarks: vec![FaceLandmark::default(); MEDIAPIPE_FACE_LANDMARK_COUNT].into(),
             blendshapes: FaceBlendshapeSet::default(),
             quality: FaceTrackingQuality {

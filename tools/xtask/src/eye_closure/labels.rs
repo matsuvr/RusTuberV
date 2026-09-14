@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use vtuber_tracking::EyeSide;
 
-/// One frame row as written by the #51 `extract` command.
+/// One frame row as written by the #51/#65 `extract` command.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct FrameRow {
     pub take_id: String,
@@ -17,11 +17,29 @@ pub(crate) struct FrameRow {
     #[serde(default)]
     pub openness_right: Option<f32>,
     #[serde(default)]
+    pub mp_blink_left: Option<f32>,
+    #[serde(default)]
+    pub mp_blink_right: Option<f32>,
+    #[serde(default)]
+    pub lid_gap_left: Option<f32>,
+    #[serde(default)]
+    pub lid_gap_right: Option<f32>,
+    #[serde(default)]
+    pub lid_points_left: Option<[[f32; 2]; 8]>,
+    #[serde(default)]
+    pub lid_points_right: Option<[[f32; 2]; 8]>,
+    #[serde(default)]
+    pub inference_width: Option<u32>,
+    #[serde(default)]
+    pub inference_height: Option<u32>,
+    #[serde(default)]
     pub arkit_blink_left: Option<f32>,
     #[serde(default)]
     pub arkit_blink_right: Option<f32>,
     #[serde(default)]
-    pub gap_before: bool,
+    pub seq_gap_before: bool,
+    #[serde(default)]
+    pub time_gap_before: bool,
     #[serde(default)]
     pub rgb_reference: Option<String>,
     #[serde(default)]
@@ -69,7 +87,7 @@ impl ExtractedData {
     pub fn load(directory: &Path) -> Result<Self, String> {
         let metadata_path = directory.join("extraction-metadata.json");
         let metadata: ExtractionMetadataFile = read_json(&metadata_path)?;
-        if metadata.schema_version != 1 {
+        if metadata.schema_version != 2 {
             return Err(format!(
                 "{}: unsupported extraction schema version {}",
                 metadata_path.display(),
@@ -255,12 +273,8 @@ fn parse_label_row(fields: &[String], path: &Path, line_no: usize) -> Result<Lab
         other => Some(other.to_owned()),
     };
     let event_id = column("event_id")?.trim().to_owned();
-    if event_id.is_empty() {
-        return Err(format!(
-            "{}:{line_no}: event_id must not be empty",
-            path.display()
-        ));
-    }
+    // An empty event_id means "this frame is not part of a reviewed closure
+    // event"; it is allowed on any label.
     Ok(LabelRow {
         take_id,
         frame_seq,

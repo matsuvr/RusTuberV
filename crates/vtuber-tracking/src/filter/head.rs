@@ -32,8 +32,8 @@ pub struct HeadFilterParams {
 impl Default for HeadFilterParams {
     fn default() -> Self {
         Self {
-            time_constant_sec: 0.05,
-            max_dt_sec: 0.5,
+            time_constant_sec: super::damped::DEFAULT_TIME_CONSTANT_SEC,
+            max_dt_sec: super::damped::DEFAULT_MAX_DT_SEC,
             max_step_rad: 1.25,
         }
     }
@@ -209,12 +209,8 @@ fn so3_biquad_step(
     time_constant_sec: f32,
 ) -> (UnitQuaternion<f32>, Vector3<f32>) {
     let error = (current.inverse() * target).scaled_axis();
-    let omega = 1.0 / time_constant_sec.max(f32::EPSILON);
-    let decay = (-omega * dt_sec).exp();
-    let combined = velocity + error * omega;
-    let new_error = (error + combined * dt_sec) * decay;
-    let new_velocity = (velocity - combined * (omega * dt_sec)) * decay;
-    let step = error - new_error;
+    let (step, new_velocity) =
+        super::damped::critically_damped_step(error, velocity, dt_sec, time_constant_sec);
     (
         current * UnitQuaternion::from_scaled_axis(step),
         new_velocity,

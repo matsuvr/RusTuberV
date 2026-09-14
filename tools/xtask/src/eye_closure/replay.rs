@@ -20,26 +20,40 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use vtuber_core::{
-    ArkitBlendshape, FaceTrackingOutcome, FrameSeq, MediaPipeBlendshape, MonoTimeNs, PixelFormat,
-    VideoFrame,
+    ArkitBlendshape, FaceLandmark, FaceTrackingOutcome, FrameSeq, MediaPipeBlendshape, MonoTimeNs,
+    PixelFormat, VideoFrame,
 };
 use vtuber_inference::FaceTrackingInference;
 use vtuber_inference::backend::mediapipe::{
     MediaPipeRuntime, TASK_BUNDLE_FILE, TASK_BUNDLE_SHA256,
+};
+use vtuber_tracking::{
+    EYE_CLOSURE_FEATURE, EYE_CLOSURE_SAMPLE_GAP_NS, EyeClosureFeatures, EyeSide, LidPoints,
+    eye_closure_features, max_lid_gap_ratio, mediapipe_lid_points,
 };
 
 use super::Options;
 use super::decode::decode_rgb_bin;
 use super::input::{InputKind, InputTake, InputsDocument};
 
-/// Feature identity shared with the runtime judgement (Issue #52).
-pub(crate) const FEATURE_ID: &str = "mediapipe_raw_eye_blink_openness_v1";
 const INVENTORY_SCHEMA_VERSION: u32 = 1;
-const EXTRACTION_SCHEMA_VERSION: u32 = 1;
+const EXTRACTION_SCHEMA_VERSION: u32 = 2;
 const ARKIT52_COUNT: usize = 52;
+const MEDIAPIPE_LANDMARK_COUNT: usize = 478;
 
-/// Parsed MediaPipe blink pair plus optional landmark-presence quality.
-type BlinkObservation = (Option<(f32, f32)>, Option<f32>);
+/// Parsed MediaPipe observation: blink pair, quality, and normalized landmarks.
+type BlinkObservation = (Option<(f32, f32)>, Option<f32>, Option<Vec<[f32; 2]>>);
+
+/// Lid-gap ratios and the eight fixed points per eye from one observation.
+#[derive(Clone, Copy, Debug, Default)]
+struct LidGeometry {
+    left_gap: Option<f32>,
+    right_gap: Option<f32>,
+    left_points: Option<[[f32; 2]; 8]>,
+    right_points: Option<[[f32; 2]; 8]>,
+    inference_width: Option<u32>,
+    inference_height: Option<u32>,
+}
 
 // -----------------------------------------------------------------------------
 // Inventory
@@ -84,7 +98,7 @@ pub(crate) fn run_inspect(options: &Options) -> Result<(), String> {
     }
     let report = InventoryDocument {
         schema_version: INVENTORY_SCHEMA_VERSION,
-        feature: FEATURE_ID,
+        feature: EYE_CLOSURE_FEATURE,
         inputs,
     };
     write_json(&options.output, &report)?;
@@ -223,10 +237,17 @@ struct ExtractedFrame {
     mp_blink_right: Option<f32>,
     openness_left: Option<f32>,
     openness_right: Option<f32>,
+    lid_gap_left: Option<f32>,
+    lid_gap_right: Option<f32>,
+    lid_points_left: Option<[[f32; 2]; 8]>,
+    lid_points_right: Option<[[f32; 2]; 8]>,
+    inference_width: Option<u32>,
+    inference_height: Option<u32>,
     arkit_blink_left: Option<f32>,
     arkit_blink_right: Option<f32>,
     face_observed: bool,
-    gap_before: bool,
+    seq_gap_before: bool,
+    time_gap_before: bool,
     mp_landmark_presence_median: Option<f32>,
     rgb_reference: Option<String>,
     rgb_width_px: Option<u32>,
@@ -313,11 +334,11 @@ pub(crate) fn run_extract(options: &Options) -> Result<(), String> {
             .iter()
             .filter(|frame| frame.arkit_blink_left.is_some())
             .count(),
-        gaps: frames.iter().filter(|frame| frame.gap_before).count(),
+        gaps: frames.iter().filter(|frame| frame.seq_gap_before).count(),
     };
     let metadata = ExtractionMetadata {
         schema_version: EXTRACTION_SCHEMA_VERSION,
-        feature: FEATURE_ID,
+        feature: EYE_CLOSURE_FEATURE,
         xtask_version: env!("CARGO_PKG_VERSION"),
         tool_commit: current_git_commit(),
         task_bundle_sha256_current: TASK_BUNDLE_SHA256,
@@ -440,6 +461,13 @@ fn extract_trace(input: &InputTake) -> Result<TakeExtraction, String> {
         ));
     }
     let schema_version = metadata.schema_version;
+    let rotation = input
+        .rotation_degrees
+        .or(metadata
+            .config
+            .as_ref()
+            .and_then(|config| config.pixel_rotation_degrees))
+        .unwrap_or(0);
     let mut frames = Vec::new();
     let mut counts = TakeCounts::default();
     let mut previous: Option<(u64, u64)> = None;
@@ -447,14 +475,32 @@ fn extract_trace(input: &InputTake) -> Result<TakeExtraction, String> {
         let line_no = index + 1;
         let parsed: TraceLine = serde_json::from_str(&line)
             .map_err(|error| format!("{}:{line_no}: {error}", trace_path.display()))?;
-        let gap_before = previous.is_some_and(|(seq, _)| parsed.frame_seq != seq + 1);
+        let seq_gap_before = previous.is_some_and(|(seq, _)| parsed.frame_seq != seq + 1);
+        let time_gap_before = previous.is_some_and(|(_, timestamp)| {
+            parsed.timestamp_micros.saturating_sub(timestamp) >= EYE_CLOSURE_SAMPLE_GAP_NS / 1000
+        });
         validate_ordering(&trace_path, line_no, &mut previous, &parsed)?;
         let arkit = parse_teacher(&parsed.teacher, &trace_path, line_no)?;
-        let (mp, quality) = match schema_version {
+        let reference = parsed.rgb_reference.as_ref();
+        let (mp, quality, landmarks) = match schema_version {
             1 => parse_v1_observation(&parsed.mediapipe_observation, &trace_path, line_no)?,
             _ => parse_v2_observation(&parsed.mediapipe_observation, &trace_path, line_no)?,
         };
-        let reference = parsed.rgb_reference.as_ref();
+        let geometry = match &landmarks {
+            Some(points) => {
+                let image_size = reference
+                    .and_then(|reference| inference_size(reference, rotation))
+                    .ok_or_else(|| {
+                        format!(
+                            "{}:{line_no}: v2 landmarks require declared rgb_reference width/height",
+                            trace_path.display()
+                        )
+                    })?;
+                lid_geometry(points, image_size)
+                    .map_err(|error| format!("{}:{line_no}: {error}", trace_path.display()))?
+            }
+            None => LidGeometry::default(),
+        };
         let frame = make_frame(
             &input.take_id,
             session_id.as_deref(),
@@ -463,13 +509,15 @@ fn extract_trace(input: &InputTake) -> Result<TakeExtraction, String> {
             mp,
             arkit,
             quality,
+            geometry,
             reference.map(|reference| reference.reference_path.clone()),
             reference.and_then(|reference| reference.width_px),
             reference.and_then(|reference| reference.height_px),
             reference.and_then(|reference| reference.pixel_format.clone()),
             reference.and_then(|reference| reference.orientation_degrees),
             reference.and_then(|reference| reference.mirrored),
-            gap_before,
+            seq_gap_before,
+            time_gap_before,
         );
         accumulate(&mut counts, &frame);
         frames.push(frame);
@@ -609,7 +657,7 @@ fn parse_v1_observation(
     line_no: usize,
 ) -> Result<BlinkObservation, String> {
     match value {
-        Value::Null => Ok((None, None)),
+        Value::Null => Ok((None, None, None)),
         Value::Array(items) => {
             if items.len() != ARKIT52_COUNT {
                 return Err(format!(
@@ -623,6 +671,7 @@ fn parse_v1_observation(
                     value_coefficient(items, ArkitBlendshape::EyeBlinkLeft, path, line_no)?,
                     value_coefficient(items, ArkitBlendshape::EyeBlinkRight, path, line_no)?,
                 )),
+                None,
                 None,
             ))
         }
@@ -639,7 +688,7 @@ fn parse_v2_observation(
     line_no: usize,
 ) -> Result<BlinkObservation, String> {
     match value {
-        Value::Null => Ok((None, None)),
+        Value::Null => Ok((None, None, None)),
         Value::Object(map) => {
             let direct = map
                 .get("direct_coefficients")
@@ -663,6 +712,15 @@ fn parse_v2_observation(
                     direct.len()
                 ));
             }
+            let landmarks = map
+                .get("landmarks_xy")
+                .ok_or_else(|| {
+                    format!(
+                        "{}:{line_no}: schema v2 mediapipe_observation has no landmarks_xy",
+                        path.display()
+                    )
+                })
+                .and_then(|value| parse_landmarks_xy(value, path, line_no))?;
             let quality = map
                 .get("landmark_presence_median")
                 .and_then(Value::as_f64)
@@ -673,6 +731,7 @@ fn parse_v2_observation(
                     value_coefficient(direct, ArkitBlendshape::EyeBlinkRight, path, line_no)?,
                 )),
                 quality,
+                Some(landmarks),
             ))
         }
         other => Err(format!(
@@ -680,6 +739,95 @@ fn parse_v2_observation(
             path.display()
         )),
     }
+}
+
+/// Parses the 478 normalized `landmarks_xy` entries written by the trace.
+fn parse_landmarks_xy(value: &Value, path: &Path, line_no: usize) -> Result<Vec<[f32; 2]>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| format!("{}:{line_no}: landmarks_xy is not an array", path.display()))?;
+    if items.len() != MEDIAPIPE_LANDMARK_COUNT {
+        return Err(format!(
+            "{}:{line_no}: landmarks_xy has {} entries, expected {MEDIAPIPE_LANDMARK_COUNT}",
+            path.display(),
+            items.len()
+        ));
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let pair = match item {
+                Value::String(text) => {
+                    let mut parts = text.split_whitespace();
+                    let x = parts.next().and_then(|value| value.parse::<f32>().ok());
+                    let y = parts.next().and_then(|value| value.parse::<f32>().ok());
+                    match (x, y) {
+                        (Some(x), Some(y)) => Some([x, y]),
+                        _ => None,
+                    }
+                }
+                Value::Array(coordinates) if coordinates.len() == 2 => {
+                    let [x, y] = [coordinates.first(), coordinates.get(1)];
+                    match (x.and_then(Value::as_f64), y.and_then(Value::as_f64)) {
+                        (Some(x), Some(y)) => Some([x as f32, y as f32]),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let Some(pair) = pair else {
+                return Err(format!(
+                    "{}:{line_no}: landmarks_xy[{index}] is not a numeric x/y pair",
+                    path.display()
+                ));
+            };
+            if !pair.iter().all(|value| value.is_finite()) {
+                return Err(format!(
+                    "{}:{line_no}: landmarks_xy[{index}] contains a non-finite value",
+                    path.display()
+                ));
+            }
+            Ok(pair)
+        })
+        .collect()
+}
+
+/// The inference image size for a trace reference after its pixel rotation.
+fn inference_size(reference: &TraceRgbReference, rotation_degrees: i32) -> Option<(u32, u32)> {
+    let width = reference.width_px?;
+    let height = reference.height_px?;
+    if rotation_degrees.rem_euclid(180) == 90 {
+        Some((height, width))
+    } else {
+        Some((width, height))
+    }
+}
+
+/// Computes both eyes' lid geometry from one frame's normalized landmarks.
+fn lid_geometry(points: &[[f32; 2]], image_size: (u32, u32)) -> Result<LidGeometry, String> {
+    let (width, height) = image_size;
+    let landmarks: Vec<FaceLandmark> = points
+        .iter()
+        .map(|[x, y]| FaceLandmark {
+            x: *x,
+            y: *y,
+            ..FaceLandmark::default()
+        })
+        .collect();
+    let size = [width, height];
+    let left =
+        mediapipe_lid_points(&landmarks, size, EyeSide::Left).map_err(|error| error.to_string())?;
+    let right = mediapipe_lid_points(&landmarks, size, EyeSide::Right)
+        .map_err(|error| error.to_string())?;
+    Ok(LidGeometry {
+        left_gap: max_lid_gap_ratio(&left),
+        right_gap: max_lid_gap_ratio(&right),
+        left_points: Some(left.to_array()),
+        right_points: Some(right.to_array()),
+        inference_width: Some(width),
+        inference_height: Some(height),
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -1001,7 +1149,7 @@ fn extract_raw(input: &InputTake, task_path: &Path) -> Result<TakeExtraction, St
     let rotation = input.rotation_degrees.unwrap_or(0);
     let mirrored = input.mirrored.unwrap_or(false);
     let mut frames = Vec::new();
-    let mut previous_seq = None;
+    let mut previous: Option<(u64, u64)> = None;
     for pair in &raw.pairs {
         let frame_path = input.path.join(&pair.rgb.reference_path);
         let image = decode_rgb_bin(
@@ -1012,9 +1160,13 @@ fn extract_raw(input: &InputTake, task_path: &Path) -> Result<TakeExtraction, St
             rotation,
             mirrored,
         )?;
-        let mp = infer_blink(&mut runtime, &image, pair.frame_seq, pair.timestamp_micros)?;
-        let gap_before = previous_seq.is_some_and(|seq| pair.frame_seq != seq + 1);
-        previous_seq = Some(pair.frame_seq);
+        let (mp, geometry) =
+            infer_frame(&mut runtime, &image, pair.frame_seq, pair.timestamp_micros)?;
+        let seq_gap_before = previous.is_some_and(|(seq, _)| pair.frame_seq != seq + 1);
+        let time_gap_before = previous.is_some_and(|(_, timestamp)| {
+            pair.timestamp_micros.saturating_sub(timestamp) >= EYE_CLOSURE_SAMPLE_GAP_NS / 1000
+        });
+        previous = Some((pair.frame_seq, pair.timestamp_micros));
         frames.push(make_frame(
             &input.take_id,
             Some(&raw.session_id),
@@ -1023,13 +1175,15 @@ fn extract_raw(input: &InputTake, task_path: &Path) -> Result<TakeExtraction, St
             mp,
             Some(pair.arkit),
             None,
+            geometry,
             Some(pair.rgb.reference_path.clone()),
             Some(pair.rgb.width_px),
             Some(pair.rgb.height_px),
             Some(pair.rgb.pixel_format.clone()),
             Some(pair.rgb.orientation_degrees),
             Some(pair.rgb.mirrored),
-            gap_before,
+            seq_gap_before,
+            time_gap_before,
         ));
     }
     let mut counts = TakeCounts::default();
@@ -1058,12 +1212,12 @@ fn extract_raw(input: &InputTake, task_path: &Path) -> Result<TakeExtraction, St
     Ok(TakeExtraction { frames, report })
 }
 
-fn infer_blink(
+fn infer_frame(
     runtime: &mut MediaPipeRuntime,
     image: &image::RgbImage,
     frame_seq: u64,
     timestamp_micros: u64,
-) -> Result<Option<(f32, f32)>, String> {
+) -> Result<(Option<(f32, f32)>, LidGeometry), String> {
     let mut rgba = Vec::with_capacity((image.width() * image.height() * 4) as usize);
     for pixel in image.pixels() {
         rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
@@ -1078,15 +1232,48 @@ fn infer_blink(
         data: Arc::from(rgba.into_boxed_slice()),
     };
     match runtime.infer_face_tracking(&frame) {
-        Ok(FaceTrackingOutcome::Face(sample)) => Ok(Some((
-            sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkLeft),
-            sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkRight),
-        ))),
-        Ok(FaceTrackingOutcome::NoFace { .. }) => Ok(None),
+        Ok(FaceTrackingOutcome::Face(sample)) => {
+            let blinks = Some((
+                sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkLeft),
+                sample.blendshapes.get(MediaPipeBlendshape::EyeBlinkRight),
+            ));
+            let [width, height] = sample.image_size;
+            let geometry = LidGeometry {
+                left_gap: features_of(&sample, EyeSide::Left)
+                    .map(|features| features.lid_gap_ratio),
+                right_gap: features_of(&sample, EyeSide::Right)
+                    .map(|features| features.lid_gap_ratio),
+                left_points: mediapipe_lid_points(
+                    &sample.landmarks,
+                    sample.image_size,
+                    EyeSide::Left,
+                )
+                .ok()
+                .map(LidPoints::to_array),
+                right_points: mediapipe_lid_points(
+                    &sample.landmarks,
+                    sample.image_size,
+                    EyeSide::Right,
+                )
+                .ok()
+                .map(LidPoints::to_array),
+                inference_width: Some(width),
+                inference_height: Some(height),
+            };
+            Ok((blinks, geometry))
+        }
+        Ok(FaceTrackingOutcome::NoFace { .. }) => Ok((None, LidGeometry::default())),
         Err(error) => Err(format!(
             "MediaPipe inference failed for frame_seq {frame_seq}: {error}"
         )),
     }
+}
+
+fn features_of(
+    sample: &vtuber_core::FaceTrackingSample,
+    eye: EyeSide,
+) -> Option<EyeClosureFeatures> {
+    eye_closure_features(sample, eye).ok().flatten()
 }
 
 // -----------------------------------------------------------------------------
@@ -1102,13 +1289,15 @@ fn make_frame(
     mp: Option<(f32, f32)>,
     arkit: Option<(f32, f32)>,
     quality: Option<f32>,
+    geometry: LidGeometry,
     rgb_reference: Option<String>,
     rgb_width_px: Option<u32>,
     rgb_height_px: Option<u32>,
     rgb_pixel_format: Option<String>,
     rgb_declared_orientation_degrees: Option<i32>,
     rgb_declared_mirrored: Option<bool>,
-    gap_before: bool,
+    seq_gap_before: bool,
+    time_gap_before: bool,
 ) -> ExtractedFrame {
     ExtractedFrame {
         take_id: take_id.to_owned(),
@@ -1119,10 +1308,17 @@ fn make_frame(
         mp_blink_right: mp.map(|(_, right)| right),
         openness_left: mp.map(|(left, _)| 1.0 - left),
         openness_right: mp.map(|(_, right)| 1.0 - right),
+        lid_gap_left: geometry.left_gap,
+        lid_gap_right: geometry.right_gap,
+        lid_points_left: geometry.left_points,
+        lid_points_right: geometry.right_points,
+        inference_width: geometry.inference_width,
+        inference_height: geometry.inference_height,
         arkit_blink_left: arkit.map(|(left, _)| left),
         arkit_blink_right: arkit.map(|(_, right)| right),
         face_observed: mp.is_some(),
-        gap_before,
+        seq_gap_before,
+        time_gap_before,
         mp_landmark_presence_median: quality,
         rgb_reference,
         rgb_width_px,
@@ -1149,7 +1345,7 @@ fn accumulate(counts: &mut TakeCounts, frame: &ExtractedFrame) {
     if frame.face_observed && frame.arkit_blink_left.is_some() {
         counts.both_present += 1;
     }
-    if frame.gap_before {
+    if frame.seq_gap_before {
         counts.gaps += 1;
     }
 }
@@ -1277,13 +1473,13 @@ fn write_csv(path: &Path, frames: &[ExtractedFrame]) -> Result<(), String> {
     let mut writer = std::io::BufWriter::new(file);
     writeln!(
         writer,
-        "take_id,session_id,frame_seq,timestamp_micros,mp_blink_left,mp_blink_right,openness_left,openness_right,arkit_blink_left,arkit_blink_right,face_observed,gap_before,mp_landmark_presence_median,rgb_reference,rgb_width_px,rgb_height_px,rgb_pixel_format,rgb_orientation_degrees,rgb_mirrored"
+        "take_id,session_id,frame_seq,timestamp_micros,mp_blink_left,mp_blink_right,openness_left,openness_right,lid_gap_left,lid_gap_right,inference_width,inference_height,arkit_blink_left,arkit_blink_right,face_observed,seq_gap_before,time_gap_before,mp_landmark_presence_median,rgb_reference,rgb_width_px,rgb_height_px,rgb_pixel_format,rgb_orientation_degrees,rgb_mirrored"
     )
     .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     for frame in frames {
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_field(&frame.take_id),
             csv_field(frame.session_id.as_deref().unwrap_or("")),
             frame.frame_seq,
@@ -1292,10 +1488,15 @@ fn write_csv(path: &Path, frames: &[ExtractedFrame]) -> Result<(), String> {
             opt_f32(frame.mp_blink_right),
             opt_f32(frame.openness_left),
             opt_f32(frame.openness_right),
+            opt_f32(frame.lid_gap_left),
+            opt_f32(frame.lid_gap_right),
+            opt_u32(frame.inference_width),
+            opt_u32(frame.inference_height),
             opt_f32(frame.arkit_blink_left),
             opt_f32(frame.arkit_blink_right),
             frame.face_observed,
-            frame.gap_before,
+            frame.seq_gap_before,
+            frame.time_gap_before,
             opt_f32(frame.mp_landmark_presence_median),
             csv_field(frame.rgb_reference.as_deref().unwrap_or("")),
             opt_u32(frame.rgb_width_px),
@@ -1405,12 +1606,17 @@ mod tests {
         })
     }
 
+    fn landmarks_xy() -> Vec<String> {
+        vec!["0.5 0.5".to_owned(); MEDIAPIPE_LANDMARK_COUNT]
+    }
+
     fn v2_row(seq: u64, timestamp: u64, mp: Vec<f32>, arkit: Vec<f32>) -> Value {
         json!({
             "frame_seq": seq,
             "timestamp_micros": timestamp,
             "mediapipe_observation": {
                 "direct_coefficients": mp,
+                "landmarks_xy": landmarks_xy(),
                 "landmark_presence_median": 0.87
             },
             "teacher": { "coefficients": arkit },
@@ -1423,6 +1629,30 @@ mod tests {
                 "mirrored": false
             }
         })
+    }
+
+    /// Places one eye at the left indices with corners 0.4 apart along x, so
+    /// the resulting `max_lid_gap_ratio` is the requested gap.
+    fn v2_row_with_left_eye(gap: f32) -> Value {
+        let indices = [362_usize, 263, 385, 386, 387, 380, 374, 373];
+        let half = gap / 5.0;
+        let pixels = [
+            [0.0_f32, 0.0_f32],
+            [0.4, 0.0],
+            [0.1, -half],
+            [0.2, -half],
+            [0.3, -half],
+            [0.1, half],
+            [0.2, half],
+            [0.3, half],
+        ];
+        let mut landmarks = landmarks_xy();
+        for (pixel, index) in pixels.iter().zip(indices.iter()) {
+            landmarks[*index] = format!("{} {}", pixel[0] / 480.0, pixel[1] / 640.0);
+        }
+        let mut row = v2_row(0, 0, coefficients(0.9, 0.1), coefficients(0.9, 0.1));
+        row["mediapipe_observation"]["landmarks_xy"] = json!(landmarks);
+        row
     }
 
     #[test]
@@ -1598,9 +1828,121 @@ mod tests {
         );
         let extraction = extract_trace(&trace_input(directory.path(), InputKind::TraceV2)).unwrap();
         assert_eq!(extraction.frames.len(), 3, "gaps are kept, not filled");
-        assert!(!extraction.frames[1].gap_before);
-        assert!(extraction.frames[2].gap_before);
+        assert!(!extraction.frames[1].seq_gap_before);
+        assert!(extraction.frames[2].seq_gap_before);
+        assert!(!extraction.frames[1].time_gap_before);
+        assert!(
+            !extraction.frames[2].time_gap_before,
+            "66 ms is not a time gap"
+        );
         assert_eq!(extraction.report.counts.gaps, 1);
+    }
+
+    #[test]
+    fn time_gaps_are_marked_separately_from_sequence_gaps() {
+        let directory = tempfile::tempdir().unwrap();
+        write_trace(
+            directory.path(),
+            2,
+            &[
+                v2_row(0, 0, coefficients(0.1, 0.1), coefficients(0.1, 0.1)),
+                v2_row(1, 33_000, coefficients(0.1, 0.1), coefficients(0.1, 0.1)),
+                v2_row(2, 400_000, coefficients(0.1, 0.1), coefficients(0.1, 0.1)),
+            ],
+        );
+        let extraction = extract_trace(&trace_input(directory.path(), InputKind::TraceV2)).unwrap();
+        assert!(!extraction.frames[2].seq_gap_before);
+        assert!(extraction.frames[2].time_gap_before);
+    }
+
+    #[test]
+    fn trace_v2_lid_geometry_matches_the_live_adapter() {
+        let directory = tempfile::tempdir().unwrap();
+        write_trace(directory.path(), 2, &[v2_row_with_left_eye(0.2)]);
+        let extraction = extract_trace(&trace_input(directory.path(), InputKind::TraceV2)).unwrap();
+        let frame = &extraction.frames[0];
+        assert_eq!(frame.inference_width, Some(480));
+        assert_eq!(frame.inference_height, Some(640));
+        let gap = frame.lid_gap_left.expect("left lid gap");
+        assert!((gap - 0.2).abs() < 1.0e-4, "{gap}");
+        assert!(frame.lid_points_left.is_some());
+        assert!(!frame.time_gap_before);
+
+        // The same normalized points through the canonical sample adapter.
+        let indices = [362_usize, 263, 385, 386, 387, 380, 374, 373];
+        let half = 0.2_f32 / 5.0;
+        let pixels = [
+            [0.0_f32, 0.0_f32],
+            [0.4, 0.0],
+            [0.1, -half],
+            [0.2, -half],
+            [0.3, -half],
+            [0.1, half],
+            [0.2, half],
+            [0.3, half],
+        ];
+        let mut landmarks = vec![FaceLandmark::default(); MEDIAPIPE_LANDMARK_COUNT];
+        for (pixel, index) in pixels.iter().zip(indices.iter()) {
+            landmarks[*index] = FaceLandmark {
+                x: pixel[0] / 480.0,
+                y: pixel[1] / 640.0,
+                ..FaceLandmark::default()
+            };
+        }
+        let pairs: Vec<(&str, f32)> = vtuber_core::MediaPipeBlendshape::ALL
+            .iter()
+            .map(|channel| (channel.as_str(), 0.0))
+            .collect();
+        let sample = vtuber_core::FaceTrackingSample::try_new(
+            FrameSeq(0),
+            MonoTimeNs(0),
+            MonoTimeNs(1),
+            MonoTimeNs(2),
+            vtuber_core::CameraFaceTransform::identity(),
+            [0.5, 0.5],
+            [480, 640],
+            std::sync::Arc::from(landmarks),
+            vtuber_core::FaceBlendshapeSet::from_pairs(&pairs).unwrap(),
+            vtuber_core::FaceTrackingQuality {
+                landmark_presence_median: Some(1.0),
+                matrix_orthogonality_error: 0.0,
+                matrix_determinant: 1.0,
+            },
+        )
+        .unwrap();
+        let live = eye_closure_features(&sample, EyeSide::Left)
+            .unwrap()
+            .unwrap();
+        assert!((live.lid_gap_ratio - gap).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_v2_row_without_landmarks_is_a_read_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut row = v2_row(0, 0, coefficients(0.1, 0.1), coefficients(0.1, 0.1));
+        row["mediapipe_observation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("landmarks_xy");
+        write_trace(directory.path(), 2, &[row]);
+        let error = extract_trace(&trace_input(directory.path(), InputKind::TraceV2)).unwrap_err();
+        assert!(error.contains("landmarks_xy"), "{error}");
+    }
+
+    #[test]
+    fn inference_size_swaps_width_and_height_for_quarter_turns() {
+        let reference = TraceRgbReference {
+            reference_path: "a".into(),
+            width_px: Some(480),
+            height_px: Some(640),
+            pixel_format: None,
+            orientation_degrees: None,
+            mirrored: None,
+        };
+        assert_eq!(inference_size(&reference, 0), Some((480, 640)));
+        assert_eq!(inference_size(&reference, 180), Some((480, 640)));
+        assert_eq!(inference_size(&reference, 90), Some((640, 480)));
+        assert_eq!(inference_size(&reference, 270), Some((640, 480)));
     }
 
     #[test]

@@ -138,6 +138,7 @@ mod tests {
             inference_finished_at: MonoTimeNs(12),
             camera_to_face: CameraFaceTransform::identity(),
             face_center: [0.5, 0.5],
+            image_size: [640, 480],
             landmarks: (0..MEDIAPIPE_FACE_LANDMARK_COUNT)
                 .map(|index| FaceLandmark {
                     x: index as f32 / MEDIAPIPE_FACE_LANDMARK_COUNT as f32,

@@ -465,6 +465,7 @@ mod tests {
                 translation_xyz: [translation_x, 0.0, 0.0],
             },
             face_center: [0.5, 0.5],
+            image_size: [640, 480],
             landmarks: Arc::from(vec![FaceLandmark::default(); 478]),
             blendshapes: FaceBlendshapeSet::default(),
             quality: FaceTrackingQuality {
