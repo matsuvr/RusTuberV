@@ -1,9 +1,19 @@
-//! Pure shoulder-relative retargeting and observation-rate arm smoothing.
+//! Pure shoulder-relative retargeting and render-clock arm smoothing.
 //!
-//! Visibility, loss/recovery, calibration sample selection, and render-clock
-//! interpolation are separate policies. None of them is silently performed here.
+//! Visibility, loss/recovery, and calibration sample selection are separate
+//! policies. Smoothing runs on the render clock toward the latest retained
+//! observation, so the control frame is a continuous signal at the consumer
+//! frame rate exactly like the head rotation and translation filters.
+//!
+//! Loss handling follows the face pipeline's shape: a lost wrist keeps its
+//! last authority briefly, then hands authority back to the avatar's virtual
+//! arm over [`ArmTrackingProfile::return_to_virtual`]; a reacquisition ramps
+//! the observed authority back in from wherever the return had reached. A
+//! wrist that teleports farther than [`ArmTrackingProfile::max_wrist_step`]
+//! in one observation is quarantined like an outlier head sample, and the
+//! first observation after a real loss is accepted as a reacquisition so a
+//! hand that moved while hidden can be picked up again.
 
-use std::num::NonZeroU64;
 use std::time::Duration;
 
 use nalgebra::Vector3;
@@ -12,6 +22,10 @@ use vtuber_core::arm_tracking::{
     ArmTrackingTargets, PoseArmFrame, PoseWorldLandmark,
 };
 use vtuber_core::{FrameSeq, MonoTimeNs};
+
+use crate::filter::damped::{
+    DEFAULT_MAX_DT_SEC, DEFAULT_TIME_CONSTANT_SEC, critically_damped_step,
+};
 
 /// A fixed subject arm length measured at calibration, never remeasured per tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,93 +74,53 @@ pub fn retarget_arm_landmarks(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct PointFilterState {
-    raw: Vector3<f32>,
-    filtered: Vector3<f32>,
+struct PointSmootherState {
+    position: Vector3<f32>,
     velocity: Vector3<f32>,
 }
 
-impl PointFilterState {
+impl PointSmootherState {
     fn new(value: [f32; 3]) -> Self {
-        let value = vector(value);
         Self {
-            raw: value,
-            filtered: value,
+            position: vector(value),
             velocity: Vector3::zeros(),
         }
     }
+
+    fn step(&mut self, target: [f32; 3], dt_sec: f32) {
+        let error = vector(target) - self.position;
+        let (correction, velocity) =
+            critically_damped_step(error, self.velocity, dt_sec, DEFAULT_TIME_CONSTANT_SEC);
+        self.position += correction;
+        self.velocity = velocity;
+    }
 }
 
-/// Explicit state passed between pure filter calls; it does not own a clock.
+/// Render-clock critically damped state for one arm's wrist and bend plane.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ArmFilterState {
-    wrist: PointFilterState,
-    elbow: PointFilterState,
+struct ArmSmootherState {
+    wrist: PointSmootherState,
+    elbow: PointSmootherState,
 }
 
-impl ArmFilterState {
-    /// Seeds observation filtering. Visible acquisition blending belongs to the compositor.
-    #[must_use]
-    pub fn new(target: ArmTrackingTarget) -> Self {
+impl ArmSmootherState {
+    /// Seeds the smoother at the first adopted target; later ticks advance it.
+    fn new(target: ArmTrackingTarget) -> Self {
         Self {
-            wrist: PointFilterState::new(target.wrist),
-            elbow: PointFilterState::new(target.elbow_pole),
+            wrist: PointSmootherState::new(target.wrist),
+            elbow: PointSmootherState::new(target.elbow_pole),
         }
     }
-}
 
-/// One adaptive low-pass update per NEW camera observation.
-///
-/// elapsed_ns is the positive difference of capture timestamps, not render dt.
-/// Callers do not re-feed a retained sample on every draw. Fixed research
-/// starting values use a 1 Hz derivative cutoff, 1.5 Hz wrist / 1 Hz elbow
-/// minimum cutoff and less depth bandwidth. They are not validated aesthetic
-/// presets. Final bone lengths are enforced by the existing analytic IK.
-///
-/// This is a value-in/value-out function: no thread, clock, global, or ECS writes.
-#[must_use]
-pub fn filter_arm_target(
-    previous: ArmFilterState,
-    target: ArmTrackingTarget,
-    elapsed_ns: NonZeroU64,
-) -> (ArmFilterState, ArmTrackingTarget) {
-    let seconds = elapsed_ns.get() as f32 * 1.0e-9;
-    let wrist = filter_point(previous.wrist, target.wrist, seconds, 1.5, 1.0);
-    let elbow = filter_point(previous.elbow, target.elbow_pole, seconds, 1.0, 0.5);
-    let filtered = ArmTrackingTarget {
-        wrist: array(wrist.filtered),
-        elbow_pole: array(elbow.filtered),
-    };
-    (ArmFilterState { wrist, elbow }, filtered)
-}
-
-fn filter_point(
-    previous: PointFilterState,
-    target: [f32; 3],
-    seconds: f32,
-    minimum_cutoff_hz: f32,
-    beta: f32,
-) -> PointFilterState {
-    let raw = vector(target);
-    let derivative = (raw - previous.raw) / seconds;
-    let velocity = previous.velocity + (derivative - previous.velocity) * alpha(1.0, seconds);
-    let cutoff = minimum_cutoff_hz + beta * velocity.norm();
-    let gain = Vector3::new(
-        alpha(cutoff, seconds),
-        alpha(cutoff, seconds),
-        alpha(cutoff * 0.75, seconds),
-    );
-    let filtered = previous.filtered + (raw - previous.filtered).component_mul(&gain);
-    PointFilterState {
-        raw,
-        filtered,
-        velocity,
+    fn advance(&mut self, target: ArmTrackingTarget, dt_sec: f32) -> ArmTrackingTarget {
+        let dt_sec = dt_sec.clamp(0.0, DEFAULT_MAX_DT_SEC);
+        self.wrist.step(target.wrist, dt_sec);
+        self.elbow.step(target.elbow_pole, dt_sec);
+        ArmTrackingTarget {
+            wrist: array(self.wrist.position),
+            elbow_pole: array(self.elbow.position),
+        }
     }
-}
-
-fn alpha(cutoff_hz: f32, seconds: f32) -> f32 {
-    let value = std::f32::consts::TAU * cutoff_hz * seconds;
-    value / (1.0 + value)
 }
 
 fn vector([x, y, z]: [f32; 3]) -> Vector3<f32> {
@@ -159,8 +133,12 @@ fn array(value: Vector3<f32>) -> [f32; 3] {
 
 /// Per-side adoption and temporal policy for observed arms.
 ///
-/// Validation belongs to the settings layer; these are research starting values
-/// (hold 150 ms, return 350 ms, acquire 200 ms) that the 5/5 evaluation adjusts.
+/// Validation belongs to the settings layer; these are research values from the
+/// 5/5 video evaluation: a hand must return to the virtual arm slowly enough to
+/// read as a relaxed drop rather than a snap, and a reacquired hand must not fly
+/// to the observation. Reacquisition continues from the current authority, so
+/// `acquire` is the time a fully abandoned hand takes to return to full
+/// observation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmTrackingProfile {
     /// Minimum shoulder visibility to use the arm at all.
@@ -173,8 +151,15 @@ pub struct ArmTrackingProfile {
     pub hold: Duration,
     /// How long the return to the virtual arm takes after the hold.
     pub return_to_virtual: Duration,
-    /// How long a reacquired channel takes to blend back in.
+    /// How long a fully reacquired channel takes to blend back in.
     pub acquire: Duration,
+    /// Largest accepted wrist displacement between two observations, in units
+    /// of the calibrated arm length.
+    ///
+    /// A larger single-observation displacement is a detection teleport, not
+    /// hand motion, so it is quarantined and the arm returns to the virtual
+    /// arm instead of following it.
+    pub max_wrist_step: f32,
 }
 
 impl Default for ArmTrackingProfile {
@@ -184,8 +169,9 @@ impl Default for ArmTrackingProfile {
             wrist_visibility: 0.5,
             elbow_visibility: 0.5,
             hold: Duration::from_millis(150),
-            return_to_virtual: Duration::from_millis(350),
-            acquire: Duration::from_millis(200),
+            return_to_virtual: Duration::from_secs(2),
+            acquire: Duration::from_millis(500),
+            max_wrist_step: 0.75,
         }
     }
 }
@@ -402,13 +388,29 @@ pub fn stabilize_elbow_pole(
 }
 
 /// A per-channel display blend that advances on render ticks and observations.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+///
+/// A present channel rises toward full authority at the acquire rate. A lost
+/// channel holds the authority it had when it was lost, then decays to zero
+/// over the return time. Both directions continue from the current weight, so
+/// losing a channel mid-acquire and reacquiring one mid-return never jump.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ChannelBlend {
     weight: f32,
-    last_seen: Option<MonoTimeNs>,
+    present: bool,
+    lost_at: MonoTimeNs,
+    loss_weight: f32,
 }
 
 impl ChannelBlend {
+    const fn new() -> Self {
+        Self {
+            weight: 0.0,
+            present: false,
+            lost_at: MonoTimeNs(0),
+            loss_weight: 0.0,
+        }
+    }
+
     fn advance(
         &mut self,
         now: MonoTimeNs,
@@ -417,39 +419,58 @@ impl ChannelBlend {
         profile: &ArmTrackingProfile,
     ) {
         if present {
-            self.last_seen = Some(now);
-            let acquire_ns = profile.acquire.as_nanos();
-            let step = match render_dt_ns {
-                Some(dt) if acquire_ns > 0 => dt as f32 / acquire_ns as f32,
-                _ => 1.0,
-            };
+            self.present = true;
+            let acquire_sec = profile.acquire.as_secs_f32().max(f32::EPSILON);
+            let step = render_dt_ns.unwrap_or(0) as f32 * 1.0e-9 / acquire_sec;
             self.weight = (self.weight + step).clamp(0.0, 1.0);
-        } else if let Some(seen) = self.last_seen {
-            let elapsed_ms = now.0.saturating_sub(seen.0) as f32 * 1.0e-6;
+        } else {
+            if self.present {
+                self.present = false;
+                self.lost_at = now;
+                self.loss_weight = self.weight;
+            }
+            let elapsed_ms = now.0.saturating_sub(self.lost_at.0) as f32 * 1.0e-6;
             let hold_ms = profile.hold.as_secs_f32() * 1.0e3;
             let return_ms = profile.return_to_virtual.as_secs_f32() * 1.0e3;
-            self.weight = if elapsed_ms <= hold_ms {
+            let factor = if elapsed_ms <= hold_ms {
                 1.0
             } else if return_ms > 0.0 && elapsed_ms <= hold_ms + return_ms {
                 (1.0 - (elapsed_ms - hold_ms) / return_ms).clamp(0.0, 1.0)
             } else {
                 0.0
             };
-        } else {
-            self.weight = 0.0;
+            self.weight = self.loss_weight * factor;
         }
     }
 }
 
-/// Per-side observation, calibration, filter, and blend state.
+/// Which observed channels one intake contained.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ChannelPresence {
+    wrist: bool,
+    elbow: bool,
+}
+
+impl ChannelPresence {
+    const NONE: Self = Self {
+        wrist: false,
+        elbow: false,
+    };
+}
+
+/// Per-side observation, calibration, smoothing, and blend state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ArmSideState {
     calibration: ArmCalibrationState,
-    filter: Option<ArmFilterState>,
+    source: Option<ArmTrackingTarget>,
+    smoother: Option<ArmSmootherState>,
+    output: Option<ArmTrackingTarget>,
     last_pole: Option<[f32; 3]>,
-    last_target: Option<ArmTrackingTarget>,
-    last_wrist_capture: Option<MonoTimeNs>,
-    last_elbow_capture: Option<MonoTimeNs>,
+    /// Channel presence of the latest consumed frame, reused on held ticks.
+    presence: ChannelPresence,
+    /// A real wrist gap happened since the last adopted target, so the next
+    /// usable observation is a reacquisition rather than a candidate teleport.
+    wrist_lost: bool,
     wrist_blend: ChannelBlend,
     pole_blend: ChannelBlend,
     pole_factor: f32,
@@ -459,19 +480,14 @@ impl ArmSideState {
     const fn empty() -> Self {
         Self {
             calibration: ArmCalibrationState::new(),
-            filter: None,
+            source: None,
+            smoother: None,
+            output: None,
             last_pole: None,
-            last_target: None,
-            last_wrist_capture: None,
-            last_elbow_capture: None,
-            wrist_blend: ChannelBlend {
-                weight: 0.0,
-                last_seen: None,
-            },
-            pole_blend: ChannelBlend {
-                weight: 0.0,
-                last_seen: None,
-            },
+            presence: ChannelPresence::NONE,
+            wrist_lost: false,
+            wrist_blend: ChannelBlend::new(),
+            pole_blend: ChannelBlend::new(),
             pole_factor: 0.0,
         }
     }
@@ -480,6 +496,91 @@ impl ArmSideState {
         ArmBlendWeight {
             wrist: self.wrist_blend.weight,
             pole: self.pole_blend.weight * self.pole_factor,
+        }
+    }
+
+    /// Adopts one new observation and records which channels it contained.
+    ///
+    /// An occluded elbow keeps the previous bend plane instead of freezing the
+    /// wrist or injecting a fabricated one. A wrist that moved farther than the
+    /// profile allows in one observation is quarantined as a detection
+    /// teleport; the first usable observation after a real loss is instead
+    /// accepted as a reacquisition.
+    fn consume(&mut self, arm: Option<&ArmLandmarks>, profile: &ArmTrackingProfile) {
+        let quality = arm.map(|value| assess_arm_observation(value, profile));
+        let wrist_usable = quality.is_some_and(ArmObservationQuality::follows_wrist);
+        let elbow_usable = quality.is_some_and(ArmObservationQuality::uses_elbow);
+
+        let sample = arm
+            .filter(|_| elbow_usable)
+            .and_then(|value| measure_arm_reference(*value));
+        self.calibration = update_arm_calibration(&self.calibration, sample);
+
+        let Some(reference) = self.calibration.confirmed_length() else {
+            self.presence = ChannelPresence::NONE;
+            return;
+        };
+        let Some(arm) = arm.filter(|_| wrist_usable) else {
+            self.wrist_lost = true;
+            self.presence = ChannelPresence::NONE;
+            return;
+        };
+
+        let target = retarget_arm_landmarks(*arm, reference);
+        let teleported = !self.wrist_lost
+            && self.source.is_some_and(|previous| {
+                (vector(target.wrist) - vector(previous.wrist)).norm() > profile.max_wrist_step
+            });
+        if teleported {
+            self.presence = ChannelPresence::NONE;
+            return;
+        }
+        self.wrist_lost = false;
+
+        let mut target = target;
+        let mut elbow_tracked = false;
+        if elbow_usable {
+            let update = stabilize_elbow_pole(self.last_pole, target, 1.0);
+            self.pole_factor = update.observed_weight;
+            if let Some(pole) = update.pole {
+                target.elbow_pole = pole;
+                self.last_pole = Some(pole);
+                elbow_tracked = true;
+            }
+        }
+        if !elbow_tracked && let Some(source) = self.source {
+            target.elbow_pole = source.elbow_pole;
+        }
+        if self.smoother.is_none() {
+            self.smoother = Some(ArmSmootherState::new(target));
+            self.output = Some(target);
+        }
+        self.source = Some(target);
+        self.presence = ChannelPresence {
+            wrist: true,
+            elbow: elbow_tracked,
+        };
+    }
+
+    /// Advances the observed blends and the render-clock smoothing by one tick.
+    ///
+    /// The latest consumed presence is reused so a retained observation keeps
+    /// feeding the same channel state on every render tick, exactly like the
+    /// face pipeline's held sample. Only a completed no-person result or a
+    /// quarantined teleport advances the loss timeline.
+    fn advance(
+        &mut self,
+        now: MonoTimeNs,
+        render_dt_ns: Option<u64>,
+        profile: &ArmTrackingProfile,
+    ) {
+        self.wrist_blend
+            .advance(now, self.presence.wrist, render_dt_ns, profile);
+        self.pole_blend
+            .advance(now, self.presence.elbow, render_dt_ns, profile);
+        if let (Some(source), Some(smoother)) = (self.source, self.smoother.as_mut()) {
+            let dt_sec = render_dt_ns.unwrap_or(0) as f32 * 1.0e-9;
+            self.output = Some(smoother.advance(source, dt_sec));
         }
     }
 
@@ -492,72 +593,15 @@ impl ArmSideState {
         self.wrist_blend.advance(now, false, render_dt_ns, profile);
         self.pole_blend.advance(now, false, render_dt_ns, profile);
     }
-
-    fn step(
-        &mut self,
-        arm: Option<&ArmLandmarks>,
-        frame: &PoseArmFrame,
-        now: MonoTimeNs,
-        render_dt_ns: Option<u64>,
-        profile: &ArmTrackingProfile,
-    ) {
-        let quality = arm.map(|value| assess_arm_observation(value, profile));
-        let wrist_usable = quality.is_some_and(ArmObservationQuality::follows_wrist);
-        let elbow_usable = quality.is_some_and(ArmObservationQuality::uses_elbow);
-
-        let sample = arm
-            .filter(|_| elbow_usable)
-            .and_then(|value| measure_arm_reference(*value));
-        self.calibration = update_arm_calibration(&self.calibration, sample);
-
-        let Some(reference) = self.calibration.confirmed_length() else {
-            self.advance_without_observation(now, render_dt_ns, profile);
-            return;
-        };
-
-        let mut elbow_tracked = false;
-        if let Some(arm) = arm.filter(|_| wrist_usable) {
-            let mut target = retarget_arm_landmarks(*arm, reference);
-            if elbow_usable {
-                let update = stabilize_elbow_pole(self.last_pole, target, 1.0);
-                self.pole_factor = update.observed_weight;
-                if let Some(pole) = update.pole {
-                    target.elbow_pole = pole;
-                    self.last_pole = Some(pole);
-                    elbow_tracked = true;
-                }
-            }
-            let wrist_elapsed = capture_elapsed(self.last_wrist_capture, frame.captured_at);
-            let elbow_elapsed = capture_elapsed(self.last_elbow_capture, frame.captured_at);
-            let (next, output) = match self.filter {
-                None => (ArmFilterState::new(target), target),
-                Some(filter) => filter_arm_channels(
-                    filter,
-                    target,
-                    wrist_elapsed,
-                    if elbow_tracked { elbow_elapsed } else { None },
-                ),
-            };
-            self.filter = Some(next);
-            self.last_target = Some(output);
-            self.last_wrist_capture = Some(frame.captured_at);
-            if elbow_tracked {
-                self.last_elbow_capture = Some(frame.captured_at);
-            }
-        }
-
-        self.wrist_blend
-            .advance(now, wrist_usable, render_dt_ns, profile);
-        self.pole_blend
-            .advance(now, elbow_tracked, render_dt_ns, profile);
-    }
 }
 
 /// Pure temporal state for observed arm tracking. It owns no clock or ECS.
 ///
-/// `now` is supplied by the caller. A tick with no new inference result
-/// advances only the display blend; a result with `observation: None` is a
-/// completed "no person" inference and starts the hold/return timeline.
+/// `now` is supplied by the caller on every render tick while the latest
+/// observation is re-fed. A new source sequence/capture time is adopted once;
+/// retargeting, calibration, and the observed blends advance with it. A result
+/// with `observation: None` is a completed "no person" inference and starts the
+/// hold/return timeline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmTrackingState {
     left: ArmSideState,
@@ -590,12 +634,15 @@ impl Default for ArmTrackingState {
     }
 }
 
-/// Advances arm tracking by one tick and emits a control frame for new results.
+/// Advances arm tracking by one render tick and emits a control frame.
 ///
-/// A stale or duplicate source sequence/capture time is ignored. Filter inputs
-/// use positive capture-time differences, so a held sample is never re-fed.
-/// When `observation` is `None` the state still advances its display blend but
-/// no frame is produced, so no fictitious source sequence is emitted.
+/// The caller re-feeds the retained observation on every tick, exactly like the
+/// face pipeline, so the arm smoother and the observed blends advance on the
+/// render clock. A stale or duplicate source sequence/capture time is not
+/// re-adopted, but it keeps its channels present: only a completed no-person
+/// result or a quarantined teleport starts the hold/return timeline. When
+/// `observation` is `None` the state only advances its display blend and no
+/// frame is produced, so no fictitious source sequence is emitted.
 #[must_use]
 pub fn step_arm_tracking(
     previous: &ArmTrackingState,
@@ -617,27 +664,31 @@ pub fn step_arm_tracking(
         return (state, None);
     };
 
-    if let Some((seq, captured_at)) = state.last_consumed
-        && (frame.source_seq.0 <= seq.0 || frame.captured_at.0 <= captured_at.0)
-    {
-        return (state, None);
+    let is_new = state.last_consumed.is_none_or(|(seq, captured_at)| {
+        frame.source_seq.0 > seq.0 && frame.captured_at.0 > captured_at.0
+    });
+    if is_new {
+        state.last_consumed = Some((frame.source_seq, frame.captured_at));
+        let (left, right) = match &frame.observation {
+            Some(value) => (Some(&value.left), Some(&value.right)),
+            None => (None, None),
+        };
+        state.left.consume(left, profile);
+        state.right.consume(right, profile);
     }
-    state.last_consumed = Some((frame.source_seq, frame.captured_at));
+    state.left.advance(now, render_dt_ns, profile);
+    state.right.advance(now, render_dt_ns, profile);
 
-    let (left, right) = match &frame.observation {
-        Some(value) => (Some(&value.left), Some(&value.right)),
-        None => (None, None),
+    let Some((source_seq, captured_at)) = state.last_consumed else {
+        return (state, None);
     };
-    state.left.step(left, frame, now, render_dt_ns, profile);
-    state.right.step(right, frame, now, render_dt_ns, profile);
-
     let control = ArmControlFrame {
-        source_seq: frame.source_seq,
-        captured_at: frame.captured_at,
+        source_seq,
+        captured_at,
         produced_at: now,
         targets: ArmTrackingTargets {
-            left: state.left.last_target,
-            right: state.right.last_target,
+            left: state.left.output,
+            right: state.right.output,
         },
         weights: ArmBlendWeights {
             left: state.left.weights(),
@@ -645,51 +696,6 @@ pub fn step_arm_tracking(
         },
     };
     (state, Some(control))
-}
-
-/// Positive capture-time difference for one filter channel, if it advanced.
-fn capture_elapsed(previous: Option<MonoTimeNs>, captured_at: MonoTimeNs) -> Option<NonZeroU64> {
-    previous.and_then(|last| NonZeroU64::new(captured_at.0.saturating_sub(last.0)))
-}
-
-/// Updates each filter channel only when that channel has a new observation.
-///
-/// Channels without a new observation keep their previous filtered value, so an
-/// occluded elbow does not freeze the wrist or inject a fabricated elbow.
-fn filter_arm_channels(
-    previous: ArmFilterState,
-    target: ArmTrackingTarget,
-    wrist_elapsed: Option<NonZeroU64>,
-    elbow_elapsed: Option<NonZeroU64>,
-) -> (ArmFilterState, ArmTrackingTarget) {
-    let mut next = previous;
-    let mut output = ArmTrackingTarget {
-        wrist: array(previous.wrist.filtered),
-        elbow_pole: array(previous.elbow.filtered),
-    };
-    if let Some(elapsed) = wrist_elapsed {
-        let wrist = filter_point(
-            previous.wrist,
-            target.wrist,
-            elapsed.get() as f32 * 1.0e-9,
-            1.5,
-            1.0,
-        );
-        output.wrist = array(wrist.filtered);
-        next.wrist = wrist;
-    }
-    if let Some(elapsed) = elbow_elapsed {
-        let elbow = filter_point(
-            previous.elbow,
-            target.elbow_pole,
-            elapsed.get() as f32 * 1.0e-9,
-            1.0,
-            0.5,
-        );
-        output.elbow_pole = array(elbow.filtered);
-        next.elbow = elbow;
-    }
-    (next, output)
 }
 
 fn perpendicular(value: Vector3<f32>, axis: Vector3<f32>) -> Vector3<f32> {
@@ -732,9 +738,7 @@ mod tests {
         }
     }
 
-    fn dt() -> NonZeroU64 {
-        NonZeroU64::new(16_666_667).unwrap()
-    }
+    const RENDER_STEP_SEC: f32 = 1.0 / 60.0;
 
     fn near(a: [f32; 3], b: [f32; 3]) {
         assert!((vector(a) - vector(b)).norm() < 1.0e-5, "{a:?} != {b:?}");
@@ -819,40 +823,43 @@ mod tests {
     }
 
     #[test]
-    fn constant_input_is_unchanged_at_both_observation_rates() {
-        for ns in [16_666_667, 33_333_333] {
+    fn constant_input_converges_without_bias_at_render_rates() {
+        for step_sec in [1.0 / 30.0, RENDER_STEP_SEC] {
             let target = target(0.3);
-            let mut state = ArmFilterState::new(target);
-            for _ in 0..60 {
-                let (next, value) = filter_arm_target(state, target, NonZeroU64::new(ns).unwrap());
-                assert_eq!(value, target);
-                state = next;
+            let mut smoother = ArmSmootherState::new(target);
+            let mut value = target;
+            for _ in 0..120 {
+                value = smoother.advance(target, step_sec);
             }
+            assert_eq!(value, target);
         }
     }
 
     #[test]
-    fn rapid_motion_gets_more_bandwidth_and_depth_less() {
-        let initial = ArmFilterState::new(target(0.0));
-        let (_, small) = filter_arm_target(initial, target(0.01), dt());
-        let (_, large) = filter_arm_target(initial, target(1.0), dt());
-        assert!(large.wrist[0] > small.wrist[0] / 0.01);
-        assert!(large.wrist[2] < large.wrist[0]);
-        assert!(large.elbow_pole[0] < large.wrist[0]);
+    fn a_step_target_converges_monotonically_without_overshoot() {
+        let mut smoother = ArmSmootherState::new(target(0.0));
+        let mut previous = 0.0;
+        for _ in 0..120 {
+            let value = smoother.advance(target(1.0), RENDER_STEP_SEC);
+            assert!(value.wrist[0] >= previous);
+            assert!(value.wrist[0] <= 1.0);
+            previous = value.wrist[0];
+        }
+        assert!(previous > 0.99);
     }
 
     #[test]
     fn stationary_jitter_is_reduced_and_calls_are_deterministic() {
-        let mut state = ArmFilterState::new(target(0.0));
+        let mut smoother = ArmSmootherState::new(target(0.0));
         let mut squared = 0.0;
-        for frame in 0..120 {
+        for frame in 0..240 {
             let raw = target(if frame % 2 == 0 { 0.01 } else { -0.01 });
-            let result = filter_arm_target(state, raw, dt());
-            assert_eq!(result, filter_arm_target(state, raw, dt()));
-            state = result.0;
-            squared += result.1.wrist[0].powi(2);
+            let mut copy = smoother;
+            let value = smoother.advance(raw, RENDER_STEP_SEC);
+            assert_eq!(value, copy.advance(raw, RENDER_STEP_SEC));
+            squared += value.wrist[0].powi(2);
         }
-        assert!((squared / 120.0).sqrt() < 0.005);
+        assert!((squared / 240.0).sqrt() < 0.005);
     }
 
     fn low_visibility(point: PoseWorldLandmark) -> PoseWorldLandmark {
@@ -892,15 +899,51 @@ mod tests {
 
     const OBSERVATION_STEP_NS: u64 = 33_333_333;
 
+    /// Feeds one new observation and advances the state.
+    fn feed(
+        state: &mut ArmTrackingState,
+        arm: ArmLandmarks,
+        seq: u64,
+        now_ns: u64,
+        profile: &ArmTrackingProfile,
+    ) -> Option<ArmControlFrame> {
+        let frame = pose_frame(seq, now_ns, Some(observation(arm, arm)));
+        let (next, control) = step_arm_tracking(state, Some(&frame), MonoTimeNs(now_ns), profile);
+        *state = next;
+        control
+    }
+
+    /// Re-feeds the same retained observation for one render tick.
+    fn feed_held(
+        state: &mut ArmTrackingState,
+        arm: ArmLandmarks,
+        seq: u64,
+        captured_ns: u64,
+        now_ns: u64,
+        profile: &ArmTrackingProfile,
+    ) -> Option<ArmControlFrame> {
+        let frame = pose_frame(seq, captured_ns, Some(observation(arm, arm)));
+        let (next, control) = step_arm_tracking(state, Some(&frame), MonoTimeNs(now_ns), profile);
+        *state = next;
+        control
+    }
+
+    /// Tracks a steady arm until calibration and the blends are fully settled.
     fn tracked_state(arm: ArmLandmarks, profile: &ArmTrackingProfile) -> ArmTrackingState {
         let mut state = ArmTrackingState::new();
-        for seq in 0..(ARM_CALIBRATION_CAPACITY as u64 + 10) {
+        for seq in 0..(ARM_CALIBRATION_CAPACITY as u64 + 30) {
             let now = seq * OBSERVATION_STEP_NS;
-            let frame = pose_frame(seq, now, Some(observation(arm, arm)));
-            let (next, _) = step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), profile);
-            state = next;
+            let _ = feed(&mut state, arm, seq, now, profile);
         }
         state
+    }
+
+    fn hidden_arm(base: ArmLandmarks) -> ArmLandmarks {
+        ArmLandmarks {
+            shoulder: low_visibility(base.shoulder),
+            elbow: low_visibility(base.elbow),
+            wrist: low_visibility(base.wrist),
+        }
     }
 
     #[test]
@@ -940,12 +983,12 @@ mod tests {
             state = next;
         }
         assert!(state.left.calibration.confirmed_length().is_none());
-        assert!(state.left.last_target.is_none());
+        assert!(state.left.output.is_none());
         assert_eq!(state.left.weights().wrist, 0.0);
     }
 
     #[test]
-    fn a_duplicate_capture_is_not_refed_into_the_filter() {
+    fn a_duplicate_capture_is_not_readopted_but_still_emits_a_frame() {
         let profile = ArmTrackingProfile::default();
         let arm = arm();
         let state = tracked_state(arm, &profile);
@@ -953,11 +996,38 @@ mod tests {
         let frame = pose_frame(500, now, Some(observation(arm, arm)));
         let (state, control) = step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
         assert!(control.is_some());
-        let filter = state.left.filter;
+        let source = state.left.source;
         let (again, control) =
             step_arm_tracking(&state, Some(&frame), MonoTimeNs(now + 16_000_000), &profile);
-        assert!(control.is_none());
-        assert_eq!(again.left.filter, filter);
+        assert!(control.is_some());
+        assert_eq!(again.left.source, source);
+    }
+
+    #[test]
+    fn render_ticks_interpolate_toward_the_retained_observation() {
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let moved = arm_at([0.3, 0.2, 0.0], [0.5, -0.3, 0.0]);
+        let captured = 2_000_000_000u64;
+        let frame = pose_frame(500, captured, Some(observation(moved, moved)));
+        let (next, _) = step_arm_tracking(&state, Some(&frame), MonoTimeNs(captured), &profile);
+        state = next;
+        let source = state.left.source.unwrap();
+        let mut previous = state.left.output.unwrap();
+        assert_ne!(vector(previous.wrist), vector(source.wrist));
+        for step in 1..=30u64 {
+            let now = captured + step * 16_666_667;
+            let (next, control) =
+                step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
+            state = next;
+            let target = control.unwrap().targets.left.unwrap();
+            let error_before = (vector(previous.wrist) - vector(source.wrist)).norm();
+            let error_after = (vector(target.wrist) - vector(source.wrist)).norm();
+            assert!(error_after <= error_before);
+            previous = target;
+        }
+        assert!((vector(previous.wrist) - vector(source.wrist)).norm() < 1.0e-3);
     }
 
     #[test]
@@ -976,6 +1046,12 @@ mod tests {
         assert_eq!(control.weights, ArmBlendWeights::default());
     }
 
+    /// Observations taken long enough after calibration for the blends to settle.
+    const SETTLED_NS: u64 = 10_000_000_000;
+
+    /// A loss window longer than hold plus return for the default profile.
+    const FULL_RETURN_FRAMES: u64 = 80;
+
     #[test]
     fn elbow_occlusion_keeps_the_wrist_tracking_while_the_pole_returns() {
         let profile = ArmTrackingProfile::default();
@@ -987,17 +1063,13 @@ mod tests {
             elbow: low_visibility(base.elbow),
             ..base
         };
-        for seq in 100u64..140 {
-            let now = 10_000_000_000 + (seq - 100) * OBSERVATION_STEP_NS;
-            let frame = pose_frame(seq, now, Some(observation(occluded, occluded)));
-            let (next, control) =
-                step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
-            state = next;
-            let weights = control.unwrap().weights.left;
-            assert_eq!(weights.wrist, 1.0);
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let control = feed(&mut state, occluded, 100 + seq, now, &profile).unwrap();
+            assert_eq!(control.weights.left.wrist, 1.0);
         }
         assert_eq!(state.left.weights().pole, 0.0);
-        assert!(state.left.last_target.is_some());
+        assert!(state.left.output.is_some());
     }
 
     #[test]
@@ -1005,20 +1077,14 @@ mod tests {
         let profile = ArmTrackingProfile::default();
         let base = arm();
         let mut state = tracked_state(base, &profile);
-        let hidden = ArmLandmarks {
-            shoulder: low_visibility(base.shoulder),
-            elbow: low_visibility(base.elbow),
-            wrist: low_visibility(base.wrist),
-        };
-        for seq in 100u64..140 {
-            let now = 10_000_000_000 + (seq - 100) * OBSERVATION_STEP_NS;
-            let frame = pose_frame(seq, now, Some(observation(hidden, hidden)));
-            let (next, _) = step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
-            state = next;
+        let hidden = hidden_arm(base);
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let _ = feed(&mut state, hidden, 100 + seq, now, &profile);
         }
         assert_eq!(state.left.weights().wrist, 0.0);
         assert_eq!(state.left.weights().pole, 0.0);
-        assert!(state.left.last_target.is_some());
+        assert!(state.left.output.is_some());
     }
 
     #[test]
@@ -1026,14 +1092,10 @@ mod tests {
         let profile = ArmTrackingProfile::default();
         let base = arm();
         let mut state = tracked_state(base, &profile);
-        let hidden = ArmLandmarks {
-            shoulder: low_visibility(base.shoulder),
-            elbow: low_visibility(base.elbow),
-            wrist: low_visibility(base.wrist),
-        };
-        for seq in 100u64..140 {
-            let now = 10_000_000_000 + (seq - 100) * OBSERVATION_STEP_NS;
-            let frame = pose_frame(seq, now, Some(observation(hidden, base)));
+        let hidden = hidden_arm(base);
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let frame = pose_frame(seq + 100, now, Some(observation(hidden, base)));
             let (next, control) =
                 step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
             state = next;
@@ -1048,32 +1110,159 @@ mod tests {
         let profile = ArmTrackingProfile::default();
         let base = arm();
         let mut state = tracked_state(base, &profile);
-        let hidden = ArmLandmarks {
-            shoulder: low_visibility(base.shoulder),
-            elbow: low_visibility(base.elbow),
-            wrist: low_visibility(base.wrist),
-        };
-        for seq in 100u64..140 {
-            let now = 10_000_000_000 + (seq - 100) * OBSERVATION_STEP_NS;
-            let frame = pose_frame(seq, now, Some(observation(hidden, hidden)));
-            let (next, _) = step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
-            state = next;
+        let hidden = hidden_arm(base);
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let _ = feed(&mut state, hidden, 100 + seq, now, &profile);
         }
         assert_eq!(state.left.weights().wrist, 0.0);
 
+        let start = SETTLED_NS + FULL_RETURN_FRAMES * OBSERVATION_STEP_NS;
         let mut previous = 0.0;
-        for seq in 140u64..150 {
-            let now = 10_000_000_000 + (seq - 100) * OBSERVATION_STEP_NS;
-            let frame = pose_frame(seq, now, Some(observation(base, base)));
-            let (next, control) =
-                step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
-            state = next;
-            let weight = control.unwrap().weights.left.wrist;
+        for seq in 0..25u64 {
+            let now = start + seq * OBSERVATION_STEP_NS;
+            let control = feed(&mut state, base, 200 + seq, now, &profile).unwrap();
+            let weight = control.weights.left.wrist;
             assert!(weight >= previous);
             assert!(weight <= 1.0);
             previous = weight;
         }
         assert_eq!(previous, 1.0);
+    }
+
+    #[test]
+    fn a_lost_wrist_returns_to_virtual_over_several_seconds() {
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let hidden = hidden_arm(base);
+        let loss_at = SETTLED_NS;
+
+        let mut observations = Vec::new();
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = loss_at + seq * OBSERVATION_STEP_NS;
+            let control = feed(&mut state, hidden, 100 + seq, now, &profile).unwrap();
+            observations.push((now, control.weights.left.wrist));
+        }
+
+        // The hold keeps full authority, then the return is still only part
+        // way back a full second after the loss: no snap to the virtual arm.
+        let (_, held) = observations[0];
+        assert_eq!(held, 1.0);
+        let at_one_second = observations
+            .iter()
+            .find(|(now, _)| *now >= loss_at + 1_150_000_000)
+            .expect("one second is inside the recorded window")
+            .1;
+        assert!(
+            at_one_second > 0.3 && at_one_second < 0.7,
+            "return should still be in progress after one second, got {at_one_second}"
+        );
+
+        let mut previous = 1.0;
+        for (now, weight) in &observations {
+            assert!(
+                *weight <= previous + 1.0e-6,
+                "return must be monotonic: {weight} > {previous} at {now}"
+            );
+            previous = *weight;
+        }
+        assert_eq!(previous, 0.0);
+    }
+
+    #[test]
+    fn held_observation_keeps_the_channel_present_during_reacquire() {
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let hidden = hidden_arm(base);
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let _ = feed(&mut state, hidden, 100 + seq, now, &profile);
+        }
+        assert_eq!(state.left.weights().wrist, 0.0);
+
+        // One new camera frame, then the same retained observation is re-fed
+        // at render rate. The held ticks must keep ramping instead of being
+        // mistaken for absence and snapping the weight to full authority.
+        let captured = SETTLED_NS + (FULL_RETURN_FRAMES + 1) * OBSERVATION_STEP_NS;
+        let seq = 300;
+        let control = feed(&mut state, base, seq, captured, &profile).unwrap();
+        let first = control.weights.left.wrist;
+        assert!(first > 0.0 && first < 0.25, "got {first}");
+
+        let mut previous = first;
+        for tick in 1..=10u64 {
+            let now = captured + tick * 16_666_667;
+            let control = feed_held(&mut state, base, seq, captured, now, &profile).unwrap();
+            let weight = control.weights.left.wrist;
+            assert!(
+                weight > previous,
+                "held ticks must keep ramping: {weight} <= {previous}"
+            );
+            assert!(weight < 1.0, "held ticks must not snap to full: {weight}");
+            previous = weight;
+        }
+    }
+
+    #[test]
+    fn a_wrist_teleport_is_quarantined_and_returns_to_virtual() {
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let tracked_source = state.left.source.unwrap();
+
+        // More than one calibrated arm length away in a single observation.
+        let teleport = arm_at([0.3, 0.2, 0.0], [-0.5, -0.4, 0.0]);
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let _ = feed(&mut state, teleport, 100 + seq, now, &profile);
+        }
+
+        // The teleport never becomes a target, and because the wrist was
+        // never really lost it never becomes a reacquisition either.
+        assert_eq!(state.left.source, Some(tracked_source));
+        assert_eq!(state.left.weights().wrist, 0.0);
+
+        // The real hand reappears near the last accepted target and reconnects
+        // from zero without a jump.
+        let now = SETTLED_NS + FULL_RETURN_FRAMES * OBSERVATION_STEP_NS;
+        let control = feed(&mut state, base, 300, now, &profile).unwrap();
+        let weight = control.weights.left.wrist;
+        assert!(weight > 0.0 && weight < 0.5, "got {weight}");
+        assert_eq!(state.left.source, Some(tracked_source));
+    }
+
+    #[test]
+    fn a_far_detection_after_a_real_loss_reacquires_smoothly() {
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let tracked_source = state.left.source.unwrap();
+        let hidden = hidden_arm(base);
+
+        // A real gap long enough for the return to be under way.
+        for seq in 0..20u64 {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let _ = feed(&mut state, hidden, 100 + seq, now, &profile);
+        }
+        assert!(state.left.weights().wrist < 1.0);
+
+        // The hand is detected far from where it was lost. A reacquisition may
+        // be anywhere, but it must blend in from the current authority.
+        let far = arm_at([0.3, 0.2, 0.0], [-0.5, -0.4, 0.0]);
+        let now = SETTLED_NS + 20 * OBSERVATION_STEP_NS;
+        let control = feed(&mut state, far, 120, now, &profile).unwrap();
+        let weight = control.weights.left.wrist;
+        assert!(
+            weight > 0.0 && weight < 1.0,
+            "reacquisition must ramp, got {weight}"
+        );
+        assert_ne!(state.left.source, Some(tracked_source));
+        near(
+            state.left.source.unwrap().wrist,
+            [-0.5 / 0.7, 0.4 / 0.7, 0.0],
+        );
     }
 
     #[test]

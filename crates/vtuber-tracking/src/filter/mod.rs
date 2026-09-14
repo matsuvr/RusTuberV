@@ -1,6 +1,7 @@
-//! Tracking filters: quaternion-centered rotation smoothing and expression
+//! Tracking filters: rotation/point smoothing and expression
 //! normalization / smoothing.
 
+pub(crate) mod damped;
 pub mod detailed;
 pub mod expression;
 pub mod gaze;

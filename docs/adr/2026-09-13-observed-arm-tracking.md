@@ -21,7 +21,8 @@ MediaPipe以外のネイティブランタイム、常駐Python、汎用プラ�
 - `vtuber-core::arm_tracking`: 固定サイズの観測/目標/撮影時刻。Bevy、MediaPipeの
   ハンドル、骨Entityを持ち込まない。顔の`Landmark3`へPoseを詰め替えない。
 - `vtuber-tracking::arm_tracking`: 固定キャリブレーション長、肩相対座標、
-  観測時刻差での適応平滑化。`ArmTrackingState`/`ArmTrackingProfile`と
+  render clock上のcritically damped平滑化（頭・身体と共通の`filter::damped`）。
+  `ArmTrackingState`/`ArmTrackingProfile`と
   `step_arm_tracking`は入力値と前状態と`now`から値を返す純粋関数。左右独立の
   短い維持→仮想腕への復帰と再取得、伸び切り時の肘平面の連続性を含む。
 - `vtuber-avatar::tracked_arm`: モデル長・rest-spaceへの変換と既存IKのみ。
@@ -49,8 +50,10 @@ B=肩親のrest回転、A=現在回転、V=追跡viewからmodelへの回転な�
 
 Poseは既存顔推論を待たせず、カメラの`Arc`画像を共有する。各結果に元画像の
 `FrameSeq`と`captured_at`を残し、顔と腕の結果を同時撮影だったように偽装しない。
-平滑化は新しい観測だけで進め、正のcapture時刻差を`NonZeroU64`で渡す。
-render時刻で同じ観測を再投入しない。描画補間は別段階。
+平滑化は顔・身体と同じrender clockに統一する: 最新観測を保持して毎tick再投入し、
+頭・身体と同じ時間定数のcritically damped 2次フィルタで追従させる。新しい観測の
+取り込み（キャリブレーション、再ターゲット、観測blend）だけを1回に限定し、
+描画補間は同じ純粋状態更新の中で行う。
 
 ## ライブ接続
 
@@ -66,7 +69,14 @@ render時刻で同じ観測を再投入しない。描画補間は別段階。
 左右のvisibility判断、キャリブレーション標本の選別、伸び切り時の肘平面の連続性、
 ロスト/復帰は純粋関数として実装・テスト済み。実測モードへ仮想腕用のtorso lag/
 swivel/shoulder trim/twist緩和を無条件に重ねず、観測目標を保つ。
-遮蔽時の動作は片腕単位の短い維持→既存の仮想腕への連続復帰と、再観測からの連続取得。
+
+映像評価後のロスト/復帰は顔パイプラインと同じ形にした。保持した観測を毎tick再投入
+してもチャンネルは在席のまま扱い、欠測（人物なし・低visibility）または検出飛びだけが
+復帰タイムラインを進める。手首が1観測で校正腕長の`max_wrist_step`（初期0.75）を
+超えて飛んだ場合は外れ値として棄却し、以降も最後に採用した目標から離れている限り
+採用しない。手首を本当に見失った後の最初の観測は距離にかかわらず再取得として受け、
+現在の権威から連続的に取得する。遮蔽時は片腕単位でhold 150 ms→既存の仮想腕へ
+2 sで復帰し、再取得は`acquire` 500 msを上限に残り分だけブレンドする。
 欠損を原点や既定長で捏造せず、無期限維持・別推論器への自動切替は入れない。
 
 ## 実機評価
@@ -78,4 +88,5 @@ swivel/shoulder trim/twist緩和を無条件に重ねず、観測目標を保つ
 Windows x86_64では`cargo fmt --all -- --check`、`cargo test --workspace`、
 `cargo clippy --workspace --all-targets`、nativeのPose workerテストが通る。
 macOSでのビルド・FFI fixture・着座/机/腕交差/伸び切り/復帰の映像確認は未実施。
-平滑化係数と時間定数は実測前の出発値であり、品質保証値ではない。
+hold/return/acquireと`max_wrist_step`は実機映像のフィードバックで更新した値であり、
+品質保証値ではない。

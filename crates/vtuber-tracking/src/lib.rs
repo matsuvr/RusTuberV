@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-/// Pure observed-arm retargeting and observation-rate filtering.
+/// Pure observed-arm retargeting and render-clock filtering.
 pub mod arm_tracking;
 
 /// Pure quality evaluation of a recorded arm sequence (Issue #50).

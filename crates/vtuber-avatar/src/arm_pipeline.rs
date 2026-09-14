@@ -1103,7 +1103,8 @@ pub fn update_dynamic_arm_targets(
 pub struct TrackedArmControl {
     /// Avatar generation the stored frame belongs to.
     pub generation: Option<crate::lifecycle::AvatarGeneration>,
-    /// Latest observed control frame, already mirrored at the output boundary.
+    /// Latest canonical (unmirrored) observed control frame. Target conversion
+    /// applies the avatar motion mirror exactly once when it is enabled.
     pub frame: Option<vtuber_core::arm_tracking::ArmControlFrame>,
     /// Fixed rotation from the canonical tracking basis into the model basis.
     pub view_to_model: Quat,
@@ -1121,6 +1122,11 @@ impl Default for TrackedArmControl {
 
 /// Converts the latest observed control frame into compositor targets.
 ///
+/// The stored frame stays canonical tracking data; when
+/// [`crate::mirror::AvatarMotionMirror`] is enabled, the per-side targets and
+/// weights are reflected and side-swapped exactly once here so the observed
+/// arms follow the same mirror as the face.
+///
 /// Runs after [`update_dynamic_arm_targets`] (which clears the virtual targets
 /// while tracked mode is selected) and before `apply_default_arm_pose`. It only
 /// reads the current parent pose and immutable rest geometry; native handles,
@@ -1130,6 +1136,7 @@ pub fn update_tracked_arm_targets(
     lifecycle: Res<AvatarLifecycle>,
     selection: Res<ArmSourceSelection>,
     control: Res<TrackedArmControl>,
+    mirror: Option<Res<crate::mirror::AvatarMotionMirror>>,
     overrides: Option<Res<crate::arm_pose::ArmPoseOverrideStore>>,
     mut roots: Query<(
         &AvatarBinding,
@@ -1158,12 +1165,16 @@ pub fn update_tracked_arm_targets(
     if lifecycle.state() != crate::lifecycle::AvatarLifecycleState::Ready {
         return;
     }
-    if targets.generation == Some(binding.generation)
-        && targets.source_seq == Some(frame.source_seq)
-    {
-        // Same input frame: keep the existing resolution (idempotent).
-        return;
-    }
+
+    // The tracked frame is re-resolved on every render tick: its source
+    // sequence only advances when the camera does, but the render-clock
+    // smoothing advances the targets each tick.
+    let mirrored = mirror.as_deref().is_none_or(|mirror| mirror.is_enabled());
+    let (frame_targets, frame_weights) = if mirrored {
+        (frame.targets.mirrored(), frame.weights.mirrored())
+    } else {
+        (frame.targets, frame.weights)
+    };
 
     let profile = overrides
         .as_deref()
@@ -1203,14 +1214,14 @@ pub fn update_tracked_arm_targets(
         left: resolve(
             binding.left_arm.as_ref(),
             motion.left.as_ref(),
-            frame.targets.left,
-            frame.weights.left,
+            frame_targets.left,
+            frame_weights.left,
         ),
         right: resolve(
             binding.right_arm.as_ref(),
             motion.right.as_ref(),
-            frame.targets.right,
-            frame.weights.right,
+            frame_targets.right,
+            frame_weights.right,
         ),
     };
 }
