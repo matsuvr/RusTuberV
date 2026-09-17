@@ -91,6 +91,7 @@ impl Plugin for VtuberAvatarPlugin {
                         .after(despawn_unloading_avatar),
                     crate::look::setup_studio_lighting,
                     crate::look::apply_environment_to_avatar_cameras,
+                    crate::look::apply_standard_portrait_settings,
                 ),
             )
             .add_message::<LoadAvatarRequest>()
