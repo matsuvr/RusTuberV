@@ -46,16 +46,27 @@ The direct term follows each light's own radiance, light color is per light,
 and two lights add. The pre-fix renderer (issue #69) multiplied no light
 radiance at all, so it could not produce this table.
 
-`mtoon-authored`: a fully lit white plane under a 1000 lx light (the app's
-default exposure is about 1/1000) reads `[255, 255, 255, 255]`. The plain MToon
-display shows the authored base color at full intensity; no extra BRDF
-normalization darkens it. An earlier revision applied Bevy's Lambertian `1/PI`
-to match the standard material's brightness, which made the plain display
-darker than the authored one, so it was reverted. The look is what shapes the
-portrait instead: `STUDIO_PRESET.key` is 900 lx, below the scene's own 1500 lx
-key, so switching the look on is a softer key plus fill and rim rather than
-more light in the same direction, and the strength slider interpolates between
-the scene light (0) and that rig (1).
+`mtoon-standard`: the standard path (`MToonMaterial::look_strength == 0`)
+renders a fully lit white plane at `[255, 255, 255, 255]` for 200 lx, 1500 lx
+and 10000 lx, and for a red light as well as a white one; a light behind the
+surface gives `[187, 187, 187, 255]`. The light's intensity and color do not
+scale the standard display and a fully lit surface shows the authored base
+color. `mtoon-lighting` is the same scene with `look_strength == 1`, where the
+intensity and color do matter.
+
+`MToonMaterial::look_strength` selects the path, and the zero path is a
+verbatim reproduction of the renderer before this epic:
+
+| standard path | source before the epic (`db364e0`) |
+|---|---|
+| `mtoon_standard_shading` | `calc_mtoon_lighting_shading` (saturate + `mtoon_linearstep` ramp) |
+| `apply_standard_directional_lights` | `apply_directional_lights` (accumulate the shading, one `mix`) |
+| `apply_standard_global_illumination` | `apply_global_illumination` (`view.exposure * ambient_light`) |
+| `apply_standard_mtoon_lighting` | `apply_mtoon_lighting` (`direct + gi + emissive + rim`) |
+
+The normal-map evaluation and the cutout shadow prepass are also gated on
+`look_strength > 0`, so the standard display keeps the plain geometric normal
+and the plain depth-only shadow.
 
 `mtoon-shading`: front-lit `124`, 90-degree side `89`, side with +0.5 shift
 `124`, light behind `0`; the toony=0 ramp has 17 intermediate samples on the
@@ -81,7 +92,42 @@ above, and any real VRM model. The screenshots taken while reviewing the
 result are visual inspection only; they are not a pixel measurement. No FPS or
 image-quality threshold is claimed.
 
-## Settings screen controls (part of #75)
+## Per-model rich-look check
+
+`cargo xtask vrm-render <vrm-or-dir> <out-dir>` loads every model through the
+production managed lifecycle with a frozen clock, a fixed camera and the
+production offscreen readback, captures one 256x256 frame with the look off and
+one with it on, and writes both frames (`.bgra` and `.png`).
+
+| model | off mean | on mean | mean abs diff |
+|---|---|---|---|
+| 1565994099520778586 | 72.21 | 75.07 | 2.98 |
+| AvatarSample_C | 36.99 | 40.36 | 3.37 |
+| IrisPart1 | 36.89 | 36.41 | 1.38 |
+| IrisPart1(ShapeKey Reduce) | 36.89 | 36.37 | 1.35 |
+| IrisPart1(ShapeKey Reduce2) | 36.89 | 36.37 | 1.35 |
+| RearAlice_3.0 | 29.41 | 29.41 | 1.70 |
+| RearAliceLite_3.0 | 29.43 | 29.43 | 1.70 |
+| Sapphy | 38.68 | 40.46 | 3.36 |
+| SapphyPerfectSync | 38.68 | 40.46 | 3.36 |
+| つくよみちゃん（タイプA・マテリアル数18） | 39.01 | 38.78 | 0.84 |
+
+Every model keeps the same opaque pixel count in both states (the geometry and
+alpha are untouched) and every model differs when the look is switched on, so
+the switch has a measurable effect on all of them.
+
+How much the difference reads as "rich" is subjective. What this records
+mechanically is: off is the standard display, on is a different image, and the
+difference is currently the studio rig only (key, fill, rim, environment,
+shadows, per-light response). The MToon gloss, environment specular and extra
+rim of issue #72 are not implemented, so "on" is not yet a large change for a
+model whose materials are already fully lit by the standard display.
+
+Not measured: a byte comparison against a binary built from the pre-epic
+commit. The equivalence above is established by the source mapping table and
+the standard-path invariants, not by running the old build.
+
+
 
 The "Enhanced look" section with the ON/OFF switch and the 0-100%
 brightness/effect-strength slider is on the **Studio** pane and the settings
@@ -128,3 +174,14 @@ be switched on and its strength adjusted from the settings screen.
   model.
 - `StandardLookBases` assumes the loader gives each avatar its own
   `StandardMaterial` assets; no per-avatar material cloning is performed.
+- The rich path applies each light's radiance without a Lambert normalization,
+  which is the specification's own toon behavior; the preset keeps every light
+  at or below 900 lx so a fully lit surface does not clip.
+- The cutout shadow prepass has no access to the view time globals, so a
+  cutout shadow uses the static UV transform while the main pass uses the
+  animated UV (only while the look is on).
+
+## Settings screen controls (part of #75)
+
+(see above)
+

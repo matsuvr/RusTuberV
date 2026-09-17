@@ -27,6 +27,7 @@ struct MToonMaterialUniform {
     outline_width_factor: f32,
     outline_lighting_mix_factor: f32,
     normal_texture_scale: f32,
+    look_strength: f32,
 }
 
 struct MToonInput{

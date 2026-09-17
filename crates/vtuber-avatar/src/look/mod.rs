@@ -7,6 +7,7 @@
 
 mod lighting;
 mod material;
+mod mtoon;
 mod preset;
 
 pub use lighting::{
@@ -19,6 +20,7 @@ pub use material::{
     capture_standard_look_base, clear_look_materials_on_unload, initialize_look_materials,
     resolve_standard_portrait,
 };
+pub use mtoon::apply_mtoon_look_strength;
 pub use preset::{
     RichLookSettings, STUDIO_PRESET, StudioLightPreset, StudioPreset, blend_look_scalar,
     effective_look_strength,

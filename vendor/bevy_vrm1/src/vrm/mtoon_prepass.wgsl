@@ -28,8 +28,12 @@
 @fragment
 fn fragment(in: prepass_io::VertexOutput) {
 #ifdef VERTEX_UVS_A
-    if ((material.flags & ALPHA_MODE_MASK) != 0u
-        || (material.flags & ALPHA_MODE_ALPHA_TO_COVERAGE) != 0u)
+    // The standard display keeps the plain depth-only shadow from before the
+    // rich-look work; the look is what makes the cutout coverage follow the
+    // material's own alpha.
+    if (material.look_strength > 0.0
+        && ((material.flags & ALPHA_MODE_MASK) != 0u
+            || (material.flags & ALPHA_MODE_ALPHA_TO_COVERAGE) != 0u))
     {
         let uv = mtoon_transformed_uv(in.uv);
         if (mtoon_alpha_at_uv(uv) < material.alpha_cutoff) {

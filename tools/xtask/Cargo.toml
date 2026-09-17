@@ -23,7 +23,7 @@ vtuber-inference = { path = "../../crates/vtuber-inference", features = ["legacy
 vtuber-tracking = { path = "../../crates/vtuber-tracking" }
 tempfile = "3"
 # JPEG input is needed only by the still-image detector diagnostic.
-image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 mediapipe = { git = "https://github.com/nikicat/mediapipe-rs", rev = "527037fa0fe1339750140283930bbb9560460e9e", version = "=0.1.0" }
 sha2 = "=0.10.8"
 serde = { version = "1", features = ["derive"] }

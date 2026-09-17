@@ -65,6 +65,8 @@ struct MtoonScene {
     /// Optional constant normal texture, one RGBA pixel.
     normal_map: Option<[u8; 4]>,
     normal_scale: f32,
+    /// Rich-look strength on the material; 0 is the standard display.
+    look_strength: f32,
 }
 
 impl MtoonScene {
@@ -79,6 +81,7 @@ impl MtoonScene {
             ground: false,
             normal_map: None,
             normal_scale: 1.0,
+            look_strength: 0.0,
         }
     }
 }
@@ -98,7 +101,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-shadow" => mtoon_shadow(),
         "mtoon-cutout-shadow" => mtoon_cutout_shadow(),
         "studio-environment" => studio_environment(),
-        "mtoon-authored" => mtoon_authored(),
+        "mtoon-standard" => mtoon_standard(),
         "mtoon-normal" => mtoon_normal(),
         "help" | "--help" | "-h" => {
             println!("cargo xtask rich-look <case> [--evidence <file>]");
@@ -106,6 +109,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-lighting  directional-light color/intensity response");
             println!("  mtoon-shading   signed NdotL, shading shift and toony endpoints");
             println!("  mtoon-normal    normal texture, scale and TBN wiring");
+            println!("  mtoon-standard  the standard display is the plain authored display");
+            println!("  mtoon-authored  (renamed to mtoon-standard)");
             return Ok(());
         }
         other => return Err(format!("unknown rich-look case: {other}")),
@@ -161,7 +166,10 @@ fn mtoon_lighting() -> Result<String, RichLookError> {
         Ok(center_pixel(&render(scene)?))
     };
 
-    let base = MtoonScene::lit(Color::WHITE, Color::BLACK, white(0.0));
+    let base = MtoonScene {
+        look_strength: 1.0,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, white(0.0))
+    };
     let dark = sample(&base)?;
     let one = sample(&MtoonScene {
         lights: vec![white(200.0)],
@@ -241,7 +249,10 @@ fn mtoon_shading() -> Result<String, RichLookError> {
         illuminance: 200.0,
         shadows_enabled: false,
     };
-    let base = MtoonScene::lit(Color::WHITE, Color::BLACK, light);
+    let base = MtoonScene {
+        look_strength: 1.0,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
+    };
     // A light travelling toward `-X` meets the plane's `+Z` normal at exactly
     // 90 degrees, so the untouched ramp sits on the middle of its range.
     let side_light = LightSpec {
@@ -314,28 +325,69 @@ fn mtoon_shading() -> Result<String, RichLookError> {
     Ok(report)
 }
 
-/// The plain MToon display must stay the authored display: a fully lit white
-/// surface under a light whose exposed intensity reaches 1.0 shows the base
-/// color, not a darkened version of it.
-fn mtoon_authored() -> Result<String, RichLookError> {
-    // The app's default exposure is about 1/1000, so 1000 lx exposes to 1.0.
-    let lit = center_pixel(&render(&MtoonScene::lit(
+/// The standard display (`look_strength` 0) must be the plain display: the
+/// light's intensity and color do not scale it, and a fully lit surface shows
+/// the authored base color.
+///
+/// This is the property that makes switching the look off indistinguishable
+/// from the renderer before the rich-look work, and it is the exact opposite
+/// of the rich path measured by `mtoon-lighting`.
+fn mtoon_standard() -> Result<String, RichLookError> {
+    let scene = |illuminance: f32, color: Color| MtoonScene::lit(
         Color::WHITE,
         Color::BLACK,
         LightSpec {
             direction: Vec3::NEG_Z,
-            color: Color::WHITE,
-            illuminance: 1000.0,
+            color,
+            illuminance,
             shadows_enabled: false,
         },
-    ))?);
-    let mut report = format!("case=mtoon-authored\nfully_lit={lit:?}\n");
-    if luma(lit) < 600 {
+    );
+    let dim = center_pixel(&render(&scene(200.0, Color::WHITE))?);
+    let bright = center_pixel(&render(&scene(1_500.0, Color::WHITE))?);
+    let very_bright = center_pixel(&render(&scene(10_000.0, Color::WHITE))?);
+    let red = center_pixel(&render(&scene(1_500.0, Color::srgb(1.0, 0.0, 0.0)))?);
+    let behind = center_pixel(&render(&MtoonScene {
+        lights: vec![LightSpec {
+            direction: Vec3::Z,
+            color: Color::WHITE,
+            illuminance: 1_500.0,
+            shadows_enabled: false,
+        }],
+        ..scene(1_500.0, Color::WHITE)
+    })?);
+
+    let mut report = format!(
+        "case=mtoon-standard\n\
+         lit_200lx={dim:?}\n\
+         lit_1500lx={bright:?}\n\
+         lit_10000lx={very_bright:?}\n\
+         lit_1500lx_red={red:?}\n\
+         light_behind={behind:?}\n"
+    );
+    if dim != bright || bright != very_bright {
         return Err(RichLookError::Failed(format!(
-            "a fully lit MToon surface is darker than its authored base color: {lit:?}"
+            "the standard display followed the light intensity: 200lx={dim:?} 1500lx={bright:?} 10000lx={very_bright:?}"
         )));
     }
-    report.push_str("checks=plain_display_shows_the_authored_base_color\n");
+    if bright != red {
+        return Err(RichLookError::Failed(format!(
+            "the standard display followed the light color: white={bright:?} red={red:?}"
+        )));
+    }
+    if luma(bright) < 600 {
+        return Err(RichLookError::Failed(format!(
+            "a fully lit standard MToon surface is not the authored base color: {bright:?}"
+        )));
+    }
+    if luma(behind) >= luma(bright) {
+        // The standard ramp maps the fully unlit side to the middle of the
+        // base/shade interpolation, so it is shaded but not black.
+        return Err(RichLookError::Failed(format!(
+            "the standard display did not shade a light behind the surface: lit={bright:?} behind={behind:?}"
+        )));
+    }
+    report.push_str("checks=standard_is_intensity_independent,standard_is_color_independent,standard_shows_authored_base\n");
     Ok(report)
 }
 
@@ -662,6 +714,7 @@ fn setup_cutout_scene(
         Mesh3d(meshes.add(quad)),
         MeshMaterial3d(materials.add(MToonMaterial {
             base_color_texture: Some(mask),
+            look_strength: 1.0,
             alpha_mode: AlphaMode::Mask(0.5),
             ..default()
         })),
@@ -715,6 +768,7 @@ fn mtoon_shadow() -> Result<String, RichLookError> {
         lights: vec![light],
         mesh: MeshSpec::Sphere,
         ground: true,
+        look_strength: 1.0,
         ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
     };
 
@@ -774,6 +828,7 @@ fn mtoon_normal() -> Result<String, RichLookError> {
     // toward `-X` turns the surface away from it.
     let base = MtoonScene {
         toony_factor: 0.0,
+        look_strength: 1.0,
         ..MtoonScene::lit(
             Color::WHITE,
             Color::BLACK,
@@ -1012,6 +1067,7 @@ fn setup_fixture_scene(
         },
         normal_texture,
         normal_texture_scale: scene.normal_scale,
+        look_strength: scene.look_strength,
         ..default()
     });
     commands.spawn((

@@ -51,6 +51,7 @@
 }
 #import mtoon::lighting::{
     mtoon_shading_weight,
+    mtoon_standard_shading,
     mtoon_direct_term,
 }
 
@@ -95,9 +96,9 @@ fn make_pbr_input(
     return pbr_input;
 }
 
-// Resolves the lighting normal. Without a normal texture the material uses the
-// geometric (vertex/skinning/morph) normal, per the MToon surface-normal
-// specification. The outline extrusion keeps using the geometric normal.
+// Resolves the lighting normal. The standard display uses the geometric
+// (vertex/skinning/morph) normal; only the rich look evaluates the material's
+// normal texture. The outline extrusion always keeps the geometric normal.
 fn mtoon_world_normal(
     vertex_input: VertexOutput,
     pbr_input: PbrInput,
@@ -106,7 +107,7 @@ fn mtoon_world_normal(
 ) -> vec3<f32> {
     var normal = pbr_input.N;
 #ifdef VERTEX_TANGENTS
-    if ((material.flags & NORMAL_TEXTURE) != 0u) {
+    if (material.look_strength > 0.0 && (material.flags & NORMAL_TEXTURE) != 0u) {
         let TBN = calculate_tbn_mikktspace(pbr_input.world_normal, vertex_input.world_tangent);
         var tangent_normal = textureSampleBias(
             normal_texture,
@@ -170,6 +171,9 @@ fn make_mtoon_input(in: VertexOutput, pbr_input: PbrInput) -> MToonInput{
 }
 
 fn apply_mtoon_lighting(in: MToonInput) -> vec4<f32> {
+    if (material.look_strength <= 0.0) {
+        return apply_standard_mtoon_lighting(in);
+    }
     let direct = apply_directional_lights(in);
     let indirect = apply_global_illumination(in);
     let emissive = apply_emissive_light(in);
@@ -178,6 +182,64 @@ fn apply_mtoon_lighting(in: MToonInput) -> vec4<f32> {
     // leaves emissive absolute (`emissive_exposure_weight` defaults to 0).
     // MToon follows the same split so exposure is not applied twice.
     return vec4<f32>(view.exposure * (direct + indirect + rim) + emissive, in.lit_color.a);
+}
+
+// The standard display: the renderer's behaviour before the rich look existed.
+//
+// Each light only moves the base/shade interpolation along the shading ramp;
+// the light's radiance is not applied and the direct term is not exposed, so a
+// fully lit surface shows the authored base color. Keeping this path is what
+// makes switching the look off indistinguishable from the plain display.
+fn apply_standard_mtoon_lighting(in: MToonInput) -> vec4<f32> {
+    let direct = apply_standard_directional_lights(in);
+    let indirect = apply_standard_global_illumination(in);
+    let emissive = apply_emissive_light(in);
+    let rim = apply_rim_lighting(in.pbr, in.uv, direct, indirect);
+    return vec4<f32>(direct + indirect + emissive + rim, in.lit_color.a);
+}
+
+fn apply_standard_directional_lights(in: MToonInput) -> vec3<f32> {
+    let shade_color = calc_shade_color(in);
+    let shade_shift = calc_mtoon_lighting_reflectance_shading_shift(in);
+    var shading: f32 = 0.0;
+    for (var i: u32 = 0u; i < lights.n_directional_lights; i = i + 1u) {
+        shading += calc_standard_lighting_shading(in, i, shade_shift);
+    }
+    return mix(shade_color, in.lit_color.rgb, shading);
+}
+
+fn calc_standard_lighting_shading(
+    input: MToonInput,
+    light_id: u32,
+    shade_shift: f32,
+) -> f32 {
+    let light = &lights.directional_lights[light_id];
+    let ndotl = dot(input.world_normal, (*light).direction_to_light);
+    let view_z = dot(vec4<f32>(
+        view.view_from_world[0].z,
+        view.view_from_world[1].z,
+        view.view_from_world[2].z,
+        view.view_from_world[3].z
+    ), input.world_position);
+    var shadow = 1.0;
+    if ((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+        shadow = fetch_directional_shadow(
+            light_id,
+            input.world_position,
+            input.world_normal,
+            view_z,
+            input.pbr.frag_coord.xy,
+        );
+    }
+    return mtoon_standard_shading(ndotl, shade_shift, material.shading_toony_factor) * shadow;
+}
+
+fn apply_standard_global_illumination(in: MToonInput) -> vec3<f32> {
+    let diffuse_color = calc_diffuse_color(
+        in.lit_color.rgb,
+        in.pbr.material.diffuse_transmission,
+    );
+    return view.exposure * mtoon_ambient(in, in.world_normal, diffuse_color);
 }
 
 fn apply_directional_lights(in: MToonInput) -> vec3<f32>{

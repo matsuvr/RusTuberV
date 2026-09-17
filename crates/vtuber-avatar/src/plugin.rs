@@ -92,6 +92,7 @@ impl Plugin for VtuberAvatarPlugin {
                     crate::look::setup_studio_lighting,
                     crate::look::apply_environment_to_avatar_cameras,
                     crate::look::apply_standard_portrait_settings,
+                    crate::look::apply_mtoon_look_strength,
                 ),
             )
             .add_message::<LoadAvatarRequest>()

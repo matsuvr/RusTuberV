@@ -97,6 +97,13 @@ pub struct MToonMaterial {
     pub gi_equalization_factor: f32,
     /// glTF `normalTexture.scale`. Scales the tangent-space normal's X/Y.
     pub normal_texture_scale: f32,
+    /// The rich look's effective strength in `0..=1`.
+    ///
+    /// Zero keeps the standard MToon display: the shading ramp folds the light
+    /// into the authored base/shade colors without applying the light's
+    /// radiance, which is what a plain VRM display looks like. Above zero the
+    /// look is active and each light contributes its own color and intensity.
+    pub look_strength: f32,
     pub alpha_mode: AlphaMode,
     pub double_sided: bool,
     /// [VRMC_materials_mtoon-1.0](https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_materials_mtoon-1.0/README.md#renderqueueoffsetnumber)
@@ -222,6 +229,7 @@ impl Default for MToonMaterial {
             emissive: LinearRgba::BLACK,
             gi_equalization_factor: 0.9,
             normal_texture_scale: 1.0,
+            look_strength: 0.0,
             alpha_mode: AlphaMode::default(),
             double_sided: false,
             depth_bias: 0.0,
@@ -337,6 +345,7 @@ pub struct MToonMaterialUniform {
     pub outline_width_factor: f32,
     pub outline_lighting_mix_factor: f32,
     pub normal_texture_scale: f32,
+    pub look_strength: f32,
 }
 
 impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
@@ -377,6 +386,7 @@ impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
             outline_width_factor: self.outline.width_factor,
             outline_lighting_mix_factor: self.outline.lighting_mix_factor,
             normal_texture_scale: self.normal_texture_scale,
+            look_strength: self.look_strength,
         }
     }
 }
