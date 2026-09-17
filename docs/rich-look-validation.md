@@ -35,23 +35,30 @@ Supporting reusable code: `tools/xtask/src/rich_look.rs` (six GPU cases),
 | case | pixel |
 |---|---|
 | zero illuminance | `[0, 0, 0, 255]` |
-| 200 lx white | `[124, 124, 124, 255]` |
-| 400 lx white | `[170, 170, 170, 255]` |
-| 200 lx red | `[0, 0, 124, 255]` |
-| 200 lx blue | `[124, 0, 0, 255]` |
-| 2 x 100 lx white | `[124, 124, 124, 255]` |
-| 100 lx white | `[89, 89, 89, 255]` |
+| 200 lx white | `[71, 71, 71, 255]` |
+| 400 lx white | `[100, 100, 100, 255]` |
+| 200 lx red | `[0, 0, 71, 255]` |
+| 200 lx blue | `[71, 0, 0, 255]` |
+| 2 x 100 lx white | `[71, 71, 71, 255]` |
+| 100 lx white | `[50, 50, 50, 255]` |
 
 The direct term follows each light's own radiance, light color is per light,
 and two lights add. The pre-fix renderer (issue #69) multiplied no light
 radiance at all, so it could not produce this table.
 
-`mtoon-shading`: front-lit `124`, 90-degree side `89`, side with +0.5 shift
-`124`, light behind `0`; the toony=0 ramp has 17 intermediate samples on the
+`mtoon-vs-standard`: the same white plane at 200 lx renders `[71, 71, 71, 255]`
+with MToon and `[74, 73, 74, 255]` with `StandardMaterial`. This is the #68
+contract for the standard display: MToon's direct term carries the same
+Lambertian `1/PI` normalization Bevy's standard material uses, so a fully lit
+MToon surface is not driven past white while the standard material stays
+mid-tone.
+
+`mtoon-shading`: front-lit `71`, 90-degree side `50`, side with +0.5 shift
+`71`, light behind `0`; the toony=0 ramp has 18 intermediate samples on the
 mid scanline and the toony=1 endpoint has 0.
 
-`mtoon-normal`: no map `118`, identity map `118`, tilted map `95`, tilted map
-with scale 0 `118`.
+`mtoon-normal`: no map `68`, identity map `68`, tilted map `54`, tilted map
+with scale 0 `68`.
 
 `mtoon-shadow`: darkest ground pixel under an MToon sphere is `0` with shadow
 maps on and `267` with them off, so the MToon mesh casts into the shadow map.
@@ -66,7 +73,21 @@ quad shadow), which is the artifact issue #71 asked to remove.
 produced usable diffuse/specular maps from the bundled 16x16x6 cubemap.
 
 Not measured: frame times, GPU time, NDI output, any GPU/OS other than the one
-above, and any real VRM model. No FPS or image-quality threshold is claimed.
+above, and any real VRM model. The screenshots taken while reviewing the
+result are visual inspection only; they are not a pixel measurement. No FPS or
+image-quality threshold is claimed.
+
+## Settings screen controls (part of #75)
+
+The settings screen now has an "Enhanced look" section with the ON/OFF switch
+and a 0-100% brightness/effect-strength slider, in all four languages, wired
+through `UiAction::SetRichLookEnabled`/`SetRichLookStrength` to
+`AvatarLookSettings` and `LookSettingsChanged`. The slider scales the whole
+look, so at 0 the scene is the standard display even while the switch is on.
+
+Not done from #75: persistence to `settings.toml`, per-model settings, and
+restore on model switch. The switch therefore starts OFF again after a
+restart.
 
 ## Not implemented
 
@@ -74,14 +95,14 @@ above, and any real VRM model. No FPS or image-quality threshold is claimed.
 |---|---|
 | #72 MToon glossy/environment/extra rim | Not implemented. `MToonPortraitParams`, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl` and the MToon specular IBL connection do not exist. |
 | #74 HDR finish and transparency | Not implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table do not exist. |
-| #75 one-click UI, 4 languages, per-model save | Not implemented. There is no UI surface, `RichLookChange`/`reduce_rich_look`/`merge_model_look_settings` or settings persistence for the look. The look can currently only be driven by writing `AvatarLookSettings`/`LookSettingsChanged`. |
+| #75 one-click UI, 4 languages, per-model save | Partially implemented: the switch and the strength slider exist in the settings screen in four languages (see above). Persistence, per-model settings and restore on model switch are not implemented. |
 | #76 material roles | Not implemented. `MaterialRole`, `infer_material_role`, `resolve_material_role`, the role param resolvers and `face_lighting_normal` do not exist. |
 | #77 final acceptance | Partially covered by this document (the measurements above). The #75 first-version and #76 role comparisons are not possible yet because those issues are not implemented. |
 
-Consequences: the epic's completion criteria are not met. In particular there
-is no one-click switch in the normal screen, MToon materials get no added
-gloss/environment/rim, no finish/tone change happens, and per-model look
-settings are not saved or restored.
+Consequences: the epic's completion criteria are not met. In particular MToon
+materials get no added gloss/environment/rim, no finish/tone change happens,
+and per-model look settings are not saved or restored. The rich look itself can
+be switched on and its strength adjusted from the settings screen.
 
 ## Known limitations in the implemented parts
 

@@ -107,6 +107,11 @@ pub use load::{
     AssetPathError, AvatarAssetId, ExpectedVrmGeneration, ImportedAvatar, LoadImportedAvatarError,
     LoadImportedAvatarRequest, LoadImportedAvatarResult, PendingAvatarLoad, UserAssetPath,
 };
+pub use look::{
+    AvatarLookSettings, LookSettingsChanged, RichLookSettings, StandardLookBase, StandardLookBases,
+    apply_standard_portrait_settings, blend_look_scalar, capture_standard_look_base,
+    effective_look_strength, resolve_standard_portrait, studio_environment_cubemap,
+};
 pub use mirror::AvatarMotionMirror;
 pub use plugin::{StartupModelPath, VtuberAvatarPlugin};
 pub use pose::{PoseApplyMetrics, natural_body_tracking_profile, update_body_tracking_pose_input};

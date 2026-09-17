@@ -148,6 +148,18 @@ pub enum UiAction {
     // --- Appearance ---
     /// Switch the UI language and persist the choice.
     SetLanguage(crate::settings::UiLanguage),
+
+    // --- Rich look ---
+    /// Switch the rich look on or off.
+    SetRichLookEnabled {
+        /// Whether the rich look should be applied.
+        enabled: bool,
+    },
+    /// Set the rich look strength.
+    SetRichLookStrength {
+        /// Effect strength in `0..=1`.
+        strength: f32,
+    },
 }
 
 impl UiAction {
@@ -291,6 +303,24 @@ mod tests {
             UiAction::ToggleExpressionKey { generation, key },
             UiAction::ClearManualExpression { generation }
         );
+    }
+
+    #[test]
+    fn rich_look_actions_carry_their_value() {
+        assert_eq!(
+            UiAction::SetRichLookEnabled { enabled: true },
+            UiAction::SetRichLookEnabled { enabled: true }
+        );
+        assert_ne!(
+            UiAction::SetRichLookEnabled { enabled: true },
+            UiAction::SetRichLookEnabled { enabled: false }
+        );
+        assert_eq!(
+            UiAction::SetRichLookStrength { strength: 0.25 },
+            UiAction::SetRichLookStrength { strength: 0.25 }
+        );
+        assert!(!UiAction::SetRichLookEnabled { enabled: true }.is_navigation());
+        assert!(!UiAction::SetRichLookStrength { strength: 1.0 }.requires_running_pipeline());
     }
 
     #[test]

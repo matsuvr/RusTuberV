@@ -825,6 +825,8 @@ pub fn process_ui_actions_system(
     mut expression_store: Option<ResMut<ExpressionBindingStore>>,
     mut manual_requests: Option<MessageWriter<ManualExpressionRequest>>,
     mut pose_runtime: Option<ResMut<crate::pose_runtime::PoseRuntime>>,
+    mut look_settings: Option<ResMut<vtuber_avatar::AvatarLookSettings>>,
+    mut look_changes: Option<MessageWriter<vtuber_avatar::LookSettingsChanged>>,
 ) {
     let actions = ui_state.take_actions();
     for action in &actions {
@@ -906,6 +908,20 @@ pub fn process_ui_actions_system(
                     )));
                 }
             }
+            UiAction::SetRichLookEnabled { enabled } => {
+                apply_rich_look_change(
+                    look_settings.as_deref_mut(),
+                    look_changes.as_mut(),
+                    |settings| settings.enabled = *enabled,
+                );
+            }
+            UiAction::SetRichLookStrength { strength } => {
+                apply_rich_look_change(
+                    look_settings.as_deref_mut(),
+                    look_changes.as_mut(),
+                    |settings| settings.strength = *strength,
+                );
+            }
             UiAction::AssignExpressionKey {
                 model_id,
                 generation,
@@ -972,6 +988,31 @@ pub fn process_ui_actions_system(
     view_model.mirror_preview = preview.mirrored;
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
     view_model.arm_tracking_enabled = pose_runtime.as_deref().is_some_and(|pose| pose.enabled());
+    if let Some(settings) = look_settings.as_deref() {
+        view_model.look.enabled = settings.0.enabled;
+        view_model.look.strength = settings.0.strength;
+    }
+}
+
+/// Applies one rich-look edit.
+///
+/// The resource is the immediate state the settings screen renders, and the
+/// message carries the same value so every look listener sees the change.
+fn apply_rich_look_change(
+    settings: Option<&mut vtuber_avatar::AvatarLookSettings>,
+    changes: Option<&mut MessageWriter<vtuber_avatar::LookSettingsChanged>>,
+    edit: impl FnOnce(&mut vtuber_avatar::RichLookSettings),
+) {
+    let (Some(settings), Some(changes)) = (settings, changes) else {
+        return;
+    };
+    let mut next = settings.0;
+    edit(&mut next);
+    if next == settings.0 {
+        return;
+    }
+    settings.0 = next;
+    changes.write(vtuber_avatar::LookSettingsChanged(next));
 }
 
 /// Returns the one catalog that expression operations may use right now.

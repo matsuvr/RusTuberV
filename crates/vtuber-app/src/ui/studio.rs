@@ -1656,7 +1656,46 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
     );
 }
 
+/// Rich-look switch and lighting/effect strength.
+///
+/// The strength scales the whole look, so at 0 the scene is the standard
+/// display even while the switch is on.
+fn rich_look_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+    let switch = lang.pick("リッチ表示", "Enhanced look", "增强显示", "고급 렌더링");
+    section(ui, switch, |ui| {
+        let mut enabled = vm.look.enabled;
+        if ui.checkbox(&mut enabled, switch).changed() {
+            state.emit(UiAction::SetRichLookEnabled { enabled });
+        }
+        let mut percent = vm.look.strength * 100.0;
+        let slider = ui.add_enabled(
+            enabled,
+            egui::Slider::new(&mut percent, 0.0..=100.0)
+                .suffix("%")
+                .text(lang.pick(
+                    "明るさ・効果の強さ",
+                    "Lighting / effect strength",
+                    "亮度·效果强度",
+                    "밝기·효과 강도",
+                )),
+        );
+        if slider.changed() {
+            state.emit(UiAction::SetRichLookStrength {
+                strength: (percent / 100.0).clamp(0.0, 1.0),
+            });
+        }
+        ui.add_space(4.0);
+        ui.label(lang.pick(
+            "照明と質感をまとめて調整します。VRMファイルは変更しません。",
+            "Adjust lighting and materials together. Your VRM file is not modified.",
+            "同时调整灯光和材质，不修改 VRM 文件。",
+            "조명과 재질을 함께 조정합니다. VRM 파일은 변경하지 않습니다.",
+        ));
+    });
+}
+
 fn settings_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+    rich_look_section(ui, vm, state, lang);
     expression_settings_section(ui, vm, state, lang);
     section(
         ui,
@@ -2725,6 +2764,38 @@ mod tests {
             assert!(
                 expression_availability_suffix(&ExpressionAvailability::Ready, lang).is_empty()
             );
+        }
+    }
+
+    #[test]
+    fn rich_look_view_model_default_matches_the_look_settings() {
+        let model = crate::ui_model::RichLookViewModel::default();
+        let settings = vtuber_avatar::RichLookSettings::default();
+        assert_eq!(model.enabled, settings.enabled);
+        assert_eq!(model.strength, settings.strength);
+    }
+
+    #[test]
+    fn rich_look_section_renders_in_every_language() {
+        for lang in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            let ctx = egui::Context::default();
+            let mut state = UiState::default();
+            let mut vm = UiViewModel::default();
+            vm.look.enabled = true;
+            vm.look.strength = 0.5;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                rich_look_section(ui, &vm, &mut state, lang);
+            });
+            let mut off = vm;
+            off.look.enabled = false;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                rich_look_section(ui, &off, &mut state, lang);
+            });
         }
     }
 
