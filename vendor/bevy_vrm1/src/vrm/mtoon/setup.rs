@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::vrm::mtoon::material::MToonPortraitParams;
 use crate::vrm::expressions::{
     VrmMaterialAppliedValues, VrmMaterialBaseValues, VrmMaterialIndex,
 };
@@ -135,7 +136,7 @@ fn turn_to_mtoon_material(
                 .cloned()
                 .or_else(|| base.normal_map_texture.clone()),
             normal_texture_scale: extension.legacy_normal_scale.unwrap_or(1.0),
-            look_strength: 0.0,
+            portrait: MToonPortraitParams::default(),
             shade: Shade::from(extension),
             outline: MToonOutline::from(extension),
             rim_lighting: RimLighting::from(extension),
@@ -556,3 +557,4 @@ mod tests {
         );
     }
 }
+

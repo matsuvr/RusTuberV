@@ -26,12 +26,46 @@ pub use uv_animation::UVAnimation;
 
 pub mod prelude {
     pub use crate::vrm::mtoon::material::{
-        MToonMaterial, MToonMaterialKey,
+        MToonMaterial, MToonMaterialKey, MToonPortraitParams,
         outline::{MToonOutline, OutlineWidthMode},
         rim_lighting::RimLighting,
         shade::Shade,
         uv_animation::UVAnimation,
     };
+}
+
+/// The rich look's extra portrait terms for one MToon material.
+///
+/// The default is no extra effect (`strength == 0`), so adding this to
+/// `MToonMaterial` cannot change an existing material. The gains are nominal
+/// preset values: `strength` is applied once, in the shader.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect, ShaderType)]
+pub struct MToonPortraitParams {
+    /// The effective look strength in `0..=1`.
+    pub strength: f32,
+    /// Gain on the added direct-light specular.
+    pub specular_gain: f32,
+    /// The roughness of the added specular and environment reflection.
+    pub perceptual_roughness: f32,
+    /// Gain on the added environment reflection.
+    pub environment_gain: f32,
+    /// Gain on the added lighting-side rim.
+    pub rim_gain: f32,
+    /// The falloff power of the added rim.
+    pub rim_power: f32,
+}
+
+impl Default for MToonPortraitParams {
+    fn default() -> Self {
+        Self {
+            strength: 0.0,
+            specular_gain: 0.35,
+            perceptual_roughness: 0.45,
+            environment_gain: 0.50,
+            rim_gain: 0.25,
+            rim_power: 3.0,
+        }
+    }
 }
 
 /// [VRMC_materials_mtoon-1.0](https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_materials_mtoon-1.0/README.md)
@@ -97,13 +131,15 @@ pub struct MToonMaterial {
     pub gi_equalization_factor: f32,
     /// glTF `normalTexture.scale`. Scales the tangent-space normal's X/Y.
     pub normal_texture_scale: f32,
-    /// The rich look's effective strength in `0..=1`.
+    /// The rich look's extra portrait terms.
     ///
-    /// Zero keeps the standard MToon display: the shading ramp folds the light
-    /// into the authored base/shade colors without applying the light's
-    /// radiance, which is what a plain VRM display looks like. Above zero the
-    /// look is active and each light contributes its own color and intensity.
-    pub look_strength: f32,
+    /// `strength == 0` keeps the standard MToon display: the shading ramp
+    /// folds the light into the authored base/shade colors without applying
+    /// the light's radiance, which is what a plain VRM display looks like.
+    /// Above zero the look is active, each light contributes its own color and
+    /// intensity, and the added gloss, environment reflection and rim are
+    /// layered on top of the author's material.
+    pub portrait: MToonPortraitParams,
     pub alpha_mode: AlphaMode,
     pub double_sided: bool,
     /// [VRMC_materials_mtoon-1.0](https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_materials_mtoon-1.0/README.md#renderqueueoffsetnumber)
@@ -229,7 +265,7 @@ impl Default for MToonMaterial {
             emissive: LinearRgba::BLACK,
             gi_equalization_factor: 0.9,
             normal_texture_scale: 1.0,
-            look_strength: 0.0,
+            portrait: MToonPortraitParams::default(),
             alpha_mode: AlphaMode::default(),
             double_sided: false,
             depth_bias: 0.0,
@@ -345,7 +381,12 @@ pub struct MToonMaterialUniform {
     pub outline_width_factor: f32,
     pub outline_lighting_mix_factor: f32,
     pub normal_texture_scale: f32,
-    pub look_strength: f32,
+    pub portrait_strength: f32,
+    pub portrait_specular_gain: f32,
+    pub portrait_perceptual_roughness: f32,
+    pub portrait_environment_gain: f32,
+    pub portrait_rim_gain: f32,
+    pub portrait_rim_power: f32,
 }
 
 impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
@@ -386,7 +427,14 @@ impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
             outline_width_factor: self.outline.width_factor,
             outline_lighting_mix_factor: self.outline.lighting_mix_factor,
             normal_texture_scale: self.normal_texture_scale,
-            look_strength: self.look_strength,
+            portrait_strength: self.portrait.strength,
+            portrait_specular_gain: self.portrait.specular_gain,
+            portrait_perceptual_roughness: self.portrait.perceptual_roughness,
+            portrait_environment_gain: self.portrait.environment_gain,
+            portrait_rim_gain: self.portrait.rim_gain,
+            portrait_rim_power: self.portrait.rim_power,
         }
     }
 }
+
+

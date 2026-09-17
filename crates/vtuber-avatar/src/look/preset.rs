@@ -1,6 +1,7 @@
 //! Look settings and the numeric interpolation shared by every look stage.
 
 use bevy::prelude::{LinearRgba, Vec3};
+use bevy_vrm1::prelude::MToonPortraitParams;
 use serde::{Deserialize, Serialize};
 
 /// The single look switch and strength shared by lighting, materials and the
@@ -106,6 +107,20 @@ pub const STUDIO_PRESET: StudioPreset = StudioPreset {
     environment_intensity: 200.0,
 };
 
+/// The added portrait terms' nominal values.
+///
+/// These are adjustment starting points, not measured optima: a modest
+/// non-metal gloss, a moderate environment reflection and a weak rim. The
+/// look's strength scales all of them at once in the shader.
+pub const MTOON_PORTRAIT_PRESET: MToonPortraitParams = MToonPortraitParams {
+    strength: 0.0,
+    specular_gain: 1.20,
+    perceptual_roughness: 0.45,
+    environment_gain: 1.00,
+    rim_gain: 0.60,
+    rim_power: 3.0,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,3 +161,5 @@ mod tests {
         );
     }
 }
+
+

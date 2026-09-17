@@ -20,10 +20,10 @@ pub use material::{
     capture_standard_look_base, clear_look_materials_on_unload, initialize_look_materials,
     resolve_standard_portrait,
 };
-pub use mtoon::apply_mtoon_look_strength;
+pub use mtoon::{apply_mtoon_portrait_settings, resolve_mtoon_portrait};
 pub use preset::{
-    RichLookSettings, STUDIO_PRESET, StudioLightPreset, StudioPreset, blend_look_scalar,
-    effective_look_strength,
+    MTOON_PORTRAIT_PRESET, RichLookSettings, STUDIO_PRESET, StudioLightPreset, StudioPreset,
+    blend_look_scalar, effective_look_strength,
 };
 
 use bevy::prelude::*;
@@ -77,3 +77,4 @@ mod tests {
         );
     }
 }
+

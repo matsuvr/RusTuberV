@@ -101,16 +101,16 @@ one with it on, and writes both frames (`.bgra` and `.png`).
 
 | model | off mean | on mean | mean abs diff |
 |---|---|---|---|
-| 1565994099520778586 | 72.21 | 75.07 | 2.98 |
-| AvatarSample_C | 36.99 | 40.36 | 3.37 |
-| IrisPart1 | 36.89 | 36.41 | 1.38 |
-| IrisPart1(ShapeKey Reduce) | 36.89 | 36.37 | 1.35 |
-| IrisPart1(ShapeKey Reduce2) | 36.89 | 36.37 | 1.35 |
-| RearAlice_3.0 | 29.41 | 29.41 | 1.70 |
-| RearAliceLite_3.0 | 29.43 | 29.43 | 1.70 |
-| Sapphy | 38.68 | 40.46 | 3.36 |
-| SapphyPerfectSync | 38.68 | 40.46 | 3.36 |
-| つくよみちゃん（タイプA・マテリアル数18） | 39.01 | 38.78 | 0.84 |
+| 1565994099520778586 | 72.03 | 75.07 | 3.13 |
+| AvatarSample_C | 36.99 | 43.58 | 6.59 |
+| IrisPart1 | 36.89 | 38.47 | 2.60 |
+| IrisPart1(ShapeKey Reduce) | 36.89 | 38.42 | 2.53 |
+| IrisPart1(ShapeKey Reduce2) | 36.89 | 38.42 | 2.53 |
+| RearAlice_3.0 | 29.41 | 30.49 | 2.22 |
+| RearAliceLite_3.0 | 29.43 | 30.51 | 2.22 |
+| Sapphy | 38.68 | 40.80 | 3.34 |
+| SapphyPerfectSync | 38.68 | 40.80 | 3.34 |
+| つくよみちゃん（タイプA・マテリアル数18） | 39.01 | 38.95 | 0.83 |
 
 Every model keeps the same opaque pixel count in both states (the geometry and
 alpha are untouched) and every model differs when the look is switched on, so
@@ -118,10 +118,11 @@ the switch has a measurable effect on all of them.
 
 How much the difference reads as "rich" is subjective. What this records
 mechanically is: off is the standard display, on is a different image, and the
-difference is currently the studio rig only (key, fill, rim, environment,
-shadows, per-light response). The MToon gloss, environment specular and extra
-rim of issue #72 are not implemented, so "on" is not yet a large change for a
-model whose materials are already fully lit by the standard display.
+difference is the studio rig plus the added MToon gloss, environment reflection
+and rim of issue #72. `mtoon-portrait` additionally asserts that the added
+specular follows the key light and that zeroing the gains removes the extra
+terms.
+
 
 Not measured: a byte comparison against a binary built from the pre-epic
 commit. The equivalence above is established by the source mapping table and
@@ -147,7 +148,7 @@ restart.
 
 | Issue | State |
 |---|---|
-| #72 MToon glossy/environment/extra rim | Not implemented. `MToonPortraitParams`, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl` and the MToon specular IBL connection do not exist. |
+| #72 MToon glossy/environment/extra rim | Implemented. `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl` and the view environment specular are in place; verified by `mtoon-portrait` and the per-model table above. |
 | #74 HDR finish and transparency | Not implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table do not exist. |
 | #75 one-click UI, 4 languages, per-model save | Partially implemented: the switch and the strength slider exist in the settings screen in four languages (see above). Persistence, per-model settings and restore on model switch are not implemented. |
 | #76 material roles | Not implemented. `MaterialRole`, `infer_material_role`, `resolve_material_role`, the role param resolvers and `face_lighting_normal` do not exist. |

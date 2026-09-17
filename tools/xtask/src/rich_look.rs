@@ -15,7 +15,7 @@ use bevy::render::RenderPlugin;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::winit::WinitPlugin;
-use bevy_vrm1::prelude::{MToonMaterial, MtoonMaterialPlugin, Shade};
+use bevy_vrm1::prelude::{MToonMaterial, MToonPortraitParams, MtoonMaterialPlugin, Shade};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vtuber_avatar::{
@@ -65,8 +65,8 @@ struct MtoonScene {
     /// Optional constant normal texture, one RGBA pixel.
     normal_map: Option<[u8; 4]>,
     normal_scale: f32,
-    /// Rich-look strength on the material; 0 is the standard display.
-    look_strength: f32,
+    /// The material's portrait values; strength 0 is the standard display.
+    portrait: MToonPortraitParams,
 }
 
 impl MtoonScene {
@@ -81,7 +81,7 @@ impl MtoonScene {
             ground: false,
             normal_map: None,
             normal_scale: 1.0,
-            look_strength: 0.0,
+            portrait: MToonPortraitParams::default(),
         }
     }
 }
@@ -98,6 +98,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let result = match case {
         "mtoon-lighting" => mtoon_lighting(),
         "mtoon-shading" => mtoon_shading(),
+        "mtoon-portrait" => mtoon_portrait(),
         "mtoon-shadow" => mtoon_shadow(),
         "mtoon-cutout-shadow" => mtoon_cutout_shadow(),
         "studio-environment" => studio_environment(),
@@ -167,7 +168,10 @@ fn mtoon_lighting() -> Result<String, RichLookError> {
     };
 
     let base = MtoonScene {
-        look_strength: 1.0,
+        portrait: MToonPortraitParams {
+            strength: 1.0,
+            ..default()
+        },
         ..MtoonScene::lit(Color::WHITE, Color::BLACK, white(0.0))
     };
     let dark = sample(&base)?;
@@ -250,7 +254,10 @@ fn mtoon_shading() -> Result<String, RichLookError> {
         shadows_enabled: false,
     };
     let base = MtoonScene {
-        look_strength: 1.0,
+        portrait: MToonPortraitParams {
+            strength: 1.0,
+            ..default()
+        },
         ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
     };
     // A light travelling toward `-X` meets the plane's `+Z` normal at exactly
@@ -389,6 +396,77 @@ fn mtoon_standard() -> Result<String, RichLookError> {
     }
     report.push_str("checks=standard_is_intensity_independent,standard_is_color_independent,standard_shows_authored_base\n");
     Ok(report)
+}
+
+/// The added portrait terms must be layered on without touching the standard
+/// display: strength 0 is the standard pixel, the rich lighting alone changes
+/// it, and the gloss/environment/rim gains change it again.
+fn mtoon_portrait() -> Result<String, RichLookError> {
+    let light = LightSpec {
+        direction: Vec3::NEG_Z,
+        color: Color::WHITE,
+        illuminance: 900.0,
+        shadows_enabled: false,
+    };
+    let scene = |portrait: MToonPortraitParams| MtoonScene {
+        portrait,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
+    };
+    let standard = center_pixel(&render(&scene(MToonPortraitParams::default()))?);
+    let rich_without_extras = center_pixel(&render(&scene(MToonPortraitParams {
+        strength: 1.0,
+        specular_gain: 0.0,
+        environment_gain: 0.0,
+        rim_gain: 0.0,
+        ..default()
+    }))?);
+    let preset = vtuber_avatar::look::MTOON_PORTRAIT_PRESET;
+    let rich = center_pixel(&render(&scene(MToonPortraitParams {
+        strength: 1.0,
+        ..preset
+    }))?);
+    // The added specular must follow the light: rotating the key moves the
+    // highlight, so the same probe pixel changes.
+    let rotated = center_pixel(&render(&scene(MToonPortraitParams {
+        strength: 1.0,
+        ..preset
+    })
+    .with_light_direction(Vec3::new(0.7, -0.3, -0.6)))?);
+
+    let mut report = format!(
+        "case=mtoon-portrait\n\
+         standard={standard:?}\n\
+         rich_without_extras={rich_without_extras:?}\n\
+         rich={rich:?}\n\
+         rich_rotated_light={rotated:?}\n"
+    );
+    if luma_diff(rich_without_extras, standard) <= 4 {
+        return Err(RichLookError::Failed(format!(
+            "the rich lighting alone did not change the standard pixel: standard={standard:?} rich={rich_without_extras:?}"
+        )));
+    }
+    if luma_diff(rich, rich_without_extras) <= 4 {
+        return Err(RichLookError::Failed(format!(
+            "the added gloss/environment/rim changed nothing: without={rich_without_extras:?} with={rich:?}"
+        )));
+    }
+    if luma_diff(rotated, rich) <= 4 {
+        return Err(RichLookError::Failed(format!(
+            "the added specular did not follow the light: fixed={rich:?} rotated={rotated:?}"
+        )));
+    }
+    report.push_str("checks=standard_unchanged,rich_lighting_changes,extras_change,specular_follows_light\n");
+    Ok(report)
+}
+
+impl MtoonScene {
+    /// Returns the scene with one light's travel direction replaced.
+    fn with_light_direction(mut self, direction: Vec3) -> Self {
+        if let Some(light) = self.lights.first_mut() {
+            light.direction = direction;
+        }
+        self
+    }
 }
 
 /// The bundled studio cubemap must survive Bevy's environment-map filter and
@@ -714,7 +792,10 @@ fn setup_cutout_scene(
         Mesh3d(meshes.add(quad)),
         MeshMaterial3d(materials.add(MToonMaterial {
             base_color_texture: Some(mask),
-            look_strength: 1.0,
+            portrait: MToonPortraitParams {
+                strength: 1.0,
+                ..default()
+            },
             alpha_mode: AlphaMode::Mask(0.5),
             ..default()
         })),
@@ -768,7 +849,10 @@ fn mtoon_shadow() -> Result<String, RichLookError> {
         lights: vec![light],
         mesh: MeshSpec::Sphere,
         ground: true,
-        look_strength: 1.0,
+        portrait: MToonPortraitParams {
+            strength: 1.0,
+            ..default()
+        },
         ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
     };
 
@@ -828,7 +912,10 @@ fn mtoon_normal() -> Result<String, RichLookError> {
     // toward `-X` turns the surface away from it.
     let base = MtoonScene {
         toony_factor: 0.0,
-        look_strength: 1.0,
+        portrait: MToonPortraitParams {
+            strength: 1.0,
+            ..default()
+        },
         ..MtoonScene::lit(
             Color::WHITE,
             Color::BLACK,
@@ -1067,7 +1154,7 @@ fn setup_fixture_scene(
         },
         normal_texture,
         normal_texture_scale: scene.normal_scale,
-        look_strength: scene.look_strength,
+        portrait: scene.portrait,
         ..default()
     });
     commands.spawn((
@@ -1121,4 +1208,14 @@ fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
 fn center_pixel(pixels: &[[u8; 4]]) -> [u8; 4] {
     pixels[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
 }
+
+
+
+
+
+
+
+
+
+
 

@@ -9,6 +9,7 @@
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
     shadows::fetch_directional_shadow,
     ambient::ambient_light,
+    lighting::perceptualRoughnessToRoughness,
     mesh_view_bindings::{
         view,
         lights,
@@ -17,6 +18,7 @@
 #import mtoon::types::{
     MToonInput,
     MToonMaterialUniform,
+    MToonPortraitUniform,
     material,
     base_color_texture,
     base_color_sampler,
@@ -48,6 +50,12 @@
 #import mtoon::alpha::{
     mtoon_animated_uv,
     mtoon_base_color_at_uv,
+}
+#import mtoon::portrait::{
+    apply_portrait_terms,
+    portrait_direct_specular,
+    portrait_environment_specular,
+    portrait_rim,
 }
 #import mtoon::lighting::{
     mtoon_shading_weight,
@@ -107,7 +115,7 @@ fn mtoon_world_normal(
 ) -> vec3<f32> {
     var normal = pbr_input.N;
 #ifdef VERTEX_TANGENTS
-    if (material.look_strength > 0.0 && (material.flags & NORMAL_TEXTURE) != 0u) {
+    if (material.portrait_strength > 0.0 && (material.flags & NORMAL_TEXTURE) != 0u) {
         let TBN = calculate_tbn_mikktspace(pbr_input.world_normal, vertex_input.world_tangent);
         var tangent_normal = textureSampleBias(
             normal_texture,
@@ -171,17 +179,98 @@ fn make_mtoon_input(in: VertexOutput, pbr_input: PbrInput) -> MToonInput{
 }
 
 fn apply_mtoon_lighting(in: MToonInput) -> vec4<f32> {
-    if (material.look_strength <= 0.0) {
+    if (material.portrait_strength <= 0.0) {
         return apply_standard_mtoon_lighting(in);
     }
-    let direct = apply_directional_lights(in);
+    let params = make_portrait_params();
+    let lights_result = apply_directional_lights(in, params);
     let indirect = apply_global_illumination(in);
     let emissive = apply_emissive_light(in);
-    let rim = apply_rim_lighting(in.pbr, in.uv, direct, indirect);
+    // The author's own MatCap/parametric rim stays exactly as authored.
+    let author_rim = apply_rim_lighting(in.pbr, in.uv, lights_result.direct, indirect);
     // Bevy applies the camera exposure once to direct and indirect light and
     // leaves emissive absolute (`emissive_exposure_weight` defaults to 0).
-    // MToon follows the same split so exposure is not applied twice.
-    return vec4<f32>(view.exposure * (direct + indirect + rim) + emissive, in.lit_color.a);
+    // MToon follows the same split so exposure is not applied twice; the added
+    // portrait terms carry their own exposure inside `apply_portrait_terms`.
+    let base = vec4<f32>(
+        view.exposure * (lights_result.direct + indirect + author_rim) + emissive,
+        in.lit_color.a,
+    );
+    let environment_specular = portrait_environment_specular(
+        in.world_normal,
+        in.world_view_dir,
+        perceptualRoughnessToRoughness(params.perceptual_roughness),
+        in.world_position.xyz,
+    );
+    return apply_portrait_terms(
+        base,
+        lights_result.specular,
+        environment_specular,
+        lights_result.rim,
+        params,
+    );
+}
+
+fn make_portrait_params() -> MToonPortraitUniform {
+    return MToonPortraitUniform(
+        material.portrait_strength,
+        material.portrait_specular_gain,
+        material.portrait_perceptual_roughness,
+        material.portrait_environment_gain,
+        material.portrait_rim_gain,
+        material.portrait_rim_power,
+    );
+}
+
+// The rich look's direct result: the authored base/shade term plus the added
+// specular and rim for the same lights.
+struct MToonDirectResult {
+    direct: vec3<f32>,
+    specular: vec3<f32>,
+    rim: vec3<f32>,
+}
+
+fn apply_directional_lights(in: MToonInput, params: MToonPortraitUniform) -> MToonDirectResult {
+    let shade_color: vec3<f32> = calc_shade_color(in);
+    let shade_shift: f32 = calc_mtoon_lighting_reflectance_shading_shift(in);
+    let roughness = perceptualRoughnessToRoughness(params.perceptual_roughness);
+    var result = MToonDirectResult(vec3(0.), vec3(0.), vec3(0.));
+    for (var i: u32 = 0u; i < lights.n_directional_lights; i = i + 1u) {
+        // The light's radiance is premultiplied by its illuminance in the
+        // Bevy uniform, so a weaker secondary light contributes less. Shadow
+        // maps only gate this light's own visibility; a light without shadows
+        // still illuminates.
+        let light = &lights.directional_lights[i];
+        let visibility = calc_mtoon_light_visibility(in, i);
+        let shading = mtoon_shading_weight(
+            dot(in.world_normal, (*light).direction_to_light),
+            shade_shift,
+            material.shading_toony_factor,
+        ) * visibility;
+        result.direct += mtoon_direct_term(
+            in.lit_color.rgb,
+            shade_color,
+            shading,
+            (*light).color.rgb,
+        );
+        // The shadow visibility also gates the added specular, so a highlight
+        // cannot shine through the key light's shadow.
+        result.specular += portrait_direct_specular(
+            in.world_normal,
+            in.world_view_dir,
+            (*light).direction_to_light,
+            (*light).color.rgb * visibility,
+            roughness,
+        );
+        result.rim += portrait_rim(
+            in.world_normal,
+            in.world_view_dir,
+            (*light).direction_to_light,
+            (*light).color.rgb,
+            params.rim_power,
+        );
+    }
+    return result;
 }
 
 // The standard display: the renderer's behaviour before the rich look existed.
@@ -242,47 +331,30 @@ fn apply_standard_global_illumination(in: MToonInput) -> vec3<f32> {
     return view.exposure * mtoon_ambient(in, in.world_normal, diffuse_color);
 }
 
-fn apply_directional_lights(in: MToonInput) -> vec3<f32>{
-    let shade_color: vec3<f32> = calc_shade_color(in);
-    let shade_shift: f32 = calc_mtoon_lighting_reflectance_shading_shift(in);
-    var direct: vec3<f32> = vec3(0.);
-    for (var i: u32 = 0u; i < lights.n_directional_lights; i = i + 1u) {
-        // The light's radiance is premultiplied by its illuminance in the
-        // Bevy uniform, so a weaker secondary light contributes less. Shadow
-        // maps only gate this light's own visibility; a light without shadows
-        // still illuminates.
-        let light = &lights.directional_lights[i];
-        let shading = calc_mtoon_lighting_shading(in, i, shade_shift);
-        direct += mtoon_direct_term(in.lit_color.rgb, shade_color, shading, (*light).color.rgb);
-    }
-    return direct;
-}
-
-fn calc_mtoon_lighting_shading(
+/// The shadow visibility of one directional light (1.0 when it casts none).
+fn calc_mtoon_light_visibility(
     input: MToonInput,
     light_id: u32,
-    shade_shift: f32,
 ) -> f32 {
     let light = &lights.directional_lights[light_id];
-    let ndotl = dot(input.world_normal, (*light).direction_to_light);
+    if ((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) == 0u {
+        return 1.0;
+    }
     let view_z = dot(vec4<f32>(
         view.view_from_world[0].z,
         view.view_from_world[1].z,
         view.view_from_world[2].z,
         view.view_from_world[3].z
     ), input.world_position);
-    var shadow = 1.0;
-    if ((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-        shadow = fetch_directional_shadow(
-            light_id,
-            input.world_position,
-            input.world_normal,
-            view_z,
-            input.pbr.frag_coord.xy,
-        );
-    }
-    return mtoon_shading_weight(ndotl, shade_shift, material.shading_toony_factor) * shadow;
+    return fetch_directional_shadow(
+        light_id,
+        input.world_position,
+        input.world_normal,
+        view_z,
+        input.pbr.frag_coord.xy,
+    );
 }
+
 
 fn calc_mtoon_lighting_reflectance_shading_shift(
     input: MToonInput,
@@ -371,3 +443,5 @@ fn calc_diffuse_color(
 ) -> vec3<f32> {
     return base_color * (1.0 - diffuse_transmission);
 }
+
+

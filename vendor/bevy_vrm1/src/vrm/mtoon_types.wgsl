@@ -27,7 +27,23 @@ struct MToonMaterialUniform {
     outline_width_factor: f32,
     outline_lighting_mix_factor: f32,
     normal_texture_scale: f32,
-    look_strength: f32,
+    portrait_strength: f32,
+    portrait_specular_gain: f32,
+    portrait_perceptual_roughness: f32,
+    portrait_environment_gain: f32,
+    portrait_rim_gain: f32,
+    portrait_rim_power: f32,
+}
+
+/// The rich look's extra terms, unpacked from the material uniform so the
+/// portrait functions can take one value.
+struct MToonPortraitUniform {
+    strength: f32,
+    specular_gain: f32,
+    perceptual_roughness: f32,
+    environment_gain: f32,
+    rim_gain: f32,
+    rim_power: f32,
 }
 
 struct MToonInput{
@@ -75,3 +91,4 @@ const NORMAL_TEXTURE: u32 = 4096u;
 
 // Outline flags
 const OUTLINE_WORLD_COORDINATES: u32 = 1u;
+
