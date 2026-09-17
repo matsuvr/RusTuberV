@@ -36,6 +36,7 @@ pub mod gaze;
 pub mod idle;
 pub mod lifecycle;
 pub mod load;
+pub mod look;
 pub mod mirror;
 pub mod placeholder;
 pub mod plugin;

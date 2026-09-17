@@ -48,7 +48,8 @@ pub mod prelude {
         expressions::{
             BinaryExpression, ClearExpressions, ExpressionBindingStatus, ExpressionEntityMap,
             ExpressionOverride, ExpressionOverrideSettings, ExpressionOverrideType,
-            ModifyExpressions, SetExpressions,
+            ModifyExpressions, SetExpressions, VrmMaterialAppliedValues, VrmMaterialBaseValues,
+            VrmMaterialIndex,
         },
         first_person::{
             FirstPersonCamera, FirstPersonLayers, FirstPersonRegistry, RequestDisableFirstPerson,
