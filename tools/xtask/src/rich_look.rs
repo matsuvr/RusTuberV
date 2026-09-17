@@ -98,6 +98,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-shadow" => mtoon_shadow(),
         "mtoon-cutout-shadow" => mtoon_cutout_shadow(),
         "studio-environment" => studio_environment(),
+        "mtoon-vs-standard" => mtoon_vs_standard(),
         "mtoon-normal" => mtoon_normal(),
         "help" | "--help" | "-h" => {
             println!("cargo xtask rich-look <case> [--evidence <file>]");
@@ -311,6 +312,143 @@ fn mtoon_shading() -> Result<String, RichLookError> {
     }
     report.push_str("checks=signed_ndotl,shade_behind,positive_shift,toony_step\n");
     Ok(report)
+}
+
+/// A fully lit MToon surface must render at the same brightness as the
+/// standard material under the same light, so switching the look off keeps the
+/// standard display as the comparison basis.
+fn mtoon_vs_standard() -> Result<String, RichLookError> {
+    let mtoon = center_pixel(&render(&MtoonScene::lit(
+        Color::WHITE,
+        Color::BLACK,
+        LightSpec {
+            direction: Vec3::NEG_Z,
+            color: Color::WHITE,
+            illuminance: 200.0,
+            shadows_enabled: false,
+        },
+    ))?);
+    let standard = center_pixel(&standard_scene()?);
+    let mut report = format!(
+        "case=mtoon-vs-standard\n\
+         mtoon_lit={mtoon:?}\n\
+         standard_lit={standard:?}\n"
+    );
+    let difference = luma(mtoon).abs_diff(luma(standard));
+    if difference > 24 {
+        return Err(RichLookError::Failed(format!(
+            "MToon and the standard material disagree at the same lighting: mtoon={mtoon:?} standard={standard:?}"
+        )));
+    }
+    report.push_str("checks=lambert_normalization_matches_standard\n");
+    Ok(report)
+}
+
+/// The same plane as `mtoon-vs-standard`, rendered with `StandardMaterial`.
+fn standard_scene() -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin { ..default() })
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<WinitPlugin>()
+            .disable::<bevy::log::LogPlugin>(),
+    )
+    .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 60,
+        pixel_format: vtuber_core::VideoOutputPixelFormat::Bgra8StraightAlpha,
+    }))
+    .insert_resource(GlobalAmbientLight {
+        brightness: 0.0,
+        ..default()
+    })
+    .insert_resource(vtuber_avatar::AvatarLifecycle::default())
+    .insert_resource(OutputArmed(false));
+    register_output_systems(&mut app);
+    app.add_systems(Startup, setup_standard_scene);
+    app.add_systems(Update, activate_output_after_setup);
+    app.finish();
+    app.cleanup();
+    collect_settled_frame(&mut app)
+}
+
+fn collect_settled_frame(app: &mut App) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let deadline = Instant::now() + MAX_WAIT;
+    let mut satisfied = 0;
+    let mut last = None;
+    while Instant::now() < deadline {
+        app.update();
+        if let Some(frame) = app
+            .world_mut()
+            .resource_mut::<AvatarOutputFrameSlot>()
+            .take_latest()
+        {
+            let sampled = pixels(&frame);
+            satisfied = if sampled.iter().any(|pixel| pixel[3] > 0) {
+                satisfied + 1
+            } else {
+                0
+            };
+            if satisfied >= SETTLE_FRAMES {
+                return Ok(sampled);
+            }
+            last = Some(sampled);
+        }
+    }
+    last.ok_or(RichLookError::NotRun(
+        "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
+    ))
+}
+
+fn setup_standard_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 200.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::NEG_Z)),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+    commands.spawn((
+        Mesh3d(meshes.add(
+            Plane3d::default()
+                .mesh()
+                .size(4.0, 4.0)
+                .build()
+                .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        )),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.9,
+            ..default()
+        })),
+        Transform::default(),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+    let camera_transform =
+        Transform::from_translation(Vec3::new(0.0, 0.0, 5.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 1.0,
+            ..default()
+        }),
+        AvatarViewportCamera::from_default_transform(camera_transform),
+        camera_transform,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
 }
 
 /// The bundled studio cubemap must survive Bevy's environment-map filter and

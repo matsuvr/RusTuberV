@@ -1,5 +1,7 @@
 #define_import_path mtoon::lighting
 
+#import bevy_render::maths::PI
+
 // MToon lighting primitives shared by the mesh and outline fragment paths.
 //
 // These are pure functions: they do not collect lights, sample shadows or
@@ -25,11 +27,17 @@ fn mtoon_shading_weight(ndotl: f32, shift: f32, toony: f32) -> f32 {
 
 // The MToon direct-light term for a single light: the base/shade color
 // interpolation multiplied by that light's linear radiance.
+//
+// Bevy premultiplies a directional light's color with its illuminance in lux,
+// and its standard material integrates the light with the Lambertian `1/PI`
+// diffuse normalization. Applying the same normalization here keeps MToon and
+// the standard material at the same brightness under the same light, instead
+// of driving the shaded color past white.
 fn mtoon_direct_term(
     lit: vec3<f32>,
     shade: vec3<f32>,
     shading: f32,
     light_rgb: vec3<f32>,
 ) -> vec3<f32> {
-    return mix(shade, lit, shading) * light_rgb;
+    return mix(shade, lit, shading) * light_rgb * (1.0 / PI);
 }
