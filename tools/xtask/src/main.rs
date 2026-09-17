@@ -25,6 +25,7 @@ mod mediapipe_face_smoke;
 mod mediapipe_pose_probe;
 mod ndi;
 mod ndi_output_render;
+mod rich_look;
 mod vrm_compatibility;
 mod vrm_managed_compatibility;
 
@@ -48,6 +49,7 @@ fn main() {
         println!("  mediapipe-face-smoke      Windows MSMF MediaPipe Face Landmarker gate");
         println!("  mediapipe-pose-probe      Guided MediaPipe neutral-relative pose proof");
         println!("  ndi <command>             Stage or verify a Windows NDI release package");
+        println!("  rich-look <case>          GPU render fixtures for the rich-look epic");
         return;
     }
 
@@ -128,6 +130,15 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        "rich-look" => {
+            if let Err(error) = rich_look::run(&args[1..]) {
+                eprintln!("rich-look failed: {error}");
+                if error.starts_with("NOT RUN:") {
+                    process::exit(rich_look::EXIT_NOT_RUN);
+                }
+                process::exit(1);
+            }
+        }
         "ndi" => {
             if let Err(error) = ndi::run(&args[1..])
                 && error != "help requested"

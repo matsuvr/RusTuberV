@@ -77,6 +77,12 @@ pub struct MToonMaterial {
     #[sampler(116)]
     #[dependency]
     pub outline_width_multiply_texture: Option<Handle<Image>>,
+    /// The glTF core specification's `normalTexture`, used for the `MToon`
+    /// surface normal. Sampled as linear data.
+    #[texture(117)]
+    #[sampler(118)]
+    #[dependency]
+    pub normal_texture: Option<Handle<Image>>,
     pub uv_animation: UVAnimation,
     pub uv_transform: Affine2,
     pub rim_lighting: RimLighting,
@@ -87,6 +93,8 @@ pub struct MToonMaterial {
     pub emissive: LinearRgba,
     /// [VRMC_materials_mtoon-1.0](https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_materials_mtoon-1.0/README.md#giequalizationfactor)
     pub gi_equalization_factor: f32,
+    /// glTF `normalTexture.scale`. Scales the tangent-space normal's X/Y.
+    pub normal_texture_scale: f32,
     pub alpha_mode: AlphaMode,
     pub double_sided: bool,
     /// [VRMC_materials_mtoon-1.0](https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_materials_mtoon-1.0/README.md#renderqueueoffsetnumber)
@@ -197,6 +205,7 @@ impl Default for MToonMaterial {
             outline_width_multiply_texture: None,
             matcap_texture: None,
             emissive_texture: None,
+            normal_texture: None,
             uv_animation: UVAnimation::default(),
             uv_transform: Affine2::IDENTITY,
             rim_lighting: RimLighting::default(),
@@ -204,6 +213,7 @@ impl Default for MToonMaterial {
             base_color: Color::WHITE,
             emissive: LinearRgba::BLACK,
             gi_equalization_factor: 0.9,
+            normal_texture_scale: 1.0,
             alpha_mode: AlphaMode::default(),
             double_sided: false,
             depth_bias: 0.0,
@@ -231,6 +241,7 @@ bitflags::bitflags! {
         const ALPHA_MODE_ALPHA_TO_COVERAGE = 1 << 9;
         const ALPHA_MODE_BLEND = 1 << 10;
         const OUTLINE_WIDTH_MULTIPLY_TEXTURE = 1 << 11;
+        const NORMAL_TEXTURE = 1 << 12;
     }
 }
 
@@ -279,6 +290,7 @@ impl From<&MToonMaterial> for MtoonFlags {
             MtoonFlags::OUTLINE_WIDTH_MULTIPLY_TEXTURE,
             value.outline_width_multiply_texture.is_some(),
         );
+        flags.set(MtoonFlags::NORMAL_TEXTURE, value.normal_texture.is_some());
         flags
     }
 }
@@ -316,6 +328,7 @@ pub struct MToonMaterialUniform {
     pub outline_color: Vec4,
     pub outline_width_factor: f32,
     pub outline_lighting_mix_factor: f32,
+    pub normal_texture_scale: f32,
 }
 
 impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
@@ -355,6 +368,7 @@ impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
             outline_color: self.outline.color.to_vec4(),
             outline_width_factor: self.outline.width_factor,
             outline_lighting_mix_factor: self.outline.lighting_mix_factor,
+            normal_texture_scale: self.normal_texture_scale,
         }
     }
 }

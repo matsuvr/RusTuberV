@@ -129,6 +129,12 @@ fn turn_to_mtoon_material(
                 .outline_width_multiply_texture
                 .and_then(|tex| registry.images.get(tex.index))
                 .cloned(),
+            normal_texture: extension
+                .legacy_normal_texture
+                .and_then(|index| registry.images.get(index))
+                .cloned()
+                .or_else(|| base.normal_map_texture.clone()),
+            normal_texture_scale: extension.legacy_normal_scale.unwrap_or(1.0),
             shade: Shade::from(extension),
             outline: MToonOutline::from(extension),
             rim_lighting: RimLighting::from(extension),
@@ -261,6 +267,66 @@ mod tests {
                 .get::<VrmMaterialBaseValues>(material_entity)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn legacy_bump_map_reaches_real_mtoon_material_setup() {
+        let source = json!({
+            "shader": "VRM/MToon",
+            "floatProperties": {"_BumpScale": 0.5},
+            "textureProperties": {"_BumpMap": 1}
+        });
+        let extension =
+            crate::vrm::gltf::materials::convert_legacy_material_properties_with_texture_count(
+                &source,
+                Some(2),
+            )
+            .expect("legacy material should convert");
+
+        let mut app = test_app();
+        app.init_asset::<StandardMaterial>();
+        app.init_asset::<MToonMaterial>();
+        let standard_handle = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let normal_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        let other_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        let root = app
+            .world_mut()
+            .spawn(VrmcMaterialRegistry {
+                images: vec![other_handle, normal_handle.clone()],
+                materials: HashMap::from([(standard_handle.id(), extension)]),
+                indices: HashMap::from([(standard_handle.id(), 0)]),
+            })
+            .id();
+        let material_entity = app
+            .world_mut()
+            .spawn((MeshMaterial3d(standard_handle), ChildOf(root)))
+            .id();
+        app.add_systems(Update, turn_to_mtoon_material);
+
+        app.update();
+
+        let material_id = app
+            .world()
+            .get::<MeshMaterial3d<MToonMaterial>>(material_entity)
+            .expect("setup must replace StandardMaterial with MToonMaterial")
+            .0
+            .id();
+        let material = app
+            .world()
+            .resource::<Assets<MToonMaterial>>()
+            .get(material_id)
+            .expect("setup must create the MToon asset");
+        assert_eq!(material.normal_texture, Some(normal_handle));
+        assert_eq!(material.normal_texture_scale, 0.5);
     }
 
     fn material_metadata(

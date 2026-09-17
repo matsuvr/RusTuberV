@@ -26,6 +26,8 @@ const MTOON_VERTEX_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("f4041db8-c464-b84c-e3c9-e618527945a1");
 const MTOON_TYPES_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("5d9302a3-6498-9d2a-fadb-842d01c87697");
+const MTOON_LIGHTING_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("0a2f6d02-4c31-4c1f-9f0e-6b3b2ae9f1c8");
 
 pub struct MtoonMaterialPlugin;
 
@@ -52,6 +54,12 @@ impl Plugin for MtoonMaterialPlugin {
             app,
             MTOON_TYPES_SHADER_HANDLE,
             "mtoon_types.wgsl",
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
+            MTOON_LIGHTING_SHADER_HANDLE,
+            "mtoon_lighting.wgsl",
             Shader::from_wgsl
         );
         load_internal_asset!(
