@@ -35,30 +35,34 @@ Supporting reusable code: `tools/xtask/src/rich_look.rs` (six GPU cases),
 | case | pixel |
 |---|---|
 | zero illuminance | `[0, 0, 0, 255]` |
-| 200 lx white | `[71, 71, 71, 255]` |
-| 400 lx white | `[100, 100, 100, 255]` |
-| 200 lx red | `[0, 0, 71, 255]` |
-| 200 lx blue | `[71, 0, 0, 255]` |
-| 2 x 100 lx white | `[71, 71, 71, 255]` |
-| 100 lx white | `[50, 50, 50, 255]` |
+| 200 lx white | `[124, 124, 124, 255]` |
+| 400 lx white | `[170, 170, 170, 255]` |
+| 200 lx red | `[0, 0, 124, 255]` |
+| 200 lx blue | `[124, 0, 0, 255]` |
+| 2 x 100 lx white | `[124, 124, 124, 255]` |
+| 100 lx white | `[89, 89, 89, 255]` |
 
 The direct term follows each light's own radiance, light color is per light,
 and two lights add. The pre-fix renderer (issue #69) multiplied no light
 radiance at all, so it could not produce this table.
 
-`mtoon-vs-standard`: the same white plane at 200 lx renders `[71, 71, 71, 255]`
-with MToon and `[74, 73, 74, 255]` with `StandardMaterial`. This is the #68
-contract for the standard display: MToon's direct term carries the same
-Lambertian `1/PI` normalization Bevy's standard material uses, so a fully lit
-MToon surface is not driven past white while the standard material stays
-mid-tone.
+`mtoon-authored`: a fully lit white plane under a 1000 lx light (the app's
+default exposure is about 1/1000) reads `[255, 255, 255, 255]`. The plain MToon
+display shows the authored base color at full intensity; no extra BRDF
+normalization darkens it. An earlier revision applied Bevy's Lambertian `1/PI`
+to match the standard material's brightness, which made the plain display
+darker than the authored one, so it was reverted. The look is what shapes the
+portrait instead: `STUDIO_PRESET.key` is 900 lx, below the scene's own 1500 lx
+key, so switching the look on is a softer key plus fill and rim rather than
+more light in the same direction, and the strength slider interpolates between
+the scene light (0) and that rig (1).
 
-`mtoon-shading`: front-lit `71`, 90-degree side `50`, side with +0.5 shift
-`71`, light behind `0`; the toony=0 ramp has 18 intermediate samples on the
+`mtoon-shading`: front-lit `124`, 90-degree side `89`, side with +0.5 shift
+`124`, light behind `0`; the toony=0 ramp has 17 intermediate samples on the
 mid scanline and the toony=1 endpoint has 0.
 
-`mtoon-normal`: no map `68`, identity map `68`, tilted map `54`, tilted map
-with scale 0 `68`.
+`mtoon-normal`: no map `118`, identity map `118`, tilted map `95`, tilted map
+with scale 0 `118`.
 
 `mtoon-shadow`: darkest ground pixel under an MToon sphere is `0` with shadow
 maps on and `267` with them off, so the MToon mesh casts into the shadow map.
@@ -79,11 +83,15 @@ image-quality threshold is claimed.
 
 ## Settings screen controls (part of #75)
 
-The settings screen now has an "Enhanced look" section with the ON/OFF switch
-and a 0-100% brightness/effect-strength slider, in all four languages, wired
-through `UiAction::SetRichLookEnabled`/`SetRichLookStrength` to
-`AvatarLookSettings` and `LookSettingsChanged`. The slider scales the whole
-look, so at 0 the scene is the standard display even while the switch is on.
+The "Enhanced look" section with the ON/OFF switch and the 0-100%
+brightness/effect-strength slider is on the **Studio** pane and the settings
+pane, in all four languages, wired through
+`UiAction::SetRichLookEnabled`/`SetRichLookStrength` to `AvatarLookSettings`
+and `LookSettingsChanged`. With the switch off, no look system writes
+anything: the studio rig restores the scene's own key light, fill/rim stay at
+zero, the ambient and environment return to their original values, and
+Standard materials return to their captured values, so the plain
+MToon/Standard/Unlit display is what renders.
 
 Not done from #75: persistence to `settings.toml`, per-model settings, and
 restore on model switch. The switch therefore starts OFF again after a

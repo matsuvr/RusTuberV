@@ -78,26 +78,32 @@ pub struct StudioPreset {
 /// The first version's only preset. These are adjustment starting points, not
 /// measured optima: key about 40° to the camera's left and 30° up, fill from
 /// the opposite side, rim from behind.
+///
+/// The key is intentionally dimmer than the scene's own 1500 lx light, so
+/// switching the look on is a *portrait* rig (softer key plus fill and rim)
+/// rather than more light on the same direction. That is also what the
+/// strength slider interpolates: at 0 it is the scene's original light, at 1
+/// the preset below.
 pub const STUDIO_PRESET: StudioPreset = StudioPreset {
     key: StudioLightPreset {
         direction: Vec3::new(0.45, -0.40, -0.80),
         color: LinearRgba::new(1.0, 0.97, 0.93, 1.0),
-        illuminance: 1500.0,
+        illuminance: 900.0,
         shadows_enabled: true,
     },
     fill: StudioLightPreset {
         direction: Vec3::new(-0.55, -0.15, -0.82),
         color: LinearRgba::new(0.85, 0.90, 1.0, 1.0),
-        illuminance: 350.0,
+        illuminance: 220.0,
         shadows_enabled: false,
     },
     rim: StudioLightPreset {
         direction: Vec3::new(-0.20, -0.35, 0.90),
         color: LinearRgba::new(1.0, 1.0, 1.0, 1.0),
-        illuminance: 600.0,
+        illuminance: 320.0,
         shadows_enabled: false,
     },
-    environment_intensity: 300.0,
+    environment_intensity: 200.0,
 };
 
 #[cfg(test)]

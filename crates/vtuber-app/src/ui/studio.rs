@@ -1074,6 +1074,7 @@ fn overview(
         },
     );
     expression_status_section(ui, vm, state, lang);
+    rich_look_section(ui, vm, state, lang);
 }
 
 fn avatar_page(
