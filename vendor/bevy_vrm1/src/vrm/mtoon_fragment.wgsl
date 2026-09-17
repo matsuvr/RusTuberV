@@ -12,7 +12,6 @@
     mesh_view_bindings::{
         view,
         lights,
-        globals,
     },
 }
 #import mtoon::types::{
@@ -27,8 +26,6 @@
     shade_multiply_texture_sampler,
     rim_multiply_texture,
     rim_multiply_sampler,
-    uv_animation_mask_texture,
-    uv_animation_mask_sampler,
     matcap_texture,
     matcap_sampler,
     emissive_texture,
@@ -39,7 +36,6 @@
     SHADING_SHIFT_TEXTURE,
     SHADE_MULTIPLY_TEXTURE,
     RIM_MAP_TEXTURE,
-    UV_ANIMATION_MASK_TEXTURE,
     MATCAP_TEXTURE,
     EMISSIVE_TEXTURE,
     NORMAL_TEXTURE,
@@ -48,6 +44,10 @@
     ALPHA_MODE_BLEND,
     ALPHA_MODE_ALPHA_TO_COVERAGE,
     OUTLINE_WORLD_COORDINATES,
+}
+#import mtoon::alpha::{
+    mtoon_animated_uv,
+    mtoon_base_color_at_uv,
 }
 #import mtoon::lighting::{
     mtoon_shading_weight,
@@ -67,7 +67,7 @@ fn fragment(
 #endif
 
     var vertex_input = in;
-    vertex_input.uv = calc_animated_uv((material.uv_transform * vec3(in.uv, 1.0)).xy);
+    vertex_input.uv = mtoon_animated_uv(in.uv);
 
     var out: FragmentOutput;
     var pbr_input = make_pbr_input(vertex_input, is_front);
@@ -131,7 +131,7 @@ fn mtoon_world_normal(
 fn lit_color(uv: vec2<f32>) -> vec4<f32> {
     var base_color = material.base_color;
     if((material.flags & BASE_COLOR_TEXTURE) != 0u) {
-        base_color *= textureSampleBias(base_color_texture, base_color_sampler, uv, view.mip_bias);
+        base_color *= mtoon_base_color_at_uv(uv);
     }
     if((material.flags & ALPHA_MODE_MASK) != 0u || (material.flags & ALPHA_MODE_ALPHA_TO_COVERAGE) != 0u) {
         let raw = base_color.a;
@@ -167,25 +167,6 @@ fn make_mtoon_input(in: VertexOutput, pbr_input: PbrInput) -> MToonInput{
         pbr_input.N,
         pbr_input.material.base_color,
     );
-}
-
-fn calc_animated_uv(uv: vec2<f32>) -> vec2<f32>{
-    let time = calc_uv_time(uv);
-    let translate = time * vec2(material.uv_animation_scroll_speed_x, material.uv_animation_rotation_speed_y);
-    let rotate_rad = fract(time * material.uv_animation_rotation_speed);
-    let cos_rotate = cos(rotate_rad);
-    let sin_rotate = sin(rotate_rad);
-    let pivot = vec2<f32>(0.5, 0.5);
-    return mat2x2(cos_rotate, -sin_rotate, sin_rotate, cos_rotate) * (uv - pivot) + pivot + translate;
-}
-
-fn calc_uv_time(uv: vec2<f32>) -> f32{
-    if((material.flags & UV_ANIMATION_MASK_TEXTURE) != 0u) {
-        let mask = textureSampleBias(uv_animation_mask_texture, uv_animation_mask_sampler, uv, view.mip_bias).b;
-        return mask * globals.time;
-    }else{
-        return globals.time;
-    }
 }
 
 fn apply_mtoon_lighting(in: MToonInput) -> vec4<f32> {

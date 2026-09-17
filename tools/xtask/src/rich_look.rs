@@ -38,6 +38,8 @@ struct LightSpec {
     direction: Vec3,
     color: Color,
     illuminance: f32,
+    /// Whether this light renders shadow maps.
+    shadows_enabled: bool,
 }
 
 /// Mesh used by a fixture scene.
@@ -58,6 +60,8 @@ struct MtoonScene {
     toony_factor: f32,
     shading_shift_factor: f32,
     mesh: MeshSpec,
+    /// Whether a lit ground plane is placed below the subject.
+    ground: bool,
     /// Optional constant normal texture, one RGBA pixel.
     normal_map: Option<[u8; 4]>,
     normal_scale: f32,
@@ -72,6 +76,7 @@ impl MtoonScene {
             toony_factor: 0.9,
             shading_shift_factor: 0.0,
             mesh: MeshSpec::Plane,
+            ground: false,
             normal_map: None,
             normal_scale: 1.0,
         }
@@ -90,6 +95,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let result = match case {
         "mtoon-lighting" => mtoon_lighting(),
         "mtoon-shading" => mtoon_shading(),
+        "mtoon-shadow" => mtoon_shadow(),
+        "mtoon-cutout-shadow" => mtoon_cutout_shadow(),
+        "studio-environment" => studio_environment(),
         "mtoon-normal" => mtoon_normal(),
         "help" | "--help" | "-h" => {
             println!("cargo xtask rich-look <case> [--evidence <file>]");
@@ -146,6 +154,7 @@ fn mtoon_lighting() -> Result<String, RichLookError> {
         direction: Vec3::NEG_Z,
         color: Color::WHITE,
         illuminance,
+        shadows_enabled: false,
     };
     let sample = |scene: &MtoonScene| -> Result<[u8; 4], RichLookError> {
         Ok(center_pixel(&render(scene)?))
@@ -166,6 +175,7 @@ fn mtoon_lighting() -> Result<String, RichLookError> {
             direction: Vec3::NEG_Z,
             color: Color::srgb(1.0, 0.0, 0.0),
             illuminance: 200.0,
+            shadows_enabled: false,
         }],
         ..base.clone()
     })?;
@@ -174,6 +184,7 @@ fn mtoon_lighting() -> Result<String, RichLookError> {
             direction: Vec3::NEG_Z,
             color: Color::srgb(0.0, 0.0, 1.0),
             illuminance: 200.0,
+            shadows_enabled: false,
         }],
         ..base.clone()
     })?;
@@ -227,6 +238,7 @@ fn mtoon_shading() -> Result<String, RichLookError> {
         direction: Vec3::NEG_Z,
         color: Color::WHITE,
         illuminance: 200.0,
+        shadows_enabled: false,
     };
     let base = MtoonScene::lit(Color::WHITE, Color::BLACK, light);
     // A light travelling toward `-X` meets the plane's `+Z` normal at exactly
@@ -301,6 +313,433 @@ fn mtoon_shading() -> Result<String, RichLookError> {
     Ok(report)
 }
 
+/// The bundled studio cubemap must survive Bevy's environment-map filter and
+/// add image-based light to a PBR surface.
+fn studio_environment() -> Result<String, RichLookError> {
+    let textured = environment_scene(300.0)?;
+    let unlit_environment = environment_scene(0.0)?;
+    let with = center_pixel(&textured);
+    let without = center_pixel(&unlit_environment);
+
+    let mut report = format!(
+        "case=studio-environment\n\
+         center_with_environment={with:?}\n\
+         center_without_environment={without:?}\n"
+    );
+    if luma(with) <= luma(without) + 8 {
+        return Err(RichLookError::Failed(format!(
+            "the generated studio environment did not light the surface: with={with:?} without={without:?}"
+        )));
+    }
+    report.push_str("checks=environment_filtered_and_applied\n");
+    Ok(report)
+}
+
+/// Renders a lit PBR sphere under the studio environment at the given
+/// intensity. The source cubemap must be square power-of-two, which the
+/// bundled one is, or Bevy's environment filter panics.
+fn environment_scene(intensity: f32) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin { ..default() })
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<WinitPlugin>()
+            .disable::<bevy::log::LogPlugin>(),
+    )
+    .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 60,
+        pixel_format: vtuber_core::VideoOutputPixelFormat::Bgra8StraightAlpha,
+    }))
+    .insert_resource(GlobalAmbientLight {
+        brightness: 0.0,
+        ..default()
+    })
+    .insert_resource(vtuber_avatar::AvatarLifecycle::default())
+    .insert_resource(EnvironmentScene { intensity })
+    .init_resource::<EnvironmentMapHandle>()
+    .insert_resource(OutputArmed(false));
+    register_output_systems(&mut app);
+    app.add_systems(Startup, setup_environment_scene);
+    app.add_systems(Update, (activate_output_after_setup, attach_environment));
+    app.finish();
+    app.cleanup();
+
+    let deadline = Instant::now() + MAX_WAIT;
+    let mut satisfied = 0;
+    let mut last = None;
+    while Instant::now() < deadline {
+        app.update();
+        // The filter only inserts `EnvironmentMapLight` once the GPU prefilter
+        // has produced the diffuse/specular maps.
+        let generated = app
+            .world_mut()
+            .query::<&EnvironmentMapLight>()
+            .iter(app.world())
+            .next()
+            .is_some();
+        if let Some(frame) = app
+            .world_mut()
+            .resource_mut::<AvatarOutputFrameSlot>()
+            .take_latest()
+        {
+            let sampled = pixels(&frame);
+            satisfied = if sampled.iter().any(|pixel| pixel[3] > 0) {
+                satisfied + 1
+            } else {
+                0
+            };
+            if satisfied >= 40 && generated {
+                return Ok(sampled);
+            }
+            last = Some(sampled);
+        }
+    }
+    last.ok_or(RichLookError::NotRun(
+        "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
+    ))
+}
+
+#[derive(Resource, Clone, Copy)]
+struct EnvironmentScene {
+    intensity: f32,
+}
+
+#[derive(Resource, Default)]
+struct EnvironmentMapHandle(Option<Handle<Image>>);
+
+/// The attachment point: the avatar is drawn by the offscreen output camera,
+/// so the environment must reach that camera too, not only the viewport one.
+// The camera query is a small, fixed two-marker union.\r
+#[allow(clippy::type_complexity)]
+fn attach_environment(
+    mut commands: Commands,
+    scene: Res<EnvironmentScene>,
+    map: Res<EnvironmentMapHandle>,
+    cameras: Query<
+        (Entity, Option<&GeneratedEnvironmentMapLight>),
+        Or<(With<AvatarViewportCamera>, With<vtuber_avatar::AvatarOutputCamera>)>,
+    >,
+) {
+    let Some(environment_map) = map.0.clone() else {
+        return;
+    };
+    for (entity, existing) in &cameras {
+        if existing.is_none() {
+            commands.entity(entity).insert(GeneratedEnvironmentMapLight {
+                environment_map: environment_map.clone(),
+                intensity: scene.intensity,
+                ..default()
+            });
+        }
+    }
+}
+
+fn setup_environment_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    scene: Res<EnvironmentScene>,
+    mut map: ResMut<EnvironmentMapHandle>,
+) {
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(1.0).mesh().build())),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.4,
+            ..default()
+        })),
+        Transform::default(),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+    let camera_transform =
+        Transform::from_translation(Vec3::new(0.0, 0.0, 5.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 1.0,
+            ..default()
+        }),
+        AvatarViewportCamera::from_default_transform(camera_transform),
+        camera_transform,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+    if scene.intensity > 0.0 {
+        map.0 = Some(images.add(vtuber_avatar::look::studio_environment_cubemap()));
+    }
+}
+
+/// A mask (cutout) MToon material must cut its shadow too: the ground under the
+/// opaque half is shadowed while the ground under the transparent half stays
+/// lit, so the shadow is not a solid quad.
+fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
+    let casting = cutout_shadow_scene(true)?;
+    let flat = cutout_shadow_scene(false)?;
+    let (left_shadowed, right_shadowed) = (ground_band(&casting, 26), ground_band(&casting, 38));
+    let (left_lit, right_lit) = (ground_band(&flat, 26), ground_band(&flat, 38));
+
+    let mut report = format!(
+        "case=mtoon-cutout-shadow\n\
+         with_shadows_left={left_shadowed} right={right_shadowed}\n\
+         without_shadows_left={left_lit} right={right_lit}\n"
+    );
+    if left_lit < 40 || right_lit < 40 {
+        return Err(RichLookError::Failed(format!(
+            "the ground was not lit at all: left={left_lit} right={right_lit}"
+        )));
+    }
+    let left_dark = left_shadowed + 8 < left_lit;
+    let right_dark = right_shadowed + 8 < right_lit;
+    match (left_dark, right_dark) {
+        (true, true) => Err(RichLookError::Failed(
+            "both halves were shadowed; the cutout alpha did not reach the shadow pass".into(),
+        )),
+        (false, false) => Err(RichLookError::Failed(format!(
+            "the quad cast no shadow on the ground: left={left_shadowed} right={right_shadowed}"
+        ))),
+        _ => {
+            report.push_str("checks=cutout_alpha_in_shadow_pass\n");
+            Ok(report)
+        }
+    }
+}
+
+/// Renders the cutout-shadow scene with an alpha-masked MToon quad standing on
+/// a lit ground. Returns the sampled frame.
+fn cutout_shadow_scene(shadows: bool) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin { ..default() })
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<WinitPlugin>()
+            .disable::<bevy::log::LogPlugin>(),
+    )
+    .add_plugins(MtoonMaterialPlugin)
+    .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 60,
+        pixel_format: vtuber_core::VideoOutputPixelFormat::Bgra8StraightAlpha,
+    }))
+    .insert_resource(GlobalAmbientLight {
+        brightness: 0.0,
+        ..default()
+    })
+    .insert_resource(vtuber_avatar::AvatarLifecycle::default())
+    .insert_resource(CutoutScene { shadows })
+    .insert_resource(OutputArmed(false));
+    register_output_systems(&mut app);
+    app.add_systems(Startup, setup_cutout_scene);
+    app.add_systems(Update, activate_output_after_setup);
+    app.finish();
+    app.cleanup();
+
+    let deadline = Instant::now() + MAX_WAIT;
+    let mut satisfied = 0;
+    let mut last = None;
+    while Instant::now() < deadline {
+        app.update();
+        if let Some(frame) = app
+            .world_mut()
+            .resource_mut::<AvatarOutputFrameSlot>()
+            .take_latest()
+        {
+            let sampled = pixels(&frame);
+            satisfied = if sampled.iter().any(|pixel| pixel[3] > 0) {
+                satisfied + 1
+            } else {
+                0
+            };
+            if satisfied >= SETTLE_FRAMES {
+                return Ok(sampled);
+            }
+            last = Some(sampled);
+        }
+    }
+    last.ok_or(RichLookError::NotRun(
+        "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
+    ))
+}
+
+#[derive(Resource, Clone, Copy)]
+struct CutoutScene {
+    shadows: bool,
+}
+
+fn setup_cutout_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<MToonMaterial>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    scene: Res<CutoutScene>,
+) {
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 300.0,
+            shadow_maps_enabled: scene.shadows,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_rotation_arc(
+            Vec3::NEG_Z,
+            Vec3::new(0.0, -1.0, 0.5).normalize(),
+        )),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, 8.0).build())),
+        MeshMaterial3d(standard_materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.9,
+            ..default()
+        })),
+        Transform::from_xyz(0.0, -1.2, 0.0),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+
+    // A two-texel base color texture: one opaque texel, one fully transparent.
+    let mut mask = Image::new_fill(
+        Extent3d {
+            width: 2,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[255, 255, 255, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mask.data = Some(vec![255, 255, 255, 255, 255, 255, 255, 0]);
+    let mask = images.add(mask);
+
+    let mut quad = Plane3d::default()
+        .mesh()
+        .size(2.0, 2.0)
+        .build()
+        .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+    let _ = quad.generate_tangents();
+    commands.spawn((
+        Mesh3d(meshes.add(quad)),
+        MeshMaterial3d(materials.add(MToonMaterial {
+            base_color_texture: Some(mask),
+            alpha_mode: AlphaMode::Mask(0.5),
+            ..default()
+        })),
+        Transform::from_xyz(0.0, 1.4, 0.0),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+
+    let camera_transform =
+        Transform::from_translation(Vec3::new(0.0, 0.0, 5.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 1.0,
+            ..default()
+        }),
+        AvatarViewportCamera::from_default_transform(camera_transform),
+        camera_transform,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+}
+
+/// The darkest luminance in the ground rows around one screen column.
+// Bounds are guaranteed by construction (row/column ranges are derived from\r
+// the fixed output dimensions); see the AGENTS.md production panic policy.\r
+#[allow(clippy::indexing_slicing)]
+fn ground_band(pixels: &[[u8; 4]], column: u32) -> u32 {
+    let mut darkest = u32::MAX;
+    for y in 45..56u32 {
+        for x in column.saturating_sub(3)..column + 4 {
+            let pixel = pixels[(y * WIDTH + x) as usize];
+            if pixel[3] == 0 {
+                continue;
+            }
+            darkest = darkest.min(luma(pixel));
+        }
+    }
+    darkest
+}
+
+/// An MToon mesh must cast into the shadow map and the lit ground must receive
+/// it: the darkest ground pixel is compared with the same scene without shadow
+/// maps.
+fn mtoon_shadow() -> Result<String, RichLookError> {
+    let light = LightSpec {
+        direction: Vec3::new(0.25, -1.0, -0.15).normalize(),
+        color: Color::WHITE,
+        illuminance: 300.0,
+        shadows_enabled: true,
+    };
+    let base = MtoonScene {
+        lights: vec![light],
+        mesh: MeshSpec::Sphere,
+        ground: true,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
+    };
+
+    let casting = render(&base)?;
+    let flat = render(&MtoonScene {
+        lights: vec![LightSpec {
+            shadows_enabled: false,
+            ..light
+        }],
+        ..base.clone()
+    })?;
+    let shadowed_floor = darkest_ground_luma(&casting);
+    let lit_floor = darkest_ground_luma(&flat);
+
+    let mut report = format!(
+        "case=mtoon-shadow\n\
+         darkest_ground_with_shadows={shadowed_floor}\n\
+         darkest_ground_without_shadows={lit_floor}\n"
+    );
+    if lit_floor < 40 {
+        return Err(RichLookError::Failed(format!(
+            "the ground was not lit at all: {lit_floor}"
+        )));
+    }
+    if shadowed_floor + 8 > lit_floor {
+        return Err(RichLookError::Failed(format!(
+            "the MToon sphere did not darken the ground below it: with={shadowed_floor} without={lit_floor}"
+        )));
+    }
+    report.push_str("checks=mtoon_casts_shadow,ground_receives_shadow\n");
+    Ok(report)
+}
+
+/// The darkest luminance in the rows that show the ground plane.
+// Bounds are guaranteed by construction (row/column ranges are derived from\r
+// the fixed output dimensions); see the AGENTS.md production panic policy.\r
+#[allow(clippy::indexing_slicing)]
+fn darkest_ground_luma(pixels: &[[u8; 4]]) -> u32 {
+    let mut darkest = u32::MAX;
+    for y in 46..58u32 {
+        for x in 4..60u32 {
+            let pixel = pixels[(y * WIDTH + x) as usize];
+            if pixel[3] == 0 {
+                continue;
+            }
+            darkest = darkest.min(luma(pixel));
+        }
+    }
+    darkest
+}
+
 /// A normal texture must tilt the lighting; scale 0 must match no normal map.
 fn mtoon_normal() -> Result<String, RichLookError> {
     // A smooth ramp (toony 0) keeps the response proportional to NdotL, so a
@@ -316,6 +755,7 @@ fn mtoon_normal() -> Result<String, RichLookError> {
                 direction: -Vec3::new(0.6, 0.0, 0.8).normalize(),
                 color: Color::WHITE,
                 illuminance: 200.0,
+                shadows_enabled: false,
             },
         )
     };
@@ -442,7 +882,8 @@ fn fixture_app(scene: &MtoonScene) -> Result<App, RichLookError> {
             })
             .set(RenderPlugin { ..default() })
             .disable::<PipelinedRenderingPlugin>()
-            .disable::<WinitPlugin>(),
+            .disable::<WinitPlugin>()
+            .disable::<bevy::log::LogPlugin>(),
     )
     .add_plugins(MtoonMaterialPlugin)
     .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
@@ -479,6 +920,7 @@ fn setup_fixture_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MToonMaterial>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     scene: Res<FixtureScene>,
 ) {
@@ -488,10 +930,23 @@ fn setup_fixture_scene(
             DirectionalLight {
                 illuminance: light.illuminance,
                 color: light.color,
-                shadow_maps_enabled: false,
+                shadow_maps_enabled: light.shadows_enabled,
                 ..default()
             },
             Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, light.direction)),
+            RenderLayers::layer(AVATAR_RENDER_LAYER),
+        ));
+    }
+
+    if scene.ground {
+        commands.spawn((
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, 8.0).build())),
+            MeshMaterial3d(standard_materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                perceptual_roughness: 0.9,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, -1.2, 0.0),
             RenderLayers::layer(AVATAR_RENDER_LAYER),
         ));
     }

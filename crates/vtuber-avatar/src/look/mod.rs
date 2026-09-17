@@ -5,14 +5,23 @@
 //! (color, emission, UV) stay owned by the existing expression writer, so the
 //! two never fight over the same material values.
 
+mod lighting;
 mod material;
 mod preset;
 
+pub use lighting::{
+    StudioLight, StudioLightSlot, StudioLookState, StudioRig, apply_environment_to_avatar_cameras,
+    blend_studio_rig, setup_studio_lighting, solve_studio_rig, studio_environment_cubemap,
+    sync_studio_lighting,
+};
 pub use material::{
     StandardLookBase, StandardLookBases, capture_standard_look_base, clear_look_materials_on_unload,
     initialize_look_materials,
 };
-pub use preset::{RichLookSettings, blend_look_scalar, effective_look_strength};
+pub use preset::{
+    RichLookSettings, STUDIO_PRESET, StudioLightPreset, StudioPreset, blend_look_scalar,
+    effective_look_strength,
+};
 
 use bevy::prelude::*;
 

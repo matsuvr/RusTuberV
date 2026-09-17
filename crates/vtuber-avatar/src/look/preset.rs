@@ -1,5 +1,6 @@
 //! Look settings and the numeric interpolation shared by every look stage.
 
+use bevy::prelude::{LinearRgba, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// The single look switch and strength shared by lighting, materials and the
@@ -45,6 +46,59 @@ pub fn blend_look_scalar(original: f32, rich: f32, strength: f32) -> f32 {
     }
     original + (rich - original) * strength
 }
+
+/// One studio light of the portrait preset, expressed in camera space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StudioLightPreset {
+    /// The direction the light travels, in camera space (the camera looks down
+    /// its local `-Z`).
+    pub direction: Vec3,
+    /// The light color.
+    pub color: LinearRgba,
+    /// The illuminance in lux.
+    pub illuminance: f32,
+    /// Whether this light casts shadows.
+    pub shadows_enabled: bool,
+}
+
+/// The portrait lighting preset: one key with shadows, a weak fill and a weak
+/// rim, plus a small studio environment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StudioPreset {
+    /// The shadow-casting key light.
+    pub key: StudioLightPreset,
+    /// The weak fill light that keeps the shaded side readable.
+    pub fill: StudioLightPreset,
+    /// The weak rim light that separates the silhouette.
+    pub rim: StudioLightPreset,
+    /// The environment light intensity in cd/m².
+    pub environment_intensity: f32,
+}
+
+/// The first version's only preset. These are adjustment starting points, not
+/// measured optima: key about 40° to the camera's left and 30° up, fill from
+/// the opposite side, rim from behind.
+pub const STUDIO_PRESET: StudioPreset = StudioPreset {
+    key: StudioLightPreset {
+        direction: Vec3::new(0.45, -0.40, -0.80),
+        color: LinearRgba::new(1.0, 0.97, 0.93, 1.0),
+        illuminance: 1500.0,
+        shadows_enabled: true,
+    },
+    fill: StudioLightPreset {
+        direction: Vec3::new(-0.55, -0.15, -0.82),
+        color: LinearRgba::new(0.85, 0.90, 1.0, 1.0),
+        illuminance: 350.0,
+        shadows_enabled: false,
+    },
+    rim: StudioLightPreset {
+        direction: Vec3::new(-0.20, -0.35, 0.90),
+        color: LinearRgba::new(1.0, 1.0, 1.0, 1.0),
+        illuminance: 600.0,
+        shadows_enabled: false,
+    },
+    environment_intensity: 300.0,
+};
 
 #[cfg(test)]
 mod tests {

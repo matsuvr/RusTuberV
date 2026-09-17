@@ -4,7 +4,9 @@ mod shade;
 mod uv_animation;
 
 use crate::vrm::mtoon::material::outline::{MToonOutline, OutlineWidthMode};
-use crate::vrm::mtoon::{MTOON_FRAGMENT_SHADER_HANDLE, MTOON_VERTEX_SHADER_HANDLE};
+use crate::vrm::mtoon::{
+    MTOON_FRAGMENT_SHADER_HANDLE, MTOON_PREPASS_SHADER_HANDLE, MTOON_VERTEX_SHADER_HANDLE,
+};
 use bevy::material::OpaqueRendererMethod;
 use bevy::math::Affine2;
 use bevy::mesh::MeshVertexBufferLayoutRef;
@@ -123,6 +125,12 @@ impl Material for MToonMaterial {
 
     fn fragment_shader() -> ShaderRef {
         MTOON_FRAGMENT_SHADER_HANDLE.into()
+    }
+
+    /// The MToon material bind group has no standard `pbr_bindings` material,
+    /// so the mesh's default prepass fragment cannot test the cutout alpha.
+    fn prepass_fragment_shader() -> ShaderRef {
+        MTOON_PREPASS_SHADER_HANDLE.into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {

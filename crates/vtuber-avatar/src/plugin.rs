@@ -80,6 +80,7 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<crate::tracking_profile::GlobalBodyTrackingProfile>()
             .init_resource::<crate::look::AvatarLookSettings>()
             .init_resource::<crate::look::StandardLookBases>()
+            .init_resource::<crate::look::StudioLookState>()
             .add_message::<crate::look::LookSettingsChanged>()
             .add_systems(
                 Update,
@@ -88,6 +89,8 @@ impl Plugin for VtuberAvatarPlugin {
                     crate::look::initialize_look_materials,
                     crate::look::clear_look_materials_on_unload
                         .after(despawn_unloading_avatar),
+                    crate::look::setup_studio_lighting,
+                    crate::look::apply_environment_to_avatar_cameras,
                 ),
             )
             .add_message::<LoadAvatarRequest>()
@@ -132,6 +135,12 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(
                 PostUpdate,
                 frame_avatar_camera.after(TransformSystems::Propagate),
+            )
+            .add_systems(
+                PostUpdate,
+                crate::look::sync_studio_lighting
+                    .after(TransformSystems::Propagate)
+                    .after(frame_avatar_camera),
             )
             .add_systems(
                 PostUpdate,

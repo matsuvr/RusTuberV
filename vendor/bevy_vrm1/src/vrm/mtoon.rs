@@ -28,6 +28,10 @@ const MTOON_TYPES_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("5d9302a3-6498-9d2a-fadb-842d01c87697");
 const MTOON_LIGHTING_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("0a2f6d02-4c31-4c1f-9f0e-6b3b2ae9f1c8");
+const MTOON_ALPHA_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("6f1c5b47-2f0a-4f4e-8c2d-9d4a7e5b3c11");
+const MTOON_PREPASS_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("3b7e9a51-8d24-4a6b-9f13-5c2e8f7a0d42");
 
 pub struct MtoonMaterialPlugin;
 
@@ -60,6 +64,18 @@ impl Plugin for MtoonMaterialPlugin {
             app,
             MTOON_LIGHTING_SHADER_HANDLE,
             "mtoon_lighting.wgsl",
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
+            MTOON_ALPHA_SHADER_HANDLE,
+            "mtoon_alpha.wgsl",
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
+            MTOON_PREPASS_SHADER_HANDLE,
+            "mtoon_prepass.wgsl",
             Shader::from_wgsl
         );
         load_internal_asset!(
