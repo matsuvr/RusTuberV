@@ -128,6 +128,13 @@ mod tests {
             strength: 1.0,
         };
         app.update();
-        assert_eq!(portrait(&app, &handle), MToonPortraitParams::default());
+        assert_eq!(
+            portrait(&app, &handle),
+            resolve_mtoon_portrait(RichLookSettings {
+                enabled: false,
+                strength: 1.0
+            })
+        );
+        assert_eq!(portrait(&app, &handle).strength, 0.0);
     }
 }
