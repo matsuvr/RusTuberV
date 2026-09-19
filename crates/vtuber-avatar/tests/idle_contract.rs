@@ -50,6 +50,7 @@ fn build_app(generation: AvatarGeneration) -> (App, IdleRig) {
         .init_resource::<AvatarLifecycle>()
         .init_resource::<PositionInputMetrics>()
         .init_resource::<LossIdleState>()
+        .init_resource::<vtuber_avatar::BodyFollowFilter>()
         .init_resource::<vtuber_avatar::AvatarMotionMirror>()
         .add_systems(PostUpdate, update_body_tracking_position_input);
 

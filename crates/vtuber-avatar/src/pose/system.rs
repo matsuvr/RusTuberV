@@ -8,11 +8,11 @@
 use bevy::prelude::*;
 use vtuber_core::metrics::FixedStats;
 use vtuber_core::monotonic_now;
-use vtuber_core::types::{AvatarControlFrame, TrackingState};
+use vtuber_core::types::AvatarControlFrame;
 
 use bevy_vrm1::prelude::{
-    BodyTrackingPoseInput, BodyTrackingProfile, ChestBoneEntity, HeadBoneEntity, HipsBoneEntity,
-    RestTransform, UpperChestBoneEntity, VrmPath,
+    BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingProfile, ChestBoneEntity,
+    HeadBoneEntity, HipsBoneEntity, RestTransform, UpperChestBoneEntity, VrmPath,
 };
 
 use crate::binding::AvatarBinding;
@@ -198,27 +198,17 @@ pub fn update_body_tracking_pose_input(
 
     *input = body_tracking_input(frame, mirrored);
 
-    // Tracking-loss idle (Issue #172): while the micro-motion episode blends
-    // in and the frame is not actively tracked, the pose input carries the
-    // bounded idle yaw/pitch instead of a plain inactive marker. Roll stays
-    // zero per the analyzed design. This keeps this system the sole pose
-    // input writer; the idle contract (issue #180) adds no procedural motion.
-    let tracked = matches!(
-        frame.state,
-        TrackingState::Tracking | TrackingState::Degraded
-    );
-    if !tracked && let Some(idle_state) = idle_state.as_ref() {
+    // Tracking-loss idle (ADR-021): the bounded idle yaw/pitch cross-fades
+    // with the control frame instead of replacing it. The blend continues
+    // from its current value on both direction changes, so during a loss the
+    // sway fades in over the still-easing pose, and after a reacquire it
+    // fades out while the tracked pose resumes — the head never snaps.
+    if let Some(idle_state) = idle_state.as_ref() {
         let blend = idle_state.blend();
         if blend > 0.0 {
             let idle = idle_state.target();
             let horizontal_sign = if mirrored { -1.0 } else { 1.0 };
-            *input = BodyTrackingPoseInput {
-                yaw_radians: horizontal_sign * idle.yaw_radians,
-                pitch_radians: idle.pitch_radians,
-                roll_radians: 0.0,
-                weight: blend.clamp(0.0, 1.0),
-                active: true,
-            };
+            *input = fade_pose_input(*input, idle, horizontal_sign, blend);
         }
     }
 
@@ -226,11 +216,36 @@ pub fn update_body_tracking_pose_input(
     metrics.record_apply(frame.source_seq, frame.captured_at, applied_at);
 }
 
+/// Cross-fades one pose input with the idle sway by `blend`.
+///
+/// The two contributions the writer multiplies by the weight are cross-faded
+/// exactly, so at `blend = 0` the input is unchanged and at `blend = 1` it is
+/// the idle sway alone; in between the control frame's contribution shrinks
+/// with its own weight instead of being zeroed.
+fn fade_pose_input(
+    input: BodyTrackingPoseInput,
+    idle: &vtuber_tracking::IdleTarget,
+    horizontal_sign: f32,
+    blend: f32,
+) -> BodyTrackingPoseInput {
+    let blend = blend.clamp(0.0, 1.0);
+    let frame_weight = input.weight.clamp(0.0, 1.0);
+    let weight = ((1.0 - blend) * frame_weight + blend).clamp(0.0, 1.0);
+    let yaw_total = (1.0 - blend) * input.yaw_radians * frame_weight
+        + blend * (horizontal_sign * idle.yaw_radians);
+    let pitch_total =
+        (1.0 - blend) * input.pitch_radians * frame_weight + blend * idle.pitch_radians;
+    let roll_total = (1.0 - blend) * input.roll_radians * frame_weight;
+    BodyTrackingPoseInput {
+        yaw_radians: yaw_total / weight,
+        pitch_radians: pitch_total / weight,
+        roll_radians: roll_total / weight,
+        weight,
+        active: true,
+    }
+}
+
 fn body_tracking_input(frame: &AvatarControlFrame, mirrored: bool) -> BodyTrackingPoseInput {
-    let active = matches!(
-        frame.state,
-        TrackingState::Tracking | TrackingState::Degraded
-    );
     let horizontal_sign = if mirrored { -1.0 } else { 1.0 };
     BodyTrackingPoseInput {
         // A horizontal reflection preserves pitch but reverses yaw and roll.
@@ -238,7 +253,12 @@ fn body_tracking_input(frame: &AvatarControlFrame, mirrored: bool) -> BodyTracki
         pitch_radians: frame.head.pitch_rad,
         roll_radians: horizontal_sign * frame.head.roll_rad,
         weight: frame.confidence,
-        active,
+        // The control frame already carries the loss glide and a confidence
+        // that decays to zero. Marking the input inactive during loss would
+        // zero the dependency's target instantly and snap the head and body to
+        // rest the moment the face leaves the frame; the weight is the only
+        // blend that may reach zero.
+        active: true,
     }
 }
 
@@ -274,9 +294,12 @@ pub fn debug_propagation_probe(
     mut frame_counter: Local<u64>,
     mut log_file: Local<Option<std::fs::File>>,
     control_frame: Res<ActiveControlFrame>,
-    inputs: Query<&BodyTrackingPoseInput>,
+    tracked: Res<crate::arm_pipeline::TrackedArmControl>,
+    selection: Res<crate::arm_pipeline::ArmSourceSelection>,
+    inputs: Query<(&BodyTrackingPoseInput, &BodyTrackingPositionInput)>,
     profiles: Query<&BodyTrackingProfile>,
     bindings: Query<&AvatarBinding>,
+    dynamic_targets: Query<&crate::arm_pipeline::DynamicArmTargets>,
     hips: Query<&HipsBoneEntity>,
     upper_chest_markers: Query<&UpperChestBoneEntity>,
     chest_markers: Query<&ChestBoneEntity>,
@@ -300,22 +323,120 @@ pub fn debug_propagation_probe(
         return;
     };
     use std::io::Write;
+    let root = lifecycle.active_root();
+    let tracked_text = tracked_arm_text(
+        *selection,
+        *tracked,
+        root.and_then(|root| dynamic_targets.get(root).ok()),
+    );
+    let position_text = root
+        .and_then(|root| inputs.get(root).ok())
+        .map(|(_, input)| {
+            format!(
+                "|pos(head=({:+.3},{:+.3},{:+.3}),body=({:+.3},{:+.3},{:+.3}),w={:.2},active={})",
+                input.head_offset.x,
+                input.head_offset.y,
+                input.head_offset.z,
+                input.body_offset.x,
+                input.body_offset.y,
+                input.body_offset.z,
+                input.weight,
+                input.active,
+            )
+        })
+        .unwrap_or_else(|| "|pos(<none>)".to_string());
+    let root_text = root
+        .and_then(|root| bones.get(root).ok())
+        .map(|(transform, rest)| {
+            let delta = transform.translation - rest.0.translation;
+            format!("|root=({:+.3},{:+.3},{:+.3})", delta.x, delta.y, delta.z)
+        })
+        .unwrap_or_else(|| "|root=<none>".to_string());
+    // The observation before any body-side following, so the next log can
+    // separate "the face tracker wobbled" from "the body follow amplified it".
+    let raw_translation_text = control_frame
+        .frame
+        .as_ref()
+        .map(|frame| {
+            let raw = frame.head_translation;
+            format!(
+                "|htraw=({:+.3},{:+.3},{:+.3},{:?})",
+                raw.x_meters, raw.y_meters, raw.z_meters, raw.state
+            )
+        })
+        .unwrap_or_else(|| "|htraw=<none>".to_string());
     let line = propagation_line(
         &lifecycle,
         *frame_counter,
         &control_frame,
-        inputs.get(lifecycle.active_root().unwrap_or(Entity::PLACEHOLDER)),
-        profiles.get(lifecycle.active_root().unwrap_or(Entity::PLACEHOLDER)),
-        bindings.get(lifecycle.active_root().unwrap_or(Entity::PLACEHOLDER)),
+        inputs.get(root.unwrap_or(Entity::PLACEHOLDER)),
+        profiles.get(root.unwrap_or(Entity::PLACEHOLDER)),
+        bindings.get(root.unwrap_or(Entity::PLACEHOLDER)),
         hips,
         upper_chest_markers,
         chest_markers,
         head_markers,
         root_paths,
         &bones,
-    );
+    ) + &tracked_text
+        + &position_text
+        + &root_text
+        + &raw_translation_text;
     let _ = writeln!(file, "{line}");
     let _ = file.flush();
+}
+
+/// Renders the observed-arm authority and per-side blend state for the probe.
+///
+/// This is what separates "the hand was not seen" from "it was seen and the
+/// pose is still returning": the weights move only when the tracker state
+/// changes, and the wrist roll is the applied palm twist.
+fn tracked_arm_text(
+    selection: crate::arm_pipeline::ArmSourceSelection,
+    control: crate::arm_pipeline::TrackedArmControl,
+    targets: Option<&crate::arm_pipeline::DynamicArmTargets>,
+) -> String {
+    let mode = format!("{:?}", selection.mode);
+    let Some(frame) = control.frame else {
+        return format!("|tracked(mode={mode} no-frame)");
+    };
+    let mut text = format!("|tracked(mode={mode} seq={}", frame.source_seq.0);
+    for (side, target, weight, pose) in [
+        (
+            "L",
+            frame.targets.left,
+            frame.weights.left,
+            targets.and_then(|targets| targets.left),
+        ),
+        (
+            "R",
+            frame.targets.right,
+            frame.weights.right,
+            targets.and_then(|targets| targets.right),
+        ),
+    ] {
+        let roll_degrees = pose
+            .and_then(|pose| pose.hand)
+            .map(|hand| {
+                let (_, angle) = hand.delta.to_axis_angle();
+                angle.to_degrees()
+            })
+            .unwrap_or(0.0);
+
+        let pole = target
+            .map(|target| target.elbow_pole)
+            .map(|pole| format!("[{:.2},{:.2},{:.2}]", pole[0], pole[1], pole[2]))
+            .unwrap_or_else(|| "-".to_string());
+        text.push_str(&format!(
+            " {side}(w={:.2},p={:.2},pal={:.2},hand={roll_degrees:+.0}deg,pole={pole},palm={:?})",
+            weight.wrist,
+            weight.pole,
+            weight.palm,
+            target.and_then(|target| target.palm_normal),
+        ));
+    }
+    text.push(')');
+    text
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,7 +444,10 @@ fn propagation_line(
     lifecycle: &AvatarLifecycle,
     frame_counter: u64,
     control_frame: &ActiveControlFrame,
-    input: Result<&BodyTrackingPoseInput, bevy::ecs::query::QueryEntityError>,
+    input: Result<
+        (&BodyTrackingPoseInput, &BodyTrackingPositionInput),
+        bevy::ecs::query::QueryEntityError,
+    >,
     profile: Result<&BodyTrackingProfile, bevy::ecs::query::QueryEntityError>,
     binding: Result<&AvatarBinding, bevy::ecs::query::QueryEntityError>,
     hips: Query<&HipsBoneEntity>,
@@ -336,7 +460,7 @@ fn propagation_line(
     let root = lifecycle.active_root();
     let input_text = root
         .zip(input.ok())
-        .map(|(_, i)| {
+        .map(|(_, (i, _))| {
             format!(
                 "yaw={:+.1}deg pitch={:+.1}deg roll={:+.1}deg weight={:.2} active={}",
                 i.yaw_radians.to_degrees(),
@@ -389,6 +513,12 @@ fn propagation_line(
                 ),
                 ("lUpperArm", binding.left_arm.as_ref().map(|a| a.upper_arm)),
                 ("lLowerArm", binding.left_arm.as_ref().map(|a| a.lower_arm)),
+                (
+                    "rShoulder",
+                    binding.right_arm.as_ref().and_then(|a| a.shoulder),
+                ),
+                ("rUpperArm", binding.right_arm.as_ref().map(|a| a.upper_arm)),
+                ("rLowerArm", binding.right_arm.as_ref().map(|a| a.lower_arm)),
             ];
             for (label, entity) in entries {
                 let Some(entity) = entity else {
@@ -418,6 +548,7 @@ fn propagation_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vtuber_core::types::TrackingState;
     use vtuber_core::types::{
         ExpressionCoefficients, FrameSeq, HeadPose, HeadTranslationSignal, MonoTimeNs,
     };
@@ -439,6 +570,39 @@ mod tests {
             expressions: ExpressionCoefficients::default(),
             detailed_face: None,
         }
+    }
+
+    #[test]
+    fn tracked_arm_text_reports_the_absence_of_a_frame() {
+        let text = tracked_arm_text(
+            crate::arm_pipeline::ArmSourceSelection::default(),
+            crate::arm_pipeline::TrackedArmControl::default(),
+            None,
+        );
+        assert!(text.contains("no-frame"), "{text}");
+    }
+
+    #[test]
+    fn tracked_arm_text_reports_sequence_and_channel_weights() {
+        let frame = vtuber_core::arm_tracking::ArmControlFrame {
+            source_seq: FrameSeq(7),
+            captured_at: MonoTimeNs(1),
+            produced_at: MonoTimeNs(2),
+            targets: Default::default(),
+            weights: Default::default(),
+        };
+        let text = tracked_arm_text(
+            crate::arm_pipeline::ArmSourceSelection::default(),
+            crate::arm_pipeline::TrackedArmControl {
+                generation: None,
+                frame: Some(frame),
+                view_to_model: Quat::IDENTITY,
+            },
+            None,
+        );
+        assert!(text.contains("seq=7"), "{text}");
+        assert!(text.contains("L(w=0.00"), "{text}");
+        assert!(text.contains("R(w=0.00"), "{text}");
     }
 
     #[test]
@@ -477,20 +641,31 @@ mod tests {
     }
 
     #[test]
-    fn degraded_tracking_remains_weighted_and_loss_targets_neutral() {
-        assert!(body_tracking_input(&frame(TrackingState::Degraded), true).active);
+    fn pose_input_stays_active_so_loss_glides_instead_of_snapping() {
+        // The control frame carries the loss glide and a confidence that
+        // decays to zero, so the input must stay active: the dependency turns
+        // an inactive input into an instant zero target.
         for state in [
+            TrackingState::Tracking,
+            TrackingState::Degraded,
             TrackingState::Starting,
             TrackingState::Searching,
             TrackingState::Acquiring,
             TrackingState::LostHold,
             TrackingState::ReturningNeutral,
         ] {
-            assert!(
-                !body_tracking_input(&frame(state), true).active,
-                "state={state:?}"
-            );
+            let input = body_tracking_input(&frame(state), true);
+            assert!(input.active, "state={state:?}");
+            assert_eq!(input.weight, 0.75, "state={state:?}");
         }
+
+        let lost_at_zero = AvatarControlFrame {
+            confidence: 0.0,
+            head: HeadPose::default(),
+            ..frame(TrackingState::ReturningNeutral)
+        };
+        assert!(body_tracking_input(&lost_at_zero, true).active);
+        assert_eq!(body_tracking_input(&lost_at_zero, true).weight, 0.0);
     }
 
     #[test]
@@ -519,5 +694,116 @@ mod tests {
         );
         assert_eq!(metrics.latency_sample_count(), 2);
         assert_eq!(metrics.capture_to_apply_p95_ms(), 40.0);
+    }
+    #[test]
+    fn idle_cross_fade_preserves_the_pose_contribution_at_zero_blend() {
+        let idle = vtuber_tracking::IdleTarget::default();
+        let input = body_tracking_input(&frame(TrackingState::Tracking), true);
+        let faded = fade_pose_input(input, &idle, 1.0, 0.0);
+        assert!(
+            (faded.yaw_radians - input.yaw_radians).abs() < 1.0e-6
+                && (faded.pitch_radians - input.pitch_radians).abs() < 1.0e-6
+                && (faded.weight - input.weight).abs() < 1.0e-6
+                && faded.active,
+            "zero blend must be a no-op: {faded:?} vs {input:?}"
+        );
+    }
+
+    #[test]
+    fn idle_cross_fade_blends_in_the_sway_without_zeroing_the_pose() {
+        // A loss while the head is turned: the pose authority has eased to
+        // 0.4 and the idle sway is half faded in on top of it instead of
+        // replacing it.
+        let idle = vtuber_tracking::IdleTarget {
+            yaw_radians: 0.05,
+            pitch_radians: 0.02,
+            ..vtuber_tracking::IdleTarget::default()
+        };
+
+        let eased = BodyTrackingPoseInput {
+            yaw_radians: 0.5,
+            pitch_radians: 0.3,
+            roll_radians: 0.1,
+            weight: 0.4,
+            active: true,
+        };
+        let faded = fade_pose_input(eased, &idle, 1.0, 0.5);
+
+        // The composed target is the exact cross-fade of the two products,
+        // not a replacement that would zero the easing pose.
+        let expected_yaw = 0.5 * (0.5 * 0.4) + 0.5 * idle.yaw_radians;
+        assert!(
+            (faded.yaw_radians * faded.weight - expected_yaw).abs() < 1.0e-5,
+            "cross-fade product mismatch: {} vs {expected_yaw}",
+            faded.yaw_radians * faded.weight
+        );
+        assert!(
+            (faded.weight - (0.5 * 0.4 + 0.5)).abs() < 1.0e-6,
+            "weight must cross-fade: {}",
+            faded.weight
+        );
+    }
+
+    #[test]
+    fn idle_cross_fade_at_full_blend_is_the_idle_sway() {
+        let idle = vtuber_tracking::IdleTarget {
+            yaw_radians: 0.05,
+            pitch_radians: 0.02,
+            ..vtuber_tracking::IdleTarget::default()
+        };
+
+        let eased = BodyTrackingPoseInput {
+            yaw_radians: 0.5,
+            pitch_radians: 0.3,
+            roll_radians: 0.1,
+            weight: 0.0,
+            active: true,
+        };
+        let faded = fade_pose_input(eased, &idle, 1.0, 1.0);
+        assert!(
+            (faded.yaw_radians - idle.yaw_radians).abs() < 1.0e-6
+                && (faded.pitch_radians - idle.pitch_radians).abs() < 1.0e-6
+                && (faded.weight - 1.0).abs() < 1.0e-6,
+            "full blend must be the idle sway: {faded:?}"
+        );
+    }
+
+    #[test]
+    fn idle_cross_fade_fades_out_monotonically_after_reacquire() {
+        let idle = vtuber_tracking::IdleTarget {
+            yaw_radians: 0.05,
+            ..vtuber_tracking::IdleTarget::default()
+        };
+
+        let tracked = BodyTrackingPoseInput {
+            yaw_radians: 0.3,
+            pitch_radians: 0.0,
+            roll_radians: 0.0,
+            weight: 0.9,
+            active: true,
+        };
+        let mut previous_sway = f32::INFINITY;
+        for step in 0..4u64 {
+            let blend = 1.0 - step as f32 * 0.25;
+            let faded = fade_pose_input(tracked, &idle, 1.0, blend);
+            let contribution = faded.yaw_radians * faded.weight;
+            let expected = blend * idle.yaw_radians + (1.0 - blend) * 0.3 * 0.9;
+            assert!(
+                (contribution - expected).abs() < 1.0e-5,
+                "step {step}: {contribution} vs {expected}"
+            );
+            assert!(
+                blend * idle.yaw_radians <= previous_sway + 1.0e-6,
+                "step {step} sway grew"
+            );
+            previous_sway = blend * idle.yaw_radians;
+        }
+
+        // At zero blend the tracked pose is untouched.
+        let zero = fade_pose_input(tracked, &idle, 1.0, 0.0);
+        assert!(
+            (zero.yaw_radians * zero.weight - 0.3 * 0.9).abs() < 1.0e-5,
+            "zero blend must not alter the tracked pose"
+        );
     }
 }

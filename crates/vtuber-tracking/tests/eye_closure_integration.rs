@@ -260,13 +260,32 @@ fn live_pins_agree_with_the_offline_replay() {
 }
 
 #[test]
-fn without_a_profile_the_existing_output_is_unchanged() {
+fn without_a_profile_the_builtin_raw_blink_rule_reaches_exactly_one() {
     let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
     assert!(!pipeline.eye_closure_active());
     let mut last = None;
     for seq in 0..10 {
         let captured_at = seq * 33_000_000;
-        let sample = sample(seq, captured_at, 0.9, 0.9, 0.0, 0.0);
+        let sample = sample(seq, captured_at, 0.9, 0.9, 0.5, 0.5);
+        last = pipeline
+            .update_mediapipe(Some(&sample), None, None, MonoTimeNs(captured_at), DT)
+            .frame;
+    }
+    let frame = last.expect("frame");
+    assert_eq!(frame.expressions.blink_left, 1.0);
+    assert_eq!(frame.expressions.blink_right, 1.0);
+    let detailed = frame.detailed_face.as_ref().expect("detailed route");
+    assert_eq!(detailed.get(ArkitBlendshape::EyeBlinkLeft), 1.0);
+    assert_eq!(detailed.get(ArkitBlendshape::EyeBlinkRight), 1.0);
+}
+
+#[test]
+fn without_a_profile_an_open_eye_is_not_pinned() {
+    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut last = None;
+    for seq in 0..10 {
+        let captured_at = seq * 33_000_000;
+        let sample = sample(seq, captured_at, 0.2, 0.2, 0.6, 0.6);
         last = pipeline
             .update_mediapipe(Some(&sample), None, None, MonoTimeNs(captured_at), DT)
             .frame;
@@ -274,6 +293,32 @@ fn without_a_profile_the_existing_output_is_unchanged() {
     let frame = last.expect("frame");
     assert!(
         frame.expressions.blink_left < 1.0,
-        "without a profile the existing smoothing must still be visible"
+        "an open eye must not be pinned: {}",
+        frame.expressions.blink_left
+    );
+    assert!(
+        frame.expressions.blink_right < 1.0,
+        "an open eye must not be pinned: {}",
+        frame.expressions.blink_right
+    );
+}
+
+#[test]
+fn without_a_profile_a_wink_closes_only_the_intended_eye() {
+    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut last = None;
+    for seq in 0..10 {
+        let captured_at = seq * 33_000_000;
+        let sample = sample(seq, captured_at, 0.9, 0.1, 0.5, 0.6);
+        last = pipeline
+            .update_mediapipe(Some(&sample), None, None, MonoTimeNs(captured_at), DT)
+            .frame;
+    }
+    let frame = last.expect("frame");
+    assert_eq!(frame.expressions.blink_left, 1.0);
+    assert!(
+        frame.expressions.blink_right < 1.0,
+        "the opposite eye must stay open: {}",
+        frame.expressions.blink_right
     );
 }

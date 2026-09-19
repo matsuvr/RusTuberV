@@ -261,11 +261,14 @@ fn breath_offset(profile: &MicroMotionProfile, elapsed_secs: f32, body_scale_met
 
 /// Blend envelope state machine for one loss episode.
 ///
-/// Tracks whether tracking is currently live. After loss the blend follows
-/// `smoothstep(elapsed_since_loss / transition)`; after reacquire it follows
-/// `1 - smoothstep(elapsed_since_reacquire / transition)`. Both directions
-/// are pure functions of capture timestamps, so the envelope is sampling-rate
-/// independent and neither direction snaps. Stale state is cleared via
+/// Tracks whether tracking is currently live. After loss the blend rises
+/// from its current value following
+/// `blend + (1 - blend) * smoothstep(elapsed_since_loss / transition)`; after
+/// reacquire it decays from its current value following
+/// `blend * (1 - smoothstep(elapsed_since_reacquire / transition))`. Both
+/// directions continue from the current blend, so a re-loss during a
+/// reacquire fade-out or a reacquire during a fade-in never removes or adds
+/// motion abruptly. Stale state is cleared via
 /// [`MicroMotionBlender::reset`] on avatar replacement/unload.
 #[derive(Clone, Copy, Debug)]
 pub struct MicroMotionBlender {
@@ -302,11 +305,11 @@ impl MicroMotionBlender {
 
     /// Advances the envelope for one evaluation.
     ///
-    /// When `tracked` is true the blend decays toward zero following the
-    /// time since reacquire started; when false it rises following the time
-    /// since loss started. Losing the face again mid-reacquire restarts the
-    /// idle episode at blend zero, which only removes idle motion while the
-    /// pose is held — never adds a jump into motion.
+    /// When `tracked` is true the blend decays toward zero from wherever it
+    /// currently is, following the time since reacquire started; when false
+    /// it rises from its current value, following the time since loss
+    /// started. Both directions continue from the current blend, so losing
+    /// the face again mid-reacquire or reacquiring mid-ramp never jumps.
     pub fn update(&mut self, tracked: bool, now: MonoTimeNs) -> f32 {
         let transition = self.transition_secs.max(f32::EPSILON);
         if tracked {
@@ -316,7 +319,7 @@ impl MicroMotionBlender {
             }
             let start = self.live_started_at.unwrap_or(now);
             let elapsed = Duration::from_nanos(now.0.saturating_sub(start.0)).as_secs_f32();
-            self.blend = 1.0 - smoothstep(elapsed / transition);
+            self.blend *= 1.0 - smoothstep(elapsed / transition);
         } else {
             if self.idle_started_at.is_none() {
                 self.idle_started_at = Some(now);
@@ -324,7 +327,7 @@ impl MicroMotionBlender {
             }
             let start = self.idle_started_at.unwrap_or(now);
             let elapsed = Duration::from_nanos(now.0.saturating_sub(start.0)).as_secs_f32();
-            self.blend = smoothstep(elapsed / transition);
+            self.blend += (1.0 - self.blend) * smoothstep(elapsed / transition);
         }
         if !self.blend.is_finite() {
             self.blend = 0.0;
@@ -668,6 +671,17 @@ mod tests {
     }
 
     #[test]
+    fn fresh_tracking_keeps_the_blend_at_zero() {
+        let p = profile();
+        let mut blender = MicroMotionBlender::new(&p).unwrap();
+
+        // A live session from the start has never been lost: no idle motion
+        // is composed into the tracked pose.
+        assert_eq!(blender.update(true, MonoTimeNs(0)), 0.0);
+        assert_eq!(blender.update(true, MonoTimeNs(1_000_000_000)), 0.0);
+    }
+
+    #[test]
     fn blender_reset_clears_stale_episode_state() {
         let p = profile();
         let mut blender = MicroMotionBlender::new(&p).unwrap();
@@ -681,6 +695,56 @@ mod tests {
 
         // A brand-new loss episode restarts the ramp from zero.
         assert_eq!(blender.update(false, MonoTimeNs(9_999_999_999)), 0.0);
+    }
+
+    #[test]
+    fn blender_reloss_continues_from_the_current_blend_instead_of_resetting() {
+        let p = profile();
+        let mut blender = MicroMotionBlender::new(&p).unwrap();
+
+        // Ramp to half amplitude, reacquire briefly, then lose again.
+        let _ = blender.update(false, MonoTimeNs(0));
+        let _ = blender.update(false, MonoTimeNs(2_000_000_000));
+        assert!((blender.blend() - 0.5).abs() < 1e-3);
+
+        let _ = blender.update(true, MonoTimeNs(2_100_000_000));
+        let after_reacquire = blender.blend();
+        assert!(
+            after_reacquire > 0.4,
+            "fade-out continues: {after_reacquire}"
+        );
+
+        let relost = blender.update(false, MonoTimeNs(2_200_000_000));
+        assert!(
+            relost >= after_reacquire - 1e-3,
+            "a re-loss must continue from the current blend, not reset to zero: {relost} < {after_reacquire}"
+        );
+    }
+
+    #[test]
+    fn blender_reacquire_fades_out_from_the_current_blend() {
+        let p = profile();
+        let mut blender = MicroMotionBlender::new(&p).unwrap();
+
+        let _ = blender.update(false, MonoTimeNs(0));
+        let _ = blender.update(false, MonoTimeNs(2_000_000_000));
+        assert!((blender.blend() - 0.5).abs() < 1e-3);
+
+        // The fade-out starts where the ramp had reached, not at a fixed 1.
+        let first = blender.update(true, MonoTimeNs(2_100_000_000));
+        assert!(
+            (first - 0.5 * (1.0 - smoothstep(0.1 / 4.0))).abs() < 1e-3,
+            "{first}"
+        );
+        let mut now = 2_100_000_000_u64;
+        loop {
+            now += 250_000_000;
+            let blend = blender.update(true, MonoTimeNs(now));
+            if blend == 0.0 {
+                break;
+            }
+            assert!(now < 2_100_000_000 + 5_000_000_000, "decay took too long");
+        }
     }
 
     #[test]

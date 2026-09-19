@@ -774,17 +774,18 @@ pub fn run_pose_worker(
     frame_slot: Arc<LatestSlot<VideoFrame>>,
     output_slot: Arc<LatestSlot<PoseArmFrame>>,
     task: &MediaPipeTaskSource,
+    hand_task: &MediaPipeTaskSource,
 ) -> InferenceWorkerResult {
     update_status(&status, |s| {
         s.set_pipeline_info(
-            Some("mediapipe-pose-landmarker".into()),
+            Some("mediapipe-pose+hand-landmarker".into()),
             Some(crate::backend::mediapipe::POSE_TASK_BUNDLE_SHA256.into()),
-            None,
+            Some(crate::backend::mediapipe::HAND_TASK_BUNDLE_SHA256.into()),
         );
         s.transition_to(InferenceWorkerState::LoadingModel);
     });
 
-    let mut runtime = match load_pose_runtime(task) {
+    let mut runtime = match load_pose_runtime(task, hand_task) {
         Ok(runtime) => runtime,
         Err(error) => {
             update_status(&status, |s| {
@@ -876,17 +877,19 @@ pub fn run_pose_worker(
 
 fn load_pose_runtime(
     task: &MediaPipeTaskSource,
+    hand_task: &MediaPipeTaskSource,
 ) -> Result<crate::backend::mediapipe::MediaPipePoseRuntime> {
-    match task {
-        MediaPipeTaskSource::Path(path) => {
-            crate::backend::mediapipe::MediaPipePoseRuntime::from_task_path(path)
-        }
-        MediaPipeTaskSource::Embedded => {
-            crate::backend::mediapipe::MediaPipePoseRuntime::from_task_bytes(
-                crate::backend::mediapipe::embedded_pose_task_bundle(),
-            )
-        }
-    }
+    let source = |task: &MediaPipeTaskSource, embedded: &'static [u8]| match task {
+        MediaPipeTaskSource::Path(path) => mediapipe::ModelSource::path(path),
+        MediaPipeTaskSource::Embedded => mediapipe::ModelSource::bytes(embedded),
+    };
+    crate::backend::mediapipe::MediaPipePoseRuntime::from_task_sources(
+        source(task, crate::backend::mediapipe::embedded_pose_task_bundle()),
+        source(
+            hand_task,
+            crate::backend::mediapipe::embedded_hand_task_bundle(),
+        ),
+    )
 }
 
 fn update_status<F, R>(status: &SharedStatus, f: F) -> R
@@ -2235,6 +2238,7 @@ mod tests {
                     status,
                     frame_slot,
                     output_slot,
+                    &MediaPipeTaskSource::Embedded,
                     &MediaPipeTaskSource::Embedded,
                 )
             }

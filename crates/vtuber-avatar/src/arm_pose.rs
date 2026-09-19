@@ -220,6 +220,11 @@ pub struct ResolvedArmPose {
     pub upper_arm_delta: Quat,
     /// Lower-arm local rest-relative rotation.
     pub lower_arm_delta: Quat,
+    /// Optional hand (wrist) local rest-relative rotation.
+    ///
+    /// Only an explicit hand target writes this; the default and virtual poses
+    /// leave the hand at its authored rest-relative pose.
+    pub hand: Option<ResolvedBoneDelta>,
     /// Optional weak shoulder-follow correction.
     pub shoulder: Option<ResolvedBoneDelta>,
     /// Authored finger curl corrections.
@@ -458,6 +463,7 @@ fn neutral_pose(pose: ResolvedArmPose) -> ResolvedArmPose {
     ResolvedArmPose {
         upper_arm_delta: Quat::IDENTITY,
         lower_arm_delta: Quat::IDENTITY,
+        hand: neutral_bone(pose.hand),
         shoulder: pose.shoulder.map(|bone| ResolvedBoneDelta {
             delta: Quat::IDENTITY,
             ..bone
@@ -505,6 +511,7 @@ fn blend_pose(from: ResolvedArmPose, target: ResolvedArmPose, amount: f32) -> Re
             .lower_arm_delta
             .slerp(target.lower_arm_delta, amount)
             .normalize(),
+        hand: blend_bone(from.hand, target.hand, amount),
         shoulder: blend_bone(from.shoulder, target.shoulder, amount),
         fingers: blend_fingers(from.fingers, target.fingers, amount),
     }
@@ -663,6 +670,7 @@ pub(crate) fn resolved_from_solution(
         lower_arm: chain.lower_arm,
         upper_arm_delta,
         lower_arm_delta,
+        hand: None,
         shoulder,
         fingers: resolve_finger_pose(chain.finger_rest, profile.finger_curl_radians),
     }))
@@ -897,6 +905,10 @@ pub fn apply_default_arm_pose(
                 &mut transforms,
                 &mut bone_states,
             );
+            if let Some(hand) = resolved.hand {
+                any_changed |=
+                    apply_delta(hand.entity, hand.delta, &mut transforms, &mut bone_states);
+            }
             for finger in [
                 resolved.fingers.thumb.metacarpal,
                 resolved.fingers.thumb.proximal,

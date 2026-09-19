@@ -76,7 +76,7 @@ pub use bevy_vrm1::prelude::{
 pub use bind::BindTriggered;
 pub use binding::{AvatarBindError, AvatarBinding, bind_humanoid_bones};
 pub use body_motion::{
-    BodyMotionProfiles, LossIdleState, PositionInputMetrics, position_channels,
+    BodyFollowFilter, BodyMotionProfiles, LossIdleState, PositionInputMetrics, position_channels,
     reset_position_metrics_on_lifecycle_change, update_body_tracking_position_input,
 };
 pub use capabilities::{

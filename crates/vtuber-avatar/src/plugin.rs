@@ -77,6 +77,7 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<PoseApplyMetrics>()
             .init_resource::<PositionInputMetrics>()
             .init_resource::<LossIdleState>()
+            .init_resource::<crate::body_motion::BodyFollowFilter>()
             .init_resource::<crate::tracking_profile::GlobalBodyTrackingProfile>()
             .init_resource::<crate::look::AvatarLookSettings>()
             .init_resource::<crate::look::StandardLookBases>()

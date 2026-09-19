@@ -46,6 +46,80 @@ pub struct BodyMotionProfiles {
     pub split: VirtualBodyProfile,
 }
 
+/// Time constant of the head lean's follow of head translation, in seconds.
+const BODY_FOLLOW_HEAD_TIME_CONSTANT_SEC: f32 = 0.5;
+
+/// Time constant of the root compensation's follow, in seconds.
+///
+/// Slower than the lean: the root carries the whole body, and a sitting
+/// subject's residual translation wobble must not make the avatar sway.
+const BODY_FOLLOW_ROOT_TIME_CONSTANT_SEC: f32 = 0.8;
+
+/// Fastest the head lean may travel, as a ratio of body scale per second.
+const BODY_FOLLOW_HEAD_MAX_RATE_RATIO_PER_SEC: f32 = 0.2;
+
+/// Fastest the root compensation may travel, as a ratio of body scale per
+/// second. A landmark glitch that reverts quickly moves the body only a little.
+const BODY_FOLLOW_ROOT_MAX_RATE_RATIO_PER_SEC: f32 = 0.12;
+
+/// Generation-scoped follow filter for the routed body translation channels.
+///
+/// The head translation itself stays responsive; only the part handed to the
+/// root compensation and the head lean is low-passed and rate-limited, so a
+/// landmark glitch reads as a small settle instead of the whole avatar
+/// jumping. A generation change reseeds the filter at the new target.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct BodyFollowFilter {
+    generation: Option<AvatarGeneration>,
+    head_offset: Vec3,
+    body_offset: Vec3,
+}
+
+impl BodyFollowFilter {
+    /// Advances both routed offsets toward their targets by one render tick.
+    #[must_use]
+    pub fn advance(
+        &mut self,
+        generation: AvatarGeneration,
+        head_target: Vec3,
+        body_target: Vec3,
+        body_scale_meters: f32,
+        dt_sec: f32,
+    ) -> (Vec3, Vec3) {
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.head_offset = head_target;
+            self.body_offset = body_target;
+            return (head_target, body_target);
+        }
+        let dt = dt_sec.clamp(0.0, 0.5);
+        let step = |current: Vec3, target: Vec3, time_constant: f32, rate_ratio: f32| {
+            let alpha = 1.0 - (-dt / time_constant).exp();
+            let max_step = rate_ratio * body_scale_meters.max(0.0) * dt;
+            let correction = (target - current) * alpha;
+            let length = correction.length();
+            if max_step > 0.0 && length > max_step {
+                current + correction * (max_step / length)
+            } else {
+                current + correction
+            }
+        };
+        self.head_offset = step(
+            self.head_offset,
+            head_target,
+            BODY_FOLLOW_HEAD_TIME_CONSTANT_SEC,
+            BODY_FOLLOW_HEAD_MAX_RATE_RATIO_PER_SEC,
+        );
+        self.body_offset = step(
+            self.body_offset,
+            body_target,
+            BODY_FOLLOW_ROOT_TIME_CONSTANT_SEC,
+            BODY_FOLLOW_ROOT_MAX_RATE_RATIO_PER_SEC,
+        );
+        (self.head_offset, self.body_offset)
+    }
+}
+
 /// Computes the positional channels for one control frame.
 ///
 /// Returns `(head_offset, body_offset)` in semantic meters, or `None` when
@@ -130,6 +204,7 @@ pub fn update_body_tracking_position_input(
     time: Res<Time>,
     mut metrics: ResMut<PositionInputMetrics>,
     mut idle_state: ResMut<LossIdleState>,
+    mut follow: ResMut<BodyFollowFilter>,
     binding_query: Query<&AvatarBinding>,
     scale_query: Query<&BodyScaleMeters>,
     mut inputs: Query<&mut BodyTrackingPositionInput>,
@@ -176,13 +251,20 @@ pub fn update_body_tracking_position_input(
         metrics.idle_blend = idle_state.blend();
         if idle_state.blend() > 0.0 {
             let idle = idle_state.target();
-            *input = BodyTrackingPositionInput {
-                head_offset: Vec3::new(
+            let (head_offset, body_offset) = follow.advance(
+                binding.generation,
+                Vec3::new(
                     sign_for(mirrored) * idle.translation_x,
                     idle.translation_y,
                     idle.translation_z,
                 ),
-                body_offset: Vec3::ZERO,
+                Vec3::ZERO,
+                body_scale,
+                time.delta_secs(),
+            );
+            *input = BodyTrackingPositionInput {
+                head_offset,
+                body_offset,
                 weight: idle_state.blend(),
                 active: true,
             };
@@ -214,63 +296,49 @@ pub fn update_body_tracking_position_input(
         metrics.idle_blend = idle_state.blend();
     }
 
-    match position_channels(frame, mirrored, profiles, body_scale) {
-        Some((mut head_offset, mut body_offset)) => {
-            // Tracking-loss semantics match the rotation path: only live
-            // tracking states drive the solve; other states hold nothing.
-            let active = is_tracked_state(frame.state);
-            if active {
-                *input = BodyTrackingPositionInput {
-                    head_offset,
-                    body_offset,
-                    weight: frame.confidence.clamp(0.0, 1.0),
-                    active: true,
-                };
-                metrics.frames_published += 1;
-                metrics.last_applied_source_seq = Some(frame.source_seq);
-            } else if idle_state.blend() > 0.0 {
-                // Lost but blending in: publish only the idle sway and the
-                // loss-scoped breathing offset.
-                let idle = idle_state.target();
-                head_offset.x = sign_for(mirrored) * idle.translation_x;
-                head_offset.z = idle.translation_z;
-                head_offset.y = idle.translation_y;
-                body_offset = Vec3::ZERO;
-                *input = BodyTrackingPositionInput {
-                    head_offset,
-                    body_offset,
-                    weight: idle_state.blend(),
-                    active: true,
-                };
-                metrics.frames_published += 1;
-                metrics.last_applied_source_seq = Some(frame.source_seq);
-            } else {
-                *input = neutral_input();
-                metrics.frames_unavailable += 1;
-            }
-        }
-        None => {
-            // Unavailable translation must not zero out a tracked rotation
-            // pose; while an idle episode blends, the sway keeps flowing.
-            if !is_tracked_state(frame.state) && idle_state.blend() > 0.0 {
-                let idle = idle_state.target();
-                *input = BodyTrackingPositionInput {
-                    head_offset: Vec3::new(
-                        sign_for(mirrored) * idle.translation_x,
-                        idle.translation_y,
-                        idle.translation_z,
-                    ),
-                    body_offset: Vec3::ZERO,
-                    weight: idle_state.blend(),
-                    active: true,
-                };
-                metrics.frames_published += 1;
-                metrics.last_applied_source_seq = Some(frame.source_seq);
-            } else {
-                *input = neutral_input();
-                metrics.frames_unavailable += 1;
-            }
-        }
+    // The idle sway cross-fades with the control frame instead of replacing
+    // it: during a loss the sway fades in over the still-easing offsets, and
+    // after a reacquire it fades out while the tracked channels resume. The
+    // envelope continues from its current value on both direction changes,
+    // so neither transition snaps.
+    let idle = idle_state.target();
+    let blend = idle_state.blend().clamp(0.0, 1.0);
+    let idle_head = Vec3::new(
+        sign_for(mirrored) * idle.translation_x,
+        idle.translation_y,
+        idle.translation_z,
+    );
+    let (frame_head, frame_body, frame_weight) =
+        match position_channels(frame, mirrored, profiles, body_scale) {
+            // Lost frames still carry the return and a decaying confidence, so
+            // they are published like tracked frames: marking the input inactive
+            // would snap the root to rest the moment the face leaves the frame.
+            Some((head, body)) => (head, body, frame.confidence.clamp(0.0, 1.0)),
+            // Unavailable translation must not zero out a tracked rotation pose;
+            // while the idle episode blends, the sway keeps flowing over zero.
+            None => (Vec3::ZERO, Vec3::ZERO, 0.0),
+        };
+    let head_target = (1.0 - blend) * frame_head + blend * idle_head;
+    let body_target = (1.0 - blend) * frame_body;
+    let weight = ((1.0 - blend) * frame_weight + blend).clamp(0.0, 1.0);
+    let (head_offset, body_offset) = follow.advance(
+        binding.generation,
+        head_target,
+        body_target,
+        body_scale,
+        time.delta_secs(),
+    );
+    *input = BodyTrackingPositionInput {
+        head_offset,
+        body_offset,
+        weight,
+        active: true,
+    };
+    if frame_head != Vec3::ZERO || blend > 0.0 {
+        metrics.frames_published += 1;
+        metrics.last_applied_source_seq = Some(frame.source_seq);
+    } else {
+        metrics.frames_unavailable += 1;
     }
 }
 
@@ -428,6 +496,58 @@ mod tests {
             expressions: ExpressionCoefficients::default(),
             detailed_face: None,
         }
+    }
+
+    #[test]
+    fn a_brief_translation_spike_does_not_teleport_the_body() {
+        let generation = AvatarGeneration(1);
+        let body_scale = 0.7;
+        let dt = 1.0 / 60.0;
+        let mut filter = BodyFollowFilter::default();
+        for _ in 0..120 {
+            let _ = filter.advance(generation, Vec3::ZERO, Vec3::ZERO, body_scale, dt);
+        }
+
+        // A 0.30 m landmark glitch lasting half a second must not move the
+        // root the full distance.
+        for _ in 0..30 {
+            let _ = filter.advance(
+                generation,
+                Vec3::new(0.0, 0.0, 0.3),
+                Vec3::new(0.0, 0.0, 0.3),
+                body_scale,
+                dt,
+            );
+        }
+        assert!(
+            filter.body_offset.z < 0.06,
+            "the body must not jump with a glitch: {}",
+            filter.body_offset.z
+        );
+        assert!(
+            filter.head_offset.z < 0.12,
+            "the lean must not jump with a glitch: {}",
+            filter.head_offset.z
+        );
+
+        // The glitch reverts; the body settles back near neutral.
+        for _ in 0..180 {
+            let _ = filter.advance(generation, Vec3::ZERO, Vec3::ZERO, body_scale, dt);
+        }
+        assert!(
+            filter.body_offset.z.abs() < 0.01,
+            "the body must settle back: {}",
+            filter.body_offset.z
+        );
+    }
+
+    #[test]
+    fn a_new_generation_reseeds_the_follow_filter() {
+        let mut filter = BodyFollowFilter::default();
+        let target = Vec3::new(0.1, 0.2, 0.3);
+        let (head, body) = filter.advance(AvatarGeneration(2), target, target, 0.7, 1.0 / 60.0);
+        assert_eq!(head, target);
+        assert_eq!(body, target);
     }
 
     #[test]

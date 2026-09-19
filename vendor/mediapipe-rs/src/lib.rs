@@ -23,6 +23,7 @@
 mod error;
 mod face_detector;
 mod face_landmarker;
+mod hand_landmarker;
 mod image;
 mod pose_landmarker;
 mod stream;
@@ -35,6 +36,9 @@ pub use error::{Error, Result, StatusCode};
 pub use face_detector::{Detection, FaceDetector, FaceDetectorBuilder, FaceDetectorStream};
 pub use face_landmarker::{
     FaceLandmarker, FaceLandmarkerBuilder, FaceLandmarkerResult, FaceLandmarkerStream,
+};
+pub use hand_landmarker::{
+    HandLandmarker, HandLandmarkerBuilder, HandLandmarkerResult, HandLandmarkerVideo,
 };
 pub use image::{Image, ImageRef};
 pub use loader::{LibrarySource, MEDIAPIPE_VERSION};

@@ -89,18 +89,27 @@ fn blend_pole(
 /// Converts an observed solve into the compositor's rest-relative pose.
 ///
 /// This is the exact conversion the virtual path uses; it is not
-/// reimplemented. Tracked fingers keep their rest pose (no observation exists)
-/// and the virtual shoulder-trim/swivel/twist modifiers are not applied.
+/// reimplemented. `hand_delta` is the hand's share of the palm roll produced by
+/// [`align_palm_twist`], when a palm observation applied one; the forearm's
+/// share is already inside `solution`. Tracked fingers keep their rest pose (no
+/// observation exists) and the virtual shoulder-trim/swivel/twist modifiers are
+/// not applied.
 pub fn resolved_tracked_arm_pose(
     chain: &ArmChainBinding,
     solution: ArmIkSolution,
+    hand_delta: Option<Quat>,
 ) -> Result<ResolvedArmPose, ArmPipelineError> {
     let profile = ArmPoseProfile {
         finger_curl_radians: 0.0,
         ..ArmPoseProfile::default()
     };
-    crate::arm_pose::resolved_from_solution(chain, &solution, profile)?
-        .ok_or(ArmPipelineError::DegenerateSolvedPose)
+    let mut pose = crate::arm_pose::resolved_from_solution(chain, &solution, profile)?
+        .ok_or(ArmPipelineError::DegenerateSolvedPose)?;
+    pose.hand = hand_delta.map(|delta| crate::arm_pose::ResolvedBoneDelta {
+        entity: chain.hand,
+        delta,
+    });
+    Ok(pose)
 }
 
 /// Converts subject-arm units into avatar rest-space positions.
@@ -133,6 +142,8 @@ pub fn tracked_arm_ik_target(
 /// This raw solve deliberately omits virtual-hand swivel, torso lag, shoulder
 /// trim, and twist relaxation. Those modifiers need tracked-source semantics
 /// before being enabled, otherwise they can move a hand away from its target.
+/// The compositor's tracked path adds the shared Stage 3b coronal descent limit
+/// after this solve, so the upper arm cannot wrap past the shoulder's range.
 /// Missing/occluded observations are handled by tracking, not an implicit fallback.
 pub fn solve_tracked_arm(
     rest: ArmRestGeometry,
@@ -141,6 +152,143 @@ pub fn solve_tracked_arm(
 ) -> Result<ArmIkSolution, ArmIkError> {
     let target = tracked_arm_ik_target(rest, target, tracking_to_rest);
     solve_two_bone_arm(ArmIkInput::from_geometry(rest, target))
+}
+
+/// Share of the observed palm roll left on the hand bone; the rest goes to the
+/// forearm. Both shares turn about the same forearm axis, so they still compose
+/// to the exact observed palm plane.
+///
+/// A VRM has a single forearm bone, so the whole pronation applied at one joint
+/// collapses that joint's skin weights: at the hand this is the "candy wrapper"
+/// wrist that reads as torn off. Halving the angle at each joint halves the
+/// shear each one sees.
+const PALM_TWIST_HAND_SHARE: f32 = 0.5;
+
+/// Rolls the forearm and hand so the palm plane matches the observed normal.
+///
+/// The analytic solve leaves the roll on the shortest arc from rest, so the
+/// palm keeps whatever orientation that arc produced. The observed normal is
+/// mapped into rest space, the solved hand's own palm normal is derived from
+/// the authored index/little rest positions, and the signed angle between the
+/// two around the solved forearm's long axis is split between the forearm (the
+/// solution is rolled in place) and the hand (the returned local delta).
+///
+/// The rotation axis runs through the elbow and the wrist, so no bone position
+/// moves: the forearm and hand only roll, and the fingers follow the hand.
+///
+/// `weight` scales the roll; the channel's return time therefore eases both
+/// bones back to the default roll when the palm is lost. Smoothness comes from
+/// the tracking layer, which already low-passes the observed normal, so there
+/// is no per-frame limiter and no carried state.
+///
+/// Returns `None` (leaving the solved roll) when the rest finger geometry is
+/// missing, the observed normal is degenerate around the forearm axis, or a
+/// direction cannot be normalized. The forearm share is still written whenever
+/// the angle is usable, even if the hand share degenerates.
+#[must_use]
+pub fn align_palm_twist(
+    chain: &ArmChainBinding,
+    solution: &mut ArmIkSolution,
+    palm_normal: [f32; 3],
+    tracking_to_rest: Quat,
+    weight: f32,
+) -> Option<Quat> {
+    if !weight.is_finite() || weight <= f32::EPSILON || !tracking_to_rest.is_finite() {
+        return None;
+    }
+    let weight = weight.clamp(0.0, 1.0);
+    let rest_normal = rest_palm_normal(chain)?;
+    let axis = crate::arm::finite_normalized(solution.wrist - solution.elbow)?;
+    let observed = crate::arm::finite_normalized(tracking_to_rest * Vec3::from(palm_normal))?;
+    let rest_hand = chain.rest.wrist.global_rotation;
+    let current = crate::arm::finite_normalized(
+        hand_global(chain, solution) * (rest_hand.inverse() * rest_normal),
+    )?;
+    let observed_perp = crate::arm::finite_normalized(observed - axis * observed.dot(axis))?;
+    let current_perp = crate::arm::finite_normalized(current - axis * current.dot(axis))?;
+    let angle = axis
+        .dot(current_perp.cross(observed_perp))
+        .atan2(current_perp.dot(observed_perp))
+        * weight;
+    if !angle.is_finite() || angle.abs() <= 1.0e-6 {
+        return None;
+    }
+    let hand_angle = angle * PALM_TWIST_HAND_SHARE;
+    let hand = roll_hand(chain, solution, axis, hand_angle);
+    roll_forearm(chain, solution, axis, angle - hand_angle);
+    hand
+}
+
+/// The hand bone's model-space orientation with its authored rest-relative pose.
+fn hand_global(chain: &ArmChainBinding, solution: &ArmIkSolution) -> Quat {
+    solution.lower_arm_global_rotation
+        * (chain.rest.elbow.global_rotation.inverse() * chain.rest.wrist.global_rotation)
+}
+
+/// Builds the hand's local rest-relative roll for a model-space rotation about
+/// the forearm axis through the wrist, which leaves the solved positions
+/// untouched.
+fn roll_hand(
+    chain: &ArmChainBinding,
+    solution: &ArmIkSolution,
+    axis: Vec3,
+    angle: f32,
+) -> Option<Quat> {
+    if angle.abs() <= 1.0e-6 {
+        return None;
+    }
+    let rest_hand = chain.rest.wrist.global_rotation;
+    let rest_lower = chain.rest.elbow.global_rotation;
+    let hand_relative = rest_lower.inverse() * rest_hand;
+    let hand_global = solution.lower_arm_global_rotation * hand_relative;
+    let rotation = Quat::from_axis_angle(axis, angle);
+    let local = hand_global.inverse() * rotation * hand_global;
+    (local.is_finite() && local.length_squared() > f32::EPSILON).then(|| local.normalize())
+}
+
+/// Rolls the solved forearm about its own long axis in model space.
+///
+/// The elbow and wrist lie on that axis, so the roll moves no bone position and
+/// the hand follows the forearm rigidly. Rebuilds the lower-arm global rotation,
+/// rest-relative delta, and local rotation exactly as [`solve_two_bone_arm`]
+/// does, so the shared conversion still applies. Returns whether the roll was
+/// written.
+fn roll_forearm(
+    chain: &ArmChainBinding,
+    solution: &mut ArmIkSolution,
+    axis: Vec3,
+    angle: f32,
+) -> bool {
+    if !angle.is_finite() || angle.abs() <= 1.0e-6 {
+        return false;
+    }
+    let rest_upper = chain.rest.upper_arm.global_rotation;
+    let rest_lower = chain.rest.elbow.global_rotation;
+    let upper_model = solution.upper_arm_global_rotation * rest_upper.inverse();
+    let lower_global = Quat::from_axis_angle(axis, angle) * solution.lower_arm_global_rotation;
+    let lower_local_model = upper_model.inverse() * (lower_global * rest_lower.inverse());
+    let Ok(lower_delta) = crate::arm::conjugated_rest_delta(lower_local_model, rest_lower) else {
+        return false;
+    };
+    solution.lower_arm_global_rotation = lower_global.normalize();
+    solution.lower_arm_delta = lower_delta;
+    solution.lower_arm_local_rotation = chain.rest.elbow.local_rotation * lower_delta;
+    true
+}
+
+/// Avatar rest-space palm normal from the authored index/little rest positions.
+///
+/// The index/little cross product relative to the wrist uses the same
+/// anatomical landmark order as the observed hand landmarks, so both sides of
+/// the comparison agree without a per-side sign. Missing finger geometry yields
+/// `None`.
+fn rest_palm_normal(chain: &ArmChainBinding) -> Option<Vec3> {
+    let index = chain.finger_rest.index.proximal?.rest.position;
+    let little = chain.finger_rest.little.proximal?.rest.position;
+    let wrist = chain.rest.wrist.position;
+    let index = crate::arm::finite_normalized(index - wrist)?;
+    let little = crate::arm::finite_normalized(little - wrist)?;
+    crate::arm::finite_normalized(index.cross(little))
 }
 
 #[cfg(test)]
@@ -173,6 +321,7 @@ mod tests {
         ArmTrackingTarget {
             wrist: [0.4, -0.3, 0.5],
             elbow_pole: [0.7, -0.5, -0.1],
+            palm_normal: None,
         }
     }
 
@@ -239,6 +388,7 @@ mod tests {
         let far = ArmTrackingTarget {
             wrist: [3.0, 0.0, 0.0],
             elbow_pole: [0.5, -0.5, 0.0],
+            palm_normal: None,
         };
         let solution = solve_tracked_arm(rest, far, Quat::IDENTITY).unwrap();
         assert!(solution.solved_reach < rest.total_arm_length);
@@ -286,6 +436,7 @@ mod tests {
             ArmBlendWeight {
                 wrist: 0.5,
                 pole: 0.5,
+                palm: 0.0,
             },
         )
         .unwrap();
@@ -311,6 +462,7 @@ mod tests {
                 ArmBlendWeight {
                     wrist: 0.5,
                     pole: 0.5,
+                    palm: 0.0,
                 },
             ),
             Err(ArmIkError::DegenerateGeometry)
@@ -321,7 +473,7 @@ mod tests {
     fn resolved_tracked_arm_pose_reuses_the_shared_conversion() {
         let chain = chain();
         let solution = solve_tracked_arm(chain.rest, target(), Quat::IDENTITY).unwrap();
-        let tracked = resolved_tracked_arm_pose(&chain, solution).unwrap();
+        let tracked = resolved_tracked_arm_pose(&chain, solution, None).unwrap();
         let profile = ArmPoseProfile {
             finger_curl_radians: 0.0,
             ..ArmPoseProfile::default()
@@ -332,5 +484,142 @@ mod tests {
         assert_eq!(tracked, shared);
         assert!(tracked.upper_arm_delta.is_finite());
         assert!(tracked.lower_arm_delta.is_finite());
+    }
+
+    fn finger_binding(position: Vec3) -> crate::arm::FingerJointRestBinding {
+        crate::arm::FingerJointRestBinding {
+            entity: bevy::prelude::Entity::from_raw_u32(3).unwrap(),
+            rest: bone(position),
+        }
+    }
+
+    /// The default test chain plus authored index/little-finger rest positions
+    /// whose cross product points along +Y, i.e. a palm facing up.
+    fn palm_chain() -> ArmChainBinding {
+        let mut chain = chain();
+        let wrist = chain.rest.wrist.position;
+        chain.finger_rest.index.proximal =
+            Some(finger_binding(wrist + Vec3::new(0.05, 0.0, 0.003)));
+        chain.finger_rest.little.proximal =
+            Some(finger_binding(wrist + Vec3::new(0.05, 0.0, -0.003)));
+        chain
+    }
+
+    /// The hand's model-space palm normal after the solve and hand delta.
+    fn solved_palm_normal(chain: &ArmChainBinding, solution: &ArmIkSolution, hand: Quat) -> Vec3 {
+        let rest_hand = chain.rest.wrist.global_rotation;
+        let hand_global = solution.lower_arm_global_rotation
+            * (chain.rest.elbow.global_rotation.inverse() * rest_hand)
+            * hand;
+        (hand_global * (rest_hand.inverse() * rest_palm_normal(chain).unwrap())).normalize()
+    }
+
+    /// A nearly straight solve, where a humeral roll cannot move the wrist.
+    fn straight_target() -> ArmTrackingTarget {
+        ArmTrackingTarget {
+            wrist: [0.9, -0.05, 0.05],
+            elbow_pole: [0.5, 0.4, 0.0],
+            palm_normal: None,
+        }
+    }
+
+    #[test]
+    fn palm_twist_rotates_the_wrist_to_the_observed_plane() {
+        let chain = palm_chain();
+        let mut solution =
+            solve_tracked_arm(chain.rest, straight_target(), Quat::IDENTITY).unwrap();
+        let hand = align_palm_twist(&chain, &mut solution, [0.0, 0.0, 1.0], Quat::IDENTITY, 1.0)
+            .expect("hand roll");
+
+        // The forearm and the hand each take a share; together they land the
+        // palm plane on the observation.
+        let axis = crate::arm::finite_normalized(solution.wrist - solution.elbow).unwrap();
+        let observed = Vec3::Z;
+        let expected = (observed - axis * observed.dot(axis)).normalize();
+        let actual = {
+            let normal = solved_palm_normal(&chain, &solution, hand);
+            (normal - axis * normal.dot(axis)).normalize()
+        };
+        assert!(
+            actual.dot(expected) > 1.0 - 1.0e-4,
+            "hand plane must match the observation: {actual:?} != {expected:?}"
+        );
+        assert_ne!(hand, Quat::IDENTITY);
+    }
+
+    #[test]
+    fn palm_twist_splits_the_roll_between_the_forearm_and_the_hand() {
+        let chain = palm_chain();
+        let mut solution =
+            solve_tracked_arm(chain.rest, straight_target(), Quat::IDENTITY).unwrap();
+        let forearm_before = solution.lower_arm_delta;
+        let hand = align_palm_twist(&chain, &mut solution, [0.0, 0.0, 1.0], Quat::IDENTITY, 1.0)
+            .expect("hand roll");
+        assert_ne!(
+            solution.lower_arm_delta, forearm_before,
+            "the forearm must take a share of the roll"
+        );
+        assert_ne!(
+            hand,
+            Quat::IDENTITY,
+            "the hand must take a share of the roll"
+        );
+    }
+
+    #[test]
+    fn palm_twist_weight_zero_is_a_no_op() {
+        let chain = palm_chain();
+        let mut solution = solve_tracked_arm(chain.rest, target(), Quat::IDENTITY).unwrap();
+        let before = solution;
+        assert_eq!(
+            align_palm_twist(&chain, &mut solution, [0.0, 0.0, 1.0], Quat::IDENTITY, 0.0),
+            None
+        );
+        assert_eq!(solution, before);
+    }
+
+    #[test]
+    fn palm_twist_scales_monotonically_with_the_weight() {
+        let chain = palm_chain();
+        let mut full = solve_tracked_arm(chain.rest, straight_target(), Quat::IDENTITY).unwrap();
+        let full_hand =
+            align_palm_twist(&chain, &mut full, [0.0, 0.0, 1.0], Quat::IDENTITY, 1.0).unwrap();
+        let mut half = solve_tracked_arm(chain.rest, straight_target(), Quat::IDENTITY).unwrap();
+        let half_hand =
+            align_palm_twist(&chain, &mut half, [0.0, 0.0, 1.0], Quat::IDENTITY, 0.5).unwrap();
+
+        let axis = crate::arm::finite_normalized(full.wrist - full.elbow).unwrap();
+        let expected = (Vec3::Z - axis * Vec3::Z.dot(axis)).normalize();
+        let error = |solution: &ArmIkSolution, hand: Quat| {
+            let normal = solved_palm_normal(&chain, solution, hand);
+            let normal = (normal - axis * normal.dot(axis)).normalize();
+            1.0 - normal.dot(expected)
+        };
+        let full_error = error(&full, full_hand);
+        let half_error = error(&half, half_hand);
+        assert!(full_error < 1.0e-4, "full weight must align: {full_error}");
+        assert!(
+            half_error > full_error && half_error < 1.0,
+            "half weight must sit between the default roll and full alignment: \
+             {half_error} vs {full_error}"
+        );
+    }
+
+    #[test]
+    fn palm_twist_is_a_no_op_without_usable_geometry() {
+        let plain = chain();
+        let mut base = solve_tracked_arm(plain.rest, target(), Quat::IDENTITY).unwrap();
+        assert_eq!(
+            align_palm_twist(&plain, &mut base, [0.0, 0.0, 1.0], Quat::IDENTITY, 1.0),
+            None
+        );
+
+        let chain = palm_chain();
+        let mut base = solve_tracked_arm(chain.rest, target(), Quat::IDENTITY).unwrap();
+        let axis = crate::arm::finite_normalized(base.wrist - base.elbow).unwrap();
+        assert_eq!(
+            align_palm_twist(&chain, &mut base, axis.to_array(), Quat::IDENTITY, 1.0),
+            None
+        );
     }
 }

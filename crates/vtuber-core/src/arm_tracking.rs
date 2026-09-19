@@ -2,11 +2,13 @@
 
 use crate::{FrameSeq, MonoTimeNs};
 
-/// A MediaPipe Pose world landmark, not a normalized image landmark.
+/// A world landmark in a task's camera-aligned, unmirrored basis.
 ///
-/// Coordinates are in meters, in the task's hip-centered, unmirrored basis:
-/// X is image-right, Y is down, and smaller Z is nearer the camera.
-/// Missing quality scores remain missing; they are not replaced with confidence 1.
+/// Coordinates are in meters: X is image-right, Y is down, and smaller Z is
+/// nearer the camera. The origin depends on the task (hip centre for Pose, the
+/// hand's geometric centre for the Hand Landmarker), so only differences within
+/// one result are comparable across tasks. Missing quality scores remain
+/// missing; they are not replaced with confidence 1.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PoseWorldLandmark {
     /// World coordinates in meters. Never populate these from normalized landmarks.
@@ -17,6 +19,23 @@ pub struct PoseWorldLandmark {
     pub presence: Option<f32>,
 }
 
+/// MediaPipe Hand Landmarker's fixed landmark count per hand.
+pub const HAND_LANDMARK_COUNT: usize = 21;
+
+/// One hand's world landmarks from the Hand Landmarker.
+///
+/// The 21 points are the wrist, finger joints, and tips in the hand task's own
+/// camera-aligned basis; only orientation is derived from them, because their
+/// origin is hand-centred rather than body-centred. The full set is retained so
+/// finger articulation can be consumed without a new inference model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandWorldLandmarks {
+    /// 21 world landmarks of one hand, in meters.
+    pub landmarks: [PoseWorldLandmark; HAND_LANDMARK_COUNT],
+    /// MediaPipe's handedness score for this hand, when supplied.
+    pub score: Option<f32>,
+}
+
 /// Three observations belonging to the same anatomical arm and source image.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmLandmarks {
@@ -24,8 +43,12 @@ pub struct ArmLandmarks {
     pub shoulder: PoseWorldLandmark,
     /// Lower-arm origin.
     pub elbow: PoseWorldLandmark,
-    /// Hand origin. No palm orientation is implied by this position.
+    /// Hand origin. No palm orientation is implied by this position alone.
     pub wrist: PoseWorldLandmark,
+    /// Hand landmarker observation spanning the palm plane, when this hand was
+    /// detected beside the pose wrist. A missing hand stays missing; it is never
+    /// replaced with a neutral orientation.
+    pub hand: Option<HandWorldLandmarks>,
 }
 
 /// Both anatomical arms from one pose. Left/right are not preview-mirror labels.
@@ -65,16 +88,29 @@ pub struct ArmTrackingTarget {
     pub wrist: [f32; 3],
     /// Observed elbow offset; controls the bend plane, not an exact elbow constraint.
     pub elbow_pole: [f32; 3],
+    /// Unit normal of the observed palm plane in the canonical tracking basis,
+    /// when the index/little-finger keypoints defined one.
+    ///
+    /// The normal points to the same anatomical hand side as the avatar rest
+    /// geometry's index/pinky cross product, so no per-side sign is applied.
+    /// `None` means "no palm observation", never a fabricated neutral twist.
+    pub palm_normal: Option<[f32; 3]>,
 }
 
 impl ArmTrackingTarget {
     /// Reflects both offsets in the sagittal plane. Pair mirroring must also swap sides.
+    ///
+    /// The palm normal is the cross product of two landmark directions, so a
+    /// reflection flips its sign in addition to reflecting it: `n -> -R n`,
+    /// which is `[x, -y, -z]` in the canonical basis.
     #[must_use]
     pub fn mirrored(self) -> Self {
         let reflect = |[x, y, z]: [f32; 3]| [-x, y, z];
+        let reflect_axial = |[x, y, z]: [f32; 3]| [x, -y, -z];
         Self {
             wrist: reflect(self.wrist),
             elbow_pole: reflect(self.elbow_pole),
+            palm_normal: self.palm_normal.map(reflect_axial),
         }
     }
 }
@@ -103,28 +139,33 @@ impl ArmTrackingTargets {
 
 /// How much an observed channel should replace the avatar's virtual arm.
 ///
-/// `wrist` gates the hand position; `pole` gates the observed bend plane. They
-/// are separate so losing an elbow keeps the visible hand following while the
-/// avatar supplies a natural pole. Both are in `0.0..=1.0`; zero means "use the
-/// virtual arm", not "the observation is at the origin".
+/// `wrist` gates the hand position; `pole` gates the observed bend plane;
+/// `palm` gates the observed forearm twist. They are separate so losing an
+/// elbow keeps the visible hand following while the avatar supplies a natural
+/// pole. All are in `0.0..=1.0`; zero means "use the virtual arm", not "the
+/// observation is at the origin".
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmBlendWeight {
     /// Observed wrist contribution.
     pub wrist: f32,
     /// Observed elbow-bend-plane contribution.
     pub pole: f32,
+    /// Observed palm-plane contribution.
+    pub palm: f32,
 }
 
 impl ArmBlendWeight {
-    /// Fully virtual: neither channel is observed.
+    /// Fully virtual: no channel is observed.
     pub const ZERO: Self = Self {
         wrist: 0.0,
         pole: 0.0,
+        palm: 0.0,
     };
-    /// Fully observed: both channels are trusted.
+    /// Fully observed: every channel is trusted.
     pub const ONE: Self = Self {
         wrist: 1.0,
         pole: 1.0,
+        palm: 1.0,
     };
 }
 
@@ -183,6 +224,7 @@ mod tests {
         let left = ArmTrackingTarget {
             wrist: [0.3, 0.2, 0.4],
             elbow_pole: [0.5, -0.1, 0.2],
+            palm_normal: Some([0.1, 0.2, -0.9]),
         };
         let targets = ArmTrackingTargets {
             left: Some(left),
@@ -192,6 +234,7 @@ mod tests {
         assert_eq!(mirrored.left, None);
         assert_eq!(mirrored.right.unwrap().wrist, [-0.3, 0.2, 0.4]);
         assert_eq!(mirrored.right.unwrap().elbow_pole, [-0.5, -0.1, 0.2]);
+        assert_eq!(mirrored.right.unwrap().palm_normal, Some([0.1, -0.2, 0.9]));
         assert_eq!(mirrored.mirrored(), targets);
     }
 
@@ -201,6 +244,7 @@ mod tests {
             left: ArmBlendWeight {
                 wrist: 0.25,
                 pole: 0.5,
+                palm: 0.75,
             },
             right: ArmBlendWeight::ONE,
         };
@@ -208,6 +252,7 @@ mod tests {
         assert_eq!(mirrored.left, ArmBlendWeight::ONE);
         assert_eq!(mirrored.right.wrist, 0.25);
         assert_eq!(mirrored.right.pole, 0.5);
+        assert_eq!(mirrored.right.palm, 0.75);
         assert_eq!(mirrored.mirrored(), weights);
     }
 
@@ -216,6 +261,7 @@ mod tests {
         let target = ArmTrackingTarget {
             wrist: [0.0; 3],
             elbow_pole: [0.0; 3],
+            palm_normal: None,
         };
         let frame = ArmControlFrame {
             source_seq: FrameSeq(1),
@@ -243,6 +289,7 @@ mod tests {
             shoulder: point,
             elbow: point,
             wrist: point,
+            hand: None,
         };
         let detected = PoseArmFrame {
             source_seq: FrameSeq(7),

@@ -7,9 +7,10 @@
 //! Two features exist:
 //!
 //! - `mediapipe_raw_eye_blink_openness_v1`: the raw MediaPipe
-//!   `EyeBlinkLeft/Right` score as an openness proxy `o = 1 - raw_blink`. It is
-//!   retained for the offline R baseline comparison only; no runtime profile
-//!   uses it after algorithm v2.
+//!   `EyeBlinkLeft/Right` score as an openness proxy `o = 1 - raw_blink`. It
+//!   backs the offline R baseline comparison and the pipeline's built-in
+//!   raw-blink rule used when no verified profile is installed; no v2 profile
+//!   uses it.
 //! - `mediapipe_max_lid_gap_blink_v2`: the per-eye `max_lid_gap_ratio` from
 //!   [`crate::eye_geometry`] as the required closure condition, with the same
 //!   eye's raw blink as an optional auxiliary condition.
@@ -175,6 +176,20 @@ impl EyeThreshold {
             close_at,
             reopen_at,
         })
+    }
+
+    /// Const constructor for this crate's compile-time-known default pairs.
+    ///
+    /// The pair is asserted at compile time, so the constant itself cannot be
+    /// invalid. Runtime values must still use [`Self::new`], which reports a
+    /// failure as a value instead of panicking.
+    #[must_use]
+    pub(crate) const fn from_constants(close_at: f32, reopen_at: f32) -> Self {
+        assert!(close_at >= 0.0 && close_at < reopen_at && reopen_at <= 1.0);
+        Self {
+            close_at,
+            reopen_at,
+        }
     }
 
     /// Openness at or below which an eye in entry position latches closed.

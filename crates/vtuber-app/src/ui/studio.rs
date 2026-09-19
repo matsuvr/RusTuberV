@@ -1517,10 +1517,10 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
             }
             ui.label(
                 RichText::new(lang.pick(
-                    "肩・肘・手首を画面に入れてください。机で隠れた手首は復帰まで仮想の腕で補います。指・掌の回転は対象外です。",
-                    "Keep shoulders, elbows, and wrists in frame. An occluded wrist is bridged by the virtual arm. Finger and palm rotation are out of scope.",
-                    "请将肩、肘、手腕保持在画面内。被遮挡的手腕会用虚拟手臂过渡。手指与手掌旋转不在范围内。",
-                    "어깨, 팔꿈치, 손목을 화면에 유지하세요. 가려진 손목은 가상 팔로 이어집니다. 손가락/손바닥 회전은 범위 밖입니다.",
+                    "肩・肘・手首に加えて手も画面に入れてください。手が見えない腕はPoseの推定を信頼できないため追跡せず、仮想の腕へゆっくり戻します。指の動きは対象外ですが、手のひらの向きは追跡します。",
+                    "Keep the hands in frame along with the shoulders, elbows, and wrists. An arm whose hand is not detected is not trusted from Pose alone and eases back to the virtual arm. Finger articulation is out of scope; the palm orientation is tracked.",
+                    "请将手与肩、肘、手腕一起保持在画面内。看不到手的另一侧手臂不信任Pose估计，会缓慢回到虚拟手臂。手指动作不在范围内，手掌朝向会被跟踪。",
+                    "어깨, 팔꿈치, 손목과 함께 손도 화면에 유지하세요. 손이 보이지 않는 팔은 Pose 추정을 신뢰하지 않고 가상 팔로 천천히 돌아갑니다. 손가락 동작은 범위 밖이지만 손바닥 방향은 추적합니다.",
                 ))
                 .small()
                 .weak(),

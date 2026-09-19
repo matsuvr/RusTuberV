@@ -2,8 +2,27 @@
 
 RusTuberV can force an eye that is judged fully closed to an exact `1.0` blink
 weight, so smoothing, loss recovery, and the avatar writer's epsilon no longer
-leave a thin half-open eye. Correction is off by default and only activates
-when a validated profile is installed.
+leave a thin half-open eye.
+
+Correction is always active. When no validated profile is installed it uses the
+built-in raw-blink rule; installing a validated profile replaces that rule with
+the measured lid-gap judgement.
+
+## Built-in raw-blink rule (no profile)
+
+Raw MediaPipe `EyeBlinkLeft/Right` never reaches `1.0` on a real closed eye
+(measured closed-frame maximum ≈ 0.88), so the direct/Perfect Sync path leaves a
+thin opening. Without a profile the pipeline judges each eye from that raw
+score alone, in openness units (`o = 1 - raw_blink`):
+
+- the eye closes when `o <= close_at` and reopens when `o >= reopen_at`, with a
+  `0.10` raw-blink hysteresis band;
+- left `close_at = 0.35` / `reopen_at = 0.45` (raw blink 0.65 / 0.55) and right
+  `close_at = 0.40` / `reopen_at = 0.50` (raw blink 0.60 / 0.50).
+
+These are the raw-blink (R) frontier points from the local labelled takes in
+[`eye-closure-run-v2-20260913.md`](eye-closure-run-v2-20260913.md); they are
+chosen for a low false-close rate. A normal open eye is never pinned.
 
 Since algorithm v2 the primary condition is the MediaPipe lid geometry: for
 each eye the perpendicular gaps of three upper/lower lid pairs are divided by
@@ -109,9 +128,9 @@ fingerprints match the running MediaPipe task bundle is installed; a candidate
 is refused.
 
 The app loads the profile once at startup. A missing, malformed, foreign, or
-incompatible profile is logged and ignored; no default threshold is
-substituted. A v1 raw-blink profile is not migrated and is ignored. Removing
-the file and restarting restores the previous behavior.
+incompatible profile is logged and ignored, and the built-in raw-blink rule
+stays in effect. A v1 raw-blink profile is not migrated and is ignored. Removing
+the file and restarting returns to the built-in raw-blink rule.
 
 ## Profile format (v2)
 

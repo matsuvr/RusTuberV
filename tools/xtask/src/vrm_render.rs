@@ -289,7 +289,7 @@ fn write_frame(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError>
 /// Writes the frame as a PNG so the render can be inspected as an image.
 fn write_png(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
     let mut rgba = Vec::with_capacity(frame.data.len());
-    for pixel in frame.data.chunks_exact(4) {
+    for pixel in frame.data.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
     let buffer = image::RgbaImage::from_raw(WIDTH, HEIGHT, rgba)
@@ -301,20 +301,19 @@ fn write_png(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
 
 /// RGBA at the face, jacket and legs so a missing material is visible.
 fn probes(data: &[u8]) -> Vec<[u8; 4]> {
+    // `render_model` inserts the WIDTH×HEIGHT BGRA output profile, so the
+    // frame buffer is exactly WIDTH×HEIGHT×4 bytes and every probe
+    // coordinate below is inside it.
+    #[allow(clippy::indexing_slicing)]
     let at = |x: u32, y: u32| {
         let index = ((y * WIDTH + x) * 4) as usize;
-        [
-            data[index],
-            data[index + 1],
-            data[index + 2],
-            data[index + 3],
-        ]
+        [data[index], data[index + 1], data[index + 2], data[index + 3]]
     };
     vec![at(128, 55), at(128, 130), at(128, 215)]
 }
 
 fn opaque_pixels(data: &[u8]) -> usize {
-    data.chunks_exact(4).filter(|pixel| pixel[3] > 0).count()
+    data.as_chunks::<4>().0.iter().filter(|pixel| pixel[3] > 0).count()
 }
 
 fn mean(data: &[u8]) -> f64 {

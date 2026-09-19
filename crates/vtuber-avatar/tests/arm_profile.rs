@@ -26,6 +26,7 @@ fn pose(upper_arm_delta: Quat, lower_arm_delta: Quat) -> ResolvedArmPose {
         lower_arm: Entity::from_raw_u32(2).unwrap(),
         upper_arm_delta,
         lower_arm_delta,
+        hand: None,
         shoulder: None,
         fingers: Default::default(),
     }

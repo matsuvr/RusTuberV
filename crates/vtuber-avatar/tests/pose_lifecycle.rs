@@ -92,13 +92,17 @@ fn missing_frame_targets_neutral() {
 }
 
 #[test]
-fn lost_tracking_targets_neutral_without_removing_input() {
+fn lost_tracking_keeps_the_input_active_for_a_glide() {
     let (mut app, root) = ready_app(Some(control_frame(TrackingState::LostHold)));
     app.update();
 
+    // The control frame carries the loss glide and a decaying confidence; an
+    // inactive input would make the dependency zero its target instantly and
+    // snap the pose to rest instead of easing there.
     let input = app.world().get::<BodyTrackingPoseInput>(root).unwrap();
-    assert!(!input.active);
+    assert!(input.active);
     assert_eq!(input.yaw_radians, -0.4);
+    assert_eq!(input.weight, 0.8);
 }
 
 #[test]
