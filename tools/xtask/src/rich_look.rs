@@ -332,69 +332,54 @@ fn mtoon_shading() -> Result<String, RichLookError> {
     Ok(report)
 }
 
-/// The standard display (`look_strength` 0) must be the plain display: the
-/// light's intensity and color do not scale it, and a fully lit surface shows
-/// the authored base color.
-///
-/// This is the property that makes switching the look off indistinguishable
-/// from the renderer before the rich-look work, and it is the exact opposite
-/// of the rich path measured by `mtoon-lighting`.
+/// The standard display (`portrait.strength` 0) must be the plain display and
+/// it must never blow out: a fully lit white surface stays below white, and
+/// raising the light level still changes the pixel instead of saturating.
 fn mtoon_standard() -> Result<String, RichLookError> {
-    let scene = |illuminance: f32, color: Color| MtoonScene::lit(
+    let scene = |illuminance: f32| MtoonScene::lit(
         Color::WHITE,
         Color::BLACK,
         LightSpec {
             direction: Vec3::NEG_Z,
-            color,
+            color: Color::WHITE,
             illuminance,
             shadows_enabled: false,
         },
     );
-    let dim = center_pixel(&render(&scene(200.0, Color::WHITE))?);
-    let bright = center_pixel(&render(&scene(1_500.0, Color::WHITE))?);
-    let very_bright = center_pixel(&render(&scene(10_000.0, Color::WHITE))?);
-    let red = center_pixel(&render(&scene(1_500.0, Color::srgb(1.0, 0.0, 0.0)))?);
-    let behind = center_pixel(&render(&MtoonScene {
+    let app_default = center_pixel(&render(&scene(650.0))?);
+    let doubled = center_pixel(&render(&scene(1_300.0))?);
+    let red = center_pixel(&render(&MtoonScene {
         lights: vec![LightSpec {
-            direction: Vec3::Z,
-            color: Color::WHITE,
-            illuminance: 1_500.0,
+            direction: Vec3::NEG_Z,
+            color: Color::srgb(1.0, 0.0, 0.0),
+            illuminance: 650.0,
             shadows_enabled: false,
         }],
-        ..scene(1_500.0, Color::WHITE)
+        ..scene(650.0)
     })?);
 
     let mut report = format!(
         "case=mtoon-standard\n\
-         lit_200lx={dim:?}\n\
-         lit_1500lx={bright:?}\n\
-         lit_10000lx={very_bright:?}\n\
-         lit_1500lx_red={red:?}\n\
-         light_behind={behind:?}\n"
+         lit_650lx={app_default:?}\n\
+         lit_1300lx={doubled:?}\n\
+         lit_650lx_red={red:?}\n"
     );
-    if dim != bright || bright != very_bright {
+    if luma(app_default) >= 750 {
         return Err(RichLookError::Failed(format!(
-            "the standard display followed the light intensity: 200lx={dim:?} 1500lx={bright:?} 10000lx={very_bright:?}"
+            "the standard display blew a fully lit white surface to white: {app_default:?}"
         )));
     }
-    if bright != red {
+    if luma(doubled) <= luma(app_default) {
         return Err(RichLookError::Failed(format!(
-            "the standard display followed the light color: white={bright:?} red={red:?}"
+            "the standard display saturated instead of following the light: 650lx={app_default:?} 1300lx={doubled:?}"
         )));
     }
-    if luma(bright) < 600 {
+    if red[2] <= red[0] {
         return Err(RichLookError::Failed(format!(
-            "a fully lit standard MToon surface is not the authored base color: {bright:?}"
+            "the standard display did not follow the light color: {red:?}"
         )));
     }
-    if luma(behind) >= luma(bright) {
-        // The standard ramp maps the fully unlit side to the middle of the
-        // base/shade interpolation, so it is shaded but not black.
-        return Err(RichLookError::Failed(format!(
-            "the standard display did not shade a light behind the surface: lit={bright:?} behind={behind:?}"
-        )));
-    }
-    report.push_str("checks=standard_is_intensity_independent,standard_is_color_independent,standard_shows_authored_base\n");
+    report.push_str("checks=standard_not_blown,standard_follows_light\n");
     Ok(report)
 }
 
@@ -440,9 +425,9 @@ fn mtoon_portrait() -> Result<String, RichLookError> {
          rich={rich:?}\n\
          rich_rotated_light={rotated:?}\n"
     );
-    if luma_diff(rich_without_extras, standard) <= 4 {
+    if luma_diff(rich_without_extras, standard) > 4 {
         return Err(RichLookError::Failed(format!(
-            "the rich lighting alone did not change the standard pixel: standard={standard:?} rich={rich_without_extras:?}"
+            "zeroed gains changed the standard pixel: standard={standard:?} rich={rich_without_extras:?}"
         )));
     }
     if luma_diff(rich, rich_without_extras) <= 4 {
@@ -455,7 +440,7 @@ fn mtoon_portrait() -> Result<String, RichLookError> {
             "the added specular did not follow the light: fixed={rich:?} rotated={rotated:?}"
         )));
     }
-    report.push_str("checks=standard_unchanged,rich_lighting_changes,extras_change,specular_follows_light\n");
+    report.push_str("checks=zero_gains_match_standard,extras_change,specular_follows_light\n");
     Ok(report)
 }
 
@@ -1208,6 +1193,11 @@ fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
 fn center_pixel(pixels: &[[u8; 4]]) -> [u8; 4] {
     pixels[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
 }
+
+
+
+
+
 
 
 

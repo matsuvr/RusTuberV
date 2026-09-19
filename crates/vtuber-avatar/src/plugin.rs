@@ -225,10 +225,12 @@ fn setup_scene(
         RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER),
     ));
 
-    // Key light.
+    // Key light. The level is chosen so a fully lit white surface exposes to
+    // about 0.7 with the default camera exposure, leaving headroom for the
+    // material's own rim/emission instead of clipping to white.
     commands.spawn((
         DirectionalLight {
-            illuminance: 1500.0,
+            illuminance: 650.0,
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.5, 0.0)),

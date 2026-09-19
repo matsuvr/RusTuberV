@@ -89,22 +89,22 @@ pub const STUDIO_PRESET: StudioPreset = StudioPreset {
     key: StudioLightPreset {
         direction: Vec3::new(0.45, -0.40, -0.80),
         color: LinearRgba::new(1.0, 0.97, 0.93, 1.0),
-        illuminance: 900.0,
+        illuminance: 550.0,
         shadows_enabled: true,
     },
     fill: StudioLightPreset {
         direction: Vec3::new(-0.55, -0.15, -0.82),
         color: LinearRgba::new(0.85, 0.90, 1.0, 1.0),
-        illuminance: 220.0,
+        illuminance: 180.0,
         shadows_enabled: false,
     },
     rim: StudioLightPreset {
         direction: Vec3::new(-0.20, -0.35, 0.90),
         color: LinearRgba::new(1.0, 1.0, 1.0, 1.0),
-        illuminance: 320.0,
+        illuminance: 260.0,
         shadows_enabled: false,
     },
-    environment_intensity: 200.0,
+    environment_intensity: 160.0,
 };
 
 /// The added portrait terms' nominal values.
@@ -161,5 +161,6 @@ mod tests {
         );
     }
 }
+
 
 

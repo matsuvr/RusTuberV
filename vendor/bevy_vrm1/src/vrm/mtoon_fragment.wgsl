@@ -284,17 +284,25 @@ fn apply_standard_mtoon_lighting(in: MToonInput) -> vec4<f32> {
     let indirect = apply_standard_global_illumination(in);
     let emissive = apply_emissive_light(in);
     let rim = apply_rim_lighting(in.pbr, in.uv, direct, indirect);
-    return vec4<f32>(direct + indirect + emissive + rim, in.lit_color.a);
+    // The camera exposure is applied once, exactly as in the rich path, so the
+    // scene light's level reaches the standard display and the highlight
+    // roll-off has headroom to work with.
+    return vec4<f32>(view.exposure * (direct + indirect + rim) + emissive, in.lit_color.a);
 }
 
 fn apply_standard_directional_lights(in: MToonInput) -> vec3<f32> {
     let shade_color = calc_shade_color(in);
     let shade_shift = calc_mtoon_lighting_reflectance_shading_shift(in);
-    var shading: f32 = 0.0;
+    var direct: vec3<f32> = vec3(0.);
     for (var i: u32 = 0u; i < lights.n_directional_lights; i = i + 1u) {
-        shading += calc_standard_lighting_shading(in, i, shade_shift);
+        let light = &lights.directional_lights[i];
+        let shading = calc_standard_lighting_shading(in, i, shade_shift);
+        // The light's radiance is applied here and the camera exposure once in
+        // the composition, so the scene light controls the standard display's
+        // brightness and a fully lit surface is not driven to white.
+        direct += mtoon_direct_term(in.lit_color.rgb, shade_color, shading, (*light).color.rgb);
     }
-    return mix(shade_color, in.lit_color.rgb, shading);
+    return direct;
 }
 
 fn calc_standard_lighting_shading(
@@ -328,7 +336,7 @@ fn apply_standard_global_illumination(in: MToonInput) -> vec3<f32> {
         in.lit_color.rgb,
         in.pbr.material.diffuse_transmission,
     );
-    return view.exposure * mtoon_ambient(in, in.world_normal, diffuse_color);
+    return mtoon_ambient(in, in.world_normal, diffuse_color);
 }
 
 /// The shadow visibility of one directional light (1.0 when it casts none).
@@ -443,5 +451,6 @@ fn calc_diffuse_color(
 ) -> vec3<f32> {
     return base_color * (1.0 - diffuse_transmission);
 }
+
 
 

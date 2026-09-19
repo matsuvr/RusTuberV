@@ -46,27 +46,24 @@ The direct term follows each light's own radiance, light color is per light,
 and two lights add. The pre-fix renderer (issue #69) multiplied no light
 radiance at all, so it could not produce this table.
 
-`mtoon-standard`: the standard path (`MToonMaterial::look_strength == 0`)
-renders a fully lit white plane at `[255, 255, 255, 255]` for 200 lx, 1500 lx
-and 10000 lx, and for a red light as well as a white one; a light behind the
-surface gives `[187, 187, 187, 255]`. The light's intensity and color do not
-scale the standard display and a fully lit surface shows the authored base
-color. `mtoon-lighting` is the same scene with `look_strength == 1`, where the
-intensity and color do matter.
+`mtoon-standard`: a fully lit white plane at the app's 650 lx key reads
+`[211, 211, 211, 255]` (225 with the app's ambient), below white; at 1300 lx it
+reaches `[255, 255, 255, 255]`, and a red light keeps the red channel. The
+standard display follows the scene light's level and color and leaves headroom
+instead of clipping. The standard path applies each light's radiance and the
+camera exposure once, exactly as the rich path does; the difference between off
+and on is the portrait extras and the studio rig, not the brightness formula.
 
-`MToonMaterial::look_strength` selects the path, and the zero path is a
-verbatim reproduction of the renderer before this epic:
+The light level is the app's own `setup_scene` key (650 lx): a fully lit white
+surface exposes to about 0.73 including the default ambient, so a material's
+own rim or emission has room before white. Bevy applies `Tonemapping` only to
+HDR views, so a real highlight roll-off needs the HDR output of issue #74; at
+the current LDR output the headroom is what keeps the display off white.
 
-| standard path | source before the epic (`db364e0`) |
-|---|---|
-| `mtoon_standard_shading` | `calc_mtoon_lighting_shading` (saturate + `mtoon_linearstep` ramp) |
-| `apply_standard_directional_lights` | `apply_directional_lights` (accumulate the shading, one `mix`) |
-| `apply_standard_global_illumination` | `apply_global_illumination` (`view.exposure * ambient_light`) |
-| `apply_standard_mtoon_lighting` | `apply_mtoon_lighting` (`direct + gi + emissive + rim`) |
-
-The normal-map evaluation and the cutout shadow prepass are also gated on
-`look_strength > 0`, so the standard display keeps the plain geometric normal
-and the plain depth-only shadow.
+`mtoon-portrait`: `standard` `[244,244,244]`, `rich_without_extras`
+`[244,244,244]` (zeroed gains leave the standard pixel), `rich`
+`[253,253,253]` (the gains add), and the same rich scene with a rotated key
+`[244,244,244]` (the added specular follows the light).
 
 `mtoon-shading`: front-lit `124`, 90-degree side `89`, side with +0.5 shift
 `124`, light behind `0`; the toony=0 ramp has 17 intermediate samples on the
@@ -101,17 +98,16 @@ one with it on, and writes both frames (`.bgra` and `.png`).
 
 | model | off mean | on mean | mean abs diff |
 |---|---|---|---|
-| 1565994099520778586 | 72.03 | 75.07 | 3.13 |
-| AvatarSample_C | 36.99 | 43.58 | 6.59 |
-| IrisPart1 | 36.89 | 38.47 | 2.60 |
-| IrisPart1(ShapeKey Reduce) | 36.89 | 38.42 | 2.53 |
-| IrisPart1(ShapeKey Reduce2) | 36.89 | 38.42 | 2.53 |
-| RearAlice_3.0 | 29.41 | 30.49 | 2.22 |
-| RearAliceLite_3.0 | 29.43 | 30.51 | 2.22 |
-| Sapphy | 38.68 | 40.80 | 3.34 |
-| SapphyPerfectSync | 38.68 | 40.80 | 3.34 |
-| つくよみちゃん（タイプA・マテリアル数18） | 39.01 | 38.95 | 0.83 |
-
+| 1565994099520778586 | 63.52 | 71.90 | 8.38 |
+| AvatarSample_C | 33.56 | 39.65 | 6.08 |
+| IrisPart1 | 31.26 | 35.62 | 4.36 |
+| IrisPart1(ShapeKey Reduce) | 31.21 | 35.56 | 4.36 |
+| IrisPart1(ShapeKey Reduce2) | 31.21 | 35.56 | 4.36 |
+| RearAlice_3.0 | 24.73 | 28.34 | 3.63 |
+| RearAliceLite_3.0 | 24.75 | 28.36 | 3.63 |
+| Sapphy | 35.09 | 38.41 | 3.32 |
+| SapphyPerfectSync | 35.09 | 38.41 | 3.32 |
+| つくよみちゃん（タイプA・マテリアル数18） | 32.53 | 36.35 | 3.82 |
 Every model keeps the same opaque pixel count in both states (the geometry and
 alpha are untouched) and every model differs when the look is switched on, so
 the switch has a measurable effect on all of them.
@@ -185,4 +181,5 @@ be switched on and its strength adjusted from the settings screen.
 ## Settings screen controls (part of #75)
 
 (see above)
+
 
