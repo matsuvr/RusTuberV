@@ -36,6 +36,7 @@ pub mod gaze;
 pub mod idle;
 pub mod lifecycle;
 pub mod load;
+pub mod look;
 pub mod mirror;
 pub mod placeholder;
 pub mod plugin;
@@ -75,7 +76,7 @@ pub use bevy_vrm1::prelude::{
 pub use bind::BindTriggered;
 pub use binding::{AvatarBindError, AvatarBinding, bind_humanoid_bones};
 pub use body_motion::{
-    BodyMotionProfiles, LossIdleState, PositionInputMetrics, position_channels,
+    BodyFollowFilter, BodyMotionProfiles, LossIdleState, PositionInputMetrics, position_channels,
     reset_position_metrics_on_lifecycle_change, update_body_tracking_position_input,
 };
 pub use capabilities::{
@@ -105,6 +106,11 @@ pub use lifecycle::*;
 pub use load::{
     AssetPathError, AvatarAssetId, ExpectedVrmGeneration, ImportedAvatar, LoadImportedAvatarError,
     LoadImportedAvatarRequest, LoadImportedAvatarResult, PendingAvatarLoad, UserAssetPath,
+};
+pub use look::{
+    AvatarLookSettings, LookSettingsChanged, RichLookSettings, StandardLookBase, StandardLookBases,
+    apply_standard_portrait_settings, blend_look_scalar, capture_standard_look_base,
+    effective_look_strength, resolve_standard_portrait, studio_environment_cubemap,
 };
 pub use mirror::AvatarMotionMirror;
 pub use plugin::{StartupModelPath, VtuberAvatarPlugin};

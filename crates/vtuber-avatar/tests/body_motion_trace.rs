@@ -113,6 +113,7 @@ fn build_app(generation: AvatarGeneration) -> (App, TraceRig) {
         .init_resource::<ArmPoseOverrideStore>()
         .init_resource::<vtuber_avatar::PositionInputMetrics>()
         .init_resource::<vtuber_avatar::LossIdleState>()
+        .init_resource::<vtuber_avatar::BodyFollowFilter>()
         .init_resource::<vtuber_avatar::PoseApplyMetrics>()
         .init_resource::<AvatarMotionMirror>()
         .add_systems(

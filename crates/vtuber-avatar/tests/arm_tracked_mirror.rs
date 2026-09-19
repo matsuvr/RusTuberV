@@ -16,10 +16,11 @@
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{RestGlobalTransform, RestTransform};
 use vtuber_avatar::{
-    ArmChainBinding, ArmChainCapabilities, ArmMotionGeometry, ArmPoseSourceKind, ArmRestGeometry,
-    ArmSide, ArmSourceSelection, AvatarAssetId, AvatarBinding, AvatarGeneration, AvatarLifecycle,
-    AvatarMotionMirror, DynamicArmTargets, RestSpaceBonePose, TrackedArmControl,
-    build_arm_motion_rest_geometry, update_tracked_arm_targets,
+    ArmChainBinding, ArmChainCapabilities, ArmMotionGeometry, ArmPipelineInput, ArmPoseProfile,
+    ArmPoseSourceKind, ArmRestGeometry, ArmSide, ArmSourceSelection, AvatarAssetId, AvatarBinding,
+    AvatarGeneration, AvatarLifecycle, AvatarMotionMirror, DynamicArmProfile, DynamicArmTargets,
+    RestSpaceBonePose, TrackedArmControl, build_arm_motion_rest_geometry, resolve_arm_pose,
+    update_tracked_arm_targets,
 };
 use vtuber_core::arm_tracking::{
     ArmBlendWeight, ArmBlendWeights, ArmControlFrame, ArmTrackingTarget, ArmTrackingTargets,
@@ -196,6 +197,7 @@ fn observed_target() -> ArmTrackingTarget {
     ArmTrackingTarget {
         wrist: [0.30, -0.24, 0.05],
         elbow_pole: [0.16, -0.10, 0.02],
+        palm_normal: Some([0.10, 0.20, -0.90]),
     }
 }
 
@@ -205,6 +207,7 @@ fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
     let weight = ArmBlendWeight {
         wrist: 0.25,
         pole: 0.5,
+        palm: 0.75,
     };
     let (mut app, rig) = build_app(true, generation);
 
@@ -264,6 +267,95 @@ fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
     assert_eq!(
         mirrored_right.upper_arm, rig.right_upper,
         "the mirrored target must resolve on the avatar's right arm"
+    );
+}
+
+#[test]
+fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
+    let generation = AvatarGeneration(23);
+    let (mut app, rig) = build_app(false, generation);
+
+    set_control(
+        &mut app,
+        generation,
+        control_frame(
+            1,
+            ArmTrackingTargets {
+                left: Some(observed_target()),
+                right: None,
+            },
+            ArmBlendWeights {
+                left: ArmBlendWeight::ONE,
+                right: ArmBlendWeight::ZERO,
+            },
+        ),
+    );
+    app.update();
+    let first = resolved_targets(&app, &rig)
+        .left
+        .expect("the first frame resolves");
+
+    // The virtual blend source, computed exactly as the system does, then a
+    // tracked target whose converted pole is reflected through the converted
+    // wrist, so the two planes are opposed and blending is degenerate.
+    let opposed = {
+        let binding = app.world().get::<AvatarBinding>(rig.root).expect("binding");
+        let chain = binding.left_arm.as_ref().expect("left chain");
+        let motion = app
+            .world()
+            .get::<ArmMotionGeometry>(rig.root)
+            .expect("motion geometry")
+            .left
+            .as_ref()
+            .expect("left motion");
+        let input = ArmPipelineInput {
+            chain,
+            motion,
+            legacy_profile: ArmPoseProfile::default(),
+            dynamic_profile: DynamicArmProfile::default(),
+            head_offset: Vec3::ZERO,
+            body_offset: Vec3::ZERO,
+            torso_delta: Quat::IDENTITY,
+            body_scale_meters: 0.7,
+        };
+        let virtual_target = resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
+            .expect("pipeline error")
+            .expect("virtual target")
+            .1
+            .hand_target;
+        let total = chain.rest.total_arm_length;
+        let to_tracking = |p: Vec3| ((p - chain.rest.upper_arm.position) / total).to_array();
+        ArmTrackingTarget {
+            wrist: to_tracking(virtual_target.wrist),
+            elbow_pole: to_tracking(virtual_target.wrist * 2.0 - virtual_target.elbow_pole),
+            palm_normal: None,
+        }
+    };
+
+    set_control(
+        &mut app,
+        generation,
+        control_frame(
+            2,
+            ArmTrackingTargets {
+                left: Some(opposed),
+                right: None,
+            },
+            ArmBlendWeights {
+                left: ArmBlendWeight::ONE,
+                right: ArmBlendWeight::ZERO,
+            },
+        ),
+    );
+    app.update();
+    let held = resolved_targets(&app, &rig);
+    assert_eq!(held.source_seq, Some(FrameSeq(2)));
+    assert_eq!(
+        held.left,
+        Some(first),
+        "a degenerate tick must hold the previous pose, not drop to the default: held={:?} first={:?}",
+        held.left,
+        first
     );
 }
 

@@ -14,11 +14,20 @@ use vtuber_core::types::{HeadTranslationSignal, MonoTimeNs};
 /// Parameters for the translation filter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TranslationFilterParams {
-    /// Smoothing time constant in seconds.
+    /// Smoothing time constant in seconds while observations continue the
+    /// motion the filter is already following.
     ///
     /// Larger values suppress more noise at the cost of a softer body
     /// follow.
     pub time_constant_sec: f32,
+    /// Smoothing time constant used when an observation jumps away from the
+    /// previous one.
+    ///
+    /// Never smaller than [`Self::time_constant_sec`].
+    pub slow_time_constant_sec: f32,
+    /// Observation rate in meters per second at which the response has fully
+    /// slowed to [`Self::slow_time_constant_sec`].
+    pub jump_rate_meters_per_sec: f32,
     /// Maximum accepted delta-time in seconds.
     ///
     /// Larger gaps are clamped so that a stale observation cannot fully snap
@@ -29,7 +38,15 @@ pub struct TranslationFilterParams {
 impl Default for TranslationFilterParams {
     fn default() -> Self {
         Self {
-            time_constant_sec: 0.1,
+            // A sitting subject's monocular head translation wobbles by
+            // several centimeters at around 1 Hz; the body-follow filter
+            // downstream cannot remove what it cannot see, so the observation
+            // itself is smoothed harder than the rotation filter. The fast
+            // constant keeps a genuine lean responsive while the slow one
+            // absorbs a monocular depth jump.
+            time_constant_sec: 0.10,
+            slow_time_constant_sec: 0.25,
+            jump_rate_meters_per_sec: 1.5,
             max_dt_sec: 0.5,
         }
     }
@@ -39,6 +56,19 @@ impl Default for TranslationFilterParams {
 struct FilterState {
     translation: HeadTranslationSignal,
     last_time: MonoTimeNs,
+    /// The observation the filter last received, used to measure how far the
+    /// next one departs from it.
+    last_target: HeadTranslationSignal,
+    /// When `last_target` first changed, so the departure is measured over the
+    /// observation interval rather than over one render tick.
+    last_target_time: MonoTimeNs,
+}
+
+/// Euclidean distance between two translation observations, in meters.
+fn departure_distance(from: HeadTranslationSignal, to: HeadTranslationSignal) -> f32 {
+    (to.x_meters - from.x_meters)
+        .hypot(to.y_meters - from.y_meters)
+        .hypot(to.z_meters - from.z_meters)
 }
 
 /// Exponential smoothing filter for the head translation signal.
@@ -89,16 +119,36 @@ impl TranslationFilter {
             self.state = Some(FilterState {
                 translation: target,
                 last_time: timestamp,
+                last_target: target,
+                last_target_time: timestamp,
             });
             return target;
         };
 
         let dt_ns = timestamp.0.saturating_sub(state.last_time.0);
         let dt_sec = ((dt_ns as f32) / 1_000_000_000.0).min(self.params.max_dt_sec);
-        let tau = self.params.time_constant_sec;
         if dt_sec <= 0.0 {
             return state.translation;
         }
+
+        // How fast this observation departs from the previous one. A held
+        // sample repeats `last_target`, so it stays on the fast response.
+        let observation_changed = target != state.last_target;
+        let rate = if observation_changed {
+            super::damped::observation_rate(
+                departure_distance(state.last_target, target),
+                (timestamp.0.saturating_sub(state.last_target_time.0) as f32) * 1.0e-9,
+            )
+        } else {
+            0.0
+        };
+        let response = super::damped::ResidualResponse::new(
+            self.params.time_constant_sec,
+            self.params.slow_time_constant_sec,
+            self.params.jump_rate_meters_per_sec,
+        );
+        let tau = response.time_constant_sec(rate);
+
         let alpha = 1.0 - (-dt_sec / tau).exp();
         let blend_axis = |current: f32, goal: f32| current + (goal - current) * alpha;
         let smoothed = HeadTranslationSignal {
@@ -110,6 +160,16 @@ impl TranslationFilter {
         self.state = Some(FilterState {
             translation: smoothed,
             last_time: timestamp,
+            last_target: if observation_changed {
+                target
+            } else {
+                state.last_target
+            },
+            last_target_time: if observation_changed {
+                timestamp
+            } else {
+                state.last_target_time
+            },
         });
         smoothed
     }
@@ -131,8 +191,31 @@ mod tests {
     fn params() -> TranslationFilterParams {
         TranslationFilterParams {
             time_constant_sec: TAU,
+            slow_time_constant_sec: TAU,
+            jump_rate_meters_per_sec: 1.5,
             max_dt_sec: 0.5,
         }
+    }
+
+    #[test]
+    fn a_small_step_uses_the_fast_response_and_a_jump_the_slow_one() {
+        let step = |value: f32| HeadTranslationSignal::tracked(value, 0.0, 0.0);
+        let run = |target: HeadTranslationSignal| {
+            let mut filter = TranslationFilter::new(TranslationFilterParams::default());
+            let _ = filter.update(step(0.0), MonoTimeNs(0));
+            filter.update(target, MonoTimeNs(16_666_667)).x_meters
+        };
+
+        // A millimeter-scale wobble is normal; a 30 cm one-observation change
+        // is a monocular depth jump.
+        let small = run(step(0.005));
+        let jump = run(step(0.3));
+        assert!(
+            small / 0.005 > (jump / 0.3) * 1.5,
+            "a small wobble must follow faster than a depth jump: small={}, jump={}",
+            small / 0.005,
+            jump / 0.3
+        );
     }
 
     #[test]

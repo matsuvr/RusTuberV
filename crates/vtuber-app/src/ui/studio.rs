@@ -1074,6 +1074,7 @@ fn overview(
         },
     );
     expression_status_section(ui, vm, state, lang);
+    rich_look_section(ui, vm, state, lang);
 }
 
 fn avatar_page(
@@ -1516,10 +1517,10 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
             }
             ui.label(
                 RichText::new(lang.pick(
-                    "肩・肘・手首を画面に入れてください。机で隠れた手首は復帰まで仮想の腕で補います。指・掌の回転は対象外です。",
-                    "Keep shoulders, elbows, and wrists in frame. An occluded wrist is bridged by the virtual arm. Finger and palm rotation are out of scope.",
-                    "请将肩、肘、手腕保持在画面内。被遮挡的手腕会用虚拟手臂过渡。手指与手掌旋转不在范围内。",
-                    "어깨, 팔꿈치, 손목을 화면에 유지하세요. 가려진 손목은 가상 팔로 이어집니다. 손가락/손바닥 회전은 범위 밖입니다.",
+                    "肩・肘・手首に加えて手も画面に入れてください。手が見えない腕はPoseの推定を信頼できないため追跡せず、仮想の腕へゆっくり戻します。指の動きは対象外ですが、手のひらの向きは追跡します。",
+                    "Keep the hands in frame along with the shoulders, elbows, and wrists. An arm whose hand is not detected is not trusted from Pose alone and eases back to the virtual arm. Finger articulation is out of scope; the palm orientation is tracked.",
+                    "请将手与肩、肘、手腕一起保持在画面内。看不到手的另一侧手臂不信任Pose估计，会缓慢回到虚拟手臂。手指动作不在范围内，手掌朝向会被跟踪。",
+                    "어깨, 팔꿈치, 손목과 함께 손도 화면에 유지하세요. 손이 보이지 않는 팔은 Pose 추정을 신뢰하지 않고 가상 팔로 천천히 돌아갑니다. 손가락 동작은 범위 밖이지만 손바닥 방향은 추적합니다.",
                 ))
                 .small()
                 .weak(),
@@ -1656,7 +1657,46 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
     );
 }
 
+/// Rich-look switch and lighting/effect strength.
+///
+/// The strength scales the whole look, so at 0 the scene is the standard
+/// display even while the switch is on.
+fn rich_look_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+    let switch = lang.pick("リッチ表示", "Enhanced look", "增强显示", "고급 렌더링");
+    section(ui, switch, |ui| {
+        let mut enabled = vm.look.enabled;
+        if ui.checkbox(&mut enabled, switch).changed() {
+            state.emit(UiAction::SetRichLookEnabled { enabled });
+        }
+        let mut percent = vm.look.strength * 100.0;
+        let slider = ui.add_enabled(
+            enabled,
+            egui::Slider::new(&mut percent, 0.0..=100.0)
+                .suffix("%")
+                .text(lang.pick(
+                    "明るさ・効果の強さ",
+                    "Lighting / effect strength",
+                    "亮度·效果强度",
+                    "밝기·효과 강도",
+                )),
+        );
+        if slider.changed() {
+            state.emit(UiAction::SetRichLookStrength {
+                strength: (percent / 100.0).clamp(0.0, 1.0),
+            });
+        }
+        ui.add_space(4.0);
+        ui.label(lang.pick(
+            "照明と質感をまとめて調整します。VRMファイルは変更しません。",
+            "Adjust lighting and materials together. Your VRM file is not modified.",
+            "同时调整灯光和材质，不修改 VRM 文件。",
+            "조명과 재질을 함께 조정합니다. VRM 파일은 변경하지 않습니다.",
+        ));
+    });
+}
+
 fn settings_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+    rich_look_section(ui, vm, state, lang);
     expression_settings_section(ui, vm, state, lang);
     section(
         ui,
@@ -2725,6 +2765,38 @@ mod tests {
             assert!(
                 expression_availability_suffix(&ExpressionAvailability::Ready, lang).is_empty()
             );
+        }
+    }
+
+    #[test]
+    fn rich_look_view_model_default_matches_the_look_settings() {
+        let model = crate::ui_model::RichLookViewModel::default();
+        let settings = vtuber_avatar::RichLookSettings::default();
+        assert_eq!(model.enabled, settings.enabled);
+        assert_eq!(model.strength, settings.strength);
+    }
+
+    #[test]
+    fn rich_look_section_renders_in_every_language() {
+        for lang in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            let ctx = egui::Context::default();
+            let mut state = UiState::default();
+            let mut vm = UiViewModel::default();
+            vm.look.enabled = true;
+            vm.look.strength = 0.5;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                rich_look_section(ui, &vm, &mut state, lang);
+            });
+            let mut off = vm;
+            off.look.enabled = false;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                rich_look_section(ui, &off, &mut state, lang);
+            });
         }
     }
 

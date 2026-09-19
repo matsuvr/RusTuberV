@@ -1146,6 +1146,7 @@ pub fn update_tracked_arm_targets(
         Option<&mut DynamicArmTargets>,
     )>,
     torso_rotations: Query<(&GlobalTransform, &RestGlobalTransform)>,
+    #[cfg(debug_assertions)] mut debug_frame: Local<u32>,
 ) {
     if selection.mode != ArmPoseSourceKind::TrackedPose {
         return;
@@ -1208,22 +1209,91 @@ pub fn update_tracked_arm_targets(
             tracking_to_rest,
         )
     };
+    // A tick whose blend or solve is degenerate keeps the last resolved pose
+    // for that side instead of clearing it: clearing would drop the side to the
+    // static default pose for one frame, which reads as a snap. The generation
+    // guard keeps a replaced model from ever receiving the previous pose.
+    let previous = *targets;
+    let hold = |side: Option<crate::arm_pose::ResolvedArmPose>,
+                resolved: Option<crate::arm_pose::ResolvedArmPose>| {
+        resolved.or(if previous.generation == Some(binding.generation) {
+            side
+        } else {
+            None
+        })
+    };
     *targets = DynamicArmTargets {
         generation: Some(binding.generation),
         source_seq: Some(frame.source_seq),
-        left: resolve(
-            binding.left_arm.as_ref(),
-            motion.left.as_ref(),
-            frame_targets.left,
-            frame_weights.left,
+        left: hold(
+            previous.left,
+            resolve(
+                binding.left_arm.as_ref(),
+                motion.left.as_ref(),
+                frame_targets.left,
+                frame_weights.left,
+            ),
         ),
-        right: resolve(
-            binding.right_arm.as_ref(),
-            motion.right.as_ref(),
-            frame_targets.right,
-            frame_weights.right,
+        right: hold(
+            previous.right,
+            resolve(
+                binding.right_arm.as_ref(),
+                motion.right.as_ref(),
+                frame_targets.right,
+                frame_weights.right,
+            ),
         ),
     };
+    #[cfg(debug_assertions)]
+    log_tracked_arm_frame(
+        &frame,
+        frame_targets,
+        frame_weights,
+        &targets,
+        &mut debug_frame,
+    );
+}
+
+/// Debug-build trace of one tracked-arm resolution every 30 render ticks.
+///
+/// Records at `info!` so it is visible without changing the log filter. The
+/// per-channel weights next to the applied wrist roll show whether a stuck
+/// palm comes from a missing observation, a zero blend weight, or a twist the
+/// solver rejected as degenerate.
+#[cfg(debug_assertions)]
+fn log_tracked_arm_frame(
+    frame: &vtuber_core::arm_tracking::ArmControlFrame,
+    targets: vtuber_core::arm_tracking::ArmTrackingTargets,
+    weights: vtuber_core::arm_tracking::ArmBlendWeights,
+    resolved: &DynamicArmTargets,
+    counter: &mut u32,
+) {
+    *counter = counter.wrapping_add(1);
+    if !counter.is_multiple_of(30) {
+        return;
+    }
+    for (side, target, weight, pose) in [
+        ("left", targets.left, weights.left, resolved.left),
+        ("right", targets.right, weights.right, resolved.right),
+    ] {
+        let roll_degrees = pose
+            .and_then(|pose| pose.hand)
+            .map(|hand| {
+                let (_, angle) = hand.delta.to_axis_angle();
+                angle.to_degrees()
+            })
+            .unwrap_or(0.0);
+        bevy::log::info!(
+            target: "palm_trace",
+            "arm seq={} side={side} weight(wrist={:.2} pole={:.2} palm={:.2}) \
+             palm_normal={:?} hand_roll_deg={roll_degrees:.1}",
+            frame.source_seq.0,
+            weight.wrist,
+            weight.pole,
+            weight.palm,
+            target.and_then(|target| target.palm_normal),
+        );
+    }
 }
 
 fn resolve_tracked_side(
@@ -1246,9 +1316,27 @@ fn resolve_tracked_side(
         }
         None => tracked,
     };
-    let solution =
-        crate::arm::solve_two_bone_arm(ArmIkInput::from_geometry(chain.rest, blended)).ok()?;
-    crate::tracked_arm::resolved_tracked_arm_pose(chain, solution).ok()
+    let ik_input = ArmIkInput::from_geometry(chain.rest, blended);
+    let mut solution = crate::arm::solve_two_bone_arm(ik_input).ok()?;
+    // Stage 3b applies to every source, including an observation: an observed
+    // wrist that crosses the body otherwise wraps the upper arm past the
+    // shoulder's range (the recorded trace reached 154 degrees), because the
+    // analytic solve only takes the shortest arc from rest. The limit rotates
+    // the whole solved chain rigidly, so the elbow bend and reach are kept.
+    clamp_upper_arm_swing(&mut solution, &ik_input, MAX_ARM_DROP_RADIANS);
+    // The observed palm roll is split between the forearm (written into the
+    // solution) and the hand (returned as the local delta) so neither joint
+    // carries the whole pronation.
+    let hand_delta = target.palm_normal.and_then(|palm_normal| {
+        crate::tracked_arm::align_palm_twist(
+            chain,
+            &mut solution,
+            palm_normal,
+            tracking_to_rest,
+            weights.palm,
+        )
+    });
+    crate::tracked_arm::resolved_tracked_arm_pose(chain, solution, hand_delta).ok()
 }
 
 /// The virtual target used as the blend source for observed arms.
@@ -2296,5 +2384,131 @@ mod tests {
             descent.to_degrees(),
             MAX_ARM_DROP_RADIANS.to_degrees()
         );
+    }
+
+    #[test]
+    fn tracked_side_respects_the_coronal_descent_limit() {
+        // An observed hand that crossed the body: the analytic shortest-arc
+        // solve alone wraps the upper arm past the shoulder's range (the
+        // recorded trace reached 154 degrees on the mirrored side). The
+        // tracked path must apply the same Stage 3b limit as the virtual path.
+        let chain = sample_chain(ArmSide::Left);
+        let target = vtuber_core::arm_tracking::ArmTrackingTarget {
+            wrist: [-0.55, 0.10, 0.55],
+            elbow_pole: [-0.20, -0.40, -0.20],
+            palm_normal: None,
+        };
+        let geometrized =
+            crate::tracked_arm::tracked_arm_ik_target(chain.rest, target, Quat::IDENTITY);
+        let raw_input = ArmIkInput::from_geometry(chain.rest, geometrized);
+        let raw = crate::arm::solve_two_bone_arm(raw_input).expect("solve");
+        let raw_descent = upper_arm_descent_radians(&raw_input, &raw).expect("descent");
+        assert!(
+            raw_descent.abs() > MAX_ARM_DROP_RADIANS,
+            "the raw solve must exceed the limit for this target, got {} deg",
+            raw_descent.to_degrees()
+        );
+
+        let pose = resolve_tracked_side(
+            Some(&chain),
+            None,
+            DynamicArmProfile::default(),
+            0.7,
+            Some(target),
+            vtuber_core::arm_tracking::ArmBlendWeight::ONE,
+            Quat::IDENTITY,
+        )
+        .expect("tracked pose");
+
+        let rest = &chain.rest.upper_arm;
+        let model_delta =
+            rest.global_rotation * pose.upper_arm_delta * rest.global_rotation.inverse();
+        let solved_direction =
+            model_delta * (chain.rest.elbow.position - chain.rest.upper_arm.position).normalize();
+        let rest_coronal = (chain.rest.elbow.position - chain.rest.upper_arm.position).normalize();
+        let coronal =
+            crate::arm::finite_normalized(solved_direction - Vec3::Z * solved_direction.z)
+                .expect("coronal component");
+        let swing_axis =
+            crate::arm::finite_normalized(rest_coronal.cross(-Vec3::Y)).expect("swing axis");
+        let descent = f32::atan2(
+            rest_coronal.cross(coronal).dot(swing_axis),
+            rest_coronal.dot(coronal),
+        );
+        assert!(
+            descent <= MAX_ARM_DROP_RADIANS + 1.0e-3,
+            "tracked descent {} deg exceeds the {} deg limit",
+            descent.to_degrees(),
+            MAX_ARM_DROP_RADIANS.to_degrees()
+        );
+    }
+
+    #[test]
+    fn tracked_side_applies_the_palm_twist_through_the_palm_weight() {
+        use crate::arm::{FingerJointRestBinding, FingerRestReferences};
+        use vtuber_core::arm_tracking::{ArmBlendWeight, ArmTrackingTarget};
+
+        let mut chain = sample_chain(ArmSide::Left);
+        let wrist = chain.rest.wrist.position;
+        let index = rest_bone(wrist + Vec3::new(0.05, 0.0, 0.003));
+        let little = rest_bone(wrist + Vec3::new(0.05, 0.0, -0.003));
+        chain.finger_rest = FingerRestReferences {
+            index: crate::arm::FingerJointRestReferences {
+                proximal: Some(FingerJointRestBinding {
+                    entity: bevy::prelude::Entity::from_raw_u32(4).unwrap(),
+                    rest: index,
+                }),
+                ..Default::default()
+            },
+            little: crate::arm::FingerJointRestReferences {
+                proximal: Some(FingerJointRestBinding {
+                    entity: bevy::prelude::Entity::from_raw_u32(5).unwrap(),
+                    rest: little,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let target = ArmTrackingTarget {
+            wrist: [0.4, -0.3, 0.5],
+            elbow_pole: [0.7, -0.5, -0.1],
+            palm_normal: Some([0.0, 0.0, 1.0]),
+        };
+        let weights = |palm| ArmBlendWeight {
+            wrist: 1.0,
+            pole: 1.0,
+            palm,
+        };
+        let resolve = |target: ArmTrackingTarget, palm: f32| {
+            resolve_tracked_side(
+                Some(&chain),
+                None,
+                DynamicArmProfile::default(),
+                0.7,
+                Some(target),
+                weights(palm),
+                Quat::IDENTITY,
+            )
+        };
+
+        let tracked = resolve(target, 1.0).expect("tracked pose");
+        let default_twist = resolve(target, 0.0).expect("tracked pose");
+        let no_palm = resolve(
+            ArmTrackingTarget {
+                palm_normal: None,
+                ..target
+            },
+            1.0,
+        )
+        .expect("tracked pose");
+
+        assert!(
+            tracked.hand.is_some(),
+            "the hand must receive its share of the roll"
+        );
+        assert!(default_twist.hand.is_none());
+        assert_eq!(no_palm, default_twist);
+        // The roll is split: the forearm takes its share and the hand the rest.
+        assert_ne!(tracked.lower_arm_delta, default_twist.lower_arm_delta);
     }
 }

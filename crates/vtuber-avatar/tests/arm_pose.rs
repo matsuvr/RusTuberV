@@ -77,6 +77,7 @@ fn spawn_avatar(app: &mut App, base_rotation: Quat, delta: Quat) -> ArmChain {
         lower_arm: lower,
         upper_arm_delta: delta,
         lower_arm_delta: delta.inverse(),
+        hand: None,
         shoulder: None,
         fingers: Default::default(),
     };
@@ -456,6 +457,7 @@ fn optional_shoulder_and_finger_corrections_compose_without_accumulation() {
             lower_arm: lower,
             upper_arm_delta: Quat::IDENTITY,
             lower_arm_delta: Quat::IDENTITY,
+            hand: None,
             shoulder: Some(vtuber_avatar::ResolvedBoneDelta {
                 entity: shoulder,
                 delta: shoulder_delta,
@@ -511,6 +513,7 @@ fn generation_mismatch_and_missing_pose_are_safe_no_ops() {
                 lower_arm: upper,
                 upper_arm_delta: Quat::from_rotation_z(0.8),
                 lower_arm_delta: Quat::IDENTITY,
+                hand: None,
                 shoulder: None,
                 fingers: Default::default(),
             }),

@@ -28,10 +28,10 @@ use vtuber_core::types::{
     AvatarControlFrame, FrameSeq, HeadPose, Landmark3, LandmarkSchemaId, MonoTimeNs,
     NamedCoefficient, RawExpressionObservation, RawFaceObservation, TrackingState,
 };
+use vtuber_tracking::loss_blend::LossBlendProfile;
 use vtuber_tracking::{
-    ConfidenceGateParams, ExpressionFilterParams, HeadFilterParams, LossRecoveryParams,
-    NeutralProfile, NeutralValidationSettings, PipelineConfig, StateMachineParams,
-    TrackingPipeline,
+    ConfidenceGateParams, ExpressionFilterParams, HeadFilterParams, NeutralProfile,
+    NeutralValidationSettings, PipelineConfig, StateMachineParams, TrackingPipeline,
 };
 
 const SCHEMA: LandmarkSchemaId = LandmarkSchemaId("replay-test");
@@ -56,11 +56,10 @@ fn config() -> PipelineConfig {
         translation_filter: Default::default(),
         gaze_filter: Default::default(),
         expression_filter: ExpressionFilterParams::with_time_constants(0.03, 0.10),
-        loss_recovery: LossRecoveryParams {
-            glide_duration: Duration::from_millis(100),
-            decay_duration: Duration::from_millis(200),
-            recovery_duration: Duration::from_millis(100),
-            ..LossRecoveryParams::default()
+        loss_recovery: LossBlendProfile {
+            hold: Duration::from_millis(100),
+            return_duration: Duration::from_millis(200),
+            acquire: Duration::from_millis(100),
         },
     }
 }
@@ -303,11 +302,11 @@ fn replay_lost_face_returns_to_neutral() {
     );
 
     // Build a stream that turns the head, then loses the face for long enough
-    // that the loss-recovery decay fully completes before the stream ends.
+    // that the loss-recovery return fully completes before the stream ends.
     let mut stream: Vec<Option<RawFaceObservation>> = Vec::new();
     stream.push(Some(observation(1, neutral, relaxed_expression(), None)));
     stream.push(Some(observation(2, turned, relaxed_expression(), None)));
-    for _seq in 3..=12 {
+    for _seq in 3..=18 {
         stream.push(None);
     }
 

@@ -99,6 +99,15 @@ pub struct VrmcMaterialsExtensitions {
     #[serde(skip)]
     #[reflect(ignore)]
     pub legacy_uv_transform: Option<[f32; 4]>,
+    /// Legacy `_BumpMap` image index, if present.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub legacy_normal_texture: Option<usize>,
+    /// Legacy `_BumpScale`, if present. The glTF core `normalTexture.scale` is
+    /// not exposed by Bevy's loader, so the VRM 0.x value is the only source.
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub legacy_normal_scale: Option<f32>,
     /// True when this entry is an intentional existing `StandardMaterial`
     /// fallback for one of the supported VRM/Unlit shaders.
     #[serde(skip)]
@@ -568,22 +577,18 @@ pub(crate) fn convert_legacy_material_properties_with_render_queue_offset(
                 .or_else(|| floats.get("_Cull").and_then(finite_f32).map(|cull| cull <= 0.5))
         });
     converted.legacy_uv_transform = main_texture_transform;
-    for name in ["_BumpMap", "_BumpScale"] {
-        if value
-            .get("textureProperties")
-            .and_then(Value::as_object)
-            .is_some_and(|properties| properties.contains_key(name))
-            || value
-                .get("floatProperties")
-                .and_then(Value::as_object)
-                .is_some_and(|properties| properties.contains_key(name))
-        {
-            #[cfg(feature = "log")]
-            bevy::log::warn!(
-                "Legacy material property {name} is retained by glTF fallback because the existing MToon contract has no normal-map slot"
-            );
-        }
-    }
+    converted.legacy_normal_texture = value
+        .get("textureProperties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("_BumpMap"))
+        .and_then(|index| index.as_u64())
+        .and_then(|index| usize::try_from(index).ok())
+        .filter(|index| texture_count.is_none_or(|count| *index < count));
+    converted.legacy_normal_scale = value
+        .get("floatProperties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("_BumpScale"))
+        .and_then(finite_f32);
     Some(converted)
 }
 
@@ -778,6 +783,30 @@ mod tests {
             converted.legacy_alpha_mode,
             Some(LegacyAlphaMode::Mask(0.35))
         );
+    }
+
+    #[test]
+    fn converts_legacy_bump_map_and_scale() {
+        let value = json!({
+            "shader": "VRM/MToon",
+            "floatProperties": {"_BumpScale": 0.5},
+            "textureProperties": {"_BumpMap": 1}
+        });
+        let converted = convert_legacy_material_properties_with_texture_count(&value, Some(2))
+            .expect("legacy bump map should convert");
+        assert_eq!(converted.legacy_normal_texture, Some(1));
+        assert_eq!(converted.legacy_normal_scale, Some(0.5));
+    }
+
+    #[test]
+    fn legacy_bump_map_index_out_of_range_is_dropped() {
+        let value = json!({
+            "shader": "VRM/MToon",
+            "textureProperties": {"_BumpMap": 2}
+        });
+        let converted = convert_legacy_material_properties_with_texture_count(&value, Some(2))
+            .expect("out-of-range bump map should not reject the material");
+        assert_eq!(converted.legacy_normal_texture, None);
     }
 
     #[test]

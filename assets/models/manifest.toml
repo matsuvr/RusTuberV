@@ -7,6 +7,7 @@ downloaded_at = "2026-08-05"
 notes = [
     "MediaPipe Face Landmarker is the sole production face backend through the pinned native binding in ADR-009.",
     "MediaPipe Pose Landmarker is the sole production arm-observation backend through the same binding.",
+    "MediaPipe Hand Landmarker runs beside Pose in the same worker for the observed palm plane; the Pose hand keypoints are not used.",
     "The task bundle is consumed as a bundle; internal models are not extracted into an application pipeline.",
     "The legacy composite artifacts below are retained only for explicit research/evaluation commands.",
 ]
@@ -23,6 +24,20 @@ redistribution = "allowed under Apache-2.0; prefer original upstream URL for upd
 notes = [
     "Arm-observation pose backend; verified by SHA-256 before worker construction.",
     "Full is the initial model; Lite is a same-input comparison in evaluation, never a silent runtime fallback.",
+]
+
+[[artifacts]]
+file = "hand_landmarker.task"
+sha256 = "FBC2A30080C3C557093B5DDFC334698132EB341044CCEE322CCF8BCF3607CDE1"
+purpose = "Official MediaPipe Hand Landmarker task bundle (float16)"
+source = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+upstream = "https://developers.google.com/edge/mediapipe/solutions/vision/hand_landmarker"
+license = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0.html"
+redistribution = "allowed under Apache-2.0; prefer original upstream URL for updates"
+notes = [
+    "Palm/finger-observation backend for observed arms; the 21 landmarks are used up to the palm plane.",
+    "Verified by SHA-256 before worker construction; no silent fallback to the Pose hand keypoints.",
 ]
 
 [[artifacts]]

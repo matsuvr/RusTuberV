@@ -20,6 +20,9 @@ use crate::orchestrator::Orchestrator;
 /// The packaged Pose task filename.
 const POSE_TASK_FILE: &str = "pose_landmarker_full.task";
 
+/// The packaged Hand Landmarker task filename.
+const HAND_TASK_FILE: &str = "hand_landmarker.task";
+
 /// Owns the Pose worker and the pure observed-arm tracking state.
 #[derive(Resource)]
 pub struct PoseRuntime {
@@ -31,8 +34,12 @@ pub struct PoseRuntime {
     tracking: ArmTrackingState,
     profile: ArmTrackingProfile,
     task_path: std::path::PathBuf,
+    hand_task_path: std::path::PathBuf,
     output_generation: u64,
     held_frame: Option<PoseArmFrame>,
+    /// Debug-build raw observation log, opened lazily on the first frame.
+    #[cfg(debug_assertions)]
+    debug_log: Option<std::fs::File>,
 }
 
 impl PoseRuntime {
@@ -53,8 +60,14 @@ impl PoseRuntime {
                 .join("assets")
                 .join("models")
                 .join(POSE_TASK_FILE),
+            hand_task_path: project_root
+                .join("assets")
+                .join("models")
+                .join(HAND_TASK_FILE),
             output_generation: 0,
             held_frame: None,
+            #[cfg(debug_assertions)]
+            debug_log: None,
         }
     }
 
@@ -97,11 +110,16 @@ impl PoseRuntime {
         } else {
             MediaPipeTaskSource::Embedded
         };
+        let hand_task = if self.hand_task_path.is_file() {
+            MediaPipeTaskSource::Path(self.hand_task_path.clone())
+        } else {
+            MediaPipeTaskSource::Embedded
+        };
         let status = Arc::clone(&self.status);
         let frame_slot = Arc::clone(&self.frame_slot);
         let output_slot = Arc::clone(&self.output_slot);
         let worker = WorkerHandle::spawn("pose-worker", move |stop| {
-            run_pose_worker(stop, status, frame_slot, output_slot, &task)
+            run_pose_worker(stop, status, frame_slot, output_slot, &task, &hand_task)
         });
         self.worker = Some(worker);
     }
@@ -128,6 +146,8 @@ impl PoseRuntime {
             self.output_slot.try_read_after(self.output_generation)
         {
             self.output_generation = self.output_slot.generation();
+            #[cfg(debug_assertions)]
+            log_pose_frame(&frame, &mut self.debug_log);
             self.held_frame = Some(frame);
         }
         let profile = self.profile;
@@ -146,6 +166,113 @@ impl Default for PoseRuntime {
     fn default() -> Self {
         Self::new(std::path::PathBuf::from("."))
     }
+}
+
+/// Debug-build trace of every decoded Pose frame.
+///
+/// Records at `info!` so it is visible without changing the log filter, and
+/// appends the raw world landmarks to `mediapipe_pose_debug.csv` next to the
+/// working directory. Comparing those rows with `propagation_debug.log` frame
+/// by frame separates a bad MediaPipe observation from a tracking reaction:
+/// each row is `seq,captured_ns,side,role,x,y,z,visibility,presence,score`
+/// with one row per shoulder/elbow/wrist plus a hand-score row per side.
+#[cfg(debug_assertions)]
+fn log_pose_frame(frame: &PoseArmFrame, file: &mut Option<std::fs::File>) {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+    if file.is_none()
+        && let Ok(mut handle) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("mediapipe_pose_debug.csv")
+    {
+        let _ = writeln!(
+            handle,
+            "seq,captured_ns,side,role,x,y,z,visibility,presence,score"
+        );
+        *file = Some(handle);
+    }
+    let score =
+        |arm: &vtuber_core::arm_tracking::ArmLandmarks| arm.hand.and_then(|hand| hand.score);
+    match &frame.observation {
+        Some(observation) => bevy::log::info!(
+            target: "palm_trace",
+            "pose seq={} captured_ns={} left_hand_score={:?} right_hand_score={:?}",
+            frame.source_seq.0,
+            frame.captured_at.0,
+            score(&observation.left),
+            score(&observation.right),
+        ),
+        None => {
+            bevy::log::info!(
+                target: "palm_trace",
+                "pose seq={} no_person",
+                frame.source_seq.0,
+            );
+            if let Some(file) = file.as_mut() {
+                let _ = writeln!(file, "{},{}", frame.source_seq.0, frame.captured_at.0);
+            }
+            return;
+        }
+    }
+    let Some(file) = file.as_mut() else {
+        return;
+    };
+    let Some(observation) = &frame.observation else {
+        return;
+    };
+    let number =
+        |value: Option<f32>| value.map_or_else(|| "-".to_string(), |value| format!("{value:.4}"));
+    let mut rows = String::new();
+    for (side, arm) in [("L", &observation.left), ("R", &observation.right)] {
+        for (role, point) in [
+            ("shoulder", &arm.shoulder),
+            ("elbow", &arm.elbow),
+            ("wrist", &arm.wrist),
+        ] {
+            let [x, y, z] = point.meters;
+            let _ = writeln!(
+                rows,
+                "{},{},{side},{role},{x:.4},{y:.4},{z:.4},{},{},-",
+                frame.source_seq.0,
+                frame.captured_at.0,
+                number(point.visibility),
+                number(point.presence),
+            );
+        }
+        let _ = writeln!(
+            rows,
+            "{},{},{side},hand,-,-,-,-,-,{}",
+            frame.source_seq.0,
+            frame.captured_at.0,
+            number(arm.hand.and_then(|hand| hand.score)),
+        );
+        // The palm-plane source: wrist, index MCP, and pinky MCP world points
+        // from the Hand Landmarker, so the observed normal can be recomputed
+        // offline against the avatar trace.
+        if let Some(hand) = arm.hand {
+            for (role, landmark) in [
+                ("hand_wrist", 0usize),
+                ("hand_index", 5),
+                ("hand_pinky", 17),
+            ] {
+                let Some(point) = hand.landmarks.get(landmark) else {
+                    continue;
+                };
+                let [x, y, z] = point.meters;
+                let _ = writeln!(
+                    rows,
+                    "{},{},{side},{role},{x:.4},{y:.4},{z:.4},{},{},-",
+                    frame.source_seq.0,
+                    frame.captured_at.0,
+                    number(point.visibility),
+                    number(point.presence),
+                );
+            }
+        }
+    }
+    let _ = file.write_all(rows.as_bytes());
 }
 
 /// Applies the persisted arm-tracking switch at startup.

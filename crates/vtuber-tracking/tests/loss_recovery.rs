@@ -6,34 +6,36 @@
     clippy::indexing_slicing
 )]
 
-//! Integration tests for loss hold, neutral decay, and recovery blend.
+//! Integration tests for the shared loss hold, eased neutral return, and
+//! reacquisition blend.
 //!
 //! These tests verify that `LossRecovery` behaves deterministically using
 //! only caller-supplied durations and monotonic timestamps, without any
-//! wall-clock dependency.
+//! wall-clock dependency. The timeline is the shared `LossBlendProfile`
+//! (also used by the arm channels): hold, then an eased return over the
+//! return duration, then an acquire-time blend on reacquire.
 
 use std::time::Duration;
 
 use approx::assert_relative_eq;
 
 use vtuber_core::types::{
-    AvatarControlFrame, ExpressionCoefficients, FrameSeq, GazeSignal, HeadPose,
+    AvatarControlFrame, ExpressionCoefficients, FrameSeq, GazeSignal, GazeTrackingState, HeadPose,
     HeadTranslationSignal, MonoTimeNs, TrackingState,
 };
 use vtuber_core::{ARKIT52_CHANNEL_COUNT, Arkit52Coefficients, ArkitBlendshape};
-use vtuber_tracking::loss_recovery::{
-    LossRecovery, LossRecoveryConfigError, LossRecoveryParams, MAX_DECAY_DURATION,
-    MAX_GLIDE_DURATION, MAX_RECOVERY_DURATION, MIN_DECAY_DURATION, MIN_GLIDE_DURATION,
-    MIN_RECOVERY_DURATION,
+use vtuber_tracking::loss_blend::{
+    LossBlendProfile, MAX_ACQUIRE_DURATION, MAX_HOLD_DURATION, MAX_RETURN_DURATION,
+    MIN_ACQUIRE_DURATION, MIN_HOLD_DURATION, MIN_RETURN_DURATION,
 };
+use vtuber_tracking::loss_recovery::LossRecovery;
 use vtuber_tracking::pose::semantic_pose_to_quaternion;
 
-fn test_params() -> LossRecoveryParams {
-    LossRecoveryParams {
-        glide_duration: Duration::from_millis(100),
-        decay_duration: Duration::from_millis(200),
-        recovery_duration: Duration::from_millis(100),
-        ..LossRecoveryParams::default()
+fn test_params() -> LossBlendProfile {
+    LossBlendProfile {
+        hold: Duration::from_millis(100),
+        return_duration: Duration::from_millis(200),
+        acquire: Duration::from_millis(100),
     }
 }
 
@@ -59,8 +61,11 @@ fn frame(seq: u64, yaw: f32, pitch: f32, roll: f32, expression_value: f32) -> Av
     }
 }
 
-fn rotation_angle_from_identity(pose: HeadPose) -> f32 {
-    semantic_pose_to_quaternion(pose).angle()
+/// The pose authority a consumer renders: the pose weighted by the frame
+/// confidence, exactly like the arm channels' observed target weighted by the
+/// channel authority.
+fn pose_authority(frame: &AvatarControlFrame) -> f32 {
+    semantic_pose_to_quaternion(frame.head).angle() * frame.confidence
 }
 
 /// A tracked frame whose `TongueOut` is zero, matching the coefficients the
@@ -101,22 +106,21 @@ fn loss_recovery_hold_preserves_source_sequence() {
             None,
             MonoTimeNs(66_000_000),
         )
-        .expect("glided frame should be emitted");
+        .expect("held frame should be emitted");
 
     assert_eq!(held.source_seq, tracked.source_seq);
     assert_eq!(held.captured_at, tracked.captured_at);
     assert_eq!(held.state, TrackingState::LostHold);
     assert!(
-        rotation_angle_from_identity(held.head) > 0.01,
-        "glided pose should not already be neutral"
+        semantic_pose_to_quaternion(held.head).angle() > 0.01,
+        "held pose should not already be neutral"
     );
+    assert_relative_eq!(held.confidence, tracked.confidence, epsilon = 1e-5);
 }
 
 #[test]
-fn loss_recovery_neutral_return_uses_shortest_arc() {
+fn loss_recovery_eases_authority_monotonically_over_return_duration() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
-    // Yaw just shy of +pi. The shortest arc to identity stays positive and
-    // decreases in magnitude; the long way would wrap through negative yaw.
     let tracked = frame(1, 179.0f32.to_radians(), 0.0, 0.0, 0.0);
 
     let _ = recovery.update(
@@ -125,7 +129,7 @@ fn loss_recovery_neutral_return_uses_shortest_arc() {
         Some(tracked.clone()),
         MonoTimeNs(16_000_000),
     );
-    // Spend exactly the glide duration in LostHold (stationary frames glide in place).
+    // The hold keeps the pose and the authority unchanged.
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
@@ -133,41 +137,27 @@ fn loss_recovery_neutral_return_uses_shortest_arc() {
         MonoTimeNs(116_000_000),
     );
 
-    let mut last_yaw = tracked.head.yaw_rad;
-    let mut last_angle = rotation_angle_from_identity(tracked.head);
-
+    let mut previous = pose_authority(&tracked);
     for step in 1..=5 {
         let out = recovery
             .update(
                 TrackingState::ReturningNeutral,
                 Duration::from_millis(40),
                 None,
-                MonoTimeNs(116_000_000 + step as u64 * 40_000_000),
+                MonoTimeNs(116_000_000 + step * 40_000_000),
             )
             .expect("returning frame should be emitted");
 
-        let angle = rotation_angle_from_identity(out.head);
+        let authority = pose_authority(&out);
         assert!(
-            angle <= last_angle + 1e-5,
-            "rotation angle should not increase during return: step {step}: {angle} > {last_angle}"
+            authority <= previous + 1e-5,
+            "the eased authority should not increase during return: step {step}: {authority} > {previous}"
         );
-        assert!(
-            out.head.yaw_rad >= -0.01,
-            "shortest arc should stay on the positive side of yaw: step {step}: {}",
-            out.head.yaw_rad
-        );
-        assert!(
-            out.head.yaw_rad.abs() <= last_yaw.abs() + 1e-5,
-            "yaw magnitude should decrease: step {step}: {} > {}",
-            out.head.yaw_rad.abs(),
-            last_yaw.abs()
-        );
-
-        last_yaw = out.head.yaw_rad;
-        last_angle = angle;
+        previous = authority;
     }
 
-    // After the full decay duration has elapsed, the output should be neutral.
+    // After the full return duration has elapsed, the authority is exactly
+    // zero: the consumers render the neutral pose.
     let neutral = recovery
         .update(
             TrackingState::ReturningNeutral,
@@ -176,9 +166,7 @@ fn loss_recovery_neutral_return_uses_shortest_arc() {
             MonoTimeNs(500_000_000),
         )
         .expect("neutral frame should be emitted");
-    assert_relative_eq!(neutral.head.yaw_rad, 0.0, epsilon = 1e-4);
-    assert_relative_eq!(neutral.head.pitch_rad, 0.0, epsilon = 1e-4);
-    assert_relative_eq!(neutral.head.roll_rad, 0.0, epsilon = 1e-4);
+    assert_relative_eq!(neutral.confidence, 0.0, epsilon = 1e-6);
 }
 
 #[test]
@@ -194,7 +182,7 @@ fn loss_recovery_reacquire_limits_jump() {
         MonoTimeNs(16_000_000),
     );
 
-    // Lose the face and let it decay partway to neutral.
+    // Lose the face and let the return ease partway down.
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
@@ -243,9 +231,9 @@ fn loss_recovery_reacquire_limits_jump() {
     let after_recovery = recovery
         .update(
             TrackingState::Tracking,
-            Duration::from_millis(100),
+            Duration::from_millis(200),
             Some(target.clone()),
-            MonoTimeNs(366_000_000),
+            MonoTimeNs(466_000_000),
         )
         .unwrap();
     assert_relative_eq!(
@@ -274,7 +262,7 @@ fn loss_recovery_holds_detailed_face_during_loss_hold() {
             None,
             MonoTimeNs(66_000_000),
         )
-        .expect("glide should preserve the last detailed face state");
+        .expect("the hold should preserve the last detailed face state");
 
     let held = held.detailed_face.expect("detailed face is held");
     assert!((held.get(ArkitBlendshape::JawOpen) - 0.8).abs() < 1.0e-6);
@@ -282,7 +270,7 @@ fn loss_recovery_holds_detailed_face_during_loss_hold() {
 }
 
 #[test]
-fn loss_recovery_decays_detailed_face_monotonically_toward_zero() {
+fn loss_recovery_eases_detailed_face_monotonically_toward_zero() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
     let tracked = detailed_frame(11, 0.8);
 
@@ -292,32 +280,31 @@ fn loss_recovery_decays_detailed_face_monotonically_toward_zero() {
         Some(tracked),
         MonoTimeNs(16_000_000),
     );
-    // Spend the glide window so the next update starts the decay.
+    // Spend the hold so the next updates ease the coefficients.
     let _ = recovery.update(
         TrackingState::LostHold,
-        Duration::from_millis(50),
+        Duration::from_millis(100),
         None,
-        MonoTimeNs(66_000_000),
+        MonoTimeNs(116_000_000),
     );
 
     let mut previous = f32::INFINITY;
-    let mut decaying = 0usize;
+    let mut easing = 0usize;
     for step in 1..=4u64 {
         let frame = recovery
             .update(
                 TrackingState::ReturningNeutral,
-                Duration::from_millis(20),
+                Duration::from_millis(50),
                 None,
-                MonoTimeNs(66_000_000 + step * 20_000_000),
+                MonoTimeNs(116_000_000 + step * 50_000_000),
             )
-            .expect("decay should emit a frame");
+            .expect("the eased return should emit a frame");
 
-        // The decay must never snap `Some` straight to `None`.
+        // The ease must never snap `Some` straight to `None`.
         assert!(
             frame.detailed_face.is_some(),
-            "step {step} dropped the detailed face mid-decay"
+            "step {step} dropped the detailed face mid-ease"
         );
-        assert!(!recovery.is_returning() || frame.detailed_face.is_some());
 
         let jaw = detailed_value(&frame, ArkitBlendshape::JawOpen);
         let smile = detailed_value(&frame, ArkitBlendshape::MouthSmileLeft);
@@ -329,11 +316,11 @@ fn loss_recovery_decays_detailed_face_monotonically_toward_zero() {
             "tongue stays zero"
         );
         if recovery.is_returning() {
-            decaying += 1;
+            easing += 1;
         }
         previous = jaw;
     }
-    assert!(decaying > 0, "the decay should still be in progress");
+    assert!(easing > 0, "the ease should still be in progress");
 }
 
 #[test]
@@ -349,31 +336,25 @@ fn loss_recovery_publishes_zero_detailed_face_before_dropping_it() {
     );
     let _ = recovery.update(
         TrackingState::LostHold,
-        Duration::from_millis(50),
+        Duration::from_millis(100),
         None,
-        MonoTimeNs(66_000_000),
+        MonoTimeNs(116_000_000),
     );
-    // The first returning update hands the glide over to the decay.
-    let _ = recovery.update(
-        TrackingState::ReturningNeutral,
-        Duration::from_millis(200),
-        None,
-        MonoTimeNs(266_000_000),
-    );
-    let neutral = recovery
+    // One update past hold + return duration publishes the released frame
+    // with exact zeros, then hands over to the neutral phase.
+    let released = recovery
         .update(
             TrackingState::ReturningNeutral,
-            Duration::from_millis(200),
+            Duration::from_millis(300),
             None,
-            MonoTimeNs(466_000_000),
+            MonoTimeNs(416_000_000),
         )
-        .expect("neutral transition should emit a frame");
-
-    // The last decay frame publishes exact zeros for every channel.
-    let neutral = neutral
+        .expect("the final return frame should be emitted");
+    let released = released
         .detailed_face
-        .expect("the final decay frame still carries coefficients");
-    assert_eq!(neutral, Arkit52Coefficients::default());
+        .expect("the final return frame still carries coefficients");
+    assert_eq!(released, Arkit52Coefficients::default());
+    assert_relative_eq!(released.get(ArkitBlendshape::JawOpen), 0.0, epsilon = 1e-6);
 
     // Once neutral is reached the coefficients are dropped, and the tracker
     // in the avatar adapter has already seen the zeros.
@@ -382,7 +363,7 @@ fn loss_recovery_publishes_zero_detailed_face_before_dropping_it() {
             TrackingState::Searching,
             Duration::from_millis(16),
             None,
-            MonoTimeNs(482_000_000),
+            MonoTimeNs(432_000_000),
         )
         .expect("searching should keep emitting neutral frames");
     assert!(
@@ -402,30 +383,24 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
         Some(tracked.clone()),
         MonoTimeNs(16_000_000),
     );
-    // Fully decay to neutral: the coefficients are dropped.
+    // Fully ease to neutral: the coefficients are dropped.
     let _ = recovery.update(
         TrackingState::LostHold,
-        Duration::from_millis(50),
+        Duration::from_millis(100),
         None,
-        MonoTimeNs(66_000_000),
+        MonoTimeNs(116_000_000),
     );
     let _ = recovery.update(
         TrackingState::ReturningNeutral,
-        Duration::from_millis(200),
+        Duration::from_millis(300),
         None,
-        MonoTimeNs(266_000_000),
-    );
-    let _ = recovery.update(
-        TrackingState::ReturningNeutral,
-        Duration::from_millis(200),
-        None,
-        MonoTimeNs(466_000_000),
+        MonoTimeNs(416_000_000),
     );
     let _ = recovery.update(
         TrackingState::Searching,
         Duration::from_millis(16),
         None,
-        MonoTimeNs(482_000_000),
+        MonoTimeNs(432_000_000),
     );
 
     // Reacquire a face whose jaw is open again.
@@ -435,7 +410,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(reacquired.clone()),
-            MonoTimeNs(298_000_000),
+            MonoTimeNs(448_000_000),
         )
         .expect("reacquire should emit a frame");
 
@@ -449,7 +424,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(reacquired.clone()),
-            MonoTimeNs(314_000_000),
+            MonoTimeNs(464_000_000),
         )
         .expect("reacquire should emit a frame");
     let second_jaw = detailed_value(&second, ArkitBlendshape::JawOpen);
@@ -463,7 +438,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
         "tongue stays zero across reacquisition"
     );
 
-    // The blend finishes within the configured recovery duration.
+    // The blend finishes within the configured acquire duration.
     let mut last = second_jaw;
     for step in 1..=6u64 {
         let frame = recovery
@@ -471,7 +446,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
                 TrackingState::Tracking,
                 Duration::from_millis(20),
                 Some(reacquired.clone()),
-                MonoTimeNs(314_000_000 + step * 20_000_000),
+                MonoTimeNs(464_000_000 + step * 20_000_000),
             )
             .expect("recovery frame");
         last = detailed_value(&frame, ArkitBlendshape::JawOpen);
@@ -482,69 +457,52 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
 
 #[test]
 fn loss_recovery_settings_enforce_fixed_ranges() {
-    assert!(LossRecoveryParams::default().validate().is_ok());
-
-    assert!(matches!(
-        LossRecoveryParams {
-            glide_duration: Duration::ZERO,
-            ..LossRecoveryParams::default()
-        }
-        .validate()
-        .unwrap_err(),
-        LossRecoveryConfigError::ZeroDuration {
-            field: "glide_duration"
-        }
-    ));
+    assert!(LossBlendProfile::default().validate().is_ok());
 
     assert!(
-        LossRecoveryParams {
-            glide_duration: MIN_GLIDE_DURATION - Duration::from_millis(1),
-            ..LossRecoveryParams::default()
+        LossBlendProfile {
+            hold: MIN_HOLD_DURATION - Duration::from_millis(1),
+            ..test_params()
         }
         .validate()
         .is_err()
     );
-
     assert!(
-        LossRecoveryParams {
-            glide_duration: MAX_GLIDE_DURATION + Duration::from_millis(1),
-            ..LossRecoveryParams::default()
+        LossBlendProfile {
+            hold: MAX_HOLD_DURATION + Duration::from_millis(1),
+            ..test_params()
         }
         .validate()
         .is_err()
     );
-
     assert!(
-        LossRecoveryParams {
-            decay_duration: MIN_DECAY_DURATION - Duration::from_millis(1),
-            ..LossRecoveryParams::default()
+        LossBlendProfile {
+            return_duration: MIN_RETURN_DURATION - Duration::from_millis(1),
+            ..test_params()
         }
         .validate()
         .is_err()
     );
-
     assert!(
-        LossRecoveryParams {
-            decay_duration: MAX_DECAY_DURATION + Duration::from_millis(1),
-            ..LossRecoveryParams::default()
+        LossBlendProfile {
+            return_duration: MAX_RETURN_DURATION + Duration::from_millis(1),
+            ..test_params()
         }
         .validate()
         .is_err()
     );
-
     assert!(
-        LossRecoveryParams {
-            recovery_duration: MIN_RECOVERY_DURATION - Duration::from_millis(1),
-            ..LossRecoveryParams::default()
+        LossBlendProfile {
+            acquire: MIN_ACQUIRE_DURATION - Duration::from_millis(1),
+            ..test_params()
         }
         .validate()
         .is_err()
     );
-
     assert!(
-        LossRecoveryParams {
-            recovery_duration: MAX_RECOVERY_DURATION + Duration::from_millis(1),
-            ..LossRecoveryParams::default()
+        LossBlendProfile {
+            acquire: MAX_ACQUIRE_DURATION + Duration::from_millis(1),
+            ..test_params()
         }
         .validate()
         .is_err()
@@ -638,23 +596,22 @@ fn loss_recovery_hold_preserves_head_translation() {
             None,
             MonoTimeNs(66_000_000),
         )
-        .expect("glided frame should be emitted");
+        .expect("held frame should be emitted");
 
     assert_eq!(held.head_translation, tracked.head_translation);
 }
 
 #[test]
-fn loss_recovery_decay_blends_translation_toward_zero_while_available() {
+fn loss_recovery_eases_translation_authority_to_zero_while_available() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
     let tracked = with_translation(1, 0.04, -0.02, 0.06);
 
     let _ = recovery.update(
         TrackingState::Tracking,
         Duration::from_millis(16),
-        Some(tracked),
+        Some(tracked.clone()),
         MonoTimeNs(16_000_000),
     );
-    // Spend exactly the glide duration in LostHold (stationary frames glide in place).
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
@@ -662,34 +619,35 @@ fn loss_recovery_decay_blends_translation_toward_zero_while_available() {
         MonoTimeNs(116_000_000),
     );
 
-    let mid_decay = recovery
+    // The translation observation is held; the consumers weight it by the
+    // frame confidence, which eases to zero over the return duration.
+    let mid = recovery
         .update(
             TrackingState::ReturningNeutral,
-            Duration::from_millis(100),
+            Duration::from_millis(150),
             None,
-            MonoTimeNs(216_000_000),
+            MonoTimeNs(266_000_000),
         )
-        .expect("decay should emit a frame");
+        .expect("the eased return should emit a frame");
     assert!(
-        mid_decay.head_translation.is_available(),
-        "mid-decay translation must stay distinguishable from unavailable"
+        mid.head_translation.is_available(),
+        "mid-return translation must stay distinguishable from unavailable"
     );
     assert!(
-        mid_decay.head_translation.x_meters.abs() < 0.04,
-        "translation X should decay toward zero"
+        mid.confidence < tracked.confidence,
+        "the translation authority must be easing: {}",
+        mid.confidence
     );
 
     let neutral = recovery
         .update(
             TrackingState::ReturningNeutral,
-            Duration::from_millis(200),
+            Duration::from_millis(500),
             None,
-            MonoTimeNs(500_000_000),
+            MonoTimeNs(766_000_000),
         )
-        .expect("neutral frame should be emitted");
-    assert_relative_eq!(neutral.head_translation.x_meters, 0.0, epsilon = 1e-4);
-    assert_relative_eq!(neutral.head_translation.y_meters, 0.0, epsilon = 1e-4);
-    assert_relative_eq!(neutral.head_translation.z_meters, 0.0, epsilon = 1e-4);
+        .expect("fully eased frame should be emitted");
+    assert_relative_eq!(neutral.confidence, 0.0, epsilon = 1e-6);
 }
 
 #[test]
@@ -712,7 +670,7 @@ fn rotation_only_producer_falls_back_to_unavailable_translation() {
             None,
             MonoTimeNs(66_000_000),
         )
-        .expect("glided frame should be emitted");
+        .expect("held frame should be emitted");
     assert!(!held.head_translation.is_available());
 
     let decayed = recovery
@@ -722,10 +680,10 @@ fn rotation_only_producer_falls_back_to_unavailable_translation() {
             None,
             MonoTimeNs(266_000_000),
         )
-        .expect("decay should emit a frame");
+        .expect("the return should emit a frame");
     assert!(
         !decayed.head_translation.is_available(),
-        "unavailable translation must not become a zero observation during decay"
+        "unavailable translation must not become a zero observation during return"
     );
 
     // Recovery blending between two unavailable endpoints stays unavailable.
@@ -739,96 +697,6 @@ fn rotation_only_producer_falls_back_to_unavailable_translation() {
         )
         .expect("recovery should emit a frame");
     assert!(!recovering.head_translation.is_available());
-}
-
-#[test]
-fn loss_recovery_glide_continues_motion_with_inertia() {
-    let mut recovery = LossRecovery::new(test_params()).unwrap();
-    // Two tracked frames turning the head: yaw 0.2 -> 0.3 over one frame.
-    let _ = recovery.update(
-        TrackingState::Tracking,
-        Duration::from_millis(16),
-        Some(frame(1, 0.2, 0.0, 0.0, 0.0)),
-        MonoTimeNs(33_333_333),
-    );
-    let _ = recovery.update(
-        TrackingState::Tracking,
-        Duration::from_millis(16),
-        Some(frame(2, 0.3, 0.0, 0.0, 0.0)),
-        MonoTimeNs(66_666_666),
-    );
-
-    let glided = recovery
-        .update(
-            TrackingState::LostHold,
-            Duration::from_millis(33),
-            None,
-            MonoTimeNs(100_000_000),
-        )
-        .expect("glide should emit a frame");
-
-    // The head keeps turning in the same direction instead of freezing.
-    assert!(
-        glided.head.yaw_rad > 0.3,
-        "glide should continue the motion, got {}",
-        glided.head.yaw_rad
-    );
-}
-
-#[test]
-fn loss_recovery_glide_excursion_is_bounded() {
-    let mut recovery = LossRecovery::new(test_params()).unwrap();
-    // A violent single-frame turn produces a large estimated velocity.
-    let _ = recovery.update(
-        TrackingState::Tracking,
-        Duration::from_millis(16),
-        Some(frame(1, 0.0, 0.0, 0.0, 0.0)),
-        MonoTimeNs(33_333_333),
-    );
-    let origin = frame(2, 1.5, 0.0, 0.0, 0.0);
-    let _ = recovery.update(
-        TrackingState::Tracking,
-        Duration::from_millis(16),
-        Some(origin.clone()),
-        MonoTimeNs(66_666_666),
-    );
-
-    let origin_q = semantic_pose_to_quaternion(origin.head);
-    let bound = test_params().max_glide_excursion_rad;
-    let mut max_glide_yaw = 0.0_f32;
-    let mut previous_yaw: Option<f32> = None;
-    for step in 1..=20 {
-        let glided = recovery
-            .update(
-                TrackingState::LostHold,
-                Duration::from_millis(33),
-                None,
-                MonoTimeNs(66_666_666 + step as u64 * 33_333_333),
-            )
-            .expect("glide should emit a frame");
-        let yaw = glided.head.yaw_rad;
-        if recovery.is_gliding() {
-            let excursion = semantic_pose_to_quaternion(glided.head).angle_to(&origin_q);
-            assert!(
-                excursion <= bound + 1.0e-4,
-                "glide excursion {excursion} exceeded the bound at step {step}"
-            );
-            max_glide_yaw = max_glide_yaw.max(yaw);
-        } else {
-            // Once the decay takes over, the pose must head back toward
-            // neutral (passing through the origin yaw, which is expected).
-            let previous = previous_yaw.unwrap_or(yaw);
-            assert!(
-                yaw.abs() <= previous.abs() + 1.0e-4,
-                "decay should move toward neutral, got {yaw} after {previous} at step {step}"
-            );
-        }
-        previous_yaw = Some(yaw);
-    }
-    assert!(
-        max_glide_yaw > 1.5,
-        "glide should keep turning in the tracked direction, got {max_glide_yaw}"
-    );
 }
 
 #[test]
@@ -851,12 +719,12 @@ fn loss_recovery_reacquire_from_searching_does_not_snap() {
     let neutral = recovery
         .update(
             TrackingState::Searching,
-            Duration::from_millis(200),
+            Duration::from_millis(400),
             None,
-            MonoTimeNs(333_333_333),
+            MonoTimeNs(533_333_333),
         )
         .expect("searching should emit a frame");
-    assert_relative_eq!(neutral.head.yaw_rad, 0.0, epsilon = 1e-4);
+    assert_relative_eq!(neutral.confidence, 0.0, epsilon = 1e-6);
 
     let reacquired = frame(2, 0.8, 0.0, 0.0, 0.0);
     let reconnected = recovery
@@ -864,7 +732,7 @@ fn loss_recovery_reacquire_from_searching_does_not_snap() {
             TrackingState::Acquiring,
             Duration::from_millis(16),
             Some(reacquired.clone()),
-            MonoTimeNs(350_000_000),
+            MonoTimeNs(550_000_000),
         )
         .expect("reacquire should emit a frame");
 
@@ -886,29 +754,121 @@ fn loss_recovery_repeated_loss_does_not_oscillate_back_to_tracked_pose() {
         Some(tracked.clone()),
         MonoTimeNs(33_333_333),
     );
-    // First LostHold update expires the glide window (100 ms) and starts
-    // the decay with zero carry.
+    // The first lost update is the hold; the authority stays unchanged.
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
         None,
         MonoTimeNs(133_333_333),
     );
-    let decaying = recovery
+    let easing = recovery
+        .update(
+            TrackingState::LostHold,
+            Duration::from_millis(150),
+            None,
+            MonoTimeNs(283_333_333),
+        )
+        .expect("the return should continue while the machine stays in LostHold");
+
+    // The authority must keep easing down, not snap back to the tracked
+    // pose because the state machine is still in LostHold.
+    assert!(
+        pose_authority(&easing) < pose_authority(&tracked),
+        "the return must not oscillate back to the tracked pose, got {}",
+        easing.head.yaw_rad
+    );
+    assert!(recovery.is_returning());
+}
+
+#[test]
+fn loss_recovery_reacquires_with_the_same_blend_after_a_second_loss() {
+    let mut recovery = LossRecovery::new(test_params()).unwrap();
+    let _ = recovery.update(
+        TrackingState::Tracking,
+        Duration::from_millis(16),
+        Some(frame(1, 0.4, 0.0, 0.0, 0.0)),
+        MonoTimeNs(33_333_333),
+    );
+    let _ = recovery.update(
+        TrackingState::LostHold,
+        Duration::from_millis(100),
+        None,
+        MonoTimeNs(133_333_333),
+    );
+
+    // Reacquire briefly, then lose again: the return must resume from
+    // wherever the recovery had reached instead of restarting.
+    let target = frame(2, 0.9, 0.0, 0.0, 0.0);
+    let _ = recovery.update(
+        TrackingState::Tracking,
+        Duration::from_millis(50),
+        Some(target.clone()),
+        MonoTimeNs(183_333_333),
+    );
+    let resumed = recovery
+        .update(
+            TrackingState::LostHold,
+            Duration::from_millis(100),
+            None,
+            MonoTimeNs(283_333_333),
+        )
+        .expect("a second loss should resume the return");
+    let authority = pose_authority(&resumed);
+    assert!(
+        authority <= pose_authority(&target) + 1.0e-5,
+        "the resumed return must not exceed the loss authority: {authority}"
+    );
+    assert!(recovery.is_returning());
+}
+
+#[test]
+fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
+    let mut recovery = LossRecovery::new(test_params()).unwrap();
+    let mut tracked = frame(1, 0.2, 0.0, 0.0, 0.0);
+    tracked.gaze = GazeSignal::tracked(0.8, -0.4, 0.9);
+    let first = recovery
+        .update(
+            TrackingState::Tracking,
+            Duration::from_millis(16),
+            Some(tracked.clone()),
+            MonoTimeNs(16_000_000),
+        )
+        .unwrap();
+    let held = recovery
         .update(
             TrackingState::LostHold,
             Duration::from_millis(50),
             None,
-            MonoTimeNs(183_333_333),
+            MonoTimeNs(66_000_000),
         )
-        .expect("decay should continue while the machine stays in LostHold");
+        .unwrap();
+    assert_eq!(held.gaze.horizontal, first.gaze.horizontal);
+    assert_relative_eq!(held.gaze.confidence, first.gaze.confidence, epsilon = 1e-6);
 
-    // The pose must keep decaying toward neutral, not snap back to the
-    // tracked pose because the state machine is still in LostHold.
+    // Past the hold the gaze authority eases with the pose authority.
+    let easing = recovery
+        .update(
+            TrackingState::LostHold,
+            Duration::from_millis(150),
+            None,
+            MonoTimeNs(216_000_000),
+        )
+        .unwrap();
     assert!(
-        decaying.head.yaw_rad.abs() < tracked.head.yaw_rad.abs(),
-        "decay must not oscillate back to the tracked pose, got {}",
-        decaying.head.yaw_rad
+        easing.gaze.confidence < held.gaze.confidence,
+        "the gaze authority must ease during the return"
     );
-    assert!(recovery.is_returning());
+
+    let mut target = frame(2, -0.2, 0.0, 0.0, 0.0);
+    target.gaze = GazeSignal::tracked(-0.8, 0.2, 0.9);
+    let recovering = recovery
+        .update(
+            TrackingState::Tracking,
+            Duration::from_millis(50),
+            Some(target),
+            MonoTimeNs(266_000_000),
+        )
+        .unwrap();
+    assert!(recovering.gaze.horizontal > -0.8);
+    assert_eq!(recovering.gaze.state, GazeTrackingState::Tracked);
 }

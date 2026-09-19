@@ -23,7 +23,8 @@ ADR-020 は常に動作するプロシージャル idle オシレータ（旧 #2
 ### 合成ポリシー
 
 - 呼吸は sway（x/z, yaw/pitch）と同一の blend envelope でスケールされる。blend 0 で無害、episode 開始から 4 秒でフル振幅。
-- episode の再開（短い再取得後の再ロスト）では blend が 0 からやり直すため、位相のリセットが可視のジャンプになることはない。
+- envelope は方向転換のたびに現在値から連続的に変化する（追記 2026-09-16）: 喪失側は `blend + (1 - blend) * smoothstep(elapsed / transition)` で立ち上げ、再取得側は `blend * (1 - smoothstep(elapsed / transition))` でフェードアウトする。短い再取得後の再ロストでも再開時点の blend から続くため、sway の出入りが可視のジャンプになることはない。
+- bridge は idle target を「置換」ではなく「制御フレームとのクロスフェード」で合成する（制御フレームの重み付き寄与と idle の寄与をその重み積で混ぜる）。喪失中は緩やかな復帰ポーズの上に sway が重なり、再取得後は sway がフェードアウトする。
 - 決定論: 呼吸は `elapsed_since_loss` のみの関数であり、30/60/120 FPS 等価評価で同一曲線になる。OS RNG は使わない。
 
 ## Writer ownership（ADR-020 表への追記）

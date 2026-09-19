@@ -82,3 +82,15 @@ target-model reproducerはsynthetic rig統合テストが担い、実機モデ�
 head translation → torso lean (lateral) + root translation (Y/Z) + 頭部回転 → 首・胸・腰の配分、という合成により、顔の動きが腰（root translationはhips以下を含む全身）まで伝播する。vendor自体は変更しない（library defaultはfallbackとして不変）。回帰テストは`crates/vtuber-avatar/tests/binding.rs`（位置component挿入とtorso pitch shareの検証）と`crates/vtuber-avatar/src/pose/mod.rs`（配分合計・胴体シェア・limit整合）に追加した。
 
 位置solve有効化の副作用として、hand targetのbody-follow補償（`DynamicArmProfile::compensation_gains`）が腕を体の反対側へ引き込むケースでupper armがT-pose基準90°（きをつけ）を超えて降り、胴体にめり込むことが確認された。対策としてarm pipelineにstage 3b（`arm_pipeline::clamp_upper_arm_swing`、定数`MAX_ARM_DROP_RADIANS` = 85°）を追加した: solvedなupper arm方向のcoronal面（model forward +Zに垂直）でのT-poseからの降下角が85°を超える場合、elbow/wrist/回転/deltaを肩周りで剛体回転させて上限へ戻す。腕を上げる方向と前後スイングは制限しない。85°は90°ではなく服の厚みぶんのマージンである。
+
+## Amendment 2026-09-15: body follows head translation slowly
+
+着座したままの実機ログで、頭部入力が数秒のあいだに yaw -17°→+24°、roll ±29° と跳ね、それがroot translation経由で全身のジャンプとして見えた（人間は動いていない）。face translation filterは0.1 sで速く、Pose/face landmarkのグリッチがそのまま root へ届く。
+
+対策:
+
+1. **body-followフィルタ**（`vtuber-avatar::body_motion::BodyFollowFilter`）: `update_body_tracking_position_input` が head translation から routing した `head_offset` / `body_offset` を、生成世代ごとの状態で指数追従し、毎フレームの移動量を body-scale 比で制限する。グリッチが短時間で戻れば体は数cmしか動かず、持続的な移動にはゆっくり追従する。head translation入力自体と回転経路は変更しない。
+2. **追従の二段化（チューニング）**: 実機ログで root/lean が ±5〜8 cm、約1 Hz で揺れ続けたため、上流の `TranslationFilterParams` 既定時定数を 0.1→0.25 s とし、body-follow は root と lean を分離した（`BODY_FOLLOW_ROOT_TIME_CONSTANT_SEC` = 0.8 s、`BODY_FOLLOW_HEAD_TIME_CONSTANT_SEC` = 0.5 s、上限は root 0.12 / lean 0.2 body-scale/s）。1 Hz の揺れは root で入力の約2割まで減衰し、持続的な移動だけが残る。
+3. **胴体half-lifeの増加**: 自然プロファイルの upperChest 0.18→0.22、chest 0.285→0.35、spine 0.45→0.6、hips 0.35→0.5（`tracking_profile.toml` も同値に更新。このファイルが存在すれば実行時の値はこちらが優先される）。頭・首は速いまま、胴体は頭のスパイクに追従しにくくする。
+
+診断用に `propagation_debug.log` へ `pos(head=...,body=...,w=...)`、`root=(dx,dy,dz)`、`htraw=(x,y,z,state)`（body-follow前の観測）を追加し、観測の揺れと追従の増幅を次回ログで切り分けられるようにした。

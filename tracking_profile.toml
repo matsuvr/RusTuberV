@@ -51,12 +51,12 @@ full = 35.0
 
 # 追従のなめらかさ（半減期・秒）。小さいほど即応、大きいほどゆったり
 [body.half_life]
-head = 0.055
-neck = 0.075
-upper_chest = 0.18
-chest = 0.285
-spine = 0.45
-hips = 0.35
+head = 0.025
+neck = 0.05
+upper_chest = 0.22
+chest = 0.35
+spine = 0.6
+hips = 0.5
 
 # 各骨の回転上限（度）
 [body.limits.head]

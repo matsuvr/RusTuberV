@@ -77,12 +77,19 @@ pub fn natural_body_tracking_profile() -> BodyTrackingProfile {
         yaw_body_engagement_start_radians: 8.0_f32.to_radians(),
         yaw_body_engagement_full_radians: 35.0_f32.to_radians(),
         bone_half_lives: BodyBoneHalfLives {
-            head_seconds: 0.055,
-            neck_seconds: 0.075,
-            upper_chest_seconds: 0.180,
-            chest_seconds: 0.285,
-            spine_seconds: 0.450,
-            hips_seconds: 0.350,
+            // The tracking filter already absorbs detection jumps on the
+            // observation clock, so the head and neck only need the response
+            // that removes the per-frame step of a stepped control frame. A
+            // long half-life here would add its lag on top of the filter's.
+            head_seconds: 0.025,
+            neck_seconds: 0.050,
+            // The torso lags the head clearly: a sitting subject's face
+            // tracking can spike by tens of degrees for a few frames, and the
+            // body must not swing with those spikes.
+            upper_chest_seconds: 0.220,
+            chest_seconds: 0.350,
+            spine_seconds: 0.600,
+            hips_seconds: 0.500,
         },
         bone_rotation_limits: BodyBoneRotationLimits {
             head: limit_degrees(45.0, 30.0, 25.0),

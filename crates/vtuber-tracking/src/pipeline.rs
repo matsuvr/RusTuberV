@@ -40,7 +40,8 @@ use crate::expressions::{
     observe_mediapipe_gaze,
 };
 use crate::eye_closure::{
-    EyeClosureState, EyeGeometryThresholds, EyeSide, GeometryEyeClosureTracker,
+    EyeClosureObservation, EyeClosureState, EyeClosureThresholds, EyeClosureTracker,
+    EyeGeometryThresholds, EyeSide, EyeThreshold, GeometryEyeClosureTracker,
 };
 use crate::eye_geometry::{EyeClosureFeatures, eye_closure_features};
 use crate::filter::{
@@ -48,7 +49,8 @@ use crate::filter::{
     ExpressionFilterParams, ExpressionRange, GazeFilter, GazeFilterParams, HeadFilterParams,
     HeadRotationFilter, TranslationFilter, TranslationFilterParams,
 };
-use crate::loss_recovery::{LossRecovery, LossRecoveryParams};
+use crate::loss_blend::LossBlendProfile;
+use crate::loss_recovery::LossRecovery;
 use crate::pose::mediapipe::{mediapipe_to_application_basis, relative_transform};
 use crate::pose::planar::{
     CANONICAL_FACE_TEMPLATE, PlanarCorrespondence, PlanarLandmark, PlanarPoseError,
@@ -394,8 +396,8 @@ pub struct PipelineConfig {
     pub gaze_filter: GazeFilterParams,
     /// Expression normalization and smoothing parameters.
     pub expression_filter: ExpressionFilterParams,
-    /// Loss glide / decay / recovery timing.
-    pub loss_recovery: LossRecoveryParams,
+    /// Unified loss hold / return / reacquire timing.
+    pub loss_recovery: LossBlendProfile,
 }
 
 impl Default for PipelineConfig {
@@ -409,7 +411,7 @@ impl Default for PipelineConfig {
             translation_filter: TranslationFilterParams::default(),
             gaze_filter: GazeFilterParams::default(),
             expression_filter: ExpressionFilterParams::default(),
-            loss_recovery: LossRecoveryParams::default(),
+            loss_recovery: LossBlendProfile::default(),
         }
     }
 }
@@ -498,6 +500,19 @@ impl MediapipeSampleCache {
     }
 }
 
+/// Per-eye default blink-close thresholds in openness units (`1 - raw blink`).
+///
+/// This is the rule used when no verified eye-closure profile is installed. The
+/// values are the raw-blink (R) frontier measured on the local labelled takes
+/// (`docs/eye-closure-run-v2-20260913.md`): a raw MediaPipe blink of 0.65
+/// (left) or 0.60 (right) closes, and the hysteresis release is 0.10 raw
+/// blink wide. They only turn an already near-closed eye into an exact `1.0`
+/// morph weight; MediaPipe never reaches the endpoint by itself.
+const DEFAULT_BLINK_CLOSURE: EyeClosureThresholds = EyeClosureThresholds::new(
+    EyeThreshold::from_constants(0.35, 0.45),
+    EyeThreshold::from_constants(0.40, 0.50),
+);
+
 /// Owns the end-to-end tracking pipeline.
 ///
 /// `TrackingPipeline` is single-threaded and contains no worker handles,
@@ -517,6 +532,7 @@ pub struct TrackingPipeline {
     loss_recovery: LossRecovery,
     mediapipe_cache: Option<MediapipeSampleCache>,
     eye_closure: Option<GeometryEyeClosureTracker>,
+    blink_closure: EyeClosureTracker,
 }
 
 impl TrackingPipeline {
@@ -552,6 +568,7 @@ impl TrackingPipeline {
             loss_recovery,
             mediapipe_cache: None,
             eye_closure: None,
+            blink_closure: EyeClosureTracker::new(DEFAULT_BLINK_CLOSURE),
         })
     }
 
@@ -569,14 +586,14 @@ impl TrackingPipeline {
 
     /// Installs validated per-eye geometry thresholds.
     ///
-    /// Passing thresholds here is the only way to enable correction; there is
-    /// no default threshold and no automatic fallback.
+    /// A verified profile replaces the built-in raw-blink rule with the
+    /// measured lid-gap judgement; clearing it returns to that built-in rule.
     pub fn set_eye_closure_thresholds(&mut self, thresholds: EyeGeometryThresholds) {
         self.eye_closure = Some(GeometryEyeClosureTracker::new(thresholds));
         self.mediapipe_cache = None;
     }
 
-    /// Disables eye-closure correction and drops its latched state.
+    /// Disables the installed profile and returns to the built-in raw-blink rule.
     pub fn clear_eye_closure(&mut self) {
         self.eye_closure = None;
         self.mediapipe_cache = None;
@@ -651,11 +668,12 @@ impl TrackingPipeline {
         self.gaze_filter.reset();
     }
 
-    /// Drops the latched closure without changing the installed thresholds.
+    /// Drops both closure latches without changing the installed thresholds.
     fn reset_eye_closure_state(&mut self) {
         if let Some(tracker) = self.eye_closure.as_mut() {
             tracker.reset();
         }
+        self.blink_closure.reset();
     }
 
     /// Runs one frame through the pipeline.
@@ -729,14 +747,23 @@ impl TrackingPipeline {
         if !cache_valid {
             cache =
                 sample.map(|sample| MediapipeSampleCache::build(sample, neutral, gaze_baseline));
-            if let (Some(cached), Some(tracker), Some(sample)) =
-                (cache.as_mut(), self.eye_closure.as_mut(), sample)
-            {
-                cached.closure = Some(tracker.observe(
+            if let (Some(cached), Some(sample)) = (cache.as_mut(), sample) {
+                let fallback = self.blink_closure.observe(
                     sample.source_seq,
                     sample.captured_at,
-                    cached.closure_features,
-                ));
+                    EyeClosureObservation {
+                        left_openness: Some(1.0 - cached.raw_blink_left),
+                        right_openness: Some(1.0 - cached.raw_blink_right),
+                    },
+                );
+                cached.closure = Some(match self.eye_closure.as_mut() {
+                    Some(tracker) => tracker.observe(
+                        sample.source_seq,
+                        sample.captured_at,
+                        cached.closure_features,
+                    ),
+                    None => fallback,
+                });
             }
         }
         if sample.is_none() {
@@ -1640,11 +1667,10 @@ mod assembly {
             translation_filter: TranslationFilterParams::default(),
             gaze_filter: GazeFilterParams::default(),
             expression_filter: ExpressionFilterParams::with_time_constants(0.03, 0.10),
-            loss_recovery: LossRecoveryParams {
-                glide_duration: Duration::from_millis(100),
-                decay_duration: Duration::from_millis(200),
-                recovery_duration: Duration::from_millis(100),
-                ..LossRecoveryParams::default()
+            loss_recovery: LossBlendProfile {
+                hold: Duration::from_millis(100),
+                return_duration: Duration::from_millis(200),
+                acquire: Duration::from_millis(100),
             },
         }
     }

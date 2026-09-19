@@ -38,6 +38,7 @@ fn pose_for(chain: &Chain, delta: Quat) -> ResolvedArmPose {
         lower_arm: chain.lower,
         upper_arm_delta: delta,
         lower_arm_delta: Quat::IDENTITY,
+        hand: None,
         shoulder: None,
         fingers: Default::default(),
     }

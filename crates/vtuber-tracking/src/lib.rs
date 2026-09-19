@@ -35,6 +35,8 @@ pub mod eye_closure;
 pub mod eye_geometry;
 /// Tracking filters: rotation smoothing and expression filtering.
 pub mod filter;
+/// Unified tracking-loss hold / return / reacquire ramp.
+pub mod loss_blend;
 /// Loss hold, neutral decay, and recovery blend.
 pub mod loss_recovery;
 /// Bounded procedural micro-motion after tracking loss (Issue #172).
@@ -91,11 +93,12 @@ pub use filter::{
     ExpressionFilter, ExpressionFilterParams, ExpressionRange, GazeFilter, GazeFilterParams,
     HeadFilterParams, HeadRotationFilter, MissingChannelFallback, MissingChannelPolicy,
 };
-pub use loss_recovery::{
-    LossRecovery, LossRecoveryConfigError, LossRecoveryParams, MAX_DECAY_DURATION,
-    MAX_GLIDE_DURATION, MAX_RECOVERY_DURATION, MIN_DECAY_DURATION, MIN_GLIDE_DURATION,
-    MIN_RECOVERY_DURATION,
+pub use loss_blend::{
+    LossBlend, LossBlendConfigError, LossBlendProfile, MAX_ACQUIRE_DURATION, MAX_HOLD_DURATION,
+    MAX_RETURN_DURATION, MIN_ACQUIRE_DURATION, MIN_HOLD_DURATION, MIN_RETURN_DURATION,
+    acquire_factor, loss_return_factor,
 };
+pub use loss_recovery::{LossRecovery, LossRecoveryConfigError};
 pub use micro_motion::{
     IdleTarget, MicroMotionBlender, MicroMotionProfile, MicroMotionProfileError,
     blended_idle_target, idle_target, is_tracked_state,

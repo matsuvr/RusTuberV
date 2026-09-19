@@ -26,6 +26,24 @@ struct MToonMaterialUniform {
     outline_color: vec4<f32>,
     outline_width_factor: f32,
     outline_lighting_mix_factor: f32,
+    normal_texture_scale: f32,
+    portrait_strength: f32,
+    portrait_specular_gain: f32,
+    portrait_perceptual_roughness: f32,
+    portrait_environment_gain: f32,
+    portrait_rim_gain: f32,
+    portrait_rim_power: f32,
+}
+
+/// The rich look's extra terms, unpacked from the material uniform so the
+/// portrait functions can take one value.
+struct MToonPortraitUniform {
+    strength: f32,
+    specular_gain: f32,
+    perceptual_roughness: f32,
+    environment_gain: f32,
+    rim_gain: f32,
+    rim_power: f32,
 }
 
 struct MToonInput{
@@ -54,6 +72,8 @@ struct MToonInput{
 @group(#{MATERIAL_BIND_GROUP}) @binding(114) var emissive_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(115) var outline_width_multiply_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(116) var outline_width_multiply_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(117) var normal_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(118) var normal_texture_sampler: sampler;
 
 const BASE_COLOR_TEXTURE: u32 = 1u;
 const SHADING_SHIFT_TEXTURE: u32 = 2u;
@@ -67,6 +87,8 @@ const ALPHA_MODE_MASK: u32 = 256u;
 const ALPHA_MODE_ALPHA_TO_COVERAGE: u32 = 512u;
 const ALPHA_MODE_BLEND: u32 = 1024u;
 const OUTLINE_WIDTH_MULTIPLY_TEXTURE: u32 = 2048u;
+const NORMAL_TEXTURE: u32 = 4096u;
 
 // Outline flags
 const OUTLINE_WORLD_COORDINATES: u32 = 1u;
+

@@ -208,6 +208,7 @@ pub fn setup_output_camera(
     commands
         .spawn((
             Camera3d::default(),
+            // preview and the NDI output share one finished image.
             camera,
             RenderTarget::Image(image_handle.into()),
             Projection::Perspective(PerspectiveProjection {
@@ -739,3 +740,4 @@ mod tests {
         assert!(!ground.intersects(&avatar));
     }
 }
+

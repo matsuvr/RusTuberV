@@ -77,7 +77,25 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<PoseApplyMetrics>()
             .init_resource::<PositionInputMetrics>()
             .init_resource::<LossIdleState>()
+            .init_resource::<crate::body_motion::BodyFollowFilter>()
             .init_resource::<crate::tracking_profile::GlobalBodyTrackingProfile>()
+            .init_resource::<crate::look::AvatarLookSettings>()
+            .init_resource::<crate::look::StandardLookBases>()
+            .init_resource::<crate::look::StudioLookState>()
+            .add_message::<crate::look::LookSettingsChanged>()
+            .add_systems(
+                Update,
+                (
+                    crate::look::apply_look_settings_changes,
+                    crate::look::initialize_look_materials,
+                    crate::look::clear_look_materials_on_unload
+                        .after(despawn_unloading_avatar),
+                    crate::look::setup_studio_lighting,
+                    crate::look::apply_environment_to_avatar_cameras,
+                    crate::look::apply_standard_portrait_settings,
+                    crate::look::apply_mtoon_portrait_settings,
+                ),
+            )
             .add_message::<LoadAvatarRequest>()
             .add_message::<LoadAvatarResult>()
             .add_message::<UnloadAvatarRequest>()
@@ -120,6 +138,12 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(
                 PostUpdate,
                 frame_avatar_camera.after(TransformSystems::Propagate),
+            )
+            .add_systems(
+                PostUpdate,
+                crate::look::sync_studio_lighting
+                    .after(TransformSystems::Propagate)
+                    .after(frame_avatar_camera),
             )
             .add_systems(
                 PostUpdate,
@@ -202,10 +226,12 @@ fn setup_scene(
         RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER),
     ));
 
-    // Key light.
+    // Key light. The level is chosen so a fully lit white surface exposes to
+    // about 0.7 with the default camera exposure, leaving headroom for the
+    // material's own rim/emission instead of clipping to white.
     commands.spawn((
         DirectionalLight {
-            illuminance: 1500.0,
+            illuminance: 650.0,
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.5, 0.0)),

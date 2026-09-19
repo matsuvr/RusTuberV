@@ -3,6 +3,7 @@
 #[allow(clippy::all)]
 mod bindings;
 pub mod compat;
+pub mod hand;
 
 pub use bindings::*;
 
