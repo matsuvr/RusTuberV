@@ -5,11 +5,16 @@
 //! (color, emission, UV) stay owned by the existing expression writer, so the
 //! two never fight over the same material values.
 
+mod finish;
 mod lighting;
 mod material;
 mod mtoon;
 mod preset;
 
+pub use finish::{
+    PORTRAIT_FINISH, PortraitFinish, PortraitFinishPass, PortraitFinishState,
+    register_portrait_finish, resolve_portrait_finish, sync_portrait_finish,
+};
 pub use lighting::{
     StudioLight, StudioLightSlot, StudioLookState, StudioRig, apply_environment_to_avatar_cameras,
     blend_studio_rig, setup_studio_lighting, solve_studio_rig, studio_environment_cubemap,
@@ -77,4 +82,3 @@ mod tests {
         );
     }
 }
-

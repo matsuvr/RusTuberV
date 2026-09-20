@@ -23,6 +23,7 @@ implemented and not measured, and is not claimed as working.
 | #70 look boundary | `ea47b59` | `RichLookSettings`/`effective_look_strength`/`blend_look_scalar`, `StandardLookBase` capture, `AvatarLookSettings`+`LookSettingsChanged`, capture-once/unload lifecycle |
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
+| #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with Bevy's own display transforms and LUTs |
 
 Supporting reusable code: `tools/xtask/src/rich_look.rs` (six GPU cases),
 `vendor/bevy_vrm1/src/vrm/mtoon_lighting.wgsl`, `mtoon_alpha.wgsl`,
@@ -59,6 +60,58 @@ surface exposes to about 0.73 including the default ambient, so a material's
 own rim or emission has room before white. Bevy applies `Tonemapping` only to
 HDR views, so a real highlight roll-off needs the HDR output of issue #74; at
 the current LDR output the headroom is what keeps the display off white.
+
+## #74 measured: HDR finish, alpha and tone (Windows/Vulkan/RTX 4090)
+
+`look::finish` resolves one preset (`PORTRAIT_FINISH`: HDR on, the app's
+default `Exposure::BLENDER` ev100, Bevy's default `TonyMcMapface` display
+transform) and `sync_portrait_finish` writes the resolved `Hdr`/`Exposure`/
+`Tonemapping` onto both avatar cameras, marks the output view for the
+alpha-aware finish pass and routes the output camera's own `Tonemapping`
+through it (`None` on the component, the curve travels in the pass uniform) so
+the display transform is applied exactly once. The window keeps Bevy's own
+tonemapping pass, so the viewport and the output image share the same
+exposure and curve.
+
+Per-model `vrm-render` numbers with the finish in place (same fixture, same
+frozen clock):
+
+| model | off mean | on mean | mean abs diff |
+|---|---|---|---|
+| AvatarSample_C | 33.56 | 38.56 | 5.09 |
+| IrisPart1(ShapeKey Reduce) | 31.21 | 33.49 | 3.60 |
+| RearAliceLite_3.0 | 24.75 | 25.95 | 2.26 |
+| Sapphy | 35.09 | 34.40 | 2.24 |
+
+The ON state is now *dimmer on highlights than the pre-#74 look* while the
+portrait rig still adds light: AvatarSample_C's bright jacket panel reads
+`[245, 237, 236]` in the pre-#74 ON frame and `[193, 188, 188]` with the
+finish, and the face keeps its tone, so the added light no longer clips to
+white.
+
+Alpha contract checks (byte comparisons of the readback frames):
+
+| comparison | result |
+|---|---|
+| look off, this build vs origin/main (`648d981`) | byte-identical for AvatarSample_C, IrisPart1(ShapeKey Reduce), RearAliceLite_3.0 and Sapphy |
+| look on vs off, alpha channel | AvatarSample_C and RearAliceLite_3.0: 0 differing pixels; Sapphy 112 and Iris 62 pixels differ by ±1/255 at MSAA-resolved semi-transparent edges (the pre-#74 build showed the same kind of 13/11-pixel differences at the same edges) |
+
+The ±1 edge differences come from the HDR path quantizing the MSAA-resolved
+premultiplied content through `Rgba16Float` before the final 8-bit write;
+they are not a tone-dependent alpha change, and every consumer still receives
+the same premultiplied BGRA8 sRGB image the preview samples and the readback
+unpremultiplies exactly once.
+
+Fixture note: the first `vrm-render` run after a rebuild can capture the look
+-off frame before every material upload has landed (a model with missing
+jacket/hair or a blank frame). Reruns of the same model are stable and were
+the values recorded above; the flake is in the fixture's single-readback
+capture, not in the look systems.
+
+Not measured: frame times, GPU time, NDI output, any GPU/OS other than the one
+above. The screenshots taken while reviewing the result are visual inspection
+only; they are not a pixel measurement. No FPS or image-quality threshold is
+claimed.
 
 `mtoon-portrait`: `standard` `[244,244,244]`, `rich_without_extras`
 `[244,244,244]` (zeroed gains leave the standard pixel), `rich`
@@ -145,15 +198,15 @@ restart.
 | Issue | State |
 |---|---|
 | #72 MToon glossy/environment/extra rim | Implemented. `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl` and the view environment specular are in place; verified by `mtoon-portrait` and the per-model table above. |
-| #74 HDR finish and transparency | Not implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table do not exist. |
+| #74 HDR finish and transparency | Implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table exist in `crates/vtuber-avatar/src/look/finish.rs` and `finish.wgsl`; verified by the #74 measurements above. |
 | #75 one-click UI, 4 languages, per-model save | Partially implemented: the switch and the strength slider exist in the settings screen in four languages (see above). Persistence, per-model settings and restore on model switch are not implemented. |
 | #76 material roles | Not implemented. `MaterialRole`, `infer_material_role`, `resolve_material_role`, the role param resolvers and `face_lighting_normal` do not exist. |
 | #77 final acceptance | Partially covered by this document (the measurements above). The #75 first-version and #76 role comparisons are not possible yet because those issues are not implemented. |
 
-Consequences: the epic's completion criteria are not met. In particular MToon
-materials get no added gloss/environment/rim, no finish/tone change happens,
-and per-model look settings are not saved or restored. The rich look itself can
-be switched on and its strength adjusted from the settings screen.
+Consequences: the epic's completion criteria are not fully met yet. The
+finish/tone change (#74) is in place and the look can be switched on and
+adjusted from the settings screen; per-model look settings are not saved or
+restored, and the role-based adjustments of #76 are not implemented.
 
 ## Known limitations in the implemented parts
 
@@ -169,6 +222,14 @@ be switched on and its strength adjusted from the settings screen.
 - `RICH_ROUGHNESS_SCALE = 0.95` and the `STUDIO_PRESET` values are adjustment
   starting points, not measured optima. They were not tuned against a real
   model.
+- `PORTRAIT_FINISH` pins the display transform to the app's default exposure
+  and Bevy's default `TonyMcMapface` curve. Both are starting points; the
+  preset has not been tuned on a real model, and the finish's runtime curve
+  dispatch supports every `Tonemapping` variant but only the preset's value is
+  reachable through `resolve_portrait_finish`.
+- With the look on, the output view composites in linear `Rgba16Float`, so
+  MSAA-resolved semi-transparent edges can differ from the plain display by
+  ±1/255 after the final 8-bit write (see the #74 alpha checks above).
 - `StandardLookBases` assumes the loader gives each avatar its own
   `StandardMaterial` assets; no per-avatar material cloning is performed.
 - The rich path applies each light's radiance without a Lambert normalization,

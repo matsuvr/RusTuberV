@@ -82,14 +82,16 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<crate::look::AvatarLookSettings>()
             .init_resource::<crate::look::StandardLookBases>()
             .init_resource::<crate::look::StudioLookState>()
+            .init_resource::<crate::look::PortraitFinishState>()
             .add_message::<crate::look::LookSettingsChanged>()
             .add_systems(
                 Update,
                 (
                     crate::look::apply_look_settings_changes,
+                    crate::look::sync_portrait_finish
+                        .after(crate::look::apply_look_settings_changes),
                     crate::look::initialize_look_materials,
-                    crate::look::clear_look_materials_on_unload
-                        .after(despawn_unloading_avatar),
+                    crate::look::clear_look_materials_on_unload.after(despawn_unloading_avatar),
                     crate::look::setup_studio_lighting,
                     crate::look::apply_environment_to_avatar_cameras,
                     crate::look::apply_standard_portrait_settings,
@@ -199,6 +201,7 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(Update, reset_position_metrics_on_lifecycle_change)
             .add_systems(Update, crate::pose::debug_propagation_probe);
         register_output_systems(app);
+        crate::look::register_portrait_finish(app);
     }
 }
 
