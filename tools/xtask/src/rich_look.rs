@@ -900,7 +900,7 @@ fn mtoon_blend_depth() -> Result<String, RichLookError> {
 
     let ring_native = render(&transparent_sphere(MToonShadingMode::Native, 0.0))?;
     let ring_rich_zero = render(&transparent_sphere(MToonShadingMode::Rich, 0.0))?;
-    let ring_rich_full = render(&transparent_sphere(MToonShadingMode::Rich, 1.0))?;
+    let ring_rich_full = render_expected_empty(&transparent_sphere(MToonShadingMode::Rich, 1.0))?;
     let (ring_zero_differing, _) = pixel_difference(&ring_native, &ring_rich_zero);
     let native_ring_pixels = opaque_pixel_count(&ring_native);
     let full_ring_pixels = opaque_pixel_count(&ring_rich_full);
@@ -2761,6 +2761,12 @@ fn render(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     render_app(fixture_app(scene, false)?)
 }
 
+/// Renders a scene whose measured image is legitimately fully transparent
+/// (the fixture asserts that the Rich display discards every fragment).
+fn render_expected_empty(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
+    render_app_expected_empty(fixture_app(scene, false)?)
+}
+
 /// Renders the scene with the independent upstream reference fragment shader
 /// substituted for the Native one.
 ///
@@ -2770,8 +2776,44 @@ fn render_reference(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     render_app(fixture_app(scene, true)?)
 }
 
-fn render_app(mut app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
-    let deadline = Instant::now() + MAX_WAIT;
+/// Whether a fully transparent readback is content that has not landed yet or
+/// the measurement itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmptyReadback {
+    /// A transparent frame means the scene has not rendered yet; keep waiting
+    /// for content.
+    NotReady,
+    /// The fixture measures a legitimately transparent image (for example the
+    /// Rich discard of a fully transparent Blend outline), so empty frames are
+    /// sampled like any other image.
+    Expected,
+}
+
+/// Runs the fixture app and returns the readback only when the settle
+/// condition was reached.
+fn render_app(app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
+    settle_captured_frames(app, Instant::now() + MAX_WAIT, EmptyReadback::NotReady)
+}
+
+/// Runs the fixture app for a measurement that is expected to be transparent.
+fn render_app_expected_empty(app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
+    settle_captured_frames(app, Instant::now() + MAX_WAIT, EmptyReadback::Expected)
+}
+
+/// Runs the fixture app until `SETTLED_FRAMES` byte-identical readback frames
+/// have been sampled (non-empty unless the fixture expects a transparent
+/// measurement).
+///
+/// Only that condition returns `Ok`. A run that ends at the deadline or on
+/// `AppExit` without settling does not report the last image as success:
+/// without any completed readback the result is `NotRun` (the GPU path is
+/// unavailable), and with readbacks that never settled it is `Failed` with the
+/// unmet settle condition.
+fn settle_captured_frames(
+    mut app: App,
+    deadline: Instant,
+    empty: EmptyReadback,
+) -> Result<Vec<[u8; 4]>, RichLookError> {
     let mut settled = 0;
     let mut last = None;
     while Instant::now() < deadline {
@@ -2786,8 +2828,12 @@ fn render_app(mut app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
             // frames after the mesh does, so a capture that only waits for
             // non-empty pixels can miss the shadow. Waiting for stable frames
             // makes every fixture app compare the same settled image.
+            let has_content = match empty {
+                EmptyReadback::NotReady => sampled.iter().any(|pixel| pixel[3] > 0),
+                EmptyReadback::Expected => true,
+            };
             let stable = last.as_deref() == Some(sampled.as_slice());
-            settled = if stable && sampled.iter().any(|pixel| pixel[3] > 0) {
+            settled = if stable && has_content {
                 settled + 1
             } else {
                 0
@@ -2805,9 +2851,14 @@ fn render_app(mut app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
             break;
         }
     }
-    last.ok_or(RichLookError::NotRun(
-        "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
-    ))
+    match last {
+        None => Err(RichLookError::NotRun(
+            "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
+        )),
+        Some(_) => Err(RichLookError::Failed(format!(
+            "the fixture readback did not reach {SETTLED_FRAMES} identical frames; refusing to use an unstable image"
+        ))),
+    }
 }
 
 fn fixture_app(scene: &MtoonScene, upstream_reference: bool) -> Result<App, RichLookError> {
@@ -3083,4 +3134,197 @@ fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
 #[allow(clippy::indexing_slicing)]
 fn center_pixel(pixels: &[[u8; 4]]) -> [u8; 4] {
     pixels[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use vtuber_core::{FrameSeq, MonoTimeNs, VideoOutputPixelFormat};
+
+    /// One-pixel readback frame for the CPU settle-rule tests.
+    fn test_frame(pixel: [u8; 4]) -> VideoOutputFrame {
+        VideoOutputFrame {
+            width: 1,
+            height: 1,
+            stride_bytes: 4,
+            pixel_format: VideoOutputPixelFormat::Bgra8StraightAlpha,
+            frame_seq: FrameSeq(0),
+            captured_at: MonoTimeNs(0),
+            data: Arc::from(pixel.to_vec()),
+        }
+    }
+
+    /// A deterministic frame source: publishes one frame per update, cycling
+    /// through `frames` when asked, and optionally raises `AppExit` after a
+    /// number of updates.
+    #[derive(Resource)]
+    struct TestFeed {
+        frames: Vec<[u8; 4]>,
+        cycle: bool,
+        exit_after_updates: Option<usize>,
+        published: usize,
+        updates: usize,
+    }
+
+    impl TestFeed {
+        /// Publishes the frames forever in order.
+        fn repeating(frames: Vec<[u8; 4]>) -> Self {
+            Self {
+                frames,
+                cycle: true,
+                exit_after_updates: None,
+                published: 0,
+                updates: 0,
+            }
+        }
+
+        /// Publishes each frame once, then stops.
+        fn once(frames: Vec<[u8; 4]>) -> Self {
+            Self {
+                frames,
+                cycle: false,
+                exit_after_updates: None,
+                published: 0,
+                updates: 0,
+            }
+        }
+
+        fn with_exit_after(mut self, updates: usize) -> Self {
+            self.exit_after_updates = Some(updates);
+            self
+        }
+    }
+
+    fn publish_test_frames(
+        mut feed: ResMut<TestFeed>,
+        mut slot: ResMut<AvatarOutputFrameSlot>,
+        mut exit: ResMut<Messages<AppExit>>,
+    ) {
+        let frame_count = feed.frames.len();
+        if frame_count > 0 {
+            let index = if feed.cycle {
+                feed.published % frame_count
+            } else {
+                feed.published
+            };
+            if let Some(pixel) = feed.frames.get(index).copied() {
+                slot.publish(test_frame(pixel));
+                feed.published += 1;
+            }
+        }
+        feed.updates += 1;
+        if feed.exit_after_updates == Some(feed.updates) {
+            exit.write(AppExit::Success);
+        }
+    }
+
+    fn settle_test_app(feed: TestFeed) -> App {
+        let mut app = App::new();
+        app.init_resource::<AvatarOutputFrameSlot>();
+        app.insert_resource(feed);
+        app.add_systems(Update, publish_test_frames);
+        app
+    }
+
+    const SETTLE_TEST_WAIT: Duration = Duration::from_millis(500);
+    const SETTLE_TEST_TIMEOUT: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn settle_accepts_only_consecutive_identical_frames() {
+        let app = settle_test_app(TestFeed::repeating(vec![[1, 2, 3, 255]]));
+        let sampled = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_WAIT,
+            EmptyReadback::NotReady,
+        )
+        .expect("identical frames must settle");
+        assert_eq!(sampled, vec![[1, 2, 3, 255]]);
+    }
+
+    #[test]
+    fn settle_rejects_changing_frames() {
+        let app = settle_test_app(TestFeed::repeating(vec![[1, 2, 3, 255], [9, 8, 7, 255]]));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(RichLookError::Failed(ref reason)) if reason.contains("identical frames")
+            ),
+            "changing frames must not settle: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_rejects_fewer_than_required_frames() {
+        let frames = vec![[1, 2, 3, 255]; SETTLED_FRAMES as usize - 1];
+        let app = settle_test_app(TestFeed::once(frames));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::Failed(_))),
+            "an incomplete stable run must not succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_rejects_app_exit_before_settling() {
+        let app = settle_test_app(TestFeed::repeating(vec![[1, 2, 3, 255]]).with_exit_after(3));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_WAIT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::Failed(_))),
+            "an exit before settling must not succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_reports_not_run_without_frames() {
+        let app = settle_test_app(TestFeed::once(Vec::new()));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::NotRun(_))),
+            "no readback must stay NOT RUN: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_rejects_stable_transparent_frames_by_default() {
+        let app = settle_test_app(TestFeed::repeating(vec![[0, 0, 0, 0]]));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::Failed(_))),
+            "an empty image without an expectation must not settle: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_accepts_stable_transparent_frames_when_expected() {
+        let app = settle_test_app(TestFeed::repeating(vec![[0, 0, 0, 0]]));
+        let sampled = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_WAIT,
+            EmptyReadback::Expected,
+        )
+        .expect("the transparent measurement must settle");
+        assert_eq!(sampled, vec![[0, 0, 0, 0]]);
+    }
 }

@@ -27,7 +27,7 @@ implemented and not measured, and is not claimed as working.
 | #69 Native/Rich MToon | this change (working tree on `0018277`) | restores the upstream `f9593fd7` Native fragment (`mtoon_native.wgsl` + `mtoon_fragment.wgsl`), adds `MToonShadingMode`/`MToonMaterialKey::RICH_SHADING` shader selection, `mtoon_rich_fragment.wgsl` and `compose_rich_mtoon`; the per-light radiance, normal texture, GI equalization and added gloss are now Rich-only. The review fixes are included: the Rich transparent discard uses the authored base alpha (Blend outline), and the prepass activates the Rich cutout only for `RICH_SHADING` materials. `mtoon-reference` compares against the independent fixed-revision reference. |
 | #70 look boundary | `ea47b59` | `RichLookSettings`/`effective_look_strength`/`blend_look_scalar`, `StandardLookBase` capture, `AvatarLookSettings`+`LookSettingsChanged`, capture-once/unload lifecycle |
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
-| #71 cutout shadow UV | this change (working tree on `518af8c`) | extracts the UV animation into `mtoon_uv.wgsl` (pure expression, caller-supplied clock), has the prepass read the prepass view globals at binding 1 and reuse the animated UV, and adds animated scenes to `mtoon-cutout-shadow` (exact-phase cutout shadow) and `mtoon-reference` (scrolling Mask sphere); the fixture capture now waits for settled frames |
+| #71 cutout shadow UV | this change (working tree on `518af8c`) | extracts the UV animation into `mtoon_uv.wgsl` (pure expression, caller-supplied clock), has the prepass read the prepass view globals at binding 1 and reuse the animated UV, and adds animated scenes to `mtoon-cutout-shadow` (exact-phase cutout shadow) and `mtoon-reference` (scrolling Mask sphere); the fixture capture returns `Ok` only on 40 identical frames (expected-empty measurements opt in explicitly) and otherwise reports the unmet condition |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
 | #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, and the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with the explicit final contract `a * E(T(C))` |
 | #79 avatar UI alpha boundary | this PR | avatar-only callback for the monitor and expanding transition; the shared `Bgra8UnormSrgb` image remains gamma-premultiplied while the callback supplies linear-premultiplied RGB to the UI blend |
@@ -174,7 +174,15 @@ before sampling. The previous 3-non-empty-frames wait could sample a frame
 before the first shadow-map and pipeline setup had landed; re-running the
 unchanged `mtoon-cutout-shadow` case failed intermittently for that reason
 (Native-vs-Rich comparisons of random app instances differed by the missing
-shadow). All MToon fixture cases re-run with the settled capture.
+shadow). All MToon fixture cases re-run with the settled capture. The capture
+returns `Ok` only when the 40-identical-frames condition is met; a run that
+ends first reports the unmet condition (no readback at all stays `NOT RUN`)
+instead of using the last image. Frames must also be non-empty, except for the
+explicit expected-empty capture that `mtoon-blend-depth` uses for the Rich(1)
+discard of the fully transparent Blend outline (a stable transparent image is
+otherwise still not accepted). The CPU tests in `tools/xtask/src/rich_look.rs`
+cover the rule: identical frames settle; changing frames, fewer than the
+required frames and an early `AppExit` do not; no readback is `NOT RUN`.
 
 Local validation for this change: `cargo test --workspace -j 4` and
 `cargo clippy --workspace --all-targets -j 4` PASS; the 14 GPU cases above
@@ -218,13 +226,14 @@ material at zero effect, and Unlit stays byte-identical at full strength.
 
 ### Not measured here
 
-- Time-driven UV animation is in the `mtoon-cutout-shadow` fixture only: it
-  advances the frozen clock once to an exact phase, so the animated cutout
-  shadow is compared on the GPU. The other fixtures keep the
+- Time-driven UV animation is verified on the GPU by `mtoon-cutout-shadow`
+  (exact-phase animated cutout shadow) and `mtoon-reference` (scrolling Mask
+  sphere against the fixed-revision reference); both advance the frozen clock
+  once to an exact phase. The other fixtures keep the
   `TimeUpdateStrategy::ManualDuration(Duration::ZERO)` clock, so they compare
   only the shared UV transform path. The animation functions are shared by both
   display paths through `mtoon::native`/`mtoon::uv`; expression and animation
-  behavior is covered by the workspace tests, not by these fixtures.
+  behavior is also covered by the workspace tests.
 - The light level of the scene is the app's own `setup_scene` key (650 lx). The
   Native display is deliberately the upstream authored display; the app's look
   switch selects the Rich display, which applies the light level and colors.
