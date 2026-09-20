@@ -1,12 +1,13 @@
 #define_import_path mtoon::portrait
 
-// The rich look's extra material terms: a modest non-metal specular from each
-// light, a view-reflected environment term, and a lighting-side rim.
+// The Rich display's extra material terms: a modest non-metal specular from
+// each light, a view-reflected environment term, and a lighting-side rim.
 //
 // Everything here is an artistic layer on top of the authored MToon result:
 // it is evaluated in linear space, adds no PBR diffuse, and never changes the
-// material's alpha. `params.strength` is applied once, here, so the CPU gains
-// and the shader gains are not multiplied twice.
+// material's alpha. The composition with the Native result is
+// `compose_rich_mtoon`, the single place where `strength` is applied, so the
+// CPU gains and the shader gains are not multiplied twice.
 
 #import bevy_pbr::{
     lighting::{
@@ -15,10 +16,8 @@
         F_Schlick_vec,
         V_SmithGGXCorrelated,
     },
-    mesh_view_bindings::{view, light_probes},
+    mesh_view_bindings::light_probes,
 }
-
-#import mtoon::types::MToonPortraitUniform
 
 // The added direct-light specular for one light.
 //
@@ -101,26 +100,23 @@ fn portrait_rim(
     return vec3<f32>(rim * saturate(dot(n, l))) * light_rgb;
 }
 
-// Layers the added terms on top of the authored result.
+// Composes the Rich result from the fixed Native result.
 //
-// `base` is the material result with the look's lighting and the author's own
-// MatCap/rim/emission already in it. `strength == 0` returns `base` unchanged,
-// so switching the look off cannot change a pixel.
-fn apply_portrait_terms(
-    base: vec4<f32>,
-    direct_specular: vec3<f32>,
-    environment_specular: vec3<f32>,
-    rim: vec3<f32>,
-    params: MToonPortraitUniform,
+// The composition is the identity at `strength == 0`, so a Rich material with
+// no added effect renders exactly the Native display. At 1 it is the Rich RGB
+// with the Native alpha; in between the RGB is interpolated and the alpha is
+// always the Native alpha, so coverage, cutout and depth never move with the
+// look. This function is pure: it only reads its arguments.
+fn compose_rich_mtoon(
+    native: vec4<f32>,
+    rich_rgb: vec3<f32>,
+    strength: f32,
 ) -> vec4<f32> {
-    if (params.strength <= 0.0) {
-        return base;
+    if (strength <= 0.0) {
+        return native;
     }
-    let extra = params.specular_gain * direct_specular
-        + params.environment_gain * environment_specular
-        + params.rim_gain * rim;
-    return vec4<f32>(base.rgb + view.exposure * extra * params.strength, base.a);
+    if (strength >= 1.0) {
+        return vec4<f32>(rich_rgb, native.a);
+    }
+    return vec4<f32>(mix(native.rgb, rich_rgb, strength), native.a);
 }
-
-
-

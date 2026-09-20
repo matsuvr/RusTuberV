@@ -22,7 +22,10 @@ use bevy::render::render_resource::{
 };
 use bevy::winit::WinitPlugin;
 use bevy_egui::{EguiContext, EguiMultipassSchedule, EguiPlugin};
-use bevy_vrm1::prelude::{MToonMaterial, MToonPortraitParams, MtoonMaterialPlugin, Shade};
+use bevy_vrm1::prelude::{
+    MToonMaterial, MToonOutline, MToonPortraitParams, MToonShadingMode, MtoonMaterialPlugin,
+    OutlineWidthMode, RimLighting, Shade,
+};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vtuber_app::ui::{AvatarPreviewPlugin, paint_avatar_preview};
@@ -73,8 +76,20 @@ struct MtoonScene {
     /// Optional constant normal texture, one RGBA pixel.
     normal_map: Option<[u8; 4]>,
     normal_scale: f32,
-    /// The material's portrait values; strength 0 is the standard display.
+    /// Optional two-texel base color texture: the left and right halves of the
+    /// mesh's UV range. Used for the alpha Mask and Blend coverage cases.
+    base_color_texture: Option<[[u8; 4]; 2]>,
+    alpha_mode: AlphaMode,
+    transparent_with_z_write: bool,
+    /// The author's own MatCap/parametric rim; non-default values make the
+    /// authored rim visible in both display paths.
+    rim_lighting: RimLighting,
+    /// Whether the material draws its inverted-hull outline.
+    outline: bool,
+    /// The material's portrait values; strength 0 is the zero added effect.
     portrait: MToonPortraitParams,
+    /// Which MToon display path the material uses.
+    shading_mode: MToonShadingMode,
 }
 
 impl MtoonScene {
@@ -89,8 +104,21 @@ impl MtoonScene {
             ground: false,
             normal_map: None,
             normal_scale: 1.0,
+            base_color_texture: None,
+            alpha_mode: AlphaMode::Opaque,
+            transparent_with_z_write: false,
+            rim_lighting: RimLighting::default(),
+            outline: false,
             portrait: MToonPortraitParams::default(),
+            shading_mode: MToonShadingMode::Native,
         }
+    }
+
+    /// The same scene on the Rich display path with the preset gains.
+    fn rich(mut self, strength: f32) -> Self {
+        self.shading_mode = MToonShadingMode::Rich;
+        self.portrait.strength = strength;
+        self
     }
 }
 
@@ -113,6 +141,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-cutout-shadow" => mtoon_cutout_shadow(),
         "studio-environment" => studio_environment(),
         "mtoon-standard" => mtoon_standard(),
+        "mtoon-rich-zero" => mtoon_rich_zero(),
         "mtoon-normal" => mtoon_normal(),
         "help" | "--help" | "-h" => {
             println!("cargo xtask rich-look <case> [--evidence <file>]");
@@ -120,7 +149,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-lighting  directional-light color/intensity response");
             println!("  mtoon-shading   signed NdotL, shading shift and toony endpoints");
             println!("  mtoon-normal    normal texture, scale and TBN wiring");
-            println!("  mtoon-standard  the standard display is the plain authored display");
+            println!("  mtoon-standard  the Native display is the plain authored display");
+            println!("  mtoon-rich-zero Native vs Rich with zero added effect, byte-compared");
             println!("  finish-alpha    HDR finish, sRGB premultiplication and readback");
             println!("  avatar-ui-alpha shared avatar image through the real egui preview callback");
             println!("  mtoon-authored  (renamed to mtoon-standard)");
@@ -179,13 +209,7 @@ fn mtoon_lighting() -> Result<String, RichLookError> {
         Ok(center_pixel(&render(scene)?))
     };
 
-    let base = MtoonScene {
-        portrait: MToonPortraitParams {
-            strength: 1.0,
-            ..default()
-        },
-        ..MtoonScene::lit(Color::WHITE, Color::BLACK, white(0.0))
-    };
+    let base = MtoonScene::lit(Color::WHITE, Color::BLACK, white(0.0)).rich(1.0);
     let dark = sample(&base)?;
     let one = sample(&MtoonScene {
         lights: vec![white(200.0)],
@@ -265,13 +289,7 @@ fn mtoon_shading() -> Result<String, RichLookError> {
         illuminance: 200.0,
         shadows_enabled: false,
     };
-    let base = MtoonScene {
-        portrait: MToonPortraitParams {
-            strength: 1.0,
-            ..default()
-        },
-        ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
-    };
+    let base = MtoonScene::lit(Color::WHITE, Color::BLACK, light).rich(1.0);
     // A light travelling toward `-X` meets the plane's `+Z` normal at exactly
     // 90 degrees, so the untouched ramp sits on the middle of its range.
     let side_light = LightSpec {
@@ -344,60 +362,83 @@ fn mtoon_shading() -> Result<String, RichLookError> {
     Ok(report)
 }
 
-/// The standard display (`portrait.strength` 0) must be the plain display and
-/// it must never blow out: a fully lit white surface stays below white, and
-/// raising the light level still changes the pixel instead of saturating.
+/// The Native display is the fixed upstream authored display.
+///
+/// The light shapes the shading ramp by its direction only; its level and
+/// color are deliberately not applied, so a fully lit surface shows the
+/// authored base color. This records the restored baseline of issue #69; the
+/// light-level response is a Rich effect, not a Native one.
 fn mtoon_standard() -> Result<String, RichLookError> {
-    let scene = |illuminance: f32| MtoonScene::lit(
+    let front = |illuminance| LightSpec {
+        direction: Vec3::NEG_Z,
+        color: Color::WHITE,
+        illuminance,
+        shadows_enabled: false,
+    };
+    let lit_650lx = center_pixel(&render(&MtoonScene::lit(
+        Color::WHITE,
+        Color::BLACK,
+        front(650.0),
+    ))?);
+    let lit_1300lx = center_pixel(&render(&MtoonScene::lit(
+        Color::WHITE,
+        Color::BLACK,
+        front(1_300.0),
+    ))?);
+    let side = center_pixel(&render(&MtoonScene::lit(
         Color::WHITE,
         Color::BLACK,
         LightSpec {
-            direction: Vec3::NEG_Z,
-            color: Color::WHITE,
-            illuminance,
-            shadows_enabled: false,
+            direction: Vec3::NEG_X,
+            ..front(650.0)
         },
-    );
-    let app_default = center_pixel(&render(&scene(650.0))?);
-    let doubled = center_pixel(&render(&scene(1_300.0))?);
-    let red = center_pixel(&render(&MtoonScene {
-        lights: vec![LightSpec {
-            direction: Vec3::NEG_Z,
+    ))?);
+    let red = center_pixel(&render(&MtoonScene::lit(
+        Color::WHITE,
+        Color::BLACK,
+        LightSpec {
             color: Color::srgb(1.0, 0.0, 0.0),
-            illuminance: 650.0,
-            shadows_enabled: false,
-        }],
-        ..scene(650.0)
-    })?);
+            ..front(650.0)
+        },
+    ))?);
 
     let mut report = format!(
         "case=mtoon-standard\n\
-         lit_650lx={app_default:?}\n\
-         lit_1300lx={doubled:?}\n\
+         lit_650lx={lit_650lx:?}\n\
+         lit_1300lx={lit_1300lx:?}\n\
+         side_90deg={side:?}\n\
          lit_650lx_red={red:?}\n"
     );
-    if luma(app_default) >= 750 {
+    if lit_650lx[..3].iter().any(|channel| *channel < 250) {
         return Err(RichLookError::Failed(format!(
-            "the standard display blew a fully lit white surface to white: {app_default:?}"
+            "a fully lit white surface did not show the authored base color: {lit_650lx:?}"
         )));
     }
-    if luma(doubled) <= luma(app_default) {
+    if luma_diff(lit_650lx, lit_1300lx) > 3 {
         return Err(RichLookError::Failed(format!(
-            "the standard display saturated instead of following the light: 650lx={app_default:?} 1300lx={doubled:?}"
+            "the Native display applied the light level: 650lx={lit_650lx:?} 1300lx={lit_1300lx:?}"
         )));
     }
-    if red[2] <= red[0] {
+    if luma_diff(red, lit_650lx) > 3 {
         return Err(RichLookError::Failed(format!(
-            "the standard display did not follow the light color: {red:?}"
+            "the Native display applied the light color: white={lit_650lx:?} red={red:?}"
         )));
     }
-    report.push_str("checks=standard_not_blown,standard_follows_light\n");
+    if luma(side) >= luma(lit_650lx) {
+        return Err(RichLookError::Failed(format!(
+            "the light direction did not shape the Native display: front={lit_650lx:?} side={side:?}"
+        )));
+    }
+    report.push_str("checks=authored_color,no_light_level,no_light_color,direction_shapes\n");
     Ok(report)
 }
 
-/// The added portrait terms must be layered on without touching the standard
-/// display: strength 0 is the standard pixel, the rich lighting alone changes
-/// it, and the gloss/environment/rim gains change it again.
+/// The Rich display must keep the Native pixel at zero added effect and layer
+/// its own lighting, gloss, environment and rim on top at positive strength.
+///
+/// The zero case selects Rich with the nominal gains and only the effect
+/// amount at 0, so it proves the Rich pipeline's identity instead of falling
+/// back to the Native pipeline.
 fn mtoon_portrait() -> Result<String, RichLookError> {
     let light = LightSpec {
         direction: Vec3::NEG_Z,
@@ -405,46 +446,58 @@ fn mtoon_portrait() -> Result<String, RichLookError> {
         illuminance: 900.0,
         shadows_enabled: false,
     };
-    let scene = |portrait: MToonPortraitParams| MtoonScene {
+    let scene = |portrait: MToonPortraitParams, shading_mode: MToonShadingMode| MtoonScene {
         portrait,
+        shading_mode,
         ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
     };
-    let standard = center_pixel(&render(&scene(MToonPortraitParams::default()))?);
-    let rich_without_extras = center_pixel(&render(&scene(MToonPortraitParams {
-        strength: 1.0,
-        specular_gain: 0.0,
-        environment_gain: 0.0,
-        rim_gain: 0.0,
-        ..default()
-    }))?);
     let preset = vtuber_avatar::look::MTOON_PORTRAIT_PRESET;
-    let rich = center_pixel(&render(&scene(MToonPortraitParams {
-        strength: 1.0,
-        ..preset
-    }))?);
+    let native = center_pixel(&render(&scene(
+        MToonPortraitParams::default(),
+        MToonShadingMode::Native,
+    ))?);
+    let rich_strength_zero = center_pixel(&render(&scene(
+        MToonPortraitParams {
+            strength: 0.0,
+            ..preset
+        },
+        MToonShadingMode::Rich,
+    ))?);
+    let rich = center_pixel(&render(&scene(
+        MToonPortraitParams {
+            strength: 1.0,
+            ..preset
+        },
+        MToonShadingMode::Rich,
+    ))?);
     // The added specular must follow the light: rotating the key moves the
     // highlight, so the same probe pixel changes.
-    let rotated = center_pixel(&render(&scene(MToonPortraitParams {
-        strength: 1.0,
-        ..preset
-    })
-    .with_light_direction(Vec3::new(0.7, -0.3, -0.6)))?);
+    let rotated = center_pixel(&render(
+        &scene(
+            MToonPortraitParams {
+                strength: 1.0,
+                ..preset
+            },
+            MToonShadingMode::Rich,
+        )
+        .with_light_direction(Vec3::new(0.7, -0.3, -0.6)),
+    )?);
 
     let mut report = format!(
         "case=mtoon-portrait\n\
-         standard={standard:?}\n\
-         rich_without_extras={rich_without_extras:?}\n\
+         native={native:?}\n\
+         rich_strength_zero={rich_strength_zero:?}\n\
          rich={rich:?}\n\
          rich_rotated_light={rotated:?}\n"
     );
-    if luma_diff(rich_without_extras, standard) > 4 {
+    if luma_diff(rich_strength_zero, native) > 1 {
         return Err(RichLookError::Failed(format!(
-            "zeroed gains changed the standard pixel: standard={standard:?} rich={rich_without_extras:?}"
+            "Rich with zero added effect changed the Native pixel: native={native:?} rich_zero={rich_strength_zero:?}"
         )));
     }
-    if luma_diff(rich, rich_without_extras) <= 4 {
+    if luma_diff(rich, rich_strength_zero) <= 4 {
         return Err(RichLookError::Failed(format!(
-            "the added gloss/environment/rim changed nothing: without={rich_without_extras:?} with={rich:?}"
+            "the added gloss/environment/rim changed nothing: zero={rich_strength_zero:?} full={rich:?}"
         )));
     }
     if luma_diff(rotated, rich) <= 4 {
@@ -452,7 +505,7 @@ fn mtoon_portrait() -> Result<String, RichLookError> {
             "the added specular did not follow the light: fixed={rich:?} rotated={rotated:?}"
         )));
     }
-    report.push_str("checks=zero_gains_match_standard,extras_change,specular_follows_light\n");
+    report.push_str("checks=zero_effect_matches_native,extras_change,specular_follows_light\n");
     Ok(report)
 }
 
@@ -464,6 +517,90 @@ impl MtoonScene {
         }
         self
     }
+}
+
+/// The two display paths must produce the same image on the same inputs when
+/// the Rich display adds no effect: multiple colored lights, an authored rim,
+/// a normal map, an outline, and the Mask and Blend coverage cases.
+///
+/// A positive strength must change the same scene, so the identity cannot be
+/// an unreachable Rich shader. Both paths are separate pipelines selected by
+/// the material mode, so this compares the actual GPU images rather than the
+/// OFF state.
+fn mtoon_rich_zero() -> Result<String, RichLookError> {
+    let key = LightSpec {
+        direction: Vec3::NEG_Z,
+        color: Color::WHITE,
+        illuminance: 500.0,
+        shadows_enabled: true,
+    };
+    let fill = LightSpec {
+        direction: Vec3::new(-0.5, -0.2, -0.8),
+        color: Color::srgb(0.6, 0.8, 1.0),
+        illuminance: 220.0,
+        shadows_enabled: false,
+    };
+    let variants = [
+        (
+            "lights_rim_normal_outline",
+            MtoonScene {
+                lights: vec![key, fill],
+                normal_map: Some([128, 128, 255, 255]),
+                rim_lighting: RimLighting {
+                    color: LinearRgba::new(0.2, 0.3, 0.4, 1.0),
+                    fresnel_power: 3.0,
+                    ..default()
+                },
+                outline: true,
+                ..MtoonScene::lit(
+                    Color::srgb(0.8, 0.7, 0.6),
+                    Color::srgb(0.1, 0.1, 0.15),
+                    key,
+                )
+            },
+        ),
+        (
+            "mask",
+            MtoonScene {
+                alpha_mode: AlphaMode::Mask(0.5),
+                base_color_texture: Some([[255, 255, 255, 255], [255, 255, 255, 0]]),
+                ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+            },
+        ),
+        (
+            "blend_z_write",
+            MtoonScene {
+                alpha_mode: AlphaMode::Blend,
+                transparent_with_z_write: true,
+                base_color_texture: Some([[255, 255, 255, 255], [255, 255, 255, 0]]),
+                ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+            },
+        ),
+    ];
+
+    let mut report = String::from("case=mtoon-rich-zero\n");
+    for (name, scene) in variants {
+        let native = render(&scene)?;
+        let rich_zero = render(&scene.clone().rich(0.0))?;
+        let (differing, max_difference) = pixel_difference(&native, &rich_zero);
+        let rich_full = render(&scene.rich(1.0))?;
+        let (positive_differing, _) = pixel_difference(&native, &rich_full);
+        report.push_str(&format!(
+            "{name}: differing_pixels={differing} max_channel_diff={max_difference} rich_full_differing_pixels={positive_differing}\n"
+        ));
+        if differing != 0 {
+            return Err(RichLookError::Failed(format!(
+                "{name}: Rich with zero added effect differs from Native in {differing} pixels (max channel difference {max_difference})"
+            )));
+        }
+        if positive_differing == 0 {
+            return Err(RichLookError::Failed(format!(
+                "{name}: Rich with a positive strength did not change the Native image"
+            )));
+        }
+    }
+    report.push_str("checks=native_eq_rich_zero,rich_positive_changes\n");
+    Ok(report)
 }
 
 /// The bundled studio cubemap must survive Bevy's environment-map filter and
@@ -793,6 +930,7 @@ fn setup_cutout_scene(
                 strength: 1.0,
                 ..default()
             },
+            shading_mode: MToonShadingMode::Rich,
             alpha_mode: AlphaMode::Mask(0.5),
             ..default()
         })),
@@ -846,11 +984,7 @@ fn mtoon_shadow() -> Result<String, RichLookError> {
         lights: vec![light],
         mesh: MeshSpec::Sphere,
         ground: true,
-        portrait: MToonPortraitParams {
-            strength: 1.0,
-            ..default()
-        },
-        ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, light).rich(1.0)
     };
 
     let casting = render(&base)?;
@@ -907,23 +1041,18 @@ fn mtoon_normal() -> Result<String, RichLookError> {
     // tilted normal changes the shading whichever way the tangent points.
     // `direction_to_light` points mostly at the camera, so a normal tilted
     // toward `-X` turns the surface away from it.
-    let base = MtoonScene {
-        toony_factor: 0.0,
-        portrait: MToonPortraitParams {
-            strength: 1.0,
-            ..default()
+    let mut base = MtoonScene::lit(
+        Color::WHITE,
+        Color::BLACK,
+        LightSpec {
+            direction: -Vec3::new(0.6, 0.0, 0.8).normalize(),
+            color: Color::WHITE,
+            illuminance: 200.0,
+            shadows_enabled: false,
         },
-        ..MtoonScene::lit(
-            Color::WHITE,
-            Color::BLACK,
-            LightSpec {
-                direction: -Vec3::new(0.6, 0.0, 0.8).normalize(),
-                color: Color::WHITE,
-                illuminance: 200.0,
-                shadows_enabled: false,
-            },
-        )
-    };
+    )
+    .rich(1.0);
+    base.toony_factor = 0.0;
 
     let flat = center_pixel(&render(&base)?);
     let identity = center_pixel(&render(&MtoonScene {
@@ -972,6 +1101,25 @@ fn luma(pixel: [u8; 4]) -> u32 {
 
 fn luma_diff(a: [u8; 4], b: [u8; 4]) -> u32 {
     luma(a).abs_diff(luma(b))
+}
+
+/// The number of differing pixels and the largest per-channel difference.
+fn pixel_difference(left: &[[u8; 4]], right: &[[u8; 4]]) -> (usize, u32) {
+    let mut differing = 0;
+    let mut max_difference = 0;
+    for (left, right) in left.iter().zip(right) {
+        let difference = left
+            .iter()
+            .zip(right)
+            .map(|(left, right)| u32::from(left.abs_diff(*right)))
+            .max()
+            .unwrap_or(0);
+        if difference > 0 {
+            differing += 1;
+            max_difference = max_difference.max(difference);
+        }
+    }
+    (differing, max_difference)
 }
 
 /// Count the pixels on the middle scanline that are neither fully lit nor
@@ -1983,8 +2131,28 @@ fn setup_fixture_scene(
             RenderAssetUsages::RENDER_WORLD,
         ))
     });
+    let base_color_texture = scene.base_color_texture.map(|pixels| {
+        let mut pixels_data = Vec::with_capacity(8);
+        for pixel in pixels {
+            pixels_data.extend_from_slice(&pixel);
+        }
+        let mut image = Image::new_fill(
+            Extent3d {
+                width: 2,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[255, 255, 255, 255],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.data = Some(pixels_data);
+        images.add(image)
+    });
     let material = materials.add(MToonMaterial {
         base_color: scene.base_color,
+        base_color_texture,
         shade: Shade {
             color: LinearRgba::from(scene.shade_color),
             shading_shift_factor: scene.shading_shift_factor,
@@ -1993,7 +2161,22 @@ fn setup_fixture_scene(
         },
         normal_texture,
         normal_texture_scale: scene.normal_scale,
+        rim_lighting: scene.rim_lighting,
+        outline: MToonOutline {
+            mode: if scene.outline {
+                OutlineWidthMode::WorldCoordinates
+            } else {
+                OutlineWidthMode::None
+            },
+            width_factor: 0.04,
+            color: LinearRgba::BLACK,
+            lighting_mix_factor: 0.0,
+        },
+        alpha_mode: scene.alpha_mode,
+        transparent_with_z_write: scene.transparent_with_z_write,
+        cull_mode: scene.outline.then_some(bevy::render::render_resource::Face::Back),
         portrait: scene.portrait,
+        shading_mode: scene.shading_mode,
         ..default()
     });
     commands.spawn((

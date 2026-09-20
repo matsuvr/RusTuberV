@@ -24,7 +24,7 @@ implemented and not measured, and is not claimed as working.
 
 | Issue | Commit | Scope |
 |---|---|---|
-| #69 standard MToon | `57977e2` | per-light direct term, signed NdotL/shift/toony endpoints, single exposure application, spec GI equalization, glTF/legacy normal texture at bindings 117/118 |
+| #69 Native/Rich MToon | this change (working tree on `0018277`) | restores the upstream `f9593fd7` Native fragment (`mtoon_native.wgsl` + `mtoon_fragment.wgsl`), adds `MToonShadingMode`/`MToonMaterialKey::RICH_SHADING` shader selection, `mtoon_rich_fragment.wgsl` and `compose_rich_mtoon`; the per-light radiance, normal texture, GI equalization and added gloss are now Rich-only |
 | #70 look boundary | `ea47b59` | `RichLookSettings`/`effective_look_strength`/`blend_look_scalar`, `StandardLookBase` capture, `AvatarLookSettings`+`LookSettingsChanged`, capture-once/unload lifecycle |
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
@@ -32,42 +32,84 @@ implemented and not measured, and is not claimed as working.
 | #79 avatar UI alpha boundary | this PR | avatar-only callback for the monitor and expanding transition; the shared `Bgra8UnormSrgb` image remains gamma-premultiplied while the callback supplies linear-premultiplied RGB to the UI blend |
 
 Supporting reusable code: `tools/xtask/src/rich_look.rs` (the GPU cases,
-including `finish-alpha` and `avatar-ui-alpha`),
+including `finish-alpha`, `avatar-ui-alpha` and `mtoon-rich-zero`),
 `crates/vtuber-app/src/ui/avatar_preview.rs`/`avatar_preview.wgsl`,
-`vendor/bevy_vrm1/src/vrm/mtoon_lighting.wgsl`, `mtoon_alpha.wgsl`,
+`vendor/bevy_vrm1/src/vrm/mtoon_native.wgsl` (the fixed Native reference),
+`mtoon_rich_fragment.wgsl`, `mtoon_lighting.wgsl`, `mtoon_alpha.wgsl`,
 `mtoon_prepass.wgsl`.
 
 ## Measured on the GPU (Windows/Vulkan/RTX 4090)
 
-`mtoon-lighting` (64x64 BGRA readback, center pixel):
+`mtoon-lighting` (64x64 BGRA readback, center pixel; Rich display, strength 1):
 
 | case | pixel |
 |---|---|
 | zero illuminance | `[0, 0, 0, 255]` |
-| 200 lx white | `[124, 124, 124, 255]` |
-| 400 lx white | `[170, 170, 170, 255]` |
-| 200 lx red | `[0, 0, 124, 255]` |
-| 200 lx blue | `[124, 0, 0, 255]` |
-| 2 x 100 lx white | `[124, 124, 124, 255]` |
-| 100 lx white | `[89, 89, 89, 255]` |
+| 200 lx white | `[125, 125, 125, 255]` |
+| 400 lx white | `[172, 172, 172, 255]` |
+| 200 lx red | `[0, 0, 125, 255]` |
+| 200 lx blue | `[125, 0, 0, 255]` |
+| 2 x 100 lx white | `[125, 125, 125, 255]` |
+| 100 lx white | `[90, 90, 90, 255]` |
 
-The direct term follows each light's own radiance, light color is per light,
-and two lights add. The pre-fix renderer (issue #69) multiplied no light
-radiance at all, so it could not produce this table.
+The Rich direct term follows each light's own radiance, light color is per
+light, and two lights add. These numbers describe the Rich display only; the
+Native display deliberately does not apply the light level or color.
 
-`mtoon-standard`: a fully lit white plane at the app's 650 lx key reads
-`[211, 211, 211, 255]` (225 with the app's ambient), below white; at 1300 lx it
-reaches `[255, 255, 255, 255]`, and a red light keeps the red channel. The
-standard display follows the scene light's level and color and leaves headroom
-instead of clipping. The standard path applies each light's radiance and the
-camera exposure once, exactly as the rich path does; the difference between off
-and on is the portrait extras and the studio rig, not the brightness formula.
+`mtoon-standard` (the restored Native display, `MToonShadingMode::Native`): a
+fully lit white plane at 650 lx and at 1300 lx both read `[255, 255, 255, 255]`,
+and the same scene under a red light also reads `[255, 255, 255, 255]`, so the
+Native display shows the authored base color and does not apply the light's
+level or color. A light travelling at 90° reads `[187, 187, 187, 255]`, so the
+light direction still shapes the ramp. The same scene on the Rich display at
+strength 1 reads `[253, 253, 253, 255]` at the same probe.
 
-The light level is the app's own `setup_scene` key (650 lx): a fully lit white
-surface exposes to about 0.73 including the default ambient, so a material's
-own rim or emission has room before white. Bevy applies `Tonemapping` only to
-HDR views, so a real highlight roll-off needs the HDR output of issue #74; at
-the current LDR output the headroom is what keeps the display off white.
+## #69 measured: Native vs Rich with zero added effect (Windows/Vulkan/RTX 4090)
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-rich-zero` renders each scene twice
+through the production offscreen readback path: once with
+`MToonShadingMode::Native` and once with `MToonShadingMode::Rich` and the
+nominal gains but `strength = 0`, then compares every BGRA byte. It does not
+compare the OFF switch state.
+
+| scene inputs | differing pixels | max channel difference | Rich strength 1 differing pixels |
+|---|---:|---:|---:|
+| two colored directional lights, authored parametric rim, normal map, world outline | 0 | 0 | 2300 |
+| alpha Mask base color texture at cutoff 0.5 | 0 | 0 | 1058 |
+| alpha Blend + `transparentWithZWrite` base color texture | 0 | 0 | 966 |
+
+All three scenes are byte-identical between the two display paths at zero
+added effect, and all three change with a positive strength, so the identity is
+not an unreachable Rich shader. `mtoon-portrait` additionally checks the same
+identity on a single light: `native=[255,255,255,255]`,
+`rich_strength_zero=[255,255,255,255]`, `rich=[253,253,253,255]`,
+`rich_rotated_light=[244,244,244,255]`.
+
+`mtoon-normal` now runs on the Rich display (normal texture,
+scale and TBN wiring are Rich-only): flat `[118,118,118,255]`, identity map
+`[118,118,118,255]`, tilted map `[95,95,95,255]`, tilted map with scale 0
+`[118,118,118,255]`.
+
+`mtoon-shading` (Rich display): front-lit `125`, 90-degree side `89`, side with
++0.5 shift `124`, light behind `0`; the toony=0 ramp has 18 intermediate
+samples on the mid scanline and the toony=1 endpoint has 0.
+
+`mtoon-shadow` (Rich display): darkest ground pixel under an MToon sphere is `0`
+with shadow maps on and `267` with them off, so the MToon mesh casts into the
+shadow map.
+
+`mtoon-cutout-shadow` (Rich display, `portrait.strength > 0`): with an
+alpha-masked MToon quad, the ground under the opaque half is `1` and under the
+transparent half `256`; without shadows both are `256`. At strength 0 the Rich
+prepass keeps the Native behavior (no cutout shadow), which is the upstream
+baseline.
+
+The light level of the scene is the app's own `setup_scene` key (650 lx). The
+Native display is deliberately the upstream authored display; the app's look
+switch selects the Rich display, which applies the light level and colors.
+Bevy applies `Tonemapping` only to HDR views, so a real highlight roll-off
+needs the HDR output of issue #74; the Rich preset keeps every light at or below
+900 lx so a fully lit surface does not clip.
 
 ## #74 measured: HDR finish, alpha and tone (Windows/Vulkan/RTX 4090)
 
@@ -91,13 +133,18 @@ frozen clock):
 | RearAliceLite_3.0 | 24.75 | 25.95 | 2.26 |
 | Sapphy | 35.09 | 34.40 | 2.24 |
 
+These four rows were measured before the #69 Native/Rich split, so both the OFF
+(Native) and ON values are historical; the two models re-measured after the
+split are in the #69 section above.
+
 The ON state is now *dimmer on highlights than the pre-#74 look* while the
 portrait rig still adds light: AvatarSample_C's bright jacket panel reads
 `[245, 237, 236]` in the pre-#74 ON frame and `[193, 188, 188]` with the
 finish, and the face keeps its tone, so the added light no longer clips to
 white.
 
-Alpha contract checks (byte comparisons of the readback frames):
+Alpha contract checks (byte comparisons of the readback frames; also measured
+before the #69 split, when OFF was the modified standard path):
 
 | comparison | result |
 |---|---|
@@ -217,36 +264,24 @@ The evidence is intentionally split: `finish-alpha` is the readback RGB and
 straight-sRGB frame check; `avatar-ui-alpha` is the UI GPU composition check;
 real NDI send/receive remains unrun.
 
-### Local validation for this update
+### Local validation for this change (#69)
 
-- `cargo test --workspace -j 1`: PASS.
+- `cargo test --workspace -j 1`: PASS (recorded in the commit/PR, not repeated
+  per section).
 - `cargo clippy --workspace --all-targets -j 1 -- -D warnings`: PASS.
-- Existing GPU fixtures: `finish-alpha`, `mtoon-lighting`, `mtoon-shading`,
-  `mtoon-normal`, `mtoon-standard`, `mtoon-portrait`, `mtoon-shadow`,
-  `mtoon-cutout-shadow`, and `studio-environment`: PASS.
-- Added `avatar-ui-alpha`: PASS.
-- `git diff --check`: PASS.
+- GPU fixtures re-run on the Windows/Vulkan/RTX 4090 above: `mtoon-rich-zero`
+  (new), `mtoon-standard`, `mtoon-portrait`, `mtoon-lighting`, `mtoon-shading`,
+  `mtoon-normal`, `mtoon-shadow`, `mtoon-cutout-shadow`, `finish-alpha`,
+  `avatar-ui-alpha`, `studio-environment`: PASS.
+- `vrm-render` on `inore-vrm1.vrm` and `tsukuyomi-chan.vrm`: PASS (numbers
+  below).
 - Real NDI send/receive and macOS hardware validation: NOT RUN.
 
-`mtoon-portrait`: `standard` `[244,244,244]`, `rich_without_extras`
-`[244,244,244]` (zeroed gains leave the standard pixel), `rich`
-`[253,253,253]` (the gains add), and the same rich scene with a rotated key
-`[244,244,244]` (the added specular follows the light).
-
-`mtoon-shading`: front-lit `124`, 90-degree side `89`, side with +0.5 shift
-`124`, light behind `0`; the toony=0 ramp has 17 intermediate samples on the
-mid scanline and the toony=1 endpoint has 0.
-
-`mtoon-normal`: no map `118`, identity map `118`, tilted map `95`, tilted map
-with scale 0 `118`.
-
-`mtoon-shadow`: darkest ground pixel under an MToon sphere is `0` with shadow
-maps on and `267` with them off, so the MToon mesh casts into the shadow map.
-
-`mtoon-cutout-shadow`: with an alpha-masked MToon quad, the ground under the
-opaque half is `1` and under the transparent half `256`; without shadows both
-are `256`. Before the MToon prepass shader, both halves were shadowed (a solid
-quad shadow), which is the artifact issue #71 asked to remove.
+The numbers for `mtoon-lighting`, `mtoon-standard`, `mtoon-rich-zero`,
+`mtoon-portrait`, `mtoon-shading`, `mtoon-normal`, `mtoon-shadow` and
+`mtoon-cutout-shadow` are in the sections above; the previous `mtoon-standard`
+numbers (`[211,211,211]` at 650 lx) belonged to the modified standard path that
+this change removes and are superseded.
 
 `studio-environment`: a PBR sphere lit only by the generated studio cubemap is
 `[87, 82, 82, 255]` against `[1, 0, 1, 255]` without it, so the GPU prefilter
@@ -259,15 +294,17 @@ below.
 ## Representative VRM hardware check
 
 On the same Windows/Vulkan/RTX 4090 device, the production managed lifecycle
-was run with two fixtures that are present in this repository. `vrm-render` now
+was run with two fixtures that are present in this repository. `vrm-render`
 captures `OFF -> ON -> OFF -> ON -> strength 0`, and requires the ON image to
 change while both restoration paths and the repeated ON image remain within
-`0.5` mean absolute byte difference.
+`0.5` mean absolute byte difference. OFF is the restored Native display and
+strength 0 is Rich with no added effect, so the strength-0 restoration is also
+the switch-independent Native/Rich identity check on real models.
 
-| model | ON diff | OFF restore diff | ON repeat diff | strength 0 diff | opaque pixels off/on |
-|---|---:|---:|---:|---:|---:|
-| `inore-vrm1.vrm` | 3.117 | 0.001 | 0.000 | 0.001 | 19848 / 19848 |
-| `tsukuyomi-chan.vrm` | 1.638 | 0.004 | 0.003 | 0.004 | 10455 / 10455 |
+| model | off mean | on mean | ON diff | OFF restore diff | ON repeat diff | strength 0 diff | opaque pixels off/on |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `inore-vrm1.vrm` | 72.21 | 61.07 | 11.176 | 0.001 | 0.000 | 0.001 | 19848 / 19848 |
+| `tsukuyomi-chan.vrm` | 39.01 | 31.25 | 7.780 | 0.004 | 0.003 | 0.004 | 10455 / 10455 |
 
 Commands:
 
@@ -282,6 +319,10 @@ is visual hardware evidence, not a claim that every VRM material role was
 exhaustively classified. NDI send/receive was not run.
 
 ## Per-model rich-look check
+
+The per-model table below was measured with the previous display path and was
+not re-measured after this change; it is kept as a historical record. The
+models re-measured for this change are the two rows above.
 
 `cargo xtask vrm-render <vrm-or-dir> <out-dir>` loads every model through the
 production managed lifecycle with a frozen clock, a fixed camera and the
@@ -336,7 +377,7 @@ restart.
 
 | Issue | State |
 |---|---|
-| #72 MToon glossy/environment/extra rim | Implemented. `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl` and the view environment specular are in place; verified by `mtoon-portrait` and the per-model table above. |
+| #72 MToon glossy/environment/extra rim | Implemented. `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl` and the view environment specular are in place; verified by `mtoon-portrait` and the per-model table above. After #69 the terms are composed by `compose_rich_mtoon` on the Rich display path. |
 | #74 HDR finish and transparency | Implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table exist in `crates/vtuber-avatar/src/look/finish.rs` and `finish.wgsl`; verified by the #74 measurements above. |
 | #75 one-click UI, 4 languages, per-model save | Partially implemented: the switch and the strength slider exist in the settings screen in four languages (see above). Persistence, per-model settings and restore on model switch are not implemented. |
 | #76 material roles | Not implemented. `MaterialRole`, `infer_material_role`, `resolve_material_role`, the role param resolvers and `face_lighting_normal` do not exist. |
@@ -349,10 +390,18 @@ restored, and the role-based adjustments of #76 are not implemented.
 
 ## Known limitations in the implemented parts
 
+- `Rich` MToon materials only discard fully transparent blend fragments while
+  the added effect amount is positive; at strength 0 (and on the Native display)
+  the upstream depth behavior is kept, so the shape-key overlay fix of `7708ac1`
+  does not apply to the plain display.
+- The Native MToon display is the fixed upstream `f9593fd7` display: it does
+  not apply the light's level or color, does not evaluate the normal texture,
+  and keeps the upstream alpha/depth behavior. Those are Rich effects, not
+  missing Native fixes; issue #69 removed the earlier Native improvements on
+  purpose.
 - The MToon shadow prepass has no access to the view time globals, so a cutout
-  shadow uses the static UV transform while the main pass uses the animated UV.
-  A cutout material whose alpha depends on UV animation can therefore have a
-  shadow that does not exactly match the lit alpha.
+  shadow uses the static UV transform while the main pass uses the animated UV
+  (only while the look is on).
 - `Blend` MToon materials keep Bevy's existing shadow behavior; they are not
   converted to Opaque/Mask.
 - The studio cubemap is 16x16 per face. It is filtered on the GPU at startup by
@@ -374,9 +423,6 @@ restored, and the role-based adjustments of #76 are not implemented.
 - The rich path applies each light's radiance without a Lambert normalization,
   which is the specification's own toon behavior; the preset keeps every light
   at or below 900 lx so a fully lit surface does not clip.
-- The cutout shadow prepass has no access to the view time globals, so a
-  cutout shadow uses the static UV transform while the main pass uses the
-  animated UV (only while the look is on).
 
 ## Settings screen controls (part of #75)
 

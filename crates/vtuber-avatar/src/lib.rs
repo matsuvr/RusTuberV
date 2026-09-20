@@ -111,8 +111,9 @@ pub use look::{
     AvatarLookSettings, LookSettingsChanged, PORTRAIT_FINISH, PortraitFinish, PortraitFinishPass,
     PortraitFinishState, RichLookSettings, StandardLookBase, StandardLookBases,
     apply_standard_portrait_settings, blend_look_scalar, capture_standard_look_base,
-    effective_look_strength, register_portrait_finish, resolve_portrait_finish,
-    resolve_standard_portrait, studio_environment_cubemap, sync_portrait_finish,
+    effective_look_strength, register_portrait_finish, resolve_mtoon_shading_mode,
+    resolve_portrait_finish, resolve_standard_portrait, studio_environment_cubemap,
+    sync_portrait_finish,
 };
 pub use mirror::AvatarMotionMirror;
 pub use plugin::{StartupModelPath, VtuberAvatarPlugin};
