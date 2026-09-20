@@ -27,6 +27,7 @@ implemented and not measured, and is not claimed as working.
 | #69 Native/Rich MToon | this change (working tree on `0018277`) | restores the upstream `f9593fd7` Native fragment (`mtoon_native.wgsl` + `mtoon_fragment.wgsl`), adds `MToonShadingMode`/`MToonMaterialKey::RICH_SHADING` shader selection, `mtoon_rich_fragment.wgsl` and `compose_rich_mtoon`; the per-light radiance, normal texture, GI equalization and added gloss are now Rich-only. The review fixes are included: the Rich transparent discard uses the authored base alpha (Blend outline), and the prepass activates the Rich cutout only for `RICH_SHADING` materials. `mtoon-reference` compares against the independent fixed-revision reference. |
 | #70 look boundary | `ea47b59` | `RichLookSettings`/`effective_look_strength`/`blend_look_scalar`, `StandardLookBase` capture, `AvatarLookSettings`+`LookSettingsChanged`, capture-once/unload lifecycle |
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
+| #71 cutout shadow UV | this change (working tree on `518af8c`) | extracts the UV animation into `mtoon_uv.wgsl` (pure expression, caller-supplied clock), has the prepass read the prepass view globals at binding 1 and reuse the animated UV, and adds animated scenes to `mtoon-cutout-shadow` (exact-phase cutout shadow) and `mtoon-reference` (scrolling Mask sphere); the fixture capture now waits for settled frames |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
 | #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, and the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with the explicit final contract `a * E(T(C))` |
 | #79 avatar UI alpha boundary | this PR | avatar-only callback for the monitor and expanding transition; the shared `Bgra8UnormSrgb` image remains gamma-premultiplied while the callback supplies linear-premultiplied RGB to the UI blend |
@@ -39,7 +40,7 @@ fixed-revision reference),
 `crates/vtuber-app/src/ui/avatar_preview.rs`/`avatar_preview.wgsl`,
 `vendor/bevy_vrm1/src/vrm/mtoon_native.wgsl` (the fixed Native reference),
 `mtoon_rich_fragment.wgsl`, `mtoon_lighting.wgsl`, `mtoon_alpha.wgsl`,
-`mtoon_prepass.wgsl`.
+`mtoon_uv.wgsl`, `mtoon_prepass.wgsl`.
 
 ## Measured on the GPU (Windows/Vulkan/RTX 4090)
 
@@ -86,9 +87,13 @@ so it does not share `mtoon::native`), the production Native display
 | sphere, two colored lights, authored parametric rim + MatCap, tilted normal map, UV transform, world outline | 0 | 0 | 468 |
 | Mask sphere (cutoff 0.5) with tilted normal map | 0 | 0 | 452 |
 | Blend + `transparentWithZWrite` sphere | 0 | 0 | 409 |
+| Mask sphere with a scrolling base texture at a half-period clock | 0 | 0 | 1058 |
 
 Every scene is byte-identical across the reference, the production Native
-display and Rich(0). The compared inputs are observable on the same fixture:
+display and Rich(0). The animated scene exercises the shared UV expression
+under animation: its Native image differs from the same scene at a frozen
+clock in 2304 pixels, so the zero difference is not a comparison of two static
+images. The compared inputs are observable on the same fixture:
 the tilted normal map changes the Rich image in 440 pixels and the
 Native/reference image in 0 (normal evaluation is Rich-only), removing the
 parametric rim changes 312 pixels, removing the MatCap texture 468, and the UV
@@ -142,6 +147,47 @@ without shadows). The prepass uses the GPU-side
 `MtoonFlags::RICH_SHADING` value derived from `shading_mode`, so a saved
 positive strength cannot activate the Rich cutout while Native is selected.
 
+The same case also animates the cutout's UV. The mask texture repeats and the
+material scrolls one UV unit per second; the fixture advances its otherwise
+frozen clock once by an exact half period, so the opaque texel moves to the
+other half of the quad. The lit pass and the shadow pass evaluate the same UV
+expression (`mtoon::uv`) at the same frame clock through their own view
+bindings (the forward pass reads `globals` at binding 11, the prepass reads
+its view globals at binding 1). Measured on the Windows/Vulkan/RTX 4090
+device:
+
+| state | darkest left ground band | darkest right ground band |
+|---|---:|---:|
+| animated material, frozen phase | 1 | 256 |
+| animated material, half-period phase | 256 | 0 |
+| same scene without shadow maps | 256 | 256 |
+
+The animated material at the frozen phase is byte-identical to the static
+material (0 differing pixels), and the Native display with the animated
+material is still byte-identical with strength 0 and 1 (0 differing pixels).
+Before the shared UV change, the shadow used only the static UV transform and
+stayed on the frozen phase's half at the half-period phase; the fixture fails
+on that result.
+
+The MToon fixture capture waits for 40 byte-identical frames (`SETTLED_FRAMES`)
+before sampling. The previous 3-non-empty-frames wait could sample a frame
+before the first shadow-map and pipeline setup had landed; re-running the
+unchanged `mtoon-cutout-shadow` case failed intermittently for that reason
+(Native-vs-Rich comparisons of random app instances differed by the missing
+shadow). All MToon fixture cases re-run with the settled capture.
+
+Local validation for this change: `cargo test --workspace -j 4` and
+`cargo clippy --workspace --all-targets -j 4` PASS; the 14 GPU cases above
+re-ran PASS on the same device with the settled capture; `vrm-render` on
+`inore-vrm1.vrm` and `tsukuyomi-chan.vrm` re-ran PASS with the same numbers as
+the table in "Representative VRM hardware check" (off/on means `72.21`/`61.07`
+and `39.01`/`31.25`, OFF restore/ON repeat/strength-0 differences `<= 0.004`),
+so the Native/Rich boundary and the OFF restoration are unchanged on the real
+models. Not run in this change: real NDI send/receive, macOS, and any GPU
+other than the RTX 4090 above. The #77 final acceptance (head turn, camera
+orbit, model size differences, moving bangs/hand shadows, first-version device
+tuning) remains with #77 and is not claimed here.
+
 ### Other reused fixtures
 
 `mtoon-normal` runs on the Rich display (normal texture, scale and TBN wiring
@@ -172,11 +218,13 @@ material at zero effect, and Unlit stays byte-identical at full strength.
 
 ### Not measured here
 
-- Time-driven UV animation is not in these GPU fixtures: the fixture clock is
-  frozen (`TimeUpdateStrategy::ManualDuration(Duration::ZERO)`), so only the
-  shared UV transform path is compared on the GPU. The animation functions are
-  shared by both display paths through `mtoon::native`; expression and
-  animation behavior is covered by the workspace tests, not by these fixtures.
+- Time-driven UV animation is in the `mtoon-cutout-shadow` fixture only: it
+  advances the frozen clock once to an exact phase, so the animated cutout
+  shadow is compared on the GPU. The other fixtures keep the
+  `TimeUpdateStrategy::ManualDuration(Duration::ZERO)` clock, so they compare
+  only the shared UV transform path. The animation functions are shared by both
+  display paths through `mtoon::native`/`mtoon::uv`; expression and animation
+  behavior is covered by the workspace tests, not by these fixtures.
 - The light level of the scene is the app's own `setup_scene` key (650 lx). The
   Native display is deliberately the upstream authored display; the app's look
   switch selects the Rich display, which applies the light level and colors.
@@ -472,9 +520,13 @@ restored, and the role-based adjustments of #76 are not implemented.
   and keeps the upstream alpha/depth behavior. Those are Rich effects, not
   missing Native fixes; issue #69 removed the earlier Native improvements on
   purpose.
-- The MToon shadow prepass has no access to the view time globals, so a cutout
-  shadow uses the static UV transform while the main pass uses the animated UV
-  (only while the look is on).
+- The MToon shadow prepass now shares the material's UV animation with the lit
+  pass (`mtoon::uv`) and reads the same frame clock, so an animated cutout
+  casts the silhouette it shows. This stays a Rich effect: the shadow/prepass
+  alpha test is active only while the look is on (`portrait.strength > 0` on
+  the Rich display). The Native display deliberately keeps the upstream
+  depth-only shadow (a Mask quad casts a solid shadow), and Rich(0) restores
+  that same behavior.
 - `Blend` MToon materials keep Bevy's existing shadow behavior; they are not
   converted to Opaque/Mask.
 - The studio cubemap is 16x16 per face. It is filtered on the GPU at startup by

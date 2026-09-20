@@ -2,10 +2,14 @@
 
 // The fixed Native MToon display.
 //
-// Every function here is the upstream `bevy_vrm1` MToon fragment computation at
-// revision `f9593fd78136fb9e0507bcae111e09291ec9b82a` (0.9.1), moved out of
-// `mtoon_fragment.wgsl` unchanged so both the Native fragment shader and the
-// Rich fragment shader can evaluate the same reference.
+// Every lighting, normal and alpha function here is the upstream `bevy_vrm1`
+// MToon fragment computation at revision `f9593fd78136fb9e0507bcae111e09291ec9b82a`
+// (0.9.1), moved out of `mtoon_fragment.wgsl` unchanged so both the Native
+// fragment shader and the Rich fragment shader can evaluate the same
+// reference. The UV animation expression is the same upstream result, shared
+// with the shadow/prepass alpha test through `mtoon::uv`: `calc_animated_uv`
+// keeps the upstream signature and reads the frame clock from the forward view
+// globals.
 //
 // Do not change the lighting, normal, alpha or UV expressions in this module
 // to improve them: the Rich look is an explicit alternative path
@@ -36,8 +40,6 @@
     shade_multiply_texture_sampler,
     rim_multiply_texture,
     rim_multiply_sampler,
-    uv_animation_mask_texture,
-    uv_animation_mask_sampler,
     matcap_texture,
     matcap_sampler,
     emissive_texture,
@@ -46,7 +48,6 @@
     SHADING_SHIFT_TEXTURE,
     SHADE_MULTIPLY_TEXTURE,
     RIM_MAP_TEXTURE,
-    UV_ANIMATION_MASK_TEXTURE,
     MATCAP_TEXTURE,
     EMISSIVE_TEXTURE,
     DOUBLE_SIDED,
@@ -54,6 +55,7 @@
     ALPHA_MODE_BLEND,
     ALPHA_MODE_ALPHA_TO_COVERAGE,
 }
+#import mtoon::uv::mtoon_animated_uv
 
 fn make_pbr_input(
     vertex_input: VertexOutput,
@@ -101,23 +103,10 @@ fn make_mtoon_input(in: VertexOutput, pbr_input: PbrInput) -> MToonInput{
     );
 }
 
+// The upstream animated UV for the lit pass: the shared expression at the
+// forward view clock.
 fn calc_animated_uv(uv: vec2<f32>) -> vec2<f32>{
-    let time = calc_uv_time(uv);
-    let translate = time * vec2(material.uv_animation_scroll_speed_x, material.uv_animation_rotation_speed_y);
-    let rotate_rad = fract(time * material.uv_animation_rotation_speed);
-    let cos_rotate = cos(rotate_rad);
-    let sin_rotate = sin(rotate_rad);
-    let pivot = vec2<f32>(0.5, 0.5);
-    return mat2x2(cos_rotate, -sin_rotate, sin_rotate, cos_rotate) * (uv - pivot) + pivot + translate;
-}
-
-fn calc_uv_time(uv: vec2<f32>) -> f32{
-    if((material.flags & UV_ANIMATION_MASK_TEXTURE) != 0u) {
-        let mask = textureSampleBias(uv_animation_mask_texture, uv_animation_mask_sampler, uv, view.mip_bias).b;
-        return mask * globals.time;
-    }else{
-        return globals.time;
-    }
+    return mtoon_animated_uv(uv, globals.time);
 }
 
 fn apply_mtoon_lighting(in: MToonInput) -> vec4<f32> {
