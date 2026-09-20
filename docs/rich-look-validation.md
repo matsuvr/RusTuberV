@@ -12,7 +12,10 @@ implemented and not measured, and is not claimed as working.
 - Renderer: `cargo xtask rich-look <case>`, which renders a synthetic scene
   through the production offscreen camera/readback path (`AVATAR_RENDER_LAYER`)
   and inspects CPU pixels. It exits 2 (`NOT RUN`) when no GPU/readback is
-  available instead of reporting success.
+  available instead of reporting success. The `finish-alpha` case exercises
+  the real finish shader, `Bgra8UnormSrgb` target write and
+  `VideoOutputFrame::from_padded_bgra8`; `vrm-render` exercises the same path
+  with imported VRM assets.
 - macOS and other GPUs were not available and are not measured.
 
 ## Implemented and committed
@@ -23,9 +26,10 @@ implemented and not measured, and is not claimed as working.
 | #70 look boundary | `ea47b59` | `RichLookSettings`/`effective_look_strength`/`blend_look_scalar`, `StandardLookBase` capture, `AvatarLookSettings`+`LookSettingsChanged`, capture-once/unload lifecycle |
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
-| #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with Bevy's own display transforms and LUTs |
+| #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, and the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with the explicit final contract `a * E(T(C))` |
 
-Supporting reusable code: `tools/xtask/src/rich_look.rs` (six GPU cases),
+Supporting reusable code: `tools/xtask/src/rich_look.rs` (the GPU cases,
+including `finish-alpha`),
 `vendor/bevy_vrm1/src/vrm/mtoon_lighting.wgsl`, `mtoon_alpha.wgsl`,
 `mtoon_prepass.wgsl`.
 
@@ -102,16 +106,74 @@ they are not a tone-dependent alpha change, and every consumer still receives
 the same premultiplied BGRA8 sRGB image the preview samples and the readback
 unpremultiplies exactly once.
 
+### Final image color/alpha boundary
+
+For a main-pass premultiplied linear pixel `Cp` with coverage `a`, the finish
+pass first recovers `C = Cp / a` when `a > 0`, applies the tone curve `T(C)`,
+and retains the linear association `a * T(C)`. The output target is a linear
+`Rgba16Float` post-process texture until Bevy's upscaling blit writes the final
+`Bgra8UnormSrgb` image. Therefore the finish shader stages
+`D(a * E(T(C)))` (`E` is sRGB encode and `D = E^-1`) and the target attachment
+performs the one final `E`, producing stored RGB bytes of exactly
+`a * E(T(C))`.
+
+This is deliberately not `E(a * T(C))`: the latter is the old gamma/alpha
+ordering bug. Alpha is passed through unchanged, with an all-zero pixel for
+`a = 0`. `VideoOutputFrame::from_padded_bgra8` then performs the existing
+single byte-domain unpremultiply and exposes transport-neutral straight BGRA8
+sRGB to NDI and other consumers.
+
+The preview and readback still share the same `AvatarOutputTarget` image. The
+image is created as `Bgra8UnormSrgb` at the fixed `VideoOutputProfile`
+dimensions; `ui/shell.rs` registers that same handle with egui, and
+`ui/studio.rs` samples it with `egui::Image::from_texture`. The installed
+egui render path uses sRGB texture sampling and premultiplied-alpha blending.
+Preview visibility does not add a readback, and deactivating transport leaves
+the preview camera active.
+
+Command: `cargo run -p xtask -- rich-look finish-alpha`.
+
+`finish-alpha` is the end-to-end GPU fixture:
+`finish.wgsl` -> sRGB target write -> padded GPU readback ->
+`VideoOutputFrame::from_padded_bgra8`. On the local Windows/Vulkan/RTX 4090
+run, the tone input was linear `[0.5, 0.2, 0.05]` with Reinhard tone mapping:
+
+| alpha | straight readback BGRA | expected straight BGRA | wrong `E(a * T(C))` comparison |
+|---:|---|---|---|
+| 0.00 | `[0, 0, 0, 0]` | transparent | n/a |
+| 0.25 | `[60, 112, 155, 64]` | `[62, 113, 156, 64]` | `[114, 230, 255, 64]` |
+| 0.50 | `[62, 114, 157, 127]` | `[62, 113, 156, 128]` | `[85, 163, 227, 128]` |
+| 1.00 | `[62, 113, 156, 255]` | `[62, 113, 156, 255]` | n/a |
+
+The one-byte alpha difference at `0.50` and the small RGB differences are
+quantization. The much larger distance from the legacy comparison is color
+amplification/saturation from encoding the associated value, not quantization.
+Compositing the readback over black, white and `[24, 96, 180]` also passed:
+the fixture's actual/expected pairs were respectively `[15,28,39]`/`[16,28,39]`,
+`[206,219,230]`/`[207,219,230]` and `[33,100,174]`/`[34,100,174]` at `a=0.25`,
+and `[31,57,78]`/`[31,57,78]`, `[159,185,206]`/`[158,184,205]` and
+`[43,105,169]`/`[43,105,168]` at `a=0.50`; all differences are within the
+fixture's four-byte quantization bound.
+
+| boundary/check | status |
+|---|---|
+| alpha 0/0.25/0.5/1 through GPU finish, target and readback | PASS |
+| straight RGB remains the same between opaque and partial coverage | PASS, within quantization; no legacy amplification/saturation |
+| black/white/colored-background composition | PASS |
+| shared preview/readback image, dimensions and `Bgra8UnormSrgb` format | PASS (source/unit check) |
+| same-process OFF/ON/OFF, ON/strength-0 restoration and no repeated tone | PASS (`vrm-render`) |
+| real NDI send/receive | NOT RUN |
+
 Fixture note: the first `vrm-render` run after a rebuild can capture the look
 -off frame before every material upload has landed (a model with missing
 jacket/hair or a blank frame). Reruns of the same model are stable and were
 the values recorded above; the flake is in the fixture's single-readback
 capture, not in the look systems.
 
-Not measured: frame times, GPU time, NDI output, any GPU/OS other than the one
-above. The screenshots taken while reviewing the result are visual inspection
-only; they are not a pixel measurement. No FPS or image-quality threshold is
-claimed.
+Not measured in this synthetic case: frame times, GPU time, NDI output, or any
+GPU/OS other than the one above. The screenshots taken while reviewing the
+result are visual inspection only; they are not a pixel measurement. No FPS or
+image-quality threshold is claimed.
 
 `mtoon-portrait`: `standard` `[244,244,244]`, `rich_without_extras`
 `[244,244,244]` (zeroed gains leave the standard pixel), `rich`
@@ -137,17 +199,41 @@ quad shadow), which is the artifact issue #71 asked to remove.
 `[87, 82, 82, 255]` against `[1, 0, 1, 255]` without it, so the GPU prefilter
 produced usable diffuse/specular maps from the bundled 16x16x6 cubemap.
 
-Not measured: frame times, GPU time, NDI output, any GPU/OS other than the one
-above, and any real VRM model. The screenshots taken while reviewing the
-result are visual inspection only; they are not a pixel measurement. No FPS or
-image-quality threshold is claimed.
+Not measured in these synthetic cases: frame times, GPU time, NDI output, or
+any GPU/OS other than the one above. Real VRM coverage is recorded separately
+below.
+
+## Representative VRM hardware check
+
+On the same Windows/Vulkan/RTX 4090 device, the production managed lifecycle
+was run with two fixtures that are present in this repository. `vrm-render` now
+captures `OFF -> ON -> OFF -> ON -> strength 0`, and requires the ON image to
+change while both restoration paths and the repeated ON image remain within
+`0.5` mean absolute byte difference.
+
+| model | ON diff | OFF restore diff | ON repeat diff | strength 0 diff | opaque pixels off/on |
+|---|---:|---:|---:|---:|---:|
+| `inore-vrm1.vrm` | 3.117 | 0.001 | 0.000 | 0.001 | 19848 / 19848 |
+| `tsukuyomi-chan.vrm` | 1.638 | 0.004 | 0.003 | 0.004 | 10455 / 10455 |
+
+Commands:
+
+```text
+cargo run -p xtask -- vrm-render tests/fixtures/vrm/inore-vrm1.vrm target/rich-look-validation/inore-vrm1
+cargo run -p xtask -- vrm-render tests/fixtures/vrm/tsukuyomi-chan.vrm target/rich-look-validation/tsukuyomi-chan
+```
+
+Both commands passed. The generated OFF/ON PNG pairs were visually inspected
+for the available transparent hair, silhouette edges and clothing areas; this
+is visual hardware evidence, not a claim that every VRM material role was
+exhaustively classified. NDI send/receive was not run.
 
 ## Per-model rich-look check
 
 `cargo xtask vrm-render <vrm-or-dir> <out-dir>` loads every model through the
 production managed lifecycle with a frozen clock, a fixed camera and the
-production offscreen readback, captures one 256x256 frame with the look off and
-one with it on, and writes both frames (`.bgra` and `.png`).
+production offscreen readback, captures five 256x256 states (OFF, ON, restored
+OFF, repeated ON and strength 0), and writes each frame as `.bgra` and `.png`.
 
 | model | off mean | on mean | mean abs diff |
 |---|---|---|---|

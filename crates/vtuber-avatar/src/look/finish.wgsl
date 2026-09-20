@@ -25,6 +25,10 @@
     dt_lut_sampler,
     dt_lut_texture,
 }
+#import bevy_render::color_operations::{
+    linear_to_srgb,
+    srgb_to_linear,
+}
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
 
 @group(0) @binding(0) var finish_source: texture_2d<f32>;
@@ -80,19 +84,28 @@ fn finish_straight_linear_rgb(rgb: vec3<f32>, params: FinishUniform) -> vec3<f32
     }
 }
 
-// The finish for the main pass's premultiplied color.
+// The finish for the main pass's premultiplied color at the final sRGB
+// boundary.
 //
 // Non-linear tone mapping needs the unassociated color, so `a > 0` unprepares
 // `C = Cp / a`, applies the finish, and re-associates with the same coverage.
-// `a == 0` is the mathematical definition of a transparent pixel: zero color,
-// zero coverage. Alpha never changes.
+// The linear internal result is `a * T(C)`, but the final image contract is
+// `a * E(T(C))`. The finish pass still stores a linear value in its
+// `Rgba16Float` post-process texture, so stage `D(a * E(T(C)))` here. Bevy's
+// upscaling blit then writes that value to `Bgra8UnormSrgb`, whose attachment
+// encode supplies the one `E` at the image boundary. Alpha never changes.
 fn finish_premultiplied_linear(rgba: vec4<f32>, params: FinishUniform) -> vec4<f32> {
     let coverage = rgba.a;
     if (coverage <= 0.0) {
         return vec4<f32>(0.0);
     }
     let color = finish_straight_linear_rgb(rgba.rgb / coverage, params);
-    return vec4<f32>(color * coverage, coverage);
+    // The same linear association is retained conceptually as `a * T(C)`;
+    // encode that associated value at the final image boundary instead of
+    // encoding `a * T(C)` as one non-linear operation.
+    let premultiplied_srgb = linear_to_srgb(color) * coverage;
+    let staged_linear = srgb_to_linear(premultiplied_srgb);
+    return vec4<f32>(staged_linear, coverage);
 }
 
 @fragment

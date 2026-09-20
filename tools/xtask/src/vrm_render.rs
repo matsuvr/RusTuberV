@@ -2,9 +2,10 @@
 //!
 //! This is the mechanical check for the review requirement that switching the
 //! look off reproduces the plain display and switching it on changes the
-//! pixels: for every model it renders the same pose, camera and frame count
-//! twice and reports the difference. When no GPU/readback is available the
-//! command exits 2 (`NOT RUN`) instead of reporting success.
+//! pixels: for every model it renders the same pose and camera through
+//! OFF -> ON -> OFF -> ON -> strength 0, then reports the pixel differences.
+//! When no GPU/readback is available the command exits 2 (`NOT RUN`) instead
+//! of reporting success.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -183,36 +184,90 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     }
     let off = take_frame(&mut app, deadline)?;
 
-    app.world_mut()
-        .resource_mut::<vtuber_avatar::AvatarLookSettings>()
-        .0 = vtuber_avatar::RichLookSettings {
-        enabled: true,
-        strength: 1.0,
-    };
+    set_look(&mut app, true, 1.0);
     for _ in 0..SETTLE_FRAMES {
         app.update();
     }
     let on = take_frame(&mut app, deadline)?;
 
+    set_look(&mut app, false, 1.0);
+    for _ in 0..SETTLE_FRAMES {
+        app.update();
+    }
+    let off_restored = take_frame(&mut app, deadline)?;
+
+    set_look(&mut app, true, 1.0);
+    for _ in 0..SETTLE_FRAMES {
+        app.update();
+    }
+    let on_again = take_frame(&mut app, deadline)?;
+
+    set_look(&mut app, true, 0.0);
+    for _ in 0..SETTLE_FRAMES {
+        app.update();
+    }
+    let strength_zero = take_frame(&mut app, deadline)?;
+
     write_frame(&out_dir.join(format!("{name}.off.bgra")), &off)?;
     write_frame(&out_dir.join(format!("{name}.on.bgra")), &on)?;
+    write_frame(
+        &out_dir.join(format!("{name}.off-restored.bgra")),
+        &off_restored,
+    )?;
+    write_frame(&out_dir.join(format!("{name}.on-again.bgra")), &on_again)?;
+    write_frame(
+        &out_dir.join(format!("{name}.strength-zero.bgra")),
+        &strength_zero,
+    )?;
     write_png(&out_dir.join(format!("{name}.off.png")), &off)?;
     write_png(&out_dir.join(format!("{name}.on.png")), &on)?;
+    write_png(
+        &out_dir.join(format!("{name}.off-restored.png")),
+        &off_restored,
+    )?;
+    write_png(&out_dir.join(format!("{name}.on-again.png")), &on_again)?;
+    write_png(
+        &out_dir.join(format!("{name}.strength-zero.png")),
+        &strength_zero,
+    )?;
 
     let difference = mean_absolute_difference(&off.data, &on.data);
+    let off_restore_difference = mean_absolute_difference(&off.data, &off_restored.data);
+    let on_repeat_difference = mean_absolute_difference(&on.data, &on_again.data);
+    let strength_zero_difference = mean_absolute_difference(&off.data, &strength_zero.data);
     let summary = format!(
-        "{name}: off_mean={:.2} on_mean={:.2} mean_abs_diff={difference:.3} off_opaque={} on_opaque={}\n  probes off={:?} on={:?}\n",
+        "{name}: off_mean={:.2} on_mean={:.2} mean_abs_diff={difference:.3} \
+         off_restore_diff={off_restore_difference:.3} on_repeat_diff={on_repeat_difference:.3} \
+         strength_zero_diff={strength_zero_difference:.3} off_opaque={} on_opaque={}\n  \
+         probes off={:?} on={:?} off_restored={:?} strength_zero={:?}\n",
         mean(&off.data),
         mean(&on.data),
         opaque_pixels(&off.data),
         opaque_pixels(&on.data),
         probes(&off.data),
-        probes(&on.data)
+        probes(&on.data),
+        probes(&off_restored.data),
+        probes(&strength_zero.data)
     );
     let _ = std::fs::remove_dir_all(&managed_root);
     if difference < 0.5 {
         return Err(RenderError::Failed(format!(
             "switching the look on did not change the rendering (mean_abs_diff={difference:.3})"
+        )));
+    }
+    if off_restore_difference >= 0.5 {
+        return Err(RenderError::Failed(format!(
+            "OFF after ON did not restore the original output (mean_abs_diff={off_restore_difference:.3})"
+        )));
+    }
+    if strength_zero_difference >= 0.5 {
+        return Err(RenderError::Failed(format!(
+            "strength 0 did not restore the original output (mean_abs_diff={strength_zero_difference:.3})"
+        )));
+    }
+    if on_repeat_difference >= 0.5 {
+        return Err(RenderError::Failed(format!(
+            "reapplying ON changed the output again (mean_abs_diff={on_repeat_difference:.3})"
         )));
     }
     Ok(summary)
@@ -254,6 +309,12 @@ fn activate_output(
     if !state.is_rendering() && cameras.iter().next().is_some() {
         state.activate();
     }
+}
+
+fn set_look(app: &mut App, enabled: bool, strength: f32) {
+    app.world_mut()
+        .resource_mut::<vtuber_avatar::AvatarLookSettings>()
+        .0 = vtuber_avatar::RichLookSettings { enabled, strength };
 }
 
 fn exited(app: &mut App) -> bool {
@@ -333,6 +394,3 @@ fn mean_absolute_difference(left: &[u8], right: &[u8]) -> f64 {
         .sum::<f64>()
         / left.len() as f64
 }
-
-
-

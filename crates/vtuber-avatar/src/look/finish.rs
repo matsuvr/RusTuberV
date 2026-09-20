@@ -16,11 +16,11 @@
 //! | Main pass (look off) | gamma-composited internal texture (today's standard path) | premultiplied |
 //! | MSAA resolve | linear, box filtered | premultiplied |
 //! | Bevy tonemapping pass (viewport) | linear in, linear out | passthrough |
-//! | Finish pass (output view, look on) | tone on unassociated color | passthrough (`a = 0` → `0`) |
-//! | Upscaling blit | sRGB encode at the write | passthrough |
-//! | Output image `Bgra8UnormSrgb` | sRGB-encoded | premultiplied |
-//! | UI preview sampling | the same image, no copy | premultiplied |
-//! | `VideoOutputFrame::from_padded_bgra8` | sRGB bytes | unpremultiplied once (existing) |
+//! | Finish pass (output view, look on) | `C = Cp / a`, then `T(C)`; internally keeps `a * T(C)` and stages `D(a * E(T(C)))` for the final target | passthrough (`a = 0` → `0`) |
+//! | Upscaling blit (`CompositingSpace` unset/linear) | reads the linear staging value; the target attachment performs the one sRGB encode | passthrough |
+//! | Output image `Bgra8UnormSrgb` | sRGB bytes `a * E(T(C))` | premultiplied |
+//! | UI preview sampling | the same image handle, egui sRGB sampling and premultiplied-alpha blend | premultiplied |
+//! | `VideoOutputFrame::from_padded_bgra8` | sRGB bytes `a * E(T(C))` | unpremultiplies once to straight sRGB |
 //! | NDI | BGRA8 sRGB | straight (existing) |
 
 use bevy::asset::{Handle, load_internal_asset, uuid_handle};
@@ -705,6 +705,57 @@ mod tests {
     }
 
     #[test]
+    fn one_process_off_on_off_and_strength_zero_restore_the_original_finish() {
+        let (mut app, viewport, output) = look_sync_app();
+        let original = original_finish();
+        let on = RichLookSettings {
+            enabled: true,
+            strength: 1.0,
+        };
+
+        set_settings(&mut app, on);
+        assert!(app.world().get::<Hdr>(output).is_some());
+        set_settings(
+            &mut app,
+            RichLookSettings {
+                enabled: false,
+                strength: 1.0,
+            },
+        );
+        assert_eq!(
+            app.world().get::<Tonemapping>(viewport),
+            Some(&original.tonemapping)
+        );
+        assert_eq!(
+            app.world().get::<Tonemapping>(output),
+            Some(&original.tonemapping)
+        );
+        assert!(app.world().get::<Hdr>(viewport).is_none());
+        assert!(app.world().get::<Hdr>(output).is_none());
+        assert!(app.world().get::<PortraitFinishPass>(output).is_none());
+
+        set_settings(&mut app, on);
+        set_settings(
+            &mut app,
+            RichLookSettings {
+                enabled: true,
+                strength: 0.0,
+            },
+        );
+        assert_eq!(
+            app.world().get::<Tonemapping>(viewport),
+            Some(&original.tonemapping)
+        );
+        assert_eq!(
+            app.world().get::<Tonemapping>(output),
+            Some(&original.tonemapping)
+        );
+        assert!(app.world().get::<Hdr>(viewport).is_none());
+        assert!(app.world().get::<Hdr>(output).is_none());
+        assert!(app.world().get::<PortraitFinishPass>(output).is_none());
+    }
+
+    #[test]
     fn fixed_frames_do_not_write_again() {
         let (mut app, viewport, _) = look_sync_app();
         let on = RichLookSettings {
@@ -784,7 +835,8 @@ mod tests {
         );
     }
 
-    /// CPU mirror of the pass's `finish_premultiplied_linear`.
+    /// CPU mirror of the finish's linear association before final transfer
+    /// encoding; the GPU fixture below covers the actual target boundary.
     fn finish_premultiplied_fixture(rgba: Pixel, curve: fn([f32; 3]) -> [f32; 3]) -> Pixel {
         let coverage = rgba[3];
         if coverage <= 0.0 {
@@ -795,6 +847,40 @@ mod tests {
             color[0] * coverage,
             color[1] * coverage,
             color[2] * coverage,
+            coverage,
+        ]
+    }
+
+    fn srgb_encode(value: f32) -> f32 {
+        if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    fn srgb_decode(value: f32) -> f32 {
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// CPU mirror of the linear staging value written before the target's
+    /// automatic sRGB encode. The GPU fixture below exercises this boundary
+    /// through the real finish pass and readback path.
+    fn finish_srgb_target_staging_fixture(rgba: Pixel, curve: fn([f32; 3]) -> [f32; 3]) -> Pixel {
+        let coverage = rgba[3];
+        if coverage <= 0.0 {
+            return [0.0; 4];
+        }
+        let color = curve([rgba[0] / coverage, rgba[1] / coverage, rgba[2] / coverage]);
+        let premultiplied_srgb = color.map(srgb_encode).map(|channel| channel * coverage);
+        [
+            srgb_decode(premultiplied_srgb[0]),
+            srgb_decode(premultiplied_srgb[1]),
+            srgb_decode(premultiplied_srgb[2]),
             coverage,
         ]
     }
@@ -845,6 +931,36 @@ mod tests {
                 "channel {index}: {l} != {r} (left {left:?}, right {right:?})"
             );
         }
+    }
+
+    #[test]
+    fn srgba_boundary_associates_after_encoding_not_before() {
+        let color = [0.5, 0.2, 0.05];
+        let coverage = 0.5;
+        let source = [
+            color[0] * coverage,
+            color[1] * coverage,
+            color[2] * coverage,
+            coverage,
+        ];
+        let staged = finish_srgb_target_staging_fixture(source, reinhard);
+        let stored = [
+            srgb_encode(staged[0]),
+            srgb_encode(staged[1]),
+            srgb_encode(staged[2]),
+        ];
+        let expected = reinhard(color)
+            .map(srgb_encode)
+            .map(|channel| channel * coverage);
+        let legacy = reinhard(color.map(|channel| channel * coverage))
+            .map(srgb_encode)
+            .map(|channel| channel * 1.0);
+        for (actual, wanted) in stored.into_iter().zip(expected) {
+            assert!((actual - wanted).abs() < 1e-5);
+        }
+        assert!(stored[0] < legacy[0] - 0.02);
+        assert!(stored[1] < legacy[1] - 0.02);
+        assert!(stored[2] < legacy[2] - 0.02);
     }
 
     #[test]

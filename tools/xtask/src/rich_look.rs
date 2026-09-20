@@ -10,6 +10,8 @@
 use bevy::app::AppExit;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{Exposure, Hdr};
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
@@ -20,7 +22,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vtuber_avatar::{
     AVATAR_RENDER_LAYER, AvatarOutputFrameSlot, AvatarOutputState, AvatarViewportCamera,
-    register_output_systems,
+    PortraitFinishPass, register_output_systems, register_portrait_finish,
 };
 use vtuber_core::{VideoOutputFrame, VideoOutputProfile};
 
@@ -96,6 +98,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .map(PathBuf::from);
 
     let result = match case {
+        "finish-alpha" => finish_alpha(),
         "mtoon-lighting" => mtoon_lighting(),
         "mtoon-shading" => mtoon_shading(),
         "mtoon-portrait" => mtoon_portrait(),
@@ -111,6 +114,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-shading   signed NdotL, shading shift and toony endpoints");
             println!("  mtoon-normal    normal texture, scale and TBN wiring");
             println!("  mtoon-standard  the standard display is the plain authored display");
+            println!("  finish-alpha    HDR finish, sRGB premultiplication and readback");
             println!("  mtoon-authored  (renamed to mtoon-standard)");
             return Ok(());
         }
@@ -988,6 +992,302 @@ fn scanline(pixels: &[[u8; 4]]) -> usize {
 /// frame is sampled once the image has settled.
 const SETTLE_FRAMES: u32 = 3;
 
+const FINISH_ALPHA_VALUES: [f32; 4] = [0.0, 0.25, 0.5, 1.0];
+const FINISH_LINEAR_COLOR: [f32; 3] = [0.5, 0.2, 0.05];
+
+/// Exercise the actual HDR finish, sRGB target write, GPU readback and
+/// `VideoOutputFrame::from_padded_bgra8` path at each alpha boundary.
+#[allow(clippy::indexing_slicing)]
+fn finish_alpha() -> Result<String, RichLookError> {
+    let mut samples = Vec::new();
+    for alpha in FINISH_ALPHA_VALUES {
+        samples.push(center_pixel(&render_finish_alpha(alpha)?));
+    }
+
+    if samples[0] != [0, 0, 0, 0] {
+        return Err(RichLookError::Failed(format!(
+            "alpha=0 was not transparent after the finish/readback boundary: {:?}",
+            samples[0]
+        )));
+    }
+
+    let expected_opaque = expected_finish_bgra8(1.0);
+    let mut report = format!(
+        "case=finish-alpha\n\
+         source_linear={FINISH_LINEAR_COLOR:?}\n\
+         alphas={FINISH_ALPHA_VALUES:?}\n\
+         readback_straight_bgra={samples:?}\n\
+         expected_opaque_straight_bgra={expected_opaque:?}\n"
+    );
+    for (alpha, sample) in FINISH_ALPHA_VALUES.iter().zip(&samples) {
+        let expected = expected_finish_bgra8(*alpha);
+        if sample[3].abs_diff(expected[3]) > 1 {
+            return Err(RichLookError::Failed(format!(
+                "alpha={alpha} changed at the readback boundary: actual={sample:?} expected={expected:?}"
+            )));
+        }
+        if *alpha > 0.0 {
+            for (channel, (actual, wanted)) in
+                sample[..3].iter().zip(expected[..3].iter()).enumerate()
+            {
+                if actual.abs_diff(*wanted) > 4 {
+                    return Err(RichLookError::Failed(format!(
+                        "alpha={alpha} channel={channel} has more than quantization error: actual={sample:?} expected={expected:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    for (alpha, sample) in [0.25_f32, 0.5].into_iter().zip(samples.iter().skip(1)) {
+        let expected = expected_finish_bgra8(alpha);
+        let legacy = legacy_finish_bgra8(alpha);
+        if rgb_distance(*sample, expected) >= rgb_distance(*sample, legacy) {
+            return Err(RichLookError::Failed(format!(
+                "alpha={alpha} followed E(a*T(C)) instead of a*E(T(C)): actual={sample:?} expected={expected:?} legacy={legacy:?}"
+            )));
+        }
+        report.push_str(&format!(
+            "alpha={alpha}: expected={expected:?}, legacy_wrong={legacy:?}, rgb_distance_to_expected={}, rgb_distance_to_legacy={}\n",
+            rgb_distance(*sample, expected),
+            rgb_distance(*sample, legacy),
+        ));
+    }
+
+    let backgrounds = [
+        ("black", [0, 0, 0]),
+        ("white", [255, 255, 255]),
+        ("color", [24, 96, 180]),
+    ];
+    for (name, background) in backgrounds {
+        for (alpha, sample) in [0.25_f32, 0.5].into_iter().zip(samples.iter().skip(1)) {
+            let expected_source = [
+                expected_opaque[0],
+                expected_opaque[1],
+                expected_opaque[2],
+                quantize(alpha),
+            ];
+            let expected = composite_bgra8(expected_source, background);
+            let actual = composite_bgra8(*sample, background);
+            if actual
+                .iter()
+                .zip(expected)
+                .any(|(actual, expected)| actual.abs_diff(expected) > 4)
+            {
+                return Err(RichLookError::Failed(format!(
+                    "{name} background alpha={alpha} composition changed the straight color: actual={actual:?} expected={expected:?}"
+                )));
+            }
+            report.push_str(&format!(
+                "composite_{name}_alpha={alpha}: actual={actual:?}, expected={expected:?}\n"
+            ));
+        }
+    }
+
+    Ok(report)
+}
+
+fn srgb_encode(value: f32) -> f32 {
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn quantize(value: f32) -> u8 {
+    (value * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn expected_finish_bgra8(alpha: f32) -> [u8; 4] {
+    let toned = FINISH_LINEAR_COLOR.map(|channel| channel / (1.0 + channel));
+    let encoded = toned.map(srgb_encode);
+    [
+        quantize(encoded[2]),
+        quantize(encoded[1]),
+        quantize(encoded[0]),
+        quantize(alpha),
+    ]
+}
+
+fn legacy_finish_bgra8(alpha: f32) -> [u8; 4] {
+    let toned = FINISH_LINEAR_COLOR.map(|channel| channel / (1.0 + channel));
+    let encoded = toned.map(|channel| srgb_encode(channel * alpha) / alpha);
+    [
+        quantize(encoded[2]),
+        quantize(encoded[1]),
+        quantize(encoded[0]),
+        quantize(alpha),
+    ]
+}
+
+fn rgb_distance(actual: [u8; 4], expected: [u8; 4]) -> u32 {
+    actual[..3]
+        .iter()
+        .zip(expected[..3].iter())
+        .map(|(actual, expected)| u32::from(actual.abs_diff(*expected)))
+        .sum()
+}
+
+fn composite_bgra8(source: [u8; 4], background: [u8; 3]) -> [u8; 3] {
+    let alpha = u32::from(source[3]);
+    let inverse_alpha = u32::from(u8::MAX) - alpha;
+    [
+        ((u32::from(source[0]) * alpha + u32::from(background[0]) * inverse_alpha + 127) / 255)
+            as u8,
+        ((u32::from(source[1]) * alpha + u32::from(background[1]) * inverse_alpha + 127) / 255)
+            as u8,
+        ((u32::from(source[2]) * alpha + u32::from(background[2]) * inverse_alpha + 127) / 255)
+            as u8,
+    ]
+}
+
+fn render_finish_alpha(alpha: f32) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut app = finish_fixture_app(alpha);
+    let deadline = Instant::now() + MAX_WAIT;
+    let expected_alpha = quantize(alpha);
+    let mut settled = 0;
+    let mut last = None;
+    while Instant::now() < deadline {
+        app.update();
+        if let Some(frame) = app
+            .world_mut()
+            .resource_mut::<AvatarOutputFrameSlot>()
+            .take_latest()
+        {
+            let sampled = pixels(&frame);
+            let center = center_pixel(&sampled);
+            let alpha_ready = center[3].abs_diff(expected_alpha) <= 1;
+            let color_ready = alpha == 0.0 || sampled.iter().any(|pixel| pixel[3] > 0);
+            settled = if alpha_ready && color_ready {
+                settled + 1
+            } else {
+                0
+            };
+            if settled >= SETTLE_FRAMES {
+                return Ok(sampled);
+            }
+            last = Some(sampled);
+        }
+        if app
+            .world()
+            .get_resource::<Messages<AppExit>>()
+            .is_some_and(|messages| !messages.is_empty())
+        {
+            break;
+        }
+    }
+    last.ok_or(RichLookError::NotRun(
+        "GPU finish/readback did not complete; the local renderer/GPU path is unavailable".into(),
+    ))
+}
+
+fn finish_fixture_app(alpha: f32) -> App {
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin { ..default() })
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<WinitPlugin>()
+            .disable::<bevy::log::LogPlugin>(),
+    )
+    .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 60,
+        pixel_format: vtuber_core::VideoOutputPixelFormat::Bgra8StraightAlpha,
+    }))
+    .insert_resource(ClearColor(Color::srgba(0.0, 0.0, 0.0, 0.0)))
+    .insert_resource(vtuber_avatar::AvatarLifecycle::default())
+    .insert_resource(FinishAlpha(alpha))
+    .insert_resource(OutputArmed(false));
+    register_output_systems(&mut app);
+    register_portrait_finish(&mut app);
+    app.add_systems(Startup, setup_finish_fixture_scene);
+    app.add_systems(Update, activate_finish_output_after_setup);
+    app.finish();
+    app.cleanup();
+    app
+}
+
+#[derive(Resource, Clone, Copy)]
+struct FinishAlpha(f32);
+
+fn setup_finish_fixture_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    alpha: Res<FinishAlpha>,
+) {
+    let mesh = meshes.add(
+        Plane3d::default()
+            .mesh()
+            .size(4.0, 4.0)
+            .build()
+            .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+    );
+    let material = materials.add(StandardMaterial {
+        base_color: Color::LinearRgba(LinearRgba::new(
+            FINISH_LINEAR_COLOR[0],
+            FINISH_LINEAR_COLOR[1],
+            FINISH_LINEAR_COLOR[2],
+            alpha.0,
+        )),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+
+    let camera_transform =
+        Transform::from_translation(Vec3::new(0.0, 0.0, 5.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 1.0,
+            ..default()
+        }),
+        AvatarViewportCamera::from_default_transform(camera_transform),
+        camera_transform,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+}
+
+fn activate_finish_output_after_setup(
+    mut commands: Commands,
+    mut state: ResMut<AvatarOutputState>,
+    mut armed: ResMut<OutputArmed>,
+    cameras: Query<Entity, With<vtuber_avatar::AvatarOutputCamera>>,
+) {
+    if armed.0 {
+        return;
+    }
+    let Some(output) = cameras.iter().next() else {
+        return;
+    };
+    commands.entity(output).insert((
+        Hdr,
+        Exposure {
+            ev100: -0.263_034_4,
+        },
+        Tonemapping::None,
+        PortraitFinishPass {
+            tonemapping: Tonemapping::Reinhard,
+        },
+    ));
+    state.activate();
+    armed.0 = true;
+}
+
 fn render(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     let mut app = fixture_app(scene)?;
     let deadline = Instant::now() + MAX_WAIT;
@@ -1193,19 +1493,3 @@ fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
 fn center_pixel(pixels: &[[u8; 4]]) -> [u8; 4] {
     pixels[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
