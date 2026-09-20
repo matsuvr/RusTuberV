@@ -88,6 +88,9 @@ const ALPHA_MODE_ALPHA_TO_COVERAGE: u32 = 512u;
 const ALPHA_MODE_BLEND: u32 = 1024u;
 const OUTLINE_WIDTH_MULTIPLY_TEXTURE: u32 = 2048u;
 const NORMAL_TEXTURE: u32 = 4096u;
+/// The material uses the Rich display path. This is the GPU-side effective
+/// value of `shading_mode` for the shared prepass shader.
+const RICH_SHADING: u32 = 8192u;
 
 // Outline flags
 const OUTLINE_WORLD_COORDINATES: u32 = 1u;

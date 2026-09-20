@@ -24,7 +24,7 @@ implemented and not measured, and is not claimed as working.
 
 | Issue | Commit | Scope |
 |---|---|---|
-| #69 Native/Rich MToon | this change (working tree on `0018277`) | restores the upstream `f9593fd7` Native fragment (`mtoon_native.wgsl` + `mtoon_fragment.wgsl`), adds `MToonShadingMode`/`MToonMaterialKey::RICH_SHADING` shader selection, `mtoon_rich_fragment.wgsl` and `compose_rich_mtoon`; the per-light radiance, normal texture, GI equalization and added gloss are now Rich-only |
+| #69 Native/Rich MToon | this change (working tree on `0018277`) | restores the upstream `f9593fd7` Native fragment (`mtoon_native.wgsl` + `mtoon_fragment.wgsl`), adds `MToonShadingMode`/`MToonMaterialKey::RICH_SHADING` shader selection, `mtoon_rich_fragment.wgsl` and `compose_rich_mtoon`; the per-light radiance, normal texture, GI equalization and added gloss are now Rich-only. The review fixes are included: the Rich transparent discard uses the authored base alpha (Blend outline), and the prepass activates the Rich cutout only for `RICH_SHADING` materials. `mtoon-reference` compares against the independent fixed-revision reference. |
 | #70 look boundary | `ea47b59` | `RichLookSettings`/`effective_look_strength`/`blend_look_scalar`, `StandardLookBase` capture, `AvatarLookSettings`+`LookSettingsChanged`, capture-once/unload lifecycle |
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
@@ -32,7 +32,10 @@ implemented and not measured, and is not claimed as working.
 | #79 avatar UI alpha boundary | this PR | avatar-only callback for the monitor and expanding transition; the shared `Bgra8UnormSrgb` image remains gamma-premultiplied while the callback supplies linear-premultiplied RGB to the UI blend |
 
 Supporting reusable code: `tools/xtask/src/rich_look.rs` (the GPU cases,
-including `finish-alpha`, `avatar-ui-alpha` and `mtoon-rich-zero`),
+including `mtoon-reference`, `mtoon-rich-zero`, `mtoon-blend-depth`,
+`standard-look`, `finish-alpha` and `avatar-ui-alpha`),
+`tools/xtask/src/mtoon_upstream_reference.wgsl` (the independent
+fixed-revision reference),
 `crates/vtuber-app/src/ui/avatar_preview.rs`/`avatar_preview.wgsl`,
 `vendor/bevy_vrm1/src/vrm/mtoon_native.wgsl` (the fixed Native reference),
 `mtoon_rich_fragment.wgsl`, `mtoon_lighting.wgsl`, `mtoon_alpha.wgsl`,
@@ -66,29 +69,84 @@ strength 1 reads `[253, 253, 253, 255]` at the same probe.
 
 ## #69 measured: Native vs Rich with zero added effect (Windows/Vulkan/RTX 4090)
 
-`cargo run -p xtask -j 1 -- rich-look mtoon-rich-zero` renders each scene twice
-through the production offscreen readback path: once with
-`MToonShadingMode::Native` and once with `MToonShadingMode::Rich` and the
-nominal gains but `strength = 0`, then compares every BGRA byte. It does not
-compare the OFF switch state.
+All comparisons below run in one build (same `Cargo.lock`), backend (Vulkan) and
+input scene, through the production offscreen readback path. None of them
+compares the OFF switch state.
 
-| scene inputs | differing pixels | max channel difference | Rich strength 1 differing pixels |
+### Independent upstream reference
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-reference` renders each scene three
+ways: the fixed-revision reference (`tools/xtask/src/mtoon_upstream_reference.wgsl`,
+copied verbatim from `f9593fd7` and substituted for the Native fragment handle,
+so it does not share `mtoon::native`), the production Native display
+(`MToonShadingMode::Native`) and Rich with the nominal gains and `strength = 0`.
+
+| scene inputs | reference vs Native | Native vs Rich(0) | Rich(1) |
 |---|---:|---:|---:|
-| two colored directional lights, authored parametric rim, normal map, world outline | 0 | 0 | 2300 |
+| sphere, two colored lights, authored parametric rim + MatCap, tilted normal map, UV transform, world outline | 0 | 0 | 468 |
+| Mask sphere (cutoff 0.5) with tilted normal map | 0 | 0 | 452 |
+| Blend + `transparentWithZWrite` sphere | 0 | 0 | 409 |
+
+Every scene is byte-identical across the reference, the production Native
+display and Rich(0). The compared inputs are observable on the same fixture:
+the tilted normal map changes the Rich image in 440 pixels and the
+Native/reference image in 0 (normal evaluation is Rich-only), removing the
+parametric rim changes 312 pixels, removing the MatCap texture 468, and the UV
+transform 314. The sphere outline adds visible pixels (514 opaque pixels with
+the outline against 468 without).
+
+### Zero-effect identity without the reference
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-rich-zero` compares Native and
+Rich(0) directly on the same scenes and checks that a positive strength changes
+them.
+
+| scene inputs | differing pixels | max channel difference | Rich(1) differing pixels |
+|---|---:|---:|---:|
+| sphere, two colored lights, authored parametric rim, tilted normal map, world outline | 0 | 0 | 468 |
 | alpha Mask base color texture at cutoff 0.5 | 0 | 0 | 1058 |
 | alpha Blend + `transparentWithZWrite` base color texture | 0 | 0 | 966 |
 
-All three scenes are byte-identical between the two display paths at zero
-added effect, and all three change with a positive strength, so the identity is
-not an unreachable Rich shader. `mtoon-portrait` additionally checks the same
-identity on a single light: `native=[255,255,255,255]`,
+The tilted normal map changes the Rich image in 449 pixels, so the normal input
+is not an identity comparison of identical images. `mtoon-portrait` additionally
+checks the same identity on a single light: `native=[255,255,255,255]`,
 `rich_strength_zero=[255,255,255,255]`, `rich=[253,253,253,255]`,
 `rich_rotated_light=[244,244,244,255]`.
 
-`mtoon-normal` now runs on the Rich display (normal texture,
-scale and TBN wiring are Rich-only): flat `[118,118,118,255]`, identity map
-`[118,118,118,255]`, tilted map `[95,95,95,255]`, tilted map with scale 0
-`[118,118,118,255]`.
+### Blend outline and Z-write
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-blend-depth`:
+
+| scene | Native | Rich(0) | Rich(1) |
+|---|---:|---:|---:|
+| fully transparent outlined Blend+Z-write sphere, opaque pixels | 92 | 92 | 0 |
+| outlined opaque sphere behind a transparent Blend+Z-write quad, black outline pixels | 0 | 0 | 58 (58 without the quad) |
+
+The transparent Blend outline is drawn on the Native display and not drawn when
+the Rich display adds an effect; Rich(0) is byte-identical to Native. The
+transparent quad's depth write hides the outline behind it on the Native
+display (58 outline pixels become 0); Rich(1) discards the transparent fragment,
+so the scene is byte-identical to the same scene without the quad. This is the
+Rich-side discard introduced for issue #69: it evaluates the authored base
+alpha (base color x base texture), not the outline-pass alpha that the Native
+`lit_color` forces to 1 for Blend materials.
+
+### Shadow/prepass split
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-cutout-shadow` renders the same
+alpha-masked quad on a lit ground in four states. The Native display is
+byte-identical with `portrait.strength` 0 and 1 (0 differing pixels), and
+Rich(0) equals it; Rich(1) activates the cutout shadow (darkest ground band
+under the opaque half `1`, under the transparent half `256`, against `256/256`
+without shadows). The prepass uses the GPU-side
+`MtoonFlags::RICH_SHADING` value derived from `shading_mode`, so a saved
+positive strength cannot activate the Rich cutout while Native is selected.
+
+### Other reused fixtures
+
+`mtoon-normal` runs on the Rich display (normal texture, scale and TBN wiring
+are Rich-only): flat `[118,118,118,255]`, identity map `[118,118,118,255]`,
+tilted map `[95,95,95,255]`, tilted map with scale 0 `[118,118,118,255]`.
 
 `mtoon-shading` (Rich display): front-lit `125`, 90-degree side `89`, side with
 +0.5 shift `124`, light behind `0`; the toony=0 ramp has 18 intermediate
@@ -98,18 +156,33 @@ samples on the mid scanline and the toony=1 endpoint has 0.
 with shadow maps on and `267` with them off, so the MToon mesh casts into the
 shadow map.
 
-`mtoon-cutout-shadow` (Rich display, `portrait.strength > 0`): with an
-alpha-masked MToon quad, the ground under the opaque half is `1` and under the
-transparent half `256`; without shadows both are `256`. At strength 0 the Rich
-prepass keeps the Native behavior (no cutout shadow), which is the upstream
-baseline.
+### Standard/Unlit
 
-The light level of the scene is the app's own `setup_scene` key (650 lx). The
-Native display is deliberately the upstream authored display; the app's look
-switch selects the Rich display, which applies the light level and colors.
-Bevy applies `Tonemapping` only to HDR views, so a real highlight roll-off
-needs the HDR output of issue #74; the Rich preset keeps every light at or below
-900 lx so a fully lit surface does not clip.
+`cargo run -p xtask -j 1 -- rich-look standard-look` compares the production
+`initialize_look_materials`/`apply_standard_portrait_settings` against a control
+app that has no look systems at all:
+
+| material | control vs Rich(0) | control vs Rich(1) |
+|---|---:|---:|
+| lit `StandardMaterial` sphere | 0 | 99 (recorded; #73 owns the positive Standard change) |
+| unlit `StandardMaterial` sphere | 0 | 0 |
+
+The lit and unlit Standard materials are byte-identical to the untouched Bevy
+material at zero effect, and Unlit stays byte-identical at full strength.
+
+### Not measured here
+
+- Time-driven UV animation is not in these GPU fixtures: the fixture clock is
+  frozen (`TimeUpdateStrategy::ManualDuration(Duration::ZERO)`), so only the
+  shared UV transform path is compared on the GPU. The animation functions are
+  shared by both display paths through `mtoon::native`; expression and
+  animation behavior is covered by the workspace tests, not by these fixtures.
+- The light level of the scene is the app's own `setup_scene` key (650 lx). The
+  Native display is deliberately the upstream authored display; the app's look
+  switch selects the Rich display, which applies the light level and colors.
+  Bevy applies `Tonemapping` only to HDR views, so a real highlight roll-off
+  needs the HDR output of issue #74; the Rich preset keeps every light at or
+  below 900 lx so a fully lit surface does not clip.
 
 ## #74 measured: HDR finish, alpha and tone (Windows/Vulkan/RTX 4090)
 
@@ -266,22 +339,20 @@ real NDI send/receive remains unrun.
 
 ### Local validation for this change (#69)
 
-- `cargo test --workspace -j 1`: PASS (recorded in the commit/PR, not repeated
-  per section).
+- `cargo test --workspace -j 4`: PASS.
 - `cargo clippy --workspace --all-targets -j 1 -- -D warnings`: PASS.
-- GPU fixtures re-run on the Windows/Vulkan/RTX 4090 above: `mtoon-rich-zero`
-  (new), `mtoon-standard`, `mtoon-portrait`, `mtoon-lighting`, `mtoon-shading`,
-  `mtoon-normal`, `mtoon-shadow`, `mtoon-cutout-shadow`, `finish-alpha`,
-  `avatar-ui-alpha`, `studio-environment`: PASS.
+- GPU fixtures run on the Windows/Vulkan/RTX 4090 above: `mtoon-reference`
+  (new), `mtoon-rich-zero`, `mtoon-blend-depth` (new), `mtoon-cutout-shadow`,
+  `mtoon-lighting`, `mtoon-shading`, `mtoon-normal`, `mtoon-standard`,
+  `mtoon-portrait`, `mtoon-shadow`, `standard-look` (new), `studio-environment`,
+  `finish-alpha`, `avatar-ui-alpha`: PASS (14 cases).
 - `vrm-render` on `inore-vrm1.vrm` and `tsukuyomi-chan.vrm`: PASS (numbers
   below).
 - Real NDI send/receive and macOS hardware validation: NOT RUN.
 
-The numbers for `mtoon-lighting`, `mtoon-standard`, `mtoon-rich-zero`,
-`mtoon-portrait`, `mtoon-shading`, `mtoon-normal`, `mtoon-shadow` and
-`mtoon-cutout-shadow` are in the sections above; the previous `mtoon-standard`
-numbers (`[211,211,211]` at 650 lx) belonged to the modified standard path that
-this change removes and are superseded.
+The numbers for every GPU case are in the sections above; the previous
+`mtoon-standard` numbers (`[211,211,211]` at 650 lx) belonged to the modified
+standard path that this change removes and are superseded.
 
 `studio-environment`: a PBR sphere lit only by the generated studio cubemap is
 `[87, 82, 82, 255]` against `[1, 0, 1, 255]` without it, so the GPU prefilter
@@ -393,7 +464,9 @@ restored, and the role-based adjustments of #76 are not implemented.
 - `Rich` MToon materials only discard fully transparent blend fragments while
   the added effect amount is positive; at strength 0 (and on the Native display)
   the upstream depth behavior is kept, so the shape-key overlay fix of `7708ac1`
-  does not apply to the plain display.
+  does not apply to the plain display. The discard evaluates the authored base
+  alpha (base color x base texture) at the animated UV, so it covers the outline
+  pass too, where the Native `lit_color` forces Blend alpha to 1.
 - The Native MToon display is the fixed upstream `f9593fd7` display: it does
   not apply the light's level or color, does not evaluate the normal texture,
   and keeps the upstream alpha/depth behavior. Those are Rich effects, not

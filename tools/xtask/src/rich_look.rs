@@ -8,11 +8,12 @@
 //! (`NOT RUN`) instead of reporting success.
 
 use bevy::app::AppExit;
-use bevy::asset::RenderAssetUsages;
+use bevy::asset::{RenderAssetUsages, uuid_handle};
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr, RenderTarget};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::schedule::ScheduleLabel;
+use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -20,15 +21,21 @@ use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureUsages,
 };
+use bevy::shader::Shader;
+use bevy::time::TimeUpdateStrategy;
 use bevy::winit::WinitPlugin;
 use bevy_egui::{EguiContext, EguiMultipassSchedule, EguiPlugin};
 use bevy_vrm1::prelude::{
     MToonMaterial, MToonOutline, MToonPortraitParams, MToonShadingMode, MtoonMaterialPlugin,
-    OutlineWidthMode, RimLighting, Shade,
+    OutlineWidthMode, RimLighting, Shade, VrmMaterialBaseValues,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vtuber_app::ui::{AvatarPreviewPlugin, paint_avatar_preview};
+use vtuber_avatar::look::{
+    AvatarLookSettings, MTOON_PORTRAIT_PRESET, RichLookSettings, StandardLookBases,
+    apply_standard_portrait_settings, initialize_look_materials,
+};
 use vtuber_avatar::{
     AVATAR_RENDER_LAYER, AvatarOutputFrameSlot, AvatarOutputState, AvatarViewportCamera,
     PortraitFinishPass, register_output_systems, register_portrait_finish,
@@ -38,6 +45,15 @@ use vtuber_core::{VideoOutputFrame, VideoOutputProfile};
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
 const MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// The upstream Native fragment shader handle, used to substitute the
+/// independent reference shader into one fixture app without touching any
+/// production asset.
+const UPSTREAM_REFERENCE_FRAGMENT_HANDLE: Handle<Shader> =
+    uuid_handle!("9a96eff2-1676-1dc0-9abc-2fd5e7134443");
+/// The fixed-revision original, copied verbatim into
+/// `mtoon_upstream_reference.wgsl`; it does not share `mtoon::native`.
+const UPSTREAM_REFERENCE_FRAGMENT: &str = include_str!("mtoon_upstream_reference.wgsl");
 
 /// Exit code used when the GPU/readback path cannot be exercised.
 pub const EXIT_NOT_RUN: i32 = 2;
@@ -76,6 +92,10 @@ struct MtoonScene {
     /// Optional constant normal texture, one RGBA pixel.
     normal_map: Option<[u8; 4]>,
     normal_scale: f32,
+    /// Optional constant MatCap texture, one RGBA pixel.
+    matcap_map: Option<[u8; 4]>,
+    /// The authored static UV transform.
+    uv_transform: Affine2,
     /// Optional two-texel base color texture: the left and right halves of the
     /// mesh's UV range. Used for the alpha Mask and Blend coverage cases.
     base_color_texture: Option<[[u8; 4]; 2]>,
@@ -104,6 +124,8 @@ impl MtoonScene {
             ground: false,
             normal_map: None,
             normal_scale: 1.0,
+            matcap_map: None,
+            uv_transform: Affine2::IDENTITY,
             base_color_texture: None,
             alpha_mode: AlphaMode::Opaque,
             transparent_with_z_write: false,
@@ -141,8 +163,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-cutout-shadow" => mtoon_cutout_shadow(),
         "studio-environment" => studio_environment(),
         "mtoon-standard" => mtoon_standard(),
+        "mtoon-reference" => mtoon_reference(),
         "mtoon-rich-zero" => mtoon_rich_zero(),
+        "mtoon-blend-depth" => mtoon_blend_depth(),
         "mtoon-normal" => mtoon_normal(),
+        "standard-look" => standard_look(),
         "help" | "--help" | "-h" => {
             println!("cargo xtask rich-look <case> [--evidence <file>]");
             println!("cases:");
@@ -150,7 +175,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-shading   signed NdotL, shading shift and toony endpoints");
             println!("  mtoon-normal    normal texture, scale and TBN wiring");
             println!("  mtoon-standard  the Native display is the plain authored display");
+            println!("  mtoon-reference upstream reference vs Native vs Rich(0) on the GPU");
             println!("  mtoon-rich-zero Native vs Rich with zero added effect, byte-compared");
+            println!("  mtoon-blend-depth Blend outline transparency and Z-write occlusion");
+            println!("  standard-look   Standard/Unlit against the untouched material");
             println!("  finish-alpha    HDR finish, sRGB premultiplication and readback");
             println!("  avatar-ui-alpha shared avatar image through the real egui preview callback");
             println!("  mtoon-authored  (renamed to mtoon-standard)");
@@ -540,25 +568,35 @@ fn mtoon_rich_zero() -> Result<String, RichLookError> {
         illuminance: 220.0,
         shadows_enabled: false,
     };
+    let base = MtoonScene {
+        lights: vec![key, fill],
+        mesh: MeshSpec::Sphere,
+        normal_map: Some([0, 128, 255, 255]),
+        rim_lighting: RimLighting {
+            color: LinearRgba::new(0.2, 0.3, 0.4, 1.0),
+            fresnel_power: 3.0,
+            ..default()
+        },
+        outline: true,
+        ..MtoonScene::lit(
+            Color::srgb(0.8, 0.7, 0.6),
+            Color::srgb(0.1, 0.1, 0.15),
+            key,
+        )
+    };
+    // The tilted normal map is a Rich-only input: it must change the Rich
+    // image, while the Native identity comparison below uses it unchanged.
+    let without_normal = MtoonScene {
+        normal_map: None,
+        ..base.clone()
+    };
+    let (normal_differing, _) = pixel_difference(
+        &render(&base.clone().rich(1.0))?,
+        &render(&without_normal.rich(1.0))?,
+    );
+
     let variants = [
-        (
-            "lights_rim_normal_outline",
-            MtoonScene {
-                lights: vec![key, fill],
-                normal_map: Some([128, 128, 255, 255]),
-                rim_lighting: RimLighting {
-                    color: LinearRgba::new(0.2, 0.3, 0.4, 1.0),
-                    fresnel_power: 3.0,
-                    ..default()
-                },
-                outline: true,
-                ..MtoonScene::lit(
-                    Color::srgb(0.8, 0.7, 0.6),
-                    Color::srgb(0.1, 0.1, 0.15),
-                    key,
-                )
-            },
-        ),
+        ("lights_rim_normal_outline", base),
         (
             "mask",
             MtoonScene {
@@ -578,7 +616,15 @@ fn mtoon_rich_zero() -> Result<String, RichLookError> {
         ),
     ];
 
-    let mut report = String::from("case=mtoon-rich-zero\n");
+    let mut report = format!(
+        "case=mtoon-rich-zero\n\
+         rich_tilted_normal_vs_no_normal_differing={normal_differing}\n"
+    );
+    if normal_differing == 0 {
+        return Err(RichLookError::Failed(
+            "the tilted normal map did not change the compared image".into(),
+        ));
+    }
     for (name, scene) in variants {
         let native = render(&scene)?;
         let rich_zero = render(&scene.clone().rich(0.0))?;
@@ -601,6 +647,569 @@ fn mtoon_rich_zero() -> Result<String, RichLookError> {
     }
     report.push_str("checks=native_eq_rich_zero,rich_positive_changes\n");
     Ok(report)
+}
+
+/// The production Native display and Rich(0) must match the independent
+/// upstream reference copied from the fixed revision, on scenes whose compared
+/// inputs actually change the image.
+///
+/// The reference is `mtoon_upstream_reference.wgsl` (verbatim revision
+/// `f9593fd7`), substituted for the Native fragment handle in its own app
+/// instance. Comparing Native to it proves the production baseline still is
+/// that revision; comparing Rich(0) to it proves the composition identity.
+fn mtoon_reference() -> Result<String, RichLookError> {
+    let key = LightSpec {
+        direction: Vec3::NEG_Z,
+        color: Color::WHITE,
+        illuminance: 500.0,
+        shadows_enabled: true,
+    };
+    let fill = LightSpec {
+        direction: Vec3::new(-0.5, -0.2, -0.8),
+        color: Color::srgb(0.6, 0.8, 1.0),
+        illuminance: 220.0,
+        shadows_enabled: false,
+    };
+    let multi = MtoonScene {
+        lights: vec![key, fill],
+        mesh: MeshSpec::Sphere,
+        normal_map: Some([0, 128, 255, 255]),
+        matcap_map: Some([96, 160, 220, 255]),
+        uv_transform: Affine2::from_scale_angle_translation(
+            Vec2::splat(0.75),
+            0.0,
+            Vec2::new(0.1, 0.0),
+        ),
+        base_color_texture: Some([[255, 120, 60, 255], [60, 120, 255, 255]]),
+        rim_lighting: RimLighting {
+            color: LinearRgba::new(0.2, 0.3, 0.4, 1.0),
+            fresnel_power: 3.0,
+            ..default()
+        },
+        outline: true,
+        ..MtoonScene::lit(
+            Color::srgb(0.8, 0.7, 0.6),
+            Color::srgb(0.1, 0.1, 0.15),
+            key,
+        )
+    };
+    let mask = MtoonScene {
+        mesh: MeshSpec::Sphere,
+        normal_map: Some([0, 128, 255, 255]),
+        alpha_mode: AlphaMode::Mask(0.5),
+        base_color_texture: Some([[255, 255, 255, 255], [255, 255, 255, 0]]),
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+    };
+    let blend = MtoonScene {
+        mesh: MeshSpec::Sphere,
+        alpha_mode: AlphaMode::Blend,
+        transparent_with_z_write: true,
+        base_color_texture: Some([[255, 255, 255, 180], [255, 255, 255, 0]]),
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+    };
+
+    let mut report = String::from("case=mtoon-reference\n");
+    for (name, scene) in [
+        ("sphere_rim_matcap_normal_uv_outline", multi.clone()),
+        ("mask_sphere", mask),
+        ("blend_z_write_sphere", blend),
+    ] {
+        let reference = render_reference(&scene)?;
+        let native = render(&scene)?;
+        let rich_zero = render(&scene.clone().rich(0.0))?;
+        let rich_full = render(&scene.rich(1.0))?;
+        let (reference_native, reference_native_max) = pixel_difference(&reference, &native);
+        let (native_zero, native_zero_max) = pixel_difference(&native, &rich_zero);
+        let (native_full, _) = pixel_difference(&native, &rich_full);
+        report.push_str(&format!(
+            "{name}: reference_vs_native_differing={reference_native} (max {reference_native_max}) \
+             native_vs_rich_zero_differing={native_zero} (max {native_zero_max}) \
+             native_vs_rich_full_differing={native_full}\n"
+        ));
+        if reference_native != 0 {
+            return Err(RichLookError::Failed(format!(
+                "{name}: the production Native display differs from the fixed upstream reference in {reference_native} pixels"
+            )));
+        }
+        if native_zero != 0 {
+            return Err(RichLookError::Failed(format!(
+                "{name}: Rich with zero added effect differs from Native in {native_zero} pixels"
+            )));
+        }
+        if native_full == 0 {
+            return Err(RichLookError::Failed(format!(
+                "{name}: Rich with a positive strength did not change the reference scene"
+            )));
+        }
+    }
+
+    // The compared inputs are observable: each one changes the same reference
+    // scene, so the identity above is not a comparison of identical images.
+    // The normal texture is Rich-only: it must change the Rich image and must
+    // not change the Native/reference image.
+    let reference_multi = render_reference(&multi)?;
+    let outlined_pixels = opaque_pixel_count(&reference_multi);
+    let without_normal = MtoonScene {
+        normal_map: None,
+        ..multi.clone()
+    };
+    let reference_without_normal = render_reference(&without_normal)?;
+    let (reference_normal_differing, _) = pixel_difference(&reference_multi, &reference_without_normal);
+    let rich_full = render(&multi.clone().rich(1.0))?;
+    let rich_full_without_normal = render(&without_normal.clone().rich(1.0))?;
+    let (rich_normal_differing, _) = pixel_difference(&rich_full, &rich_full_without_normal);
+    report.push_str(&format!(
+        "normal_map reference_differing={reference_normal_differing} rich_differing={rich_normal_differing}\n"
+    ));
+    if reference_normal_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the normal texture changed the Native/reference image in {reference_normal_differing} pixels"
+        )));
+    }
+    if rich_normal_differing == 0 {
+        return Err(RichLookError::Failed(
+            "the tilted normal map did not change the Rich image".into(),
+        ));
+    }
+
+    let variants = [
+        (
+            "no_parametric_rim",
+            MtoonScene {
+                rim_lighting: RimLighting::default(),
+                ..multi.clone()
+            },
+        ),
+        (
+            "no_matcap_texture",
+            MtoonScene {
+                matcap_map: None,
+                ..multi.clone()
+            },
+        ),
+        (
+            "identity_uv_transform",
+            MtoonScene {
+                uv_transform: Affine2::IDENTITY,
+                ..multi.clone()
+            },
+        ),
+    ];
+    for (name, variant) in variants {
+        let variant_frame = render_reference(&variant)?;
+        let (differing, _) = pixel_difference(&reference_multi, &variant_frame);
+        report.push_str(&format!(
+            "{name}_differing={differing} opaque_pixels={}\n",
+            opaque_pixel_count(&variant_frame)
+        ));
+        if differing == 0 {
+            return Err(RichLookError::Failed(format!(
+                "{name}: the compared input did not change the reference scene"
+            )));
+        }
+    }
+    let no_outline = render_reference(&MtoonScene {
+        outline: false,
+        ..multi.clone()
+    })?;
+    let no_outline_pixels = opaque_pixel_count(&no_outline);
+    if outlined_pixels <= no_outline_pixels {
+        return Err(RichLookError::Failed(format!(
+            "the outline did not add visible pixels: with={outlined_pixels} without={no_outline_pixels}"
+        )));
+    }
+    report.push_str(&format!(
+        "outline_visible_pixels with={outlined_pixels} without={no_outline_pixels}\n"
+    ));
+    report.push_str("checks=reference_eq_native,native_eq_rich_zero,rich_positive_changes,normal_rich_only,inputs_observable,outline_visible\n");
+    Ok(report)
+}
+
+/// The Blend+outline transparent region must not be drawn while the Rich
+/// display adds effects, and a transparent Blend fragment must not write depth
+/// that hides a later draw behind it.
+///
+/// Part 1: a fully transparent outlined Blend+z-write sphere. Native draws its
+/// outline ring; Rich with a positive strength discards the transparent
+/// fragments in the main and outline pass, so nothing is drawn.
+///
+/// Part 2: an opaque outlined sphere with the same transparent Blend+z-write
+/// quad in front. The quad's depth write hides the outline behind it on the
+/// Native display; the Rich discard removes the depth write, so the outline is
+/// visible again exactly as if the quad did not exist.
+fn mtoon_blend_depth() -> Result<String, RichLookError> {
+    let key = LightSpec {
+        direction: Vec3::NEG_Z,
+        color: Color::WHITE,
+        illuminance: 400.0,
+        shadows_enabled: false,
+    };
+    let transparent_sphere = |shading_mode: MToonShadingMode, strength: f32| MtoonScene {
+        mesh: MeshSpec::Sphere,
+        outline: true,
+        alpha_mode: AlphaMode::Blend,
+        transparent_with_z_write: true,
+        base_color_texture: Some([[255, 255, 255, 0], [255, 255, 255, 0]]),
+        portrait: MToonPortraitParams {
+            strength,
+            ..MTOON_PORTRAIT_PRESET
+        },
+        shading_mode,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+    };
+
+    let ring_native = render(&transparent_sphere(MToonShadingMode::Native, 0.0))?;
+    let ring_rich_zero = render(&transparent_sphere(MToonShadingMode::Rich, 0.0))?;
+    let ring_rich_full = render(&transparent_sphere(MToonShadingMode::Rich, 1.0))?;
+    let (ring_zero_differing, _) = pixel_difference(&ring_native, &ring_rich_zero);
+    let native_ring_pixels = opaque_pixel_count(&ring_native);
+    let full_ring_pixels = opaque_pixel_count(&ring_rich_full);
+
+    let quad_scene = |quad: bool, shading_mode: MToonShadingMode, strength: f32| BlendDepthScene {
+        quad,
+        shading_mode,
+        strength,
+    };
+    let quad_absent = render_blend_depth(quad_scene(false, MToonShadingMode::Native, 0.0))?;
+    let quad_native = render_blend_depth(quad_scene(true, MToonShadingMode::Native, 0.0))?;
+    let quad_rich_zero = render_blend_depth(quad_scene(true, MToonShadingMode::Rich, 0.0))?;
+    let quad_rich_full = render_blend_depth(quad_scene(true, MToonShadingMode::Rich, 1.0))?;
+    let (quad_zero_differing, _) = pixel_difference(&quad_native, &quad_rich_zero);
+    let (quad_full_differing, _) = pixel_difference(&quad_absent, &quad_rich_full);
+
+    let mut report = format!(
+        "case=mtoon-blend-depth\n\
+         transparent_blend_outline native_opaque_pixels={native_ring_pixels} \
+         rich_zero_opaque_pixels={} rich_full_opaque_pixels={full_ring_pixels} \
+         native_vs_rich_zero_differing={ring_zero_differing}\n\
+         z_write_outline black_pixels_without_quad={} with_quad_native={} \
+         with_quad_rich_zero={} with_quad_rich_full={} \
+         rich_zero_vs_native_differing={quad_zero_differing} \
+         rich_full_vs_quad_absent_differing={quad_full_differing}\n",
+        opaque_pixel_count(&ring_rich_zero),
+        black_opaque_pixel_count(&quad_absent),
+        black_opaque_pixel_count(&quad_native),
+        black_opaque_pixel_count(&quad_rich_zero),
+        black_opaque_pixel_count(&quad_rich_full),
+    );
+
+    if native_ring_pixels == 0 {
+        return Err(RichLookError::Failed(
+            "the Native display did not draw the transparent Blend outline".into(),
+        ));
+    }
+    if ring_zero_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "Rich with zero added effect differs from Native on the transparent Blend outline in {ring_zero_differing} pixels"
+        )));
+    }
+    if full_ring_pixels != 0 {
+        return Err(RichLookError::Failed(format!(
+            "Rich with a positive strength still drew {full_ring_pixels} transparent outline pixels"
+        )));
+    }
+    let absent_outline = black_opaque_pixel_count(&quad_absent);
+    if absent_outline == 0 {
+        return Err(RichLookError::Failed(
+            "the outlined sphere's outline was not visible".into(),
+        ));
+    }
+    if black_opaque_pixel_count(&quad_native) >= absent_outline {
+        return Err(RichLookError::Failed(format!(
+            "the transparent quad's depth write did not hide the outline behind it: with_quad={} without_quad={absent_outline}",
+            black_opaque_pixel_count(&quad_native)
+        )));
+    }
+    if quad_zero_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "Rich with zero added effect differs from Native with the depth-writing quad in {quad_zero_differing} pixels"
+        )));
+    }
+    if quad_full_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "Rich with a positive strength did not restore the scene behind the discarded quad: {quad_full_differing} differing pixels"
+        )));
+    }
+    report.push_str("checks=blend_outline_not_drawn,rich_zero_eq_native,z_write_hides_outline,rich_discard_restores\n");
+    Ok(report)
+}
+
+#[derive(Resource, Clone, Copy)]
+struct BlendDepthScene {
+    quad: bool,
+    shading_mode: MToonShadingMode,
+    strength: f32,
+}
+
+fn render_blend_depth(spec: BlendDepthScene) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin { ..default() })
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<WinitPlugin>()
+            .disable::<bevy::log::LogPlugin>(),
+    )
+    .add_plugins(MtoonMaterialPlugin)
+    .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 60,
+        pixel_format: vtuber_core::VideoOutputPixelFormat::Bgra8StraightAlpha,
+    }))
+    .insert_resource(GlobalAmbientLight {
+        brightness: 0.0,
+        ..default()
+    })
+    .insert_resource(ClearColor(Color::srgba(0.0, 0.0, 0.0, 0.0)))
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+    .insert_resource(vtuber_avatar::AvatarLifecycle::default())
+    .insert_resource(spec)
+    .insert_resource(OutputArmed(false));
+    register_output_systems(&mut app);
+    app.add_systems(Startup, setup_blend_depth_scene);
+    app.add_systems(Update, activate_output_after_setup);
+    app.finish();
+    app.cleanup();
+    render_app(app)
+}
+
+fn setup_blend_depth_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<MToonMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    spec: Res<BlendDepthScene>,
+) {
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 400.0,
+            ..default()
+        },
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+
+    let mut sphere = Sphere::new(1.0).mesh().build();
+    let _ = sphere.generate_tangents();
+    commands.spawn((
+        Mesh3d(meshes.add(sphere)),
+        MeshMaterial3d(materials.add(MToonMaterial {
+            outline: MToonOutline {
+                mode: OutlineWidthMode::WorldCoordinates,
+                width_factor: 0.05,
+                color: LinearRgba::BLACK,
+                lighting_mix_factor: 0.0,
+            },
+            cull_mode: Some(bevy::render::render_resource::Face::Back),
+            ..default()
+        })),
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+
+    if spec.quad {
+        let transparent = images.add(Image::new_fill(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[0, 0, 0, 0],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ));
+        let mut quad = Plane3d::default()
+            .mesh()
+            .size(3.0, 3.0)
+            .build()
+            .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+        let _ = quad.generate_tangents();
+        commands.spawn((
+            Mesh3d(meshes.add(quad)),
+            MeshMaterial3d(materials.add(MToonMaterial {
+                base_color_texture: Some(transparent),
+                alpha_mode: AlphaMode::Blend,
+                transparent_with_z_write: true,
+                portrait: MToonPortraitParams {
+                    strength: spec.strength,
+                    ..MTOON_PORTRAIT_PRESET
+                },
+                shading_mode: spec.shading_mode,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, 0.0, 0.6),
+            RenderLayers::layer(AVATAR_RENDER_LAYER),
+        ));
+    }
+
+    let camera_transform =
+        Transform::from_translation(Vec3::new(0.0, 0.0, 5.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 1.0,
+            ..default()
+        }),
+        AvatarViewportCamera::from_default_transform(camera_transform),
+        camera_transform,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+}
+
+/// Standard and Unlit materials must render exactly like the untouched Bevy
+/// standard material while the look adds no effect.
+///
+/// The control app runs no look systems; the look app runs the production
+/// `initialize_look_materials`/`apply_standard_portrait_settings` at ON
+/// strength 0. Unlit must stay untouched even at full strength. The positive
+/// Standard change (roughness) belongs to issue #73 and is only recorded.
+fn standard_look() -> Result<String, RichLookError> {
+    let scene = |unlit: bool, look: Option<RichLookSettings>| StandardLookScene { unlit, look };
+    let on_zero = RichLookSettings {
+        enabled: true,
+        strength: 0.0,
+    };
+    let on_full = RichLookSettings {
+        enabled: true,
+        strength: 1.0,
+    };
+    let lit_control = render_standard_look(scene(false, None))?;
+    let lit_zero = render_standard_look(scene(false, Some(on_zero)))?;
+    let lit_full = render_standard_look(scene(false, Some(on_full)))?;
+    let unlit_control = render_standard_look(scene(true, None))?;
+    let unlit_zero = render_standard_look(scene(true, Some(on_zero)))?;
+    let unlit_full = render_standard_look(scene(true, Some(on_full)))?;
+
+    let (lit_zero_differing, _) = pixel_difference(&lit_control, &lit_zero);
+    let (lit_full_differing, _) = pixel_difference(&lit_control, &lit_full);
+    let (unlit_zero_differing, _) = pixel_difference(&unlit_control, &unlit_zero);
+    let (unlit_full_differing, _) = pixel_difference(&unlit_control, &unlit_full);
+    let mut report = format!(
+        "case=standard-look\n\
+         lit_control_vs_rich_zero_differing={lit_zero_differing}\n\
+         unlit_control_vs_rich_zero_differing={unlit_zero_differing}\n\
+         unlit_control_vs_rich_full_differing={unlit_full_differing}\n\
+         lit_control_vs_rich_full_differing={lit_full_differing} (#73 owns the positive Standard change)\n"
+    );
+    if lit_zero_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the lit Standard material changed at zero effect: {lit_zero_differing} differing pixels"
+        )));
+    }
+    if unlit_zero_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the unlit Standard material changed at zero effect: {unlit_zero_differing} differing pixels"
+        )));
+    }
+    if unlit_full_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the unlit Standard material changed at full strength: {unlit_full_differing} differing pixels"
+        )));
+    }
+    report.push_str("checks=standard_rich_zero_eq_control,unlit_unchanged\n");
+    Ok(report)
+}
+
+#[derive(Resource, Clone, Copy)]
+struct StandardLookScene {
+    unlit: bool,
+    look: Option<RichLookSettings>,
+}
+
+fn render_standard_look(spec: StandardLookScene) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(RenderPlugin { ..default() })
+            .disable::<PipelinedRenderingPlugin>()
+            .disable::<WinitPlugin>()
+            .disable::<bevy::log::LogPlugin>(),
+    )
+    .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 60,
+        pixel_format: vtuber_core::VideoOutputPixelFormat::Bgra8StraightAlpha,
+    }))
+    .insert_resource(GlobalAmbientLight {
+        brightness: 0.0,
+        ..default()
+    })
+    .insert_resource(ClearColor(Color::srgba(0.0, 0.0, 0.0, 0.0)))
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+    .insert_resource(vtuber_avatar::AvatarLifecycle::default())
+    .insert_resource(spec)
+    .insert_resource(OutputArmed(false));
+    if spec.look.is_some() {
+        app.init_resource::<StandardLookBases>()
+            .init_resource::<AvatarLookSettings>()
+            .add_systems(
+                Update,
+                (initialize_look_materials, apply_standard_portrait_settings),
+            );
+    }
+    register_output_systems(&mut app);
+    app.add_systems(Startup, setup_standard_look_scene);
+    app.add_systems(Update, activate_output_after_setup);
+    app.finish();
+    app.cleanup();
+    render_app(app)
+}
+
+fn setup_standard_look_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    spec: Res<StandardLookScene>,
+) {
+    let source = StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.35,
+        reflectance: 0.5,
+        unlit: spec.unlit,
+        ..default()
+    };
+    let base = VrmMaterialBaseValues::from_standard(&source);
+    let mut sphere = Sphere::new(1.0).mesh().build();
+    let _ = sphere.generate_tangents();
+    commands.spawn((
+        Mesh3d(meshes.add(sphere)),
+        MeshMaterial3d(materials.add(source)),
+        base,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 500.0,
+            ..default()
+        },
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
+    if let Some(look) = spec.look {
+        commands.insert_resource(AvatarLookSettings(look));
+    }
+    let camera_transform =
+        Transform::from_translation(Vec3::new(0.0, 0.0, 5.0)).looking_at(Vec3::ZERO, Vec3::Y);
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 1.0,
+            ..default()
+        }),
+        AvatarViewportCamera::from_default_transform(camera_transform),
+        camera_transform,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+    ));
 }
 
 /// The bundled studio cubemap must survive Bevy's environment-map filter and
@@ -767,20 +1376,45 @@ fn setup_environment_scene(
     }
 }
 
-/// A mask (cutout) MToon material must cut its shadow too: the ground under the
-/// opaque half is shadowed while the ground under the transparent half stays
-/// lit, so the shadow is not a solid quad.
+/// A mask (cutout) MToon material must cut its shadow too, but only while the
+/// Rich display actually adds an effect: the ground under the opaque half is
+/// shadowed while the ground under the transparent half stays lit. On the
+/// Native display, a saved positive portrait strength must not activate the
+/// Rich cutout shadow.
 fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
-    let casting = cutout_shadow_scene(true)?;
-    let flat = cutout_shadow_scene(false)?;
-    let (left_shadowed, right_shadowed) = (ground_band(&casting, 26), ground_band(&casting, 38));
+    let scene = |shadows: bool, shading_mode: MToonShadingMode, strength: f32| CutoutScene {
+        shadows,
+        shading_mode,
+        strength,
+    };
+    let native_zero = cutout_shadow_scene(scene(true, MToonShadingMode::Native, 0.0))?;
+    let native_strength = cutout_shadow_scene(scene(true, MToonShadingMode::Native, 1.0))?;
+    let rich_zero = cutout_shadow_scene(scene(true, MToonShadingMode::Rich, 0.0))?;
+    let cutout = cutout_shadow_scene(scene(true, MToonShadingMode::Rich, 1.0))?;
+    let flat = cutout_shadow_scene(scene(false, MToonShadingMode::Rich, 1.0))?;
+
+    let (native_strength_differing, _) = pixel_difference(&native_zero, &native_strength);
+    let (rich_zero_differing, _) = pixel_difference(&native_zero, &rich_zero);
+    let (left_shadowed, right_shadowed) = (ground_band(&cutout, 26), ground_band(&cutout, 38));
     let (left_lit, right_lit) = (ground_band(&flat, 26), ground_band(&flat, 38));
 
     let mut report = format!(
         "case=mtoon-cutout-shadow\n\
-         with_shadows_left={left_shadowed} right={right_shadowed}\n\
+         native_zero_vs_native_strength_differing={native_strength_differing}\n\
+         native_zero_vs_rich_zero_differing={rich_zero_differing}\n\
+         rich_strength_one_left={left_shadowed} right={right_shadowed}\n\
          without_shadows_left={left_lit} right={right_lit}\n"
     );
+    if native_strength_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the Native display changed with a positive saved portrait strength: {native_strength_differing} differing pixels"
+        )));
+    }
+    if rich_zero_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "Rich with zero added effect differs from Native on the cutout-shadow scene: {rich_zero_differing} differing pixels"
+        )));
+    }
     if left_lit < 40 || right_lit < 40 {
         return Err(RichLookError::Failed(format!(
             "the ground was not lit at all: left={left_lit} right={right_lit}"
@@ -796,7 +1430,7 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
             "the quad cast no shadow on the ground: left={left_shadowed} right={right_shadowed}"
         ))),
         _ => {
-            report.push_str("checks=cutout_alpha_in_shadow_pass\n");
+            report.push_str("checks=native_ignores_strength,rich_zero_eq_native,cutout_alpha_in_shadow_pass\n");
             Ok(report)
         }
     }
@@ -804,7 +1438,7 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
 
 /// Renders the cutout-shadow scene with an alpha-masked MToon quad standing on
 /// a lit ground. Returns the sampled frame.
-fn cutout_shadow_scene(shadows: bool) -> Result<Vec<[u8; 4]>, RichLookError> {
+fn cutout_shadow_scene(spec: CutoutScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -829,45 +1463,23 @@ fn cutout_shadow_scene(shadows: bool) -> Result<Vec<[u8; 4]>, RichLookError> {
         brightness: 0.0,
         ..default()
     })
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
     .insert_resource(vtuber_avatar::AvatarLifecycle::default())
-    .insert_resource(CutoutScene { shadows })
+    .insert_resource(spec)
     .insert_resource(OutputArmed(false));
     register_output_systems(&mut app);
     app.add_systems(Startup, setup_cutout_scene);
     app.add_systems(Update, activate_output_after_setup);
     app.finish();
     app.cleanup();
-
-    let deadline = Instant::now() + MAX_WAIT;
-    let mut satisfied = 0;
-    let mut last = None;
-    while Instant::now() < deadline {
-        app.update();
-        if let Some(frame) = app
-            .world_mut()
-            .resource_mut::<AvatarOutputFrameSlot>()
-            .take_latest()
-        {
-            let sampled = pixels(&frame);
-            satisfied = if sampled.iter().any(|pixel| pixel[3] > 0) {
-                satisfied + 1
-            } else {
-                0
-            };
-            if satisfied >= SETTLE_FRAMES {
-                return Ok(sampled);
-            }
-            last = Some(sampled);
-        }
-    }
-    last.ok_or(RichLookError::NotRun(
-        "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
-    ))
+    render_app(app)
 }
 
 #[derive(Resource, Clone, Copy)]
 struct CutoutScene {
     shadows: bool,
+    shading_mode: MToonShadingMode,
+    strength: f32,
 }
 
 fn setup_cutout_scene(
@@ -927,10 +1539,10 @@ fn setup_cutout_scene(
         MeshMaterial3d(materials.add(MToonMaterial {
             base_color_texture: Some(mask),
             portrait: MToonPortraitParams {
-                strength: 1.0,
-                ..default()
+                strength: scene.strength,
+                ..MTOON_PORTRAIT_PRESET
             },
-            shading_mode: MToonShadingMode::Rich,
+            shading_mode: scene.shading_mode,
             alpha_mode: AlphaMode::Mask(0.5),
             ..default()
         })),
@@ -1120,6 +1732,19 @@ fn pixel_difference(left: &[[u8; 4]], right: &[[u8; 4]]) -> (usize, u32) {
         }
     }
     (differing, max_difference)
+}
+
+/// The number of pixels with coverage (`alpha > 0`).
+fn opaque_pixel_count(pixels: &[[u8; 4]]) -> usize {
+    pixels.iter().filter(|pixel| pixel[3] > 0).count()
+}
+
+/// The number of near-black opaque pixels, used to isolate an outline ring.
+fn black_opaque_pixel_count(pixels: &[[u8; 4]]) -> usize {
+    pixels
+        .iter()
+        .filter(|pixel| pixel[3] > 0 && pixel[0] < 24 && pixel[1] < 24 && pixel[2] < 24)
+        .count()
 }
 
 /// Count the pixels on the middle scanline that are neither fully lit nor
@@ -1991,7 +2616,19 @@ fn activate_finish_output_after_setup(
 }
 
 fn render(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
-    let mut app = fixture_app(scene)?;
+    render_app(fixture_app(scene, false)?)
+}
+
+/// Renders the scene with the independent upstream reference fragment shader
+/// substituted for the Native one.
+///
+/// The scene must be on the Native display path: the reference replaces the
+/// Native fragment only, so a Rich scene would still use the Rich shader.
+fn render_reference(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
+    render_app(fixture_app(scene, true)?)
+}
+
+fn render_app(mut app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
     let deadline = Instant::now() + MAX_WAIT;
     let mut satisfied = 0;
     let mut last = None;
@@ -2026,7 +2663,12 @@ fn render(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     ))
 }
 
-fn fixture_app(scene: &MtoonScene) -> Result<App, RichLookError> {
+fn fixture_app(scene: &MtoonScene, upstream_reference: bool) -> Result<App, RichLookError> {
+    if upstream_reference && scene.shading_mode != MToonShadingMode::Native {
+        return Err(RichLookError::Failed(
+            "the upstream reference render requires the Native display path".into(),
+        ));
+    }
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -2054,9 +2696,23 @@ fn fixture_app(scene: &MtoonScene) -> Result<App, RichLookError> {
         ..default()
     })
     .insert_resource(ClearColor(Color::srgba(0.0, 0.0, 0.0, 0.0)))
+    // A frozen clock keeps UV animation and every readback comparison
+    // deterministic across separate apps.
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
     .insert_resource(vtuber_avatar::AvatarLifecycle::default())
     .insert_resource(FixtureScene(scene.clone()))
     .insert_resource(OutputArmed(false));
+    if upstream_reference {
+        let _ = app.world_mut()
+            .resource_mut::<Assets<Shader>>()
+            .insert(
+                &UPSTREAM_REFERENCE_FRAGMENT_HANDLE,
+                Shader::from_wgsl(
+                    UPSTREAM_REFERENCE_FRAGMENT,
+                    "mtoon_upstream_reference.wgsl",
+                ),
+            );
+    }
     register_output_systems(&mut app);
     app.add_systems(Startup, setup_fixture_scene);
     app.add_systems(Update, activate_output_after_setup);
@@ -2131,6 +2787,19 @@ fn setup_fixture_scene(
             RenderAssetUsages::RENDER_WORLD,
         ))
     });
+    let matcap_texture = scene.matcap_map.map(|pixel| {
+        images.add(Image::new_fill(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &pixel,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        ))
+    });
     let base_color_texture = scene.base_color_texture.map(|pixels| {
         let mut pixels_data = Vec::with_capacity(8);
         for pixel in pixels {
@@ -2161,6 +2830,8 @@ fn setup_fixture_scene(
         },
         normal_texture,
         normal_texture_scale: scene.normal_scale,
+        matcap_texture,
+        uv_transform: scene.uv_transform,
         rim_lighting: scene.rim_lighting,
         outline: MToonOutline {
             mode: if scene.outline {

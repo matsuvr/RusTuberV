@@ -326,6 +326,9 @@ bitflags::bitflags! {
         const ALPHA_MODE_BLEND = 1 << 10;
         const OUTLINE_WIDTH_MULTIPLY_TEXTURE = 1 << 11;
         const NORMAL_TEXTURE = 1 << 12;
+        /// The material uses the Rich display path. This is the GPU-side
+        /// effective value of `shading_mode` for the shared prepass shader.
+        const RICH_SHADING = 1 << 13;
     }
 }
 
@@ -375,6 +378,10 @@ impl From<&MToonMaterial> for MtoonFlags {
             value.outline_width_multiply_texture.is_some(),
         );
         flags.set(MtoonFlags::NORMAL_TEXTURE, value.normal_texture.is_some());
+        flags.set(
+            MtoonFlags::RICH_SHADING,
+            value.shading_mode == MToonShadingMode::Rich,
+        );
         flags
     }
 }
