@@ -1426,6 +1426,11 @@ fn setup_environment_scene(
 /// is rendered with a scroll animation at a frozen phase and at a half-period
 /// phase, and the shadowed ground band must swap halves with the animated
 /// alpha instead of staying on the static UV.
+///
+/// The lit Mask test uses the authored base alpha (`material.base_color.a`
+/// times the base color texel). A cutout with the same opaque texture but a
+/// zero base alpha is invisible in the lit pass and must not cast a shadow
+/// either.
 fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
     let native_zero =
         cutout_shadow_scene(CutoutScene::frozen(true, MToonShadingMode::Native, 0.0))?;
@@ -1434,6 +1439,15 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
     let rich_zero = cutout_shadow_scene(CutoutScene::frozen(true, MToonShadingMode::Rich, 0.0))?;
     let cutout = cutout_shadow_scene(CutoutScene::frozen(true, MToonShadingMode::Rich, 1.0))?;
     let flat = cutout_shadow_scene(CutoutScene::frozen(false, MToonShadingMode::Rich, 1.0))?;
+    // The authored base alpha is part of the lit Mask test (`material.base_color.a`
+    // times the base color texel). This cutout keeps the opaque texel but sets
+    // the base alpha to 0, so the lit pass discards every fragment; the shadow
+    // pass must discard them too instead of leaving the opaque texel's shadow
+    // behind.
+    let invisible = cutout_shadow_scene(CutoutScene {
+        base_alpha: 0.0,
+        ..CutoutScene::frozen(true, MToonShadingMode::Rich, 1.0)
+    })?;
     // One UV unit per second and a half-second clock make the half-period
     // phase exact: the fixture clock is frozen after this single advance, so
     // every captured frame renders at the same deterministic time.
@@ -1450,6 +1464,10 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
     let (still_static_differing, _) = pixel_difference(&animated_still, &cutout);
     let (left_shadowed, right_shadowed) = (ground_band(&cutout, 26), ground_band(&cutout, 38));
     let (left_lit, right_lit) = (ground_band(&flat, 26), ground_band(&flat, 38));
+    let (invisible_left, invisible_right) = (
+        ground_band(&invisible, 26),
+        ground_band(&invisible, 38),
+    );
     let (still_left, still_right) = (
         ground_band(&animated_still, 26),
         ground_band(&animated_still, 38),
@@ -1466,6 +1484,7 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
          animated_still_vs_static_differing={still_static_differing}\n\
          rich_strength_one_left={left_shadowed} right={right_shadowed}\n\
          without_shadows_left={left_lit} right={right_lit}\n\
+         base_alpha_zero_left={invisible_left} right={invisible_right}\n\
          animated_still_left={still_left} right={still_right}\n\
          animated_moving_left={moving_left} right={moving_right}\n"
     );
@@ -1514,8 +1533,13 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
                     "the animated UV left the left half shadowed: left={moving_left} lit={left_lit}"
                 )));
             }
+            if invisible_left + 8 < left_lit || invisible_right + 8 < right_lit {
+                return Err(RichLookError::Failed(format!(
+                    "a cutout with zero authored base alpha still cast a shadow: left={invisible_left} right={invisible_right} lit={left_lit}/{right_lit}"
+                )));
+            }
             report.push_str(
-                "checks=native_ignores_strength,rich_zero_eq_native,animated_material_at_zero_eq_static,cutout_alpha_in_shadow_pass,animated_cutout_shadow_follows_uv\n",
+                "checks=native_ignores_strength,rich_zero_eq_native,animated_material_at_zero_eq_static,cutout_alpha_in_shadow_pass,animated_cutout_shadow_follows_uv,base_alpha_in_shadow_pass\n",
             );
             Ok(report)
         }
@@ -1566,6 +1590,9 @@ struct CutoutScene {
     shadows: bool,
     shading_mode: MToonShadingMode,
     strength: f32,
+    /// The authored base color alpha of the cutout. The lit Mask test uses
+    /// `base_color.a * texture.a`, so zero makes the whole cutout invisible.
+    base_alpha: f32,
     /// The UV animation scroll speed of the cutout, in UV per second.
     scroll_speed: Vec2,
     /// The virtual-clock time the fixture renders at. The fixture clock is
@@ -1579,6 +1606,7 @@ impl CutoutScene {
             shadows,
             shading_mode,
             strength,
+            base_alpha: 1.0,
             scroll_speed: Vec2::ZERO,
             animation_time: Duration::ZERO,
         }
@@ -1670,6 +1698,7 @@ fn setup_cutout_scene(
     commands.spawn((
         Mesh3d(meshes.add(quad)),
         MeshMaterial3d(materials.add(MToonMaterial {
+            base_color: Color::srgba(1.0, 1.0, 1.0, scene.base_alpha),
             base_color_texture: Some(mask),
             uv_animation: UVAnimation {
                 scroll_speed: scene.scroll_speed,

@@ -27,7 +27,8 @@ implemented and not measured, and is not claimed as working.
 | #69 Native/Rich MToon | this change (working tree on `0018277`) | restores the upstream `f9593fd7` Native fragment (`mtoon_native.wgsl` + `mtoon_fragment.wgsl`), adds `MToonShadingMode`/`MToonMaterialKey::RICH_SHADING` shader selection, `mtoon_rich_fragment.wgsl` and `compose_rich_mtoon`; the per-light radiance, normal texture, GI equalization and added gloss are now Rich-only. The review fixes are included: the Rich transparent discard uses the authored base alpha (Blend outline), and the prepass activates the Rich cutout only for `RICH_SHADING` materials. `mtoon-reference` compares against the independent fixed-revision reference. |
 | #70 look boundary | `ea47b59` | `RichLookSettings`/`effective_look_strength`/`blend_look_scalar`, `StandardLookBase` capture, `AvatarLookSettings`+`LookSettingsChanged`, capture-once/unload lifecycle |
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
-| #71 cutout shadow UV | this change (working tree on `518af8c`) | extracts the UV animation into `mtoon_uv.wgsl` (pure expression, caller-supplied clock), has the prepass read the prepass view globals at binding 1 and reuse the animated UV, and adds animated scenes to `mtoon-cutout-shadow` (exact-phase cutout shadow) and `mtoon-reference` (scrolling Mask sphere); the fixture capture returns `Ok` only on 40 identical frames (expected-empty measurements opt in explicitly) and otherwise reports the unmet condition |
+| #71 cutout shadow UV | `ac69489`/`b59c651` (PR #81) | extracts the UV animation into `mtoon_uv.wgsl` (pure expression, caller-supplied clock), has the prepass read the prepass view globals at binding 1 and reuse the animated UV, and adds animated scenes to `mtoon-cutout-shadow` (exact-phase cutout shadow) and `mtoon-reference` (scrolling Mask sphere); the fixture capture returns `Ok` only on 40 identical frames (expected-empty measurements opt in explicitly) and otherwise reports the unmet condition |
+| #71 cutout base alpha | this change (working tree on `4bc53a2`) | `mtoon::alpha::mtoon_alpha_at_uv` now returns the authored base alpha (`material.base_color.a` times the base color texel); the Rich fragment discard imports that shared function instead of its private copy and the prepass tests the same value, so a cutout whose lit Mask test discards for a zero authored base alpha no longer casts the opaque texel's shadow. `mtoon-cutout-shadow` adds the zero-base-alpha scene. Native (and Rich(0)) keep the upstream depth-only shadow. |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
 | #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, and the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with the explicit final contract `a * E(T(C))` |
 | #79 avatar UI alpha boundary | this PR | avatar-only callback for the monitor and expanding transition; the shared `Bgra8UnormSrgb` image remains gamma-premultiplied while the callback supplies linear-premultiplied RGB to the UI blend |
@@ -139,7 +140,7 @@ alpha (base color x base texture), not the outline-pass alpha that the Native
 ### Shadow/prepass split
 
 `cargo run -p xtask -j 1 -- rich-look mtoon-cutout-shadow` renders the same
-alpha-masked quad on a lit ground in four states. The Native display is
+alpha-masked quad on a lit ground in several states. The Native display is
 byte-identical with `portrait.strength` 0 and 1 (0 differing pixels), and
 Rich(0) equals it; Rich(1) activates the cutout shadow (darkest ground band
 under the opaque half `1`, under the transparent half `256`, against `256/256`
@@ -169,6 +170,27 @@ Before the shared UV change, the shadow used only the static UV transform and
 stayed on the frozen phase's half at the half-period phase; the fixture fails
 on that result.
 
+The same case also covers the authored base alpha. The lit Mask test discards
+on `material.base_color.a` times the base color texel, and the shadow/prepass
+test now tests that same shared `mtoon::alpha::mtoon_alpha_at_uv` value. A
+cutout with the same opaque texture but `base_color.a = 0` is invisible in the
+lit pass and must not cast the opaque texel's shadow either. Measured on the
+Windows/Vulkan/RTX 4090 device:
+
+| scene | darkest left ground band | darkest right ground band |
+|---|---:|---:|
+| Rich(1), opaque base alpha, opaque/transparent texels | 1 | 256 |
+| Rich(1), zero base alpha, same texture | 256 | 256 |
+| same scene without shadow maps | 256 | 256 |
+
+The Rich fragment's transparent-fragment discard imports the same shared
+function, so the Blend discard and the shadow cutout cannot drift apart.
+Before this change the shadow test read only the texture alpha and the
+zero-base-alpha scene left the opaque texel's shadow behind (`left=1`); the
+fixture fails on that result. The Native display is unaffected: the prepass
+alpha test stays gated on `RICH_SHADING` and `portrait_strength > 0`, so
+Native (and Rich(0)) keep the upstream depth-only shadow.
+
 The MToon fixture capture waits for 40 byte-identical frames (`SETTLED_FRAMES`)
 before sampling. The previous 3-non-empty-frames wait could sample a frame
 before the first shadow-map and pipeline setup had landed; re-running the
@@ -184,7 +206,17 @@ otherwise still not accepted). The CPU tests in `tools/xtask/src/rich_look.rs`
 cover the rule: identical frames settle; changing frames, fewer than the
 required frames and an early `AppExit` do not; no readback is `NOT RUN`.
 
-Local validation for this change: `cargo test --workspace -j 4` and
+Local validation for the base-alpha change (working tree on `4bc53a2`):
+`cargo test --workspace -j 4` and
+`cargo clippy --workspace --all-targets -j 4 -- -D warnings` PASS; the 14 GPU
+cases re-ran PASS on the Windows/Vulkan/RTX 4090 device, including the new
+zero-base-alpha scene in `mtoon-cutout-shadow`. With the pre-change
+texture-only alpha the new scene fails (`left=1`), so the fixture measures the
+leak it fixes. Not run in this change: real NDI send/receive, macOS, and any
+GPU other than the RTX 4090 above. The #77 final acceptance remains with #77
+and is not claimed here.
+
+Local validation for the PR #81 change: `cargo test --workspace -j 4` and
 `cargo clippy --workspace --all-targets -j 4` PASS; the 14 GPU cases above
 re-ran PASS on the same device with the settled capture; `vrm-render` on
 `inore-vrm1.vrm` and `tsukuyomi-chan.vrm` re-ran PASS with the same numbers as
@@ -531,11 +563,13 @@ restored, and the role-based adjustments of #76 are not implemented.
   purpose.
 - The MToon shadow prepass now shares the material's UV animation with the lit
   pass (`mtoon::uv`) and reads the same frame clock, so an animated cutout
-  casts the silhouette it shows. This stays a Rich effect: the shadow/prepass
-  alpha test is active only while the look is on (`portrait.strength > 0` on
-  the Rich display). The Native display deliberately keeps the upstream
-  depth-only shadow (a Mask quad casts a solid shadow), and Rich(0) restores
-  that same behavior.
+  casts the silhouette it shows. Its alpha test uses the shared authored base
+  alpha (`material.base_color.a` times the base color texel), the same value
+  the lit Mask test uses, so a zero authored base alpha discards the shadow
+  too. This stays a Rich effect: the shadow/prepass alpha test is active only
+  while the look is on (`portrait.strength > 0` on the Rich display). The
+  Native display deliberately keeps the upstream depth-only shadow (a Mask
+  quad casts a solid shadow), and Rich(0) restores that same behavior.
 - `Blend` MToon materials keep Bevy's existing shadow behavior; they are not
   converted to Opaque/Mask.
 - The studio cubemap is 16x16 per face. It is filtered on the GPU at startup by
