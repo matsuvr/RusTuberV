@@ -4,8 +4,9 @@
 // so the cutout coverage follows the same source alpha as the lit image.
 //
 // The Native and Rich fragment shaders sample the base color through
-// `mtoon::native`; this module is only for the shadow/prepass pipeline, which
-// has no access to the view time globals.
+// `mtoon::native`; this module is only for the shadow/prepass pipeline. The UV
+// animation is shared with the lit pass through `mtoon::uv`; the prepass entry
+// point supplies the frame clock from the prepass view bind group's globals.
 
 #import bevy_pbr::mesh_view_bindings::view
 

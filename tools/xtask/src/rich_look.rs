@@ -13,6 +13,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr, RenderTarget};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::schedule::ScheduleLabel;
+use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
@@ -22,12 +23,12 @@ use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy::shader::Shader;
-use bevy::time::TimeUpdateStrategy;
+use bevy::time::{TimeUpdateStrategy, Virtual};
 use bevy::winit::WinitPlugin;
 use bevy_egui::{EguiContext, EguiMultipassSchedule, EguiPlugin};
 use bevy_vrm1::prelude::{
     MToonMaterial, MToonOutline, MToonPortraitParams, MToonShadingMode, MtoonMaterialPlugin,
-    OutlineWidthMode, RimLighting, Shade, VrmMaterialBaseValues,
+    OutlineWidthMode, RimLighting, Shade, UVAnimation, VrmMaterialBaseValues,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -110,6 +111,12 @@ struct MtoonScene {
     portrait: MToonPortraitParams,
     /// Which MToon display path the material uses.
     shading_mode: MToonShadingMode,
+    /// The material's UV animation (scroll and rotation speeds).
+    uv_animation: UVAnimation,
+    /// The virtual-clock time the fixture renders at. `ZERO` keeps the clock
+    /// frozen; a nonzero value advances the frozen clock exactly once, before
+    /// the first render extract.
+    animation_time: Duration,
 }
 
 impl MtoonScene {
@@ -133,6 +140,8 @@ impl MtoonScene {
             outline: false,
             portrait: MToonPortraitParams::default(),
             shading_mode: MToonShadingMode::Native,
+            uv_animation: UVAnimation::default(),
+            animation_time: Duration::ZERO,
         }
     }
 
@@ -707,12 +716,25 @@ fn mtoon_reference() -> Result<String, RichLookError> {
         base_color_texture: Some([[255, 255, 255, 180], [255, 255, 255, 0]]),
         ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
     };
+    // The animated scene exercises the shared UV expression on the Native path
+    // (and the independent reference's own copy of it) at a nonzero clock.
+    let animated = MtoonScene {
+        base_color_texture: Some([[255, 255, 255, 255], [255, 255, 255, 0]]),
+        alpha_mode: AlphaMode::Mask(0.5),
+        uv_animation: UVAnimation {
+            scroll_speed: Vec2::new(1.0, 0.0),
+            ..default()
+        },
+        animation_time: Duration::from_secs_f32(0.5),
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+    };
 
     let mut report = String::from("case=mtoon-reference\n");
     for (name, scene) in [
         ("sphere_rim_matcap_normal_uv_outline", multi.clone()),
         ("mask_sphere", mask),
         ("blend_z_write_sphere", blend),
+        ("mask_sphere_animated_uv", animated.clone()),
     ] {
         let reference = render_reference(&scene)?;
         let native = render(&scene)?;
@@ -741,6 +763,24 @@ fn mtoon_reference() -> Result<String, RichLookError> {
                 "{name}: Rich with a positive strength did not change the reference scene"
             )));
         }
+    }
+
+    // The animated scene's clock must reach the shaders: the same material at
+    // a frozen clock must differ, otherwise the identity above is vacuous.
+    let native_animated = render(&animated)?;
+    let native_frozen = render(&MtoonScene {
+        animation_time: Duration::ZERO,
+        ..animated.clone()
+    })?;
+    let (animation_differing, _) = pixel_difference(&native_animated, &native_frozen);
+    report.push_str(&format!(
+        "animated_uv native_vs_frozen_clock_differing={animation_differing}\n"
+    ));
+    if animation_differing == 0 {
+        return Err(RichLookError::Failed(
+            "the animated UV fixture did not change the Native image; the fixture clock did not reach the shader"
+                .into(),
+        ));
     }
 
     // The compared inputs are observable: each one changes the same reference
@@ -821,7 +861,7 @@ fn mtoon_reference() -> Result<String, RichLookError> {
     report.push_str(&format!(
         "outline_visible_pixels with={outlined_pixels} without={no_outline_pixels}\n"
     ));
-    report.push_str("checks=reference_eq_native,native_eq_rich_zero,rich_positive_changes,normal_rich_only,inputs_observable,outline_visible\n");
+    report.push_str("checks=reference_eq_native,native_eq_rich_zero,rich_positive_changes,animated_uv_identity,normal_rich_only,inputs_observable,outline_visible\n");
     Ok(report)
 }
 
@@ -860,7 +900,7 @@ fn mtoon_blend_depth() -> Result<String, RichLookError> {
 
     let ring_native = render(&transparent_sphere(MToonShadingMode::Native, 0.0))?;
     let ring_rich_zero = render(&transparent_sphere(MToonShadingMode::Rich, 0.0))?;
-    let ring_rich_full = render(&transparent_sphere(MToonShadingMode::Rich, 1.0))?;
+    let ring_rich_full = render_expected_empty(&transparent_sphere(MToonShadingMode::Rich, 1.0))?;
     let (ring_zero_differing, _) = pixel_difference(&ring_native, &ring_rich_zero);
     let native_ring_pixels = opaque_pixel_count(&ring_native);
     let full_ring_pixels = opaque_pixel_count(&ring_rich_full);
@@ -1381,29 +1421,53 @@ fn setup_environment_scene(
 /// shadowed while the ground under the transparent half stays lit. On the
 /// Native display, a saved positive portrait strength must not activate the
 /// Rich cutout shadow.
+///
+/// The shadow must also follow the material's UV animation: the same material
+/// is rendered with a scroll animation at a frozen phase and at a half-period
+/// phase, and the shadowed ground band must swap halves with the animated
+/// alpha instead of staying on the static UV.
 fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
-    let scene = |shadows: bool, shading_mode: MToonShadingMode, strength: f32| CutoutScene {
-        shadows,
-        shading_mode,
-        strength,
+    let native_zero =
+        cutout_shadow_scene(CutoutScene::frozen(true, MToonShadingMode::Native, 0.0))?;
+    let native_strength =
+        cutout_shadow_scene(CutoutScene::frozen(true, MToonShadingMode::Native, 1.0))?;
+    let rich_zero = cutout_shadow_scene(CutoutScene::frozen(true, MToonShadingMode::Rich, 0.0))?;
+    let cutout = cutout_shadow_scene(CutoutScene::frozen(true, MToonShadingMode::Rich, 1.0))?;
+    let flat = cutout_shadow_scene(CutoutScene::frozen(false, MToonShadingMode::Rich, 1.0))?;
+    // One UV unit per second and a half-second clock make the half-period
+    // phase exact: the fixture clock is frozen after this single advance, so
+    // every captured frame renders at the same deterministic time.
+    let animated = |animation_time: Duration| CutoutScene {
+        scroll_speed: Vec2::new(1.0, 0.0),
+        animation_time,
+        ..CutoutScene::frozen(true, MToonShadingMode::Rich, 1.0)
     };
-    let native_zero = cutout_shadow_scene(scene(true, MToonShadingMode::Native, 0.0))?;
-    let native_strength = cutout_shadow_scene(scene(true, MToonShadingMode::Native, 1.0))?;
-    let rich_zero = cutout_shadow_scene(scene(true, MToonShadingMode::Rich, 0.0))?;
-    let cutout = cutout_shadow_scene(scene(true, MToonShadingMode::Rich, 1.0))?;
-    let flat = cutout_shadow_scene(scene(false, MToonShadingMode::Rich, 1.0))?;
+    let animated_still = cutout_shadow_scene(animated(Duration::ZERO))?;
+    let animated_moving = cutout_shadow_scene(animated(Duration::from_secs_f32(0.5)))?;
 
     let (native_strength_differing, _) = pixel_difference(&native_zero, &native_strength);
     let (rich_zero_differing, _) = pixel_difference(&native_zero, &rich_zero);
+    let (still_static_differing, _) = pixel_difference(&animated_still, &cutout);
     let (left_shadowed, right_shadowed) = (ground_band(&cutout, 26), ground_band(&cutout, 38));
     let (left_lit, right_lit) = (ground_band(&flat, 26), ground_band(&flat, 38));
+    let (still_left, still_right) = (
+        ground_band(&animated_still, 26),
+        ground_band(&animated_still, 38),
+    );
+    let (moving_left, moving_right) = (
+        ground_band(&animated_moving, 26),
+        ground_band(&animated_moving, 38),
+    );
 
     let mut report = format!(
         "case=mtoon-cutout-shadow\n\
          native_zero_vs_native_strength_differing={native_strength_differing}\n\
          native_zero_vs_rich_zero_differing={rich_zero_differing}\n\
+         animated_still_vs_static_differing={still_static_differing}\n\
          rich_strength_one_left={left_shadowed} right={right_shadowed}\n\
-         without_shadows_left={left_lit} right={right_lit}\n"
+         without_shadows_left={left_lit} right={right_lit}\n\
+         animated_still_left={still_left} right={still_right}\n\
+         animated_moving_left={moving_left} right={moving_right}\n"
     );
     if native_strength_differing != 0 {
         return Err(RichLookError::Failed(format!(
@@ -1413,6 +1477,11 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
     if rich_zero_differing != 0 {
         return Err(RichLookError::Failed(format!(
             "Rich with zero added effect differs from Native on the cutout-shadow scene: {rich_zero_differing} differing pixels"
+        )));
+    }
+    if still_static_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the animated material at a frozen clock differs from the static material: {still_static_differing} differing pixels"
         )));
     }
     if left_lit < 40 || right_lit < 40 {
@@ -1430,7 +1499,24 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
             "the quad cast no shadow on the ground: left={left_shadowed} right={right_shadowed}"
         ))),
         _ => {
-            report.push_str("checks=native_ignores_strength,rich_zero_eq_native,cutout_alpha_in_shadow_pass\n");
+            if still_left + 8 >= left_lit {
+                return Err(RichLookError::Failed(format!(
+                    "the frozen UV phase did not shadow the left half: left={still_left} lit={left_lit}"
+                )));
+            }
+            if moving_right + 8 >= right_lit {
+                return Err(RichLookError::Failed(format!(
+                    "the shadow did not follow the animated UV to the right half: right={moving_right} lit={right_lit}"
+                )));
+            }
+            if moving_left + 8 < left_lit {
+                return Err(RichLookError::Failed(format!(
+                    "the animated UV left the left half shadowed: left={moving_left} lit={left_lit}"
+                )));
+            }
+            report.push_str(
+                "checks=native_ignores_strength,rich_zero_eq_native,animated_material_at_zero_eq_static,cutout_alpha_in_shadow_pass,animated_cutout_shadow_follows_uv\n",
+            );
             Ok(report)
         }
     }
@@ -1469,7 +1555,7 @@ fn cutout_shadow_scene(spec: CutoutScene) -> Result<Vec<[u8; 4]>, RichLookError>
     .insert_resource(OutputArmed(false));
     register_output_systems(&mut app);
     app.add_systems(Startup, setup_cutout_scene);
-    app.add_systems(Update, activate_output_after_setup);
+    app.add_systems(Update, (activate_output_after_setup, advance_cutout_clock));
     app.finish();
     app.cleanup();
     render_app(app)
@@ -1480,6 +1566,48 @@ struct CutoutScene {
     shadows: bool,
     shading_mode: MToonShadingMode,
     strength: f32,
+    /// The UV animation scroll speed of the cutout, in UV per second.
+    scroll_speed: Vec2,
+    /// The virtual-clock time the fixture renders at. The fixture clock is
+    /// otherwise frozen, so the captured frames all share this exact time.
+    animation_time: Duration,
+}
+
+impl CutoutScene {
+    fn frozen(shadows: bool, shading_mode: MToonShadingMode, strength: f32) -> Self {
+        Self {
+            shadows,
+            shading_mode,
+            strength,
+            scroll_speed: Vec2::ZERO,
+            animation_time: Duration::ZERO,
+        }
+    }
+}
+
+/// Advances the frozen fixture clock once, before the first render extract, so
+/// the UV animation runs at a deterministic time in every captured frame.
+fn advance_cutout_clock(
+    scene: Res<CutoutScene>,
+    mut virtual_time: ResMut<Time<Virtual>>,
+    mut time: ResMut<Time>,
+    mut applied: Local<bool>,
+) {
+    advance_clock_once(
+        scene.animation_time,
+        &mut applied,
+        &mut virtual_time,
+        &mut time,
+    );
+}
+
+/// A repeating sampler for the fixtures whose material animates its UV.
+fn repeat_sampler() -> ImageSampler {
+    ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        ..Default::default()
+    })
 }
 
 fn setup_cutout_scene(
@@ -1526,6 +1654,11 @@ fn setup_cutout_scene(
         RenderAssetUsages::RENDER_WORLD,
     );
     mask.data = Some(vec![255, 255, 255, 255, 255, 255, 255, 0]);
+    // A UV-animated material scrolls a repeating texture; the default
+    // clamp-to-edge sampler would run the pattern off the mesh instead.
+    if scene.scroll_speed != Vec2::ZERO {
+        mask.sampler = repeat_sampler();
+    }
     let mask = images.add(mask);
 
     let mut quad = Plane3d::default()
@@ -1538,6 +1671,10 @@ fn setup_cutout_scene(
         Mesh3d(meshes.add(quad)),
         MeshMaterial3d(materials.add(MToonMaterial {
             base_color_texture: Some(mask),
+            uv_animation: UVAnimation {
+                scroll_speed: scene.scroll_speed,
+                ..default()
+            },
             portrait: MToonPortraitParams {
                 strength: scene.strength,
                 ..MTOON_PORTRAIT_PRESET
@@ -1772,6 +1909,11 @@ fn scanline(pixels: &[[u8; 4]]) -> usize {
 /// geometry (pipeline compilation, asset upload). The scene is static, so the
 /// frame is sampled once the image has settled.
 const SETTLE_FRAMES: u32 = 3;
+
+/// The MToon fixtures need the mesh image to stay byte-identical across this
+/// many captures; `studio-environment` uses the same 40-frame wait for the
+/// asynchronous pipeline and shadow setup to finish.
+const SETTLED_FRAMES: u32 = 40;
 
 const FINISH_ALPHA_VALUES: [f32; 4] = [0.0, 0.25, 0.5, 1.0];
 const FINISH_LINEAR_COLOR: [f32; 3] = [0.5, 0.2, 0.05];
@@ -2619,6 +2761,12 @@ fn render(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     render_app(fixture_app(scene, false)?)
 }
 
+/// Renders a scene whose measured image is legitimately fully transparent
+/// (the fixture asserts that the Rich display discards every fragment).
+fn render_expected_empty(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
+    render_app_expected_empty(fixture_app(scene, false)?)
+}
+
 /// Renders the scene with the independent upstream reference fragment shader
 /// substituted for the Native one.
 ///
@@ -2628,9 +2776,45 @@ fn render_reference(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     render_app(fixture_app(scene, true)?)
 }
 
-fn render_app(mut app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
-    let deadline = Instant::now() + MAX_WAIT;
-    let mut satisfied = 0;
+/// Whether a fully transparent readback is content that has not landed yet or
+/// the measurement itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmptyReadback {
+    /// A transparent frame means the scene has not rendered yet; keep waiting
+    /// for content.
+    NotReady,
+    /// The fixture measures a legitimately transparent image (for example the
+    /// Rich discard of a fully transparent Blend outline), so empty frames are
+    /// sampled like any other image.
+    Expected,
+}
+
+/// Runs the fixture app and returns the readback only when the settle
+/// condition was reached.
+fn render_app(app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
+    settle_captured_frames(app, Instant::now() + MAX_WAIT, EmptyReadback::NotReady)
+}
+
+/// Runs the fixture app for a measurement that is expected to be transparent.
+fn render_app_expected_empty(app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
+    settle_captured_frames(app, Instant::now() + MAX_WAIT, EmptyReadback::Expected)
+}
+
+/// Runs the fixture app until `SETTLED_FRAMES` byte-identical readback frames
+/// have been sampled (non-empty unless the fixture expects a transparent
+/// measurement).
+///
+/// Only that condition returns `Ok`. A run that ends at the deadline or on
+/// `AppExit` without settling does not report the last image as success:
+/// without any completed readback the result is `NotRun` (the GPU path is
+/// unavailable), and with readbacks that never settled it is `Failed` with the
+/// unmet settle condition.
+fn settle_captured_frames(
+    mut app: App,
+    deadline: Instant,
+    empty: EmptyReadback,
+) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut settled = 0;
     let mut last = None;
     while Instant::now() < deadline {
         app.update();
@@ -2640,12 +2824,21 @@ fn render_app(mut app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
             .take_latest()
         {
             let sampled = pixels(&frame);
-            satisfied = if sampled.iter().any(|pixel| pixel[3] > 0) {
-                satisfied + 1
+            // The shadow map and the first pipeline compilation land a few
+            // frames after the mesh does, so a capture that only waits for
+            // non-empty pixels can miss the shadow. Waiting for stable frames
+            // makes every fixture app compare the same settled image.
+            let has_content = match empty {
+                EmptyReadback::NotReady => sampled.iter().any(|pixel| pixel[3] > 0),
+                EmptyReadback::Expected => true,
+            };
+            let stable = last.as_deref() == Some(sampled.as_slice());
+            settled = if stable && has_content {
+                settled + 1
             } else {
                 0
             };
-            if satisfied >= SETTLE_FRAMES {
+            if settled >= SETTLED_FRAMES {
                 return Ok(sampled);
             }
             last = Some(sampled);
@@ -2658,9 +2851,14 @@ fn render_app(mut app: App) -> Result<Vec<[u8; 4]>, RichLookError> {
             break;
         }
     }
-    last.ok_or(RichLookError::NotRun(
-        "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
-    ))
+    match last {
+        None => Err(RichLookError::NotRun(
+            "GPU readback did not complete; the local renderer/GPU path is unavailable".into(),
+        )),
+        Some(_) => Err(RichLookError::Failed(format!(
+            "the fixture readback did not reach {SETTLED_FRAMES} identical frames; refusing to use an unstable image"
+        ))),
+    }
 }
 
 fn fixture_app(scene: &MtoonScene, upstream_reference: bool) -> Result<App, RichLookError> {
@@ -2715,7 +2913,7 @@ fn fixture_app(scene: &MtoonScene, upstream_reference: bool) -> Result<App, Rich
     }
     register_output_systems(&mut app);
     app.add_systems(Startup, setup_fixture_scene);
-    app.add_systems(Update, activate_output_after_setup);
+    app.add_systems(Update, (activate_output_after_setup, advance_fixture_clock));
     app.finish();
     app.cleanup();
     Ok(app)
@@ -2726,6 +2924,36 @@ struct FixtureScene(MtoonScene);
 
 #[derive(Resource, Clone, Copy)]
 struct OutputArmed(bool);
+
+/// Advances the frozen fixture clock once, before the first render extract, so
+/// the UV animation runs at a deterministic time in every captured frame.
+fn advance_fixture_clock(
+    scene: Res<FixtureScene>,
+    mut virtual_time: ResMut<Time<Virtual>>,
+    mut time: ResMut<Time>,
+    mut applied: Local<bool>,
+) {
+    advance_clock_once(
+        scene.0.animation_time,
+        &mut applied,
+        &mut virtual_time,
+        &mut time,
+    );
+}
+
+fn advance_clock_once(
+    animation_time: Duration,
+    applied: &mut bool,
+    virtual_time: &mut Time<Virtual>,
+    time: &mut Time,
+) {
+    if *applied || animation_time.is_zero() {
+        return;
+    }
+    virtual_time.advance_by(animation_time);
+    time.advance_by(animation_time);
+    *applied = true;
+}
 
 fn setup_fixture_scene(
     mut commands: Commands,
@@ -2817,6 +3045,11 @@ fn setup_fixture_scene(
             RenderAssetUsages::RENDER_WORLD,
         );
         image.data = Some(pixels_data);
+        // A UV-animated material scrolls a repeating texture; the default
+        // clamp-to-edge sampler would run the pattern off the mesh instead.
+        if scene.uv_animation != UVAnimation::default() {
+            image.sampler = repeat_sampler();
+        }
         images.add(image)
     });
     let material = materials.add(MToonMaterial {
@@ -2832,6 +3065,7 @@ fn setup_fixture_scene(
         normal_texture_scale: scene.normal_scale,
         matcap_texture,
         uv_transform: scene.uv_transform,
+        uv_animation: scene.uv_animation,
         rim_lighting: scene.rim_lighting,
         outline: MToonOutline {
             mode: if scene.outline {
@@ -2900,4 +3134,197 @@ fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
 #[allow(clippy::indexing_slicing)]
 fn center_pixel(pixels: &[[u8; 4]]) -> [u8; 4] {
     pixels[(HEIGHT / 2 * WIDTH + WIDTH / 2) as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use vtuber_core::{FrameSeq, MonoTimeNs, VideoOutputPixelFormat};
+
+    /// One-pixel readback frame for the CPU settle-rule tests.
+    fn test_frame(pixel: [u8; 4]) -> VideoOutputFrame {
+        VideoOutputFrame {
+            width: 1,
+            height: 1,
+            stride_bytes: 4,
+            pixel_format: VideoOutputPixelFormat::Bgra8StraightAlpha,
+            frame_seq: FrameSeq(0),
+            captured_at: MonoTimeNs(0),
+            data: Arc::from(pixel.to_vec()),
+        }
+    }
+
+    /// A deterministic frame source: publishes one frame per update, cycling
+    /// through `frames` when asked, and optionally raises `AppExit` after a
+    /// number of updates.
+    #[derive(Resource)]
+    struct TestFeed {
+        frames: Vec<[u8; 4]>,
+        cycle: bool,
+        exit_after_updates: Option<usize>,
+        published: usize,
+        updates: usize,
+    }
+
+    impl TestFeed {
+        /// Publishes the frames forever in order.
+        fn repeating(frames: Vec<[u8; 4]>) -> Self {
+            Self {
+                frames,
+                cycle: true,
+                exit_after_updates: None,
+                published: 0,
+                updates: 0,
+            }
+        }
+
+        /// Publishes each frame once, then stops.
+        fn once(frames: Vec<[u8; 4]>) -> Self {
+            Self {
+                frames,
+                cycle: false,
+                exit_after_updates: None,
+                published: 0,
+                updates: 0,
+            }
+        }
+
+        fn with_exit_after(mut self, updates: usize) -> Self {
+            self.exit_after_updates = Some(updates);
+            self
+        }
+    }
+
+    fn publish_test_frames(
+        mut feed: ResMut<TestFeed>,
+        mut slot: ResMut<AvatarOutputFrameSlot>,
+        mut exit: ResMut<Messages<AppExit>>,
+    ) {
+        let frame_count = feed.frames.len();
+        if frame_count > 0 {
+            let index = if feed.cycle {
+                feed.published % frame_count
+            } else {
+                feed.published
+            };
+            if let Some(pixel) = feed.frames.get(index).copied() {
+                slot.publish(test_frame(pixel));
+                feed.published += 1;
+            }
+        }
+        feed.updates += 1;
+        if feed.exit_after_updates == Some(feed.updates) {
+            exit.write(AppExit::Success);
+        }
+    }
+
+    fn settle_test_app(feed: TestFeed) -> App {
+        let mut app = App::new();
+        app.init_resource::<AvatarOutputFrameSlot>();
+        app.insert_resource(feed);
+        app.add_systems(Update, publish_test_frames);
+        app
+    }
+
+    const SETTLE_TEST_WAIT: Duration = Duration::from_millis(500);
+    const SETTLE_TEST_TIMEOUT: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn settle_accepts_only_consecutive_identical_frames() {
+        let app = settle_test_app(TestFeed::repeating(vec![[1, 2, 3, 255]]));
+        let sampled = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_WAIT,
+            EmptyReadback::NotReady,
+        )
+        .expect("identical frames must settle");
+        assert_eq!(sampled, vec![[1, 2, 3, 255]]);
+    }
+
+    #[test]
+    fn settle_rejects_changing_frames() {
+        let app = settle_test_app(TestFeed::repeating(vec![[1, 2, 3, 255], [9, 8, 7, 255]]));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(RichLookError::Failed(ref reason)) if reason.contains("identical frames")
+            ),
+            "changing frames must not settle: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_rejects_fewer_than_required_frames() {
+        let frames = vec![[1, 2, 3, 255]; SETTLED_FRAMES as usize - 1];
+        let app = settle_test_app(TestFeed::once(frames));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::Failed(_))),
+            "an incomplete stable run must not succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_rejects_app_exit_before_settling() {
+        let app = settle_test_app(TestFeed::repeating(vec![[1, 2, 3, 255]]).with_exit_after(3));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_WAIT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::Failed(_))),
+            "an exit before settling must not succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_reports_not_run_without_frames() {
+        let app = settle_test_app(TestFeed::once(Vec::new()));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::NotRun(_))),
+            "no readback must stay NOT RUN: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_rejects_stable_transparent_frames_by_default() {
+        let app = settle_test_app(TestFeed::repeating(vec![[0, 0, 0, 0]]));
+        let result = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_TIMEOUT,
+            EmptyReadback::NotReady,
+        );
+        assert!(
+            matches!(result, Err(RichLookError::Failed(_))),
+            "an empty image without an expectation must not settle: {result:?}"
+        );
+    }
+
+    #[test]
+    fn settle_accepts_stable_transparent_frames_when_expected() {
+        let app = settle_test_app(TestFeed::repeating(vec![[0, 0, 0, 0]]));
+        let sampled = settle_captured_frames(
+            app,
+            Instant::now() + SETTLE_TEST_WAIT,
+            EmptyReadback::Expected,
+        )
+        .expect("the transparent measurement must settle");
+        assert_eq!(sampled, vec![[0, 0, 0, 0]]);
+    }
 }
