@@ -352,6 +352,7 @@ pub fn register_output_systems(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::render::render_resource::Extent3d;
 
     fn test_target() -> AvatarOutputTarget {
         AvatarOutputTarget {
@@ -366,6 +367,34 @@ mod tests {
         assert!(!state.is_active());
         assert!(!state.is_rendering());
         assert_eq!(state.profile(), VideoOutputProfile::DEFAULT);
+    }
+
+    #[test]
+    fn output_target_keeps_the_transport_dimensions_and_srgb_bgra_format() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .insert_resource(AvatarOutputState::default())
+            .add_systems(Startup, setup_output_camera);
+        app.update();
+
+        let target = app.world().resource::<AvatarOutputTarget>();
+        let image = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(target.image())
+            .expect("output image asset");
+        assert_eq!(
+            image.texture_descriptor.format,
+            TextureFormat::Bgra8UnormSrgb
+        );
+        assert_eq!(
+            image.texture_descriptor.size,
+            Extent3d {
+                width: VideoOutputProfile::DEFAULT.width,
+                height: VideoOutputProfile::DEFAULT.height,
+                depth_or_array_layers: 1,
+            }
+        );
     }
 
     #[test]
@@ -740,4 +769,3 @@ mod tests {
         assert!(!ground.intersects(&avatar));
     }
 }
-

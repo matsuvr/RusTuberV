@@ -1,6 +1,7 @@
 //! Apple-style desktop workspace. The sidebar contains destinations only.
 //! Camera controls, session commands, and state never live in that sidebar.
 
+use super::avatar_preview::{AvatarPreviewTexture, paint_avatar_preview, paint_avatar_preview_at};
 use super::privacy::{CameraPreviewConsent, CameraPreviewEvent};
 use super::shell::UiState;
 use crate::actions::UiAction;
@@ -19,7 +20,7 @@ use bevy_egui::egui::{self, Color32, CornerRadius, Frame, Id, RichText, TextureI
 use vtuber_avatar::{
     ArmPoseProfileOverride, AvatarMotionMirror, ExpressionAvailability, ExpressionKind,
 };
-use vtuber_core::{VideoOutputProfile, monotonic_now};
+use vtuber_core::monotonic_now;
 
 const NAVIGATION: [Pane; 7] = [
     Pane::Studio,
@@ -349,7 +350,7 @@ fn toolbar(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, sidebar: bool, la
 fn avatar_monitor(
     ui: &mut Ui,
     vm: &UiViewModel,
-    texture: Option<(TextureId, VideoOutputProfile)>,
+    texture: Option<AvatarPreviewTexture>,
     max_width: f32,
     draw_preview: bool,
     lang: UiLanguage,
@@ -366,8 +367,9 @@ fn avatar_monitor(
     ui.add_space(8.0);
     let mut preview_rect = None;
     if vm.avatar.is_ready {
-        if let Some((texture, profile)) = texture {
+        if let Some(texture) = texture {
             let width = ui.available_width().min(max_width);
+            let profile = texture.profile();
             let height = width * profile.height as f32 / profile.width as f32;
             Frame::new()
                 .fill(Color32::from_gray(228))
@@ -378,9 +380,11 @@ fn avatar_monitor(
                     // workspace collapses; the monitor keeps its layout only,
                     // so the preview is never drawn twice.
                     let response = if draw_preview {
-                        ui.add(
-                            egui::Image::from_texture((texture, size))
-                                .corner_radius(CornerRadius::same(MONITOR_CARD_RADIUS)),
+                        paint_avatar_preview(
+                            ui,
+                            texture.image().clone(),
+                            size,
+                            f32::from(MONITOR_CARD_RADIUS),
                         )
                     } else {
                         ui.allocate_exact_size(size, egui::Sense::hover()).1
@@ -418,7 +422,7 @@ pub(crate) fn render_studio(
     landmarks: &PreviewLandmarkState,
     avatar_mirror: AvatarMotionMirror,
     camera_texture: Option<TextureId>,
-    avatar_texture: Option<(TextureId, VideoOutputProfile)>,
+    avatar_texture: Option<AvatarPreviewTexture>,
     dialog_active: bool,
     font_error: Option<&str>,
     lang: UiLanguage,
@@ -485,7 +489,7 @@ pub(crate) fn render_studio(
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
                     if let Some(rect) =
-                        avatar_monitor(ui, vm, avatar_texture, 268.0, !transitioning, lang)
+                        avatar_monitor(ui, vm, avatar_texture.clone(), 268.0, !transitioning, lang)
                     {
                         monitor_rect = Some(rect);
                     }
@@ -497,7 +501,7 @@ pub(crate) fn render_studio(
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
                     if let Some(rect) =
-                        avatar_monitor(ui, vm, avatar_texture, 200.0, !transitioning, lang)
+                        avatar_monitor(ui, vm, avatar_texture.clone(), 200.0, !transitioning, lang)
                     {
                         monitor_rect = Some(rect);
                     }
@@ -581,7 +585,7 @@ pub(crate) fn render_studio(
             &mut root,
             viewport,
             expand,
-            avatar_texture,
+            avatar_texture.clone(),
             previous_monitor_rect,
         );
         let transform = egui::emath::TSTransform::new(
@@ -609,7 +613,7 @@ fn paint_avatar_transition(
     root: &mut Ui,
     viewport: egui::Rect,
     expand: f32,
-    texture: Option<(TextureId, VideoOutputProfile)>,
+    texture: Option<AvatarPreviewTexture>,
     monitor_rect: Option<egui::Rect>,
 ) {
     // Mask the live 3D scene with the avatar-only background: the workspace is
@@ -617,7 +621,7 @@ fn paint_avatar_transition(
     // surface the viewer can read.
     root.painter()
         .rect_filled(viewport, CornerRadius::ZERO, STUDIO_BACKGROUND);
-    let (Some((texture, _profile)), Some(monitor)) = (texture, monitor_rect) else {
+    let (Some(texture), Some(monitor)) = (texture, monitor_rect) else {
         return;
     };
     let card = monitor.lerp_towards(&viewport, expand);
@@ -628,14 +632,16 @@ fn paint_avatar_transition(
         CornerRadius::same(radius),
         Color32::from_rgba_unmultiplied(228, 228, 228, background_alpha),
     );
-    let mut overlay = root.new_child(
+    let overlay = root.new_child(
         egui::UiBuilder::new()
             .id_salt("studio_transition_preview")
             .max_rect(viewport),
     );
-    overlay.put(
+    paint_avatar_preview_at(
+        overlay.painter(),
         card,
-        egui::Image::from_texture((texture, card.size())).corner_radius(CornerRadius::same(radius)),
+        texture.image().clone(),
+        f32::from(radius),
     );
 }
 
@@ -2300,7 +2306,10 @@ mod tests {
                     &landmarks,
                     AvatarMotionMirror::default(),
                     None,
-                    Some((egui::TextureId::User(0), VideoOutputProfile::default())),
+                    Some(AvatarPreviewTexture::new(
+                        bevy::asset::Handle::default(),
+                        vtuber_core::VideoOutputProfile::default(),
+                    )),
                     false,
                     None,
                     UiLanguage::Ja,

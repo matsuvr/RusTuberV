@@ -7981,6 +7981,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_egui",
  "bevy_vrm1",
  "gltf",
  "image",
