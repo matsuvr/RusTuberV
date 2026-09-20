@@ -18,10 +18,14 @@
 //! | Bevy tonemapping pass (viewport) | linear in, linear out | passthrough |
 //! | Finish pass (output view, look on) | `C = Cp / a`, then `T(C)`; internally keeps `a * T(C)` and stages `D(a * E(T(C)))` for the final target | passthrough (`a = 0` → `0`) |
 //! | Upscaling blit (`CompositingSpace` unset/linear) | reads the linear staging value; the target attachment performs the one sRGB encode | passthrough |
-//! | Output image `Bgra8UnormSrgb` | sRGB bytes `a * E(T(C))` | premultiplied |
-//! | UI preview sampling | the same image handle, egui sRGB sampling and premultiplied-alpha blend | premultiplied |
-//! | `VideoOutputFrame::from_padded_bgra8` | sRGB bytes `a * E(T(C))` | unpremultiplies once to straight sRGB |
-//! | NDI | BGRA8 sRGB | straight (existing) |
+//! | Shared output image `Bgra8UnormSrgb` | stored RGB bytes `a * E(T(C))` | gamma-premultiplied |
+//! | Avatar UI blend input (monitor + expand transition) | the avatar-only callback converts sampled `S` to `a * D(E(S) / a)` (`a = 0` → `0`) | linear-premultiplied |
+//! | `VideoOutputFrame::from_padded_bgra8` | existing packing unpremultiplies the stored sRGB bytes once | straight sRGB |
+//! | NDI | the `VideoOutputFrame` BGRA8 payload | straight sRGB (existing) |
+//!
+//! The UI conversion is local to the avatar callback; normal egui text and
+//! unrelated UI images keep their existing shader. The callback does not
+//! reapply exposure or tone mapping: those already completed in `T(C)`.
 
 use bevy::asset::{Handle, load_internal_asset, uuid_handle};
 use bevy::camera::{Exposure, Hdr};

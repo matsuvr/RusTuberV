@@ -2,9 +2,13 @@
 //! UI rendering reads snapshots and emits existing application actions.
 
 pub mod file_dialog;
+mod avatar_preview;
 mod fonts;
 mod privacy;
 pub mod shell;
 mod studio;
 
+pub use avatar_preview::{
+    AvatarPreviewPlugin, AvatarPreviewTexture, paint_avatar_preview, paint_avatar_preview_at,
+};
 pub use shell::{UiShellPlugin, UiState};

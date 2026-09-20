@@ -39,7 +39,7 @@ use crate::ui_model::{Pane, UiViewModel};
 use bevy::prelude::*;
 use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPostUpdateSet, EguiPrimaryContextPass,
-    EguiTextureHandle, EguiUserTextures, PrimaryEguiContext, egui,
+    PrimaryEguiContext, egui,
 };
 use vtuber_avatar::{
     AvatarMotionMirror, AvatarOutputCamera, AvatarOutputState, AvatarOutputTarget,
@@ -144,6 +144,7 @@ impl Plugin for UiShellPlugin {
             app.is_plugin_added::<EguiPlugin>(),
             "UiShellPlugin requires EguiPlugin to be installed first"
         );
+        app.add_plugins(super::avatar_preview::AvatarPreviewPlugin);
         // The first camera may be the offscreen output camera. Never attach
         // egui there: UI pixels must stay on the window-targeting camera only.
         app.world_mut()
@@ -255,7 +256,6 @@ impl Plugin for UiShellPlugin {
             )
                 .chain(),
         )
-        .add_systems(Update, register_avatar_preview_texture)
         .add_systems(
             Update,
             (inference_bridge_system, read_inference_output_system)
@@ -336,17 +336,6 @@ fn attach_primary_egui_context_to_viewport_camera(
     }
     if let Ok(entity) = viewport_cameras.single() {
         commands.entity(entity).insert(PrimaryEguiContext);
-    }
-}
-
-fn register_avatar_preview_texture(
-    target: Option<Res<AvatarOutputTarget>>,
-    mut textures: ResMut<EguiUserTextures>,
-) {
-    if let Some(target) = target
-        && textures.image_id(target.image().id()).is_none()
-    {
-        textures.add_image(EguiTextureHandle::Weak(target.image().id()));
     }
 }
 
@@ -436,10 +425,11 @@ fn ui_render_system(
         .image_handle
         .as_ref()
         .and_then(|image| contexts.image_id(image.id()));
-    let avatar_texture = target.as_ref().and_then(|target| {
-        contexts
-            .image_id(target.image().id())
-            .map(|texture| (texture, target.profile()))
+    let avatar_texture = target.as_ref().map(|target| {
+        super::avatar_preview::AvatarPreviewTexture::new(
+            target.image().clone(),
+            target.profile(),
+        )
     });
     let ctx = contexts.ctx_mut()?;
     state.sync_pane(vm.pane);
