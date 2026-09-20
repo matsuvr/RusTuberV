@@ -9,6 +9,7 @@ use crate::vrm::gltf::materials::{
     VrmcMaterialsExtensitions, convert_legacy_material_properties_with_render_queue_offset,
     plan_legacy_render_queue_offsets,
 };
+use crate::vrm::mtoon::material::{MToonMaterialKey, MToonShadingMode};
 use crate::vrm::mtoon::outline_pass::MToonOutlinePlugin;
 use crate::vrm::mtoon::setup::MToonMaterialSetupPlugin;
 use bevy::asset::{AssetId, load_internal_asset, uuid_handle};
@@ -22,6 +23,10 @@ pub mod prelude {
 
 const MTOON_FRAGMENT_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("9a96eff2-1676-1dc0-9abc-2fd5e7134443");
+const MTOON_RICH_FRAGMENT_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("d3c8a1f4-7b52-4e09-a6d1-9f0c2b4e8a73");
+const MTOON_NATIVE_SHADER_HANDLE: Handle<Shader> =
+    uuid_handle!("b7e4c2a9-5d18-4f36-8c07-1e6a9d3b5f24");
 const MTOON_VERTEX_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("f4041db8-c464-b84c-e3c9-e618527945a1");
 const MTOON_TYPES_SHADER_HANDLE: Handle<Shader> =
@@ -35,6 +40,19 @@ const MTOON_PORTRAIT_SHADER_HANDLE: Handle<Shader> =
 const MTOON_PREPASS_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("3b7e9a51-8d24-4a6b-9f13-5c2e8f7a0d42");
 
+/// The fragment shader for one material's shading mode.
+///
+/// The Native and Rich displays are two small paths over the same fixed
+/// reference: this selects which one a pipeline compiles against.
+#[must_use]
+pub(crate) fn mtoon_fragment_shader(key: &MToonMaterialKey) -> Handle<Shader> {
+    if key.contains(MToonMaterialKey::RICH_SHADING) {
+        MTOON_RICH_FRAGMENT_SHADER_HANDLE
+    } else {
+        MTOON_FRAGMENT_SHADER_HANDLE
+    }
+}
+
 pub struct MtoonMaterialPlugin;
 
 impl Plugin for MtoonMaterialPlugin {
@@ -43,6 +61,7 @@ impl Plugin for MtoonMaterialPlugin {
         app: &mut App,
     ) {
         app.register_type::<MToonMaterial>()
+            .register_type::<MToonShadingMode>()
             .register_type::<MToonOutline>()
             .register_type::<VrmcMaterialRegistry>()
             .register_type::<RimLighting>()
@@ -54,6 +73,18 @@ impl Plugin for MtoonMaterialPlugin {
             app,
             MTOON_FRAGMENT_SHADER_HANDLE,
             "mtoon_fragment.wgsl",
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
+            MTOON_RICH_FRAGMENT_SHADER_HANDLE,
+            "mtoon_rich_fragment.wgsl",
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
+            MTOON_NATIVE_SHADER_HANDLE,
+            "mtoon_native.wgsl",
             Shader::from_wgsl
         );
         load_internal_asset!(

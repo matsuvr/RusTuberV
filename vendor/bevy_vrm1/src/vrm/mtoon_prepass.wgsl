@@ -7,6 +7,7 @@
     material,
     ALPHA_MODE_MASK,
     ALPHA_MODE_ALPHA_TO_COVERAGE,
+    RICH_SHADING,
 }
 
 #import mtoon::alpha::{
@@ -25,13 +26,16 @@
 // The main pass uses a derivative-based cutoff for antialiasing, while the
 // shadow map uses the plain cutoff: this keeps the coverage a superset of the
 // lit pixels without copying the main pass's AA.
+//
+// The cutout shadow is a Rich effect: it is active only while the material is
+// on the Rich display path and the added effect amount is positive, so the
+// Native display keeps the upstream depth-only shadow even if a saved portrait
+// strength is positive.
 @fragment
 fn fragment(in: prepass_io::VertexOutput) {
 #ifdef VERTEX_UVS_A
-    // The standard display keeps the plain depth-only shadow from before the
-    // rich-look work; the look is what makes the cutout coverage follow the
-    // material's own alpha.
     if (material.portrait_strength > 0.0
+        && (material.flags & RICH_SHADING) != 0u
         && ((material.flags & ALPHA_MODE_MASK) != 0u
             || (material.flags & ALPHA_MODE_ALPHA_TO_COVERAGE) != 0u))
     {

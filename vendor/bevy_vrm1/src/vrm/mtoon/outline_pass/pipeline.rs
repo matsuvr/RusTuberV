@@ -1,5 +1,5 @@
 use crate::vrm::mtoon::{
-    MTOON_FRAGMENT_SHADER_HANDLE, MTOON_VERTEX_SHADER_HANDLE, MToonMaterial, MToonMaterialKey,
+    MTOON_VERTEX_SHADER_HANDLE, MToonMaterial, MToonMaterialKey, mtoon_fragment_shader,
 };
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{MaterialPipeline, MaterialPipelineKey, MeshPipelineKey};
@@ -52,7 +52,7 @@ impl SpecializedMeshPipeline for MToonOutlinePipeline {
 
         descriptor.vertex.shader = MTOON_VERTEX_SHADER_HANDLE;
         if let Some(fragment) = descriptor.fragment.as_mut() {
-            fragment.shader = MTOON_FRAGMENT_SHADER_HANDLE;
+            fragment.shader = mtoon_fragment_shader(&key.bind_group_data);
         }
 
         if descriptor.layout.len() <= 3 {

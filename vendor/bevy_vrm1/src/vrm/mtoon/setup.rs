@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use crate::vrm::mtoon::material::MToonPortraitParams;
+use crate::vrm::mtoon::material::{MToonPortraitParams, MToonShadingMode};
 use crate::vrm::expressions::{
     VrmMaterialAppliedValues, VrmMaterialBaseValues, VrmMaterialIndex,
 };
@@ -137,6 +137,7 @@ fn turn_to_mtoon_material(
                 .or_else(|| base.normal_map_texture.clone()),
             normal_texture_scale: extension.legacy_normal_scale.unwrap_or(1.0),
             portrait: MToonPortraitParams::default(),
+            shading_mode: MToonShadingMode::default(),
             shade: Shade::from(extension),
             outline: MToonOutline::from(extension),
             rim_lighting: RimLighting::from(extension),

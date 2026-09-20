@@ -26,12 +26,28 @@ pub use uv_animation::UVAnimation;
 
 pub mod prelude {
     pub use crate::vrm::mtoon::material::{
-        MToonMaterial, MToonMaterialKey, MToonPortraitParams,
+        MToonMaterial, MToonMaterialKey, MToonPortraitParams, MToonShadingMode,
         outline::{MToonOutline, OutlineWidthMode},
         rim_lighting::RimLighting,
         shade::Shade,
         uv_animation::UVAnimation,
     };
+}
+
+/// Which of the two MToon display paths a material uses.
+///
+/// `Native` is the fixed upstream display; `Rich` is the display that starts
+/// from the Native result and adds the look's effects. The mode and the
+/// effect amount are separate: `Rich` with a zero strength must render the
+/// Native result exactly, which is why the shader choice is a material mode
+/// rather than a derived value of the strength.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Reflect)]
+pub enum MToonShadingMode {
+    /// The upstream MToon display, unchanged.
+    #[default]
+    Native,
+    /// The display that composes the look's effects over the Native result.
+    Rich,
 }
 
 /// The rich look's extra portrait terms for one MToon material.
@@ -133,13 +149,13 @@ pub struct MToonMaterial {
     pub normal_texture_scale: f32,
     /// The rich look's extra portrait terms.
     ///
-    /// `strength == 0` keeps the standard MToon display: the shading ramp
-    /// folds the light into the authored base/shade colors without applying
-    /// the light's radiance, which is what a plain VRM display looks like.
-    /// Above zero the look is active, each light contributes its own color and
-    /// intensity, and the added gloss, environment reflection and rim are
-    /// layered on top of the author's material.
+    /// `strength == 0` renders the fixed Native `MToon` display exactly; above
+    /// zero the added gloss, environment reflection and rim are layered on top
+    /// of the author's material. `shading_mode` selects the display path; this
+    /// value is the amount of added effect.
     pub portrait: MToonPortraitParams,
+    /// Which `MToon` display path this material renders with.
+    pub shading_mode: MToonShadingMode,
     pub alpha_mode: AlphaMode,
     pub double_sided: bool,
     /// [VRMC_materials_mtoon-1.0](https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_materials_mtoon-1.0/README.md#renderqueueoffsetnumber)
@@ -158,6 +174,8 @@ bitflags! {
         const CULL_FRONT = 1 << 0;
         const CULL_BACK = 1 << 1;
         const TRANSPARENT_WITH_Z_WRITE = 1 << 2;
+        /// Use the Rich fragment shader instead of the Native one.
+        const RICH_SHADING = 1 << 3;
     }
 }
 
@@ -222,6 +240,15 @@ impl Material for MToonMaterial {
         {
             stencil.depth_write_enabled = Some(true);
         }
+        // The main pass starts from this material's Native fragment shader and
+        // switches to the Rich one; other passes (prepass, shadow) have their
+        // own shaders and must keep them.
+        if key.bind_group_data.contains(MToonMaterialKey::RICH_SHADING)
+            && let Some(fragment) = descriptor.fragment.as_mut()
+            && fragment.shader == crate::vrm::mtoon::MTOON_FRAGMENT_SHADER_HANDLE
+        {
+            fragment.shader = crate::vrm::mtoon::mtoon_fragment_shader(&key.bind_group_data);
+        }
         Ok(())
     }
 }
@@ -240,6 +267,10 @@ impl From<&MToonMaterial> for MToonMaterialKey {
         key.set(
             MToonMaterialKey::TRANSPARENT_WITH_Z_WRITE,
             matches!(material.alpha_mode, AlphaMode::Blend) && material.transparent_with_z_write,
+        );
+        key.set(
+            MToonMaterialKey::RICH_SHADING,
+            material.shading_mode == MToonShadingMode::Rich,
         );
         key
     }
@@ -266,6 +297,7 @@ impl Default for MToonMaterial {
             gi_equalization_factor: 0.9,
             normal_texture_scale: 1.0,
             portrait: MToonPortraitParams::default(),
+            shading_mode: MToonShadingMode::default(),
             alpha_mode: AlphaMode::default(),
             double_sided: false,
             depth_bias: 0.0,
@@ -294,6 +326,9 @@ bitflags::bitflags! {
         const ALPHA_MODE_BLEND = 1 << 10;
         const OUTLINE_WIDTH_MULTIPLY_TEXTURE = 1 << 11;
         const NORMAL_TEXTURE = 1 << 12;
+        /// The material uses the Rich display path. This is the GPU-side
+        /// effective value of `shading_mode` for the shared prepass shader.
+        const RICH_SHADING = 1 << 13;
     }
 }
 
@@ -343,6 +378,10 @@ impl From<&MToonMaterial> for MtoonFlags {
             value.outline_width_multiply_texture.is_some(),
         );
         flags.set(MtoonFlags::NORMAL_TEXTURE, value.normal_texture.is_some());
+        flags.set(
+            MtoonFlags::RICH_SHADING,
+            value.shading_mode == MToonShadingMode::Rich,
+        );
         flags
     }
 }

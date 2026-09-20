@@ -1,17 +1,34 @@
 //! The MToon side of the look switch and the added portrait terms.
 //!
-//! `MToonMaterial::portrait.strength` selects between the standard MToon
-//! display (zero: the shading ramp folds the light into the authored base/shade
-//! colors, exactly the plain display) and the rich look (above zero: each light
-//! contributes its own color and radiance, the light rig applies, the
-//! material's normal texture is evaluated, and a modest gloss, environment
-//! reflection and rim are layered on top of the author's material).
+//! [`MToonShadingMode`] selects the display path: `Native` is the fixed
+//! upstream MToon display, `Rich` is the path that composes the look's effects
+//! over the Native result. The switch and the effect amount are separate:
+//! `enabled` picks the path (Rich even at strength 0), while `strength` is the
+//! amount of added effect and is applied once, in the shader's
+//! `compose_rich_mtoon`.
 
 use bevy::prelude::*;
-use bevy_vrm1::prelude::{MToonMaterial, MToonPortraitParams, VrmMaterialBaseValues};
+use bevy_vrm1::prelude::{
+    MToonMaterial, MToonPortraitParams, MToonShadingMode, VrmMaterialBaseValues,
+};
 
 use crate::look::AvatarLookSettings;
 use crate::look::preset::{MTOON_PORTRAIT_PRESET, RichLookSettings, effective_look_strength};
+
+/// Resolves the MToon display path for the current look settings.
+///
+/// The switch alone decides the path: OFF is the fixed Native display and ON
+/// is Rich even at strength 0, so the zero-effect case proves the Rich path's
+/// identity against Native instead of falling back to the Native pipeline.
+/// The mode must not be derived from the strength.
+#[must_use]
+pub fn resolve_mtoon_shading_mode(settings: RichLookSettings) -> MToonShadingMode {
+    if settings.enabled {
+        MToonShadingMode::Rich
+    } else {
+        MToonShadingMode::Native
+    }
+}
 
 /// Resolves the extra portrait values for the current look settings.
 ///
@@ -31,11 +48,15 @@ pub fn apply_mtoon_portrait_settings(
     mut materials: ResMut<Assets<MToonMaterial>>,
     meshes: Query<&MeshMaterial3d<MToonMaterial>, With<VrmMaterialBaseValues>>,
 ) {
+    let mode = resolve_mtoon_shading_mode(settings.0);
     let params = resolve_mtoon_portrait(settings.0);
     for handle in &meshes {
         let Some(mut material) = materials.get_mut(handle.id()) else {
             continue;
         };
+        if material.shading_mode != mode {
+            material.shading_mode = mode;
+        }
         if material.portrait != params {
             material.portrait = params;
         }
@@ -70,12 +91,49 @@ mod tests {
             .portrait
     }
 
+    fn shading_mode(app: &App, handle: &Handle<MToonMaterial>) -> MToonShadingMode {
+        app.world()
+            .resource::<Assets<MToonMaterial>>()
+            .get(handle)
+            .expect("material")
+            .shading_mode
+    }
+
     #[test]
-    fn default_material_has_no_extra_terms() {
+    fn default_material_has_no_extra_terms_and_stays_native() {
         assert_eq!(MToonMaterial::default().portrait.strength, 0.0);
         assert_eq!(
             MToonMaterial::default().portrait,
             MToonPortraitParams::default()
+        );
+        assert_eq!(
+            MToonMaterial::default().shading_mode,
+            MToonShadingMode::Native
+        );
+    }
+
+    #[test]
+    fn the_switch_selects_the_path_and_the_strength_only_asks_for_effects() {
+        assert_eq!(
+            resolve_mtoon_shading_mode(RichLookSettings {
+                enabled: false,
+                strength: 1.0,
+            }),
+            MToonShadingMode::Native
+        );
+        assert_eq!(
+            resolve_mtoon_shading_mode(RichLookSettings {
+                enabled: true,
+                strength: 0.0,
+            }),
+            MToonShadingMode::Rich
+        );
+        assert_eq!(
+            resolve_mtoon_shading_mode(RichLookSettings {
+                enabled: true,
+                strength: 1.0,
+            }),
+            MToonShadingMode::Rich
         );
     }
 
@@ -108,6 +166,7 @@ mod tests {
         let (mut app, handle) = app_with_material();
         app.update();
         assert_eq!(portrait(&app, &handle).strength, 0.0);
+        assert_eq!(shading_mode(&app, &handle), MToonShadingMode::Native);
 
         app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
             enabled: true,
@@ -115,6 +174,7 @@ mod tests {
         };
         app.update();
         assert_eq!(portrait(&app, &handle).strength, 1.0);
+        assert_eq!(shading_mode(&app, &handle), MToonShadingMode::Rich);
 
         app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
             enabled: true,
@@ -122,6 +182,7 @@ mod tests {
         };
         app.update();
         assert_eq!(portrait(&app, &handle).strength, 0.0);
+        assert_eq!(shading_mode(&app, &handle), MToonShadingMode::Rich);
 
         app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
             enabled: false,
@@ -136,5 +197,6 @@ mod tests {
             })
         );
         assert_eq!(portrait(&app, &handle).strength, 0.0);
+        assert_eq!(shading_mode(&app, &handle), MToonShadingMode::Native);
     }
 }
