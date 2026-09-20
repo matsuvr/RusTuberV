@@ -35,6 +35,11 @@
 // shadow map uses the plain cutoff: this keeps the coverage a superset of the
 // lit pixels without copying the main pass's AA.
 //
+// The tested alpha is the shared authored base alpha (`material.base_color.a`
+// times the base color texel): the same value the lit Mask test uses, so an
+// authored base alpha of 0 discards the shadow exactly as it discards the lit
+// fragment.
+//
 // The cutout shadow is a Rich effect: it is active only while the material is
 // on the Rich display path and the added effect amount is positive, so the
 // Native display keeps the upstream depth-only shadow even if a saved portrait

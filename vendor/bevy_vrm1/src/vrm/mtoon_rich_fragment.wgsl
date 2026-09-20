@@ -28,11 +28,8 @@
     MToonInput,
     MToonPortraitUniform,
     material,
-    base_color_texture,
-    base_color_sampler,
     normal_texture,
     normal_texture_sampler,
-    BASE_COLOR_TEXTURE,
     DOUBLE_SIDED,
     ALPHA_MODE_BLEND,
     NORMAL_TEXTURE,
@@ -53,6 +50,7 @@
     mtoon_direct_term,
     mtoon_shading_weight,
 }
+#import mtoon::alpha::mtoon_alpha_at_uv
 #import mtoon::portrait::{
     compose_rich_mtoon,
     portrait_direct_specular,
@@ -91,7 +89,7 @@ fn fragment(
     // detect the transparent region there.
     if (material.portrait_strength > 0.0
         && (material.flags & ALPHA_MODE_BLEND) != 0u
-        && rich_base_alpha_at_uv(vertex_input.uv) <= 0.0)
+        && mtoon_alpha_at_uv(vertex_input.uv) <= 0.0)
     {
         discard;
     }
@@ -110,19 +108,6 @@ fn fragment(
     var out: FragmentOutput;
     out.color = color;
     return out;
-}
-
-// The author's base color alpha (base color times the base color texture) at
-// the animated UV, before any outline-pass alpha handling. The Rich
-// transparent-fragment discard needs this in both the main and the outline
-// pass; the Native `lit_color` forces blend alpha to 1 in the outline pass, so
-// it must not be used for the check.
-fn rich_base_alpha_at_uv(uv: vec2<f32>) -> f32 {
-    var base_color = material.base_color;
-    if ((material.flags & BASE_COLOR_TEXTURE) != 0u) {
-        base_color *= textureSampleBias(base_color_texture, base_color_sampler, uv, view.mip_bias);
-    }
-    return base_color.a;
 }
 
 // The Rich lighting normal: the geometric normal at strength 0, and the
