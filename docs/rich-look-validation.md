@@ -1,4 +1,4 @@
-# Rich look validation (Issues #68-#77)
+# Rich look validation (Issues #68-#79)
 
 This is the measurement record for the rich-look epic. It covers only what was
 actually implemented and measured; everything else is listed as not
@@ -14,8 +14,10 @@ implemented and not measured, and is not claimed as working.
   and inspects CPU pixels. It exits 2 (`NOT RUN`) when no GPU/readback is
   available instead of reporting success. The `finish-alpha` case exercises
   the real finish shader, `Bgra8UnormSrgb` target write and
-  `VideoOutputFrame::from_padded_bgra8`; `vrm-render` exercises the same path
-  with imported VRM assets.
+  `VideoOutputFrame::from_padded_bgra8`; `avatar-ui-alpha` exercises the
+  avatar-only `EguiBevyPaintCallback` against a linear `Rgba16Float` target;
+  `vrm-render` exercises the same output/readback path with imported VRM
+  assets.
 - macOS and other GPUs were not available and are not measured.
 
 ## Implemented and committed
@@ -27,9 +29,11 @@ implemented and not measured, and is not claimed as working.
 | #71 studio lighting | `83c5344` | `StudioPreset`/`StudioLight`/`StudioRig` solve+blend, key takeover + fill/rim, ambient/environment sync, restore on strength 0, MToon cutout prepass, generated studio cubemap |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
 | #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, and the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with the explicit final contract `a * E(T(C))` |
+| #79 avatar UI alpha boundary | this PR | avatar-only callback for the monitor and expanding transition; the shared `Bgra8UnormSrgb` image remains gamma-premultiplied while the callback supplies linear-premultiplied RGB to the UI blend |
 
 Supporting reusable code: `tools/xtask/src/rich_look.rs` (the GPU cases,
-including `finish-alpha`),
+including `finish-alpha` and `avatar-ui-alpha`),
+`crates/vtuber-app/src/ui/avatar_preview.rs`/`avatar_preview.wgsl`,
 `vendor/bevy_vrm1/src/vrm/mtoon_lighting.wgsl`, `mtoon_alpha.wgsl`,
 `mtoon_prepass.wgsl`.
 
@@ -121,17 +125,25 @@ This is deliberately not `E(a * T(C))`: the latter is the old gamma/alpha
 ordering bug. Alpha is passed through unchanged, with an all-zero pixel for
 `a = 0`. `VideoOutputFrame::from_padded_bgra8` then performs the existing
 single byte-domain unpremultiply and exposes transport-neutral straight BGRA8
-sRGB to NDI and other consumers.
+sRGB to NDI and other consumers. This readback result is the frame contract;
+it is distinct from the UI blend input.
 
 The preview and readback still share the same `AvatarOutputTarget` image. The
 image is created as `Bgra8UnormSrgb` at the fixed `VideoOutputProfile`
-dimensions; `ui/shell.rs` registers that same handle with egui, and
-`ui/studio.rs` samples it with `egui::Image::from_texture`. The installed
-egui render path uses sRGB texture sampling and premultiplied-alpha blending.
+dimensions. The avatar monitor and expanding transition read that same image
+through a small avatar-only `EguiBevyPaintCallback`; normal egui text and
+unrelated images keep their existing shader. If the sRGB texture sample is
+`S`, the callback converts each texel to linear-premultiplied RGB as
+`a * D(E(S) / a)` for `a > 0`, and to zero for `a = 0`, before its
+premultiplied blend into the linear UI target. Exposure and tone are not
+reapplied. With linear filtering, the callback uses nearest texel sampling,
+per-texel conversion, then manual bilinear filtering, so transparent edges do
+not interpolate gamma-premultiplied bytes first. Existing egui clip rectangles,
+opacity and the monitor/transition rectangles remain in the egui pass.
 Preview visibility does not add a readback, and deactivating transport leaves
 the preview camera active.
 
-Command: `cargo run -p xtask -- rich-look finish-alpha`.
+Command: `cargo run -p xtask -j 1 -- rich-look finish-alpha`.
 
 `finish-alpha` is the end-to-end GPU fixture:
 `finish.wgsl` -> sRGB target write -> padded GPU readback ->
@@ -158,6 +170,8 @@ fixture's four-byte quantization bound.
 | boundary/check | status |
 |---|---|
 | alpha 0/0.25/0.5/1 through GPU finish, target and readback | PASS |
+| readback RGB as straight sRGB after `VideoOutputFrame` packing | PASS (`finish-alpha`) |
+| UI GPU composition from gamma-premultiplied image to linear-premultiplied blend input | PASS (`avatar-ui-alpha`) |
 | straight RGB remains the same between opaque and partial coverage | PASS, within quantization; no legacy amplification/saturation |
 | black/white/colored-background composition | PASS |
 | shared preview/readback image, dimensions and `Bgra8UnormSrgb` format | PASS (source/unit check) |
@@ -174,6 +188,45 @@ Not measured in this synthetic case: frame times, GPU time, NDI output, or any
 GPU/OS other than the one above. The screenshots taken while reviewing the
 result are visual inspection only; they are not a pixel measurement. No FPS or
 image-quality threshold is claimed.
+
+### #79 measured: avatar UI GPU composition
+
+Command: `cargo run -p xtask -j 1 -- rich-look avatar-ui-alpha`.
+
+This is a separate GPU fixture from `finish-alpha`. It paints the shared image
+through the production avatar callback, draws the actual egui background shapes,
+and reads a linear `Rgba16Float` target. The tone-after RGB is
+`[0.5, 0.2, 0.05]`; the stored source is `a * E(C)` and the tested alpha values
+are `0/0.25/0.5/1`. Reference pixels use the same stored frame's straight sRGB
+value, decode it, composite in linear premultiplied space, and encode once at
+the end.
+
+| alpha | black | white | `[24,96,180]` | UI gray `228` |
+|---:|---|---|---|---|
+| 0 | `[0,0,0]` | `[255,255,255]` | `[24,96,180]` | `[228,228,228]` |
+| 0.25 | `[99,63,30]` | `[240,231,226]` | `[102,104,161]` | `[219,208,202]` |
+| 0.5 | `[137,89,44]` | `[224,203,191]` | `[138,111,138]` | `[209,185,172]` |
+| 1 | `[188,124,63]` | `[188,124,63]` | `[188,124,63]` | `[188,124,63]` |
+
+The normal-size opaque/transparent boundary was `[188,124,63]` and
+`[228,228,228]`, both expected. The reduced 16x16 boundary was
+`[209,186,172]`, exactly the decode-before-filter reference; the legacy
+filter-first path would have produced `[253,205,176]`. Result: PASS.
+
+The evidence is intentionally split: `finish-alpha` is the readback RGB and
+straight-sRGB frame check; `avatar-ui-alpha` is the UI GPU composition check;
+real NDI send/receive remains unrun.
+
+### Local validation for this update
+
+- `cargo test --workspace -j 1`: PASS.
+- `cargo clippy --workspace --all-targets -j 1 -- -D warnings`: PASS.
+- Existing GPU fixtures: `finish-alpha`, `mtoon-lighting`, `mtoon-shading`,
+  `mtoon-normal`, `mtoon-standard`, `mtoon-portrait`, `mtoon-shadow`,
+  `mtoon-cutout-shadow`, and `studio-environment`: PASS.
+- Added `avatar-ui-alpha`: PASS.
+- `git diff --check`: PASS.
+- Real NDI send/receive and macOS hardware validation: NOT RUN.
 
 `mtoon-portrait`: `standard` `[244,244,244]`, `rich_without_extras`
 `[244,244,244]` (zeroed gains leave the standard pixel), `rich`
