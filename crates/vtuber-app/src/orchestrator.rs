@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::actions::UiAction;
@@ -53,6 +54,7 @@ pub struct PendingLoadRequest {
 struct SubmittedAvatarLoad {
     model: ImportedModel,
     look: Option<vtuber_avatar::RichLookSettings>,
+    roles: Vec<vtuber_avatar::MaterialRoleOverride>,
 }
 
 /// A selected VRM awaiting explicit license acceptance before import.
@@ -815,6 +817,17 @@ fn format_import_error(error: &ModelImportError) -> String {
     }
 }
 
+/// The look-related system parameters grouped to stay within the system
+/// parameter limit: the live settings, the material roles and their change
+/// messages.
+#[derive(SystemParam)]
+pub struct LookSystemParams<'w> {
+    look_settings: Option<ResMut<'w, vtuber_avatar::AvatarLookSettings>>,
+    look_changes: Option<MessageWriter<'w, vtuber_avatar::LookSettingsChanged>>,
+    material_roles: Option<Res<'w, vtuber_avatar::AvatarMaterialRoles>>,
+    role_changes: Option<MessageWriter<'w, vtuber_avatar::MaterialRoleOverridesChanged>>,
+}
+
 /// System that processes pending UI actions through the orchestrator.
 #[allow(clippy::too_many_arguments)]
 pub fn process_ui_actions_system(
@@ -832,8 +845,7 @@ pub fn process_ui_actions_system(
     mut expression_store: Option<ResMut<ExpressionBindingStore>>,
     mut manual_requests: Option<MessageWriter<ManualExpressionRequest>>,
     mut pose_runtime: Option<ResMut<crate::pose_runtime::PoseRuntime>>,
-    mut look_settings: Option<ResMut<vtuber_avatar::AvatarLookSettings>>,
-    mut look_changes: Option<MessageWriter<vtuber_avatar::LookSettingsChanged>>,
+    mut look: LookSystemParams,
 ) {
     let actions = ui_state.take_actions();
     for action in &actions {
@@ -920,23 +932,40 @@ pub fn process_ui_actions_system(
                 if let Some(persistent) = arm_pose_settings.as_deref_mut() {
                     persistent.look_model_id = None;
                 }
-                if let (Some(look), Some(changes)) =
-                    (look_settings.as_deref_mut(), look_changes.as_mut())
-                {
+                if let (Some(look), Some(changes)) = (
+                    look.look_settings.as_deref_mut(),
+                    look.look_changes.as_mut(),
+                ) {
                     look.0 = vtuber_avatar::RichLookSettings::default();
                     changes.write(vtuber_avatar::LookSettingsChanged(look.0));
+                }
+                if let Some(role_changes) = look.role_changes.as_mut() {
+                    role_changes.write(vtuber_avatar::MaterialRoleOverridesChanged(Vec::new()));
                 }
             }
             UiAction::ChangeRichLook(change) => {
                 apply_rich_look_action(
-                    look_settings.as_deref_mut(),
-                    look_changes.as_mut(),
+                    look.look_settings.as_deref_mut(),
+                    look.look_changes.as_mut(),
                     *change,
+                );
+            }
+            UiAction::SetMaterialRole {
+                material_index,
+                selected,
+            } => {
+                apply_material_role_action(
+                    &mut orchestrator,
+                    *material_index,
+                    *selected,
+                    look.material_roles.as_deref(),
+                    look.role_changes.as_mut(),
+                    arm_pose_settings.as_deref(),
                 );
             }
             UiAction::SaveRichLook => {
                 if let (Some(persistent), Some(look)) =
-                    (arm_pose_settings.as_deref(), look_settings.as_deref())
+                    (arm_pose_settings.as_deref(), look.look_settings.as_deref())
                 {
                     let result = persistent
                         .look_model_id
@@ -1020,7 +1049,7 @@ pub fn process_ui_actions_system(
     view_model.mirror_preview = preview.mirrored;
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
     view_model.arm_tracking_enabled = pose_runtime.as_deref().is_some_and(|pose| pose.enabled());
-    if let Some(settings) = look_settings.as_deref() {
+    if let Some(settings) = look.look_settings.as_deref() {
         view_model.look.enabled = settings.0.enabled;
         view_model.look.strength = settings.0.strength;
     }
@@ -1044,6 +1073,88 @@ fn apply_rich_look_action(
     }
     settings.0 = next;
     changes.write(vtuber_avatar::LookSettingsChanged(next));
+}
+
+/// Applies one material-role selection: commit-copy-save.
+///
+/// The runtime resource is updated through the same replace-all message the
+/// avatar side consumes, and the selection is saved immediately. A failed save
+/// keeps the live value and reports the existing typed error.
+fn apply_material_role_action(
+    orchestrator: &mut Orchestrator,
+    material_index: usize,
+    selected: Option<vtuber_avatar::MaterialRole>,
+    roles: Option<&vtuber_avatar::AvatarMaterialRoles>,
+    role_changes: Option<&mut MessageWriter<vtuber_avatar::MaterialRoleOverridesChanged>>,
+    settings: Option<&ArmPoseSettings>,
+) {
+    let (Some(roles), Some(role_changes)) = (roles, role_changes) else {
+        return;
+    };
+    let previous: Vec<vtuber_avatar::MaterialRoleOverride> = roles
+        .entries()
+        .into_iter()
+        .map(|(index, _, current)| vtuber_avatar::MaterialRoleOverride {
+            material_index: index,
+            selected: current,
+        })
+        .collect();
+    let mut next = previous.clone();
+    match next
+        .iter_mut()
+        .find(|entry| entry.material_index == material_index)
+    {
+        Some(entry) => entry.selected = selected,
+        None => next.push(vtuber_avatar::MaterialRoleOverride {
+            material_index,
+            selected,
+        }),
+    }
+    if next == previous {
+        return;
+    }
+    role_changes.write(vtuber_avatar::MaterialRoleOverridesChanged(next.clone()));
+    if let Some(settings) = settings {
+        let result = settings
+            .look_model_id
+            .as_ref()
+            .ok_or(OrchestratorError::NoAvatarLoaded)
+            .and_then(|model_id| {
+                settings
+                    .save_material_roles(model_id.clone(), next)
+                    .map_err(|error| OrchestratorError::ArmPoseSettingsFailed(error.to_string()))
+            });
+        if let Err(error) = result {
+            orchestrator.set_last_error(Some(error));
+        }
+    }
+}
+
+/// Rebuilds the material-role view model whenever the runtime roles change.
+pub fn sync_look_material_view_model(
+    roles: Option<Res<vtuber_avatar::AvatarMaterialRoles>>,
+    mut view_model: ResMut<UiViewModel>,
+    mut last_change: Local<Option<bevy::ecs::change_detection::Tick>>,
+) {
+    let Some(roles) = roles else {
+        return;
+    };
+    let change_tick = roles.last_changed();
+    if *last_change == Some(change_tick) {
+        return;
+    }
+    *last_change = Some(change_tick);
+    view_model.look_materials = roles
+        .entries()
+        .into_iter()
+        .map(
+            |(material_index, name, selected)| MaterialRoleEntryViewModel {
+                material_index,
+                name: name.to_owned(),
+                selected,
+            },
+        )
+        .collect();
 }
 
 /// Returns the one catalog that expression operations may use right now.
@@ -1405,6 +1516,11 @@ fn prepare_avatar_load(
         .map(|settings| settings.rich_look_for(&pending.model.id))
         .transpose()
         .map_err(|error| OrchestratorError::ArmPoseSettingsFailed(error.to_string()))?;
+    let roles = persistent
+        .map(|settings| settings.material_roles_for(&pending.model.id))
+        .transpose()
+        .map_err(|error| OrchestratorError::ArmPoseSettingsFailed(error.to_string()))?
+        .unwrap_or_default();
     let id = AvatarAssetId::new(&pending.model.id);
     let path = vtuber_avatar::UserAssetPath::avatar_model_path(&id)
         .map_err(|error| OrchestratorError::AvatarLoadRejected(error.to_string()))?;
@@ -1422,21 +1538,26 @@ fn prepare_avatar_load(
         SubmittedAvatarLoad {
             model: pending.model,
             look,
+            roles,
         },
     ))
 }
 
 /// Applies already-read settings only after the model load is accepted.
+#[allow(clippy::too_many_arguments)]
 fn restore_model_look(
     model_id: &str,
     restored: vtuber_avatar::RichLookSettings,
+    roles: Vec<vtuber_avatar::MaterialRoleOverride>,
     persistent: &mut ArmPoseSettings,
     look: &mut vtuber_avatar::AvatarLookSettings,
     changes: &mut MessageWriter<vtuber_avatar::LookSettingsChanged>,
+    role_changes: &mut MessageWriter<vtuber_avatar::MaterialRoleOverridesChanged>,
 ) {
     persistent.look_model_id = Some(model_id.to_owned());
     look.0 = restored;
     changes.write(vtuber_avatar::LookSettingsChanged(restored));
+    role_changes.write(vtuber_avatar::MaterialRoleOverridesChanged(roles));
 }
 
 /// Converts the avatar lifecycle's internal state to the UI model's state.
@@ -1475,6 +1596,7 @@ pub fn sync_avatar_lifecycle_system(
     mut persistent: Option<ResMut<ArmPoseSettings>>,
     mut look: Option<ResMut<vtuber_avatar::AvatarLookSettings>>,
     mut changes: Option<MessageWriter<vtuber_avatar::LookSettingsChanged>>,
+    mut role_changes: Option<MessageWriter<vtuber_avatar::MaterialRoleOverridesChanged>>,
     mut view_model: Option<ResMut<UiViewModel>>,
 ) {
     // 1. Mirror the lifecycle state into the orchestrator.
@@ -1488,18 +1610,27 @@ pub fn sync_avatar_lifecycle_system(
         match result {
             vtuber_avatar::LoadImportedAvatarResult::Accepted { request_id, .. } => {
                 if let Some(submitted) = orchestrator.submitted_loads.remove(request_id) {
-                    if let (Some(restored), Some(persistent), Some(look), Some(changes)) = (
+                    if let (
+                        Some(restored),
+                        Some(persistent),
+                        Some(look),
+                        Some(changes),
+                        Some(role_changes),
+                    ) = (
                         submitted.look,
                         persistent.as_deref_mut(),
                         look.as_deref_mut(),
                         changes.as_mut(),
+                        role_changes.as_mut(),
                     ) {
                         restore_model_look(
                             &submitted.model.id,
                             restored,
+                            submitted.roles,
                             persistent,
                             look,
                             changes,
+                            role_changes,
                         );
                     }
                     orchestrator.imported_model = Some(submitted.model);
@@ -1578,8 +1709,10 @@ mod tests {
             .init_resource::<NdiOutputIntent>()
             .init_resource::<AvatarLifecycle>()
             .init_resource::<vtuber_avatar::AvatarLookSettings>()
+            .init_resource::<vtuber_avatar::AvatarMaterialRoles>()
             .insert_resource(ArmPoseSettings::empty_at(path))
             .add_message::<vtuber_avatar::LookSettingsChanged>()
+            .add_message::<vtuber_avatar::MaterialRoleOverridesChanged>()
             .add_message::<vtuber_avatar::LoadImportedAvatarRequest>()
             .add_message::<vtuber_avatar::LoadImportedAvatarResult>()
             .add_message::<vtuber_avatar::lifecycle::UnloadAvatarRequest>()
@@ -1589,6 +1722,7 @@ mod tests {
                     process_ui_actions_system,
                     sync_avatar_lifecycle_system,
                     vtuber_avatar::look::apply_look_settings_changes,
+                    vtuber_avatar::look::apply_material_role_overrides,
                 )
                     .chain(),
             );
@@ -1730,6 +1864,139 @@ mod tests {
         restarted.update();
         finish_look_model(&mut restarted);
         assert_eq!(restarted.world().resource::<AvatarLookSettings>().0, zero);
+    }
+
+    #[test]
+    fn material_role_selections_commit_save_and_restore_per_model() {
+        use vtuber_avatar::MaterialRole;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = rich_look_app(&path);
+        select_look_model(&mut app, 'a');
+        app.update();
+        finish_look_model(&mut app);
+        look_action(
+            &mut app,
+            UiAction::SetMaterialRole {
+                material_index: 2,
+                selected: Some(MaterialRole::Face),
+            },
+        );
+        assert_eq!(
+            app.world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(2),
+            MaterialRole::Face
+        );
+        assert!(path.is_file(), "role selection saves immediately");
+        look_action(
+            &mut app,
+            UiAction::SetMaterialRole {
+                material_index: 2,
+                selected: None,
+            },
+        );
+        assert_eq!(
+            app.world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(2),
+            MaterialRole::General
+        );
+        look_action(
+            &mut app,
+            UiAction::SetMaterialRole {
+                material_index: 2,
+                selected: Some(MaterialRole::Face),
+            },
+        );
+
+        // A second model starts on Auto and keeps its own selection.
+        select_look_model(&mut app, 'b');
+        app.update();
+        finish_look_model(&mut app);
+        assert_eq!(
+            app.world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(2),
+            MaterialRole::General
+        );
+        look_action(
+            &mut app,
+            UiAction::SetMaterialRole {
+                material_index: 4,
+                selected: Some(MaterialRole::Hair),
+            },
+        );
+        look_action(
+            &mut app,
+            UiAction::SetMaterialRole {
+                material_index: 2,
+                selected: Some(MaterialRole::Skin),
+            },
+        );
+
+        select_look_model(&mut app, 'a');
+        app.update();
+        finish_look_model(&mut app);
+        assert_eq!(
+            app.world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(2),
+            MaterialRole::Face,
+            "model A's selection is restored on switch"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(4),
+            MaterialRole::General
+        );
+        select_look_model(&mut app, 'b');
+        app.update();
+        finish_look_model(&mut app);
+        assert_eq!(
+            app.world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(2),
+            MaterialRole::Skin
+        );
+        assert_eq!(
+            app.world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(4),
+            MaterialRole::Hair
+        );
+
+        // A restart restores both models' selections from the settings file.
+        drop(app);
+        let mut restarted = rich_look_app(&path);
+        select_look_model(&mut restarted, 'a');
+        restarted.update();
+        finish_look_model(&mut restarted);
+        assert_eq!(
+            restarted
+                .world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(2),
+            MaterialRole::Face
+        );
+        select_look_model(&mut restarted, 'b');
+        restarted.update();
+        finish_look_model(&mut restarted);
+        assert_eq!(
+            restarted
+                .world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(2),
+            MaterialRole::Skin
+        );
+        assert_eq!(
+            restarted
+                .world()
+                .resource::<vtuber_avatar::AvatarMaterialRoles>()
+                .role(4),
+            MaterialRole::Hair
+        );
     }
 
     #[test]

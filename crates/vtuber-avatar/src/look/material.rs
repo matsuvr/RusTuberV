@@ -1,4 +1,5 @@
-//! Captured base values of the `StandardMaterial` fields the look owns.
+//! Captured base values of the `StandardMaterial` fields the look owns, plus
+//! the per-material role presets.
 //!
 //! The look only changes four scalar fields of a `StandardMaterial`
 //! (`perceptual_roughness`, `reflectance`, `clearcoat` and
@@ -6,15 +7,242 @@
 //! UV transform, metallic and the texture handles) stays owned by the author
 //! data and the existing expression writer.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::asset::AssetId;
 use bevy::prelude::*;
-use bevy_vrm1::prelude::VrmMaterialBaseValues;
+use bevy_vrm1::prelude::{
+    MToonMaterial, VrmMaterialBaseValues, VrmMaterialIndex, VrmcMaterialRegistry,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 use crate::look::AvatarLookSettings;
 use crate::look::preset::{RichLookSettings, blend_look_scalar, effective_look_strength};
+
+/// The material's display role: which role preset tunes the added look terms.
+///
+/// A role never converts the material's shader kind: an unlit material stays
+/// unlit and an MToon material stays MToon. Unknown materials resolve to
+/// [`MaterialRole::General`], the regular shared preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaterialRole {
+    /// The first version's modest common enhancement.
+    General,
+    /// The author's colors, expression shading and shade colors dominate, with
+    /// a weak gloss.
+    Face,
+    /// A broad, weak gloss that never applies the head's face normal treatment.
+    Skin,
+    /// A clearer highlight than the face, without directional flow data.
+    Hair,
+    /// Restrained gloss that keeps the author's roughness variation.
+    Fabric,
+    /// The authored metallic/roughness surface and IBL stay in charge.
+    Metal,
+    /// The drawn eyes, MatCap and alpha/UV expression stay in charge.
+    Eye,
+}
+
+/// The metallic threshold of the PBR-based Metal hint.
+///
+/// A Standard material with no role keyword in its name and an authored
+/// metallic at or above this value resolves to [`MaterialRole::Metal`]. MToon
+/// materials never reach this hint: their glTF-compatible PBR values are not
+/// authored metal.
+const METALLIC_HINT_THRESHOLD: f32 = 0.5;
+
+/// Infers the material role from the material name and the properties the
+/// renderer actually sees.
+///
+/// The rule set is a small deterministic table over lowercase substring
+/// matches. It runs once per material at load time, never per frame. A name
+/// that matches no keyword resolves to `General`, except a true Standard
+/// material whose authored metallic reaches [`METALLIC_HINT_THRESHOLD`], which
+/// resolves to `Metal`. `is_mtoon` only disables that metallic hint: MToon
+/// keeps its glTF-compatible PBR values and must never read them as metal.
+#[must_use]
+pub fn infer_material_role(
+    name: &str,
+    is_mtoon: bool,
+    standard_metallic: Option<f32>,
+) -> MaterialRole {
+    let name = name.to_lowercase();
+    // `skin/body/肌` is tested before `face/顔` so a compound name can never
+    // turn the body skin into the Face role, and overlapping words resolve by
+    // the first matching row.
+    let table: [(&str, MaterialRole); 10] = [
+        ("skin", MaterialRole::Skin),
+        ("body", MaterialRole::Skin),
+        ("肌", MaterialRole::Skin),
+        ("face", MaterialRole::Face),
+        ("顔", MaterialRole::Face),
+        ("hair", MaterialRole::Hair),
+        ("髪", MaterialRole::Hair),
+        ("eye", MaterialRole::Eye),
+        ("瞳", MaterialRole::Eye),
+        ("目", MaterialRole::Eye),
+    ];
+    for (keyword, role) in table {
+        if name.contains(keyword) {
+            return role;
+        }
+    }
+    let clothing: [(&str, MaterialRole); 5] = [
+        ("fabric", MaterialRole::Fabric),
+        ("cloth", MaterialRole::Fabric),
+        ("金属", MaterialRole::Metal),
+        ("metal", MaterialRole::Metal),
+        ("服", MaterialRole::Fabric),
+    ];
+    for (keyword, role) in clothing {
+        if name.contains(keyword) {
+            return role;
+        }
+    }
+    if !is_mtoon && standard_metallic.is_some_and(|metallic| metallic >= METALLIC_HINT_THRESHOLD) {
+        return MaterialRole::Metal;
+    }
+    MaterialRole::General
+}
+
+/// Resolves the effective role: a user selection wins, otherwise the inferred
+/// role applies. `selected == None` is the UI's "Auto".
+#[must_use]
+pub fn resolve_material_role(
+    inferred: MaterialRole,
+    selected: Option<MaterialRole>,
+) -> MaterialRole {
+    selected.unwrap_or(inferred)
+}
+
+/// One persisted per-material role selection. `selected == None` is "Auto".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialRoleOverride {
+    /// The glTF material index the selection applies to.
+    pub material_index: usize,
+    /// The user's role selection; `None` is the UI's "Auto".
+    pub selected: Option<MaterialRole>,
+}
+
+/// Per-material roles and names for the active avatar, keyed by
+/// [`VrmMaterialIndex`].
+///
+/// The inference happens once per finalized material at load; user overrides
+/// are replaced from the persisted settings. Shared materials share one index
+/// and therefore one role, so a shared-material edit acts on the whole
+/// material.
+#[derive(Resource, Default, Debug)]
+pub struct AvatarMaterialRoles {
+    inferred: BTreeMap<usize, MaterialRole>,
+    selected: BTreeMap<usize, MaterialRole>,
+    names: BTreeMap<usize, String>,
+}
+
+impl AvatarMaterialRoles {
+    /// Records a material's inferred role and name once. Returns `true` when
+    /// it was newly recorded.
+    pub fn record(
+        &mut self,
+        index: usize,
+        name: &str,
+        is_mtoon: bool,
+        standard_metallic: Option<f32>,
+    ) -> bool {
+        if self.inferred.contains_key(&index) {
+            return false;
+        }
+        self.inferred.insert(
+            index,
+            infer_material_role(name, is_mtoon, standard_metallic),
+        );
+        self.names.insert(index, name.to_string());
+        true
+    }
+
+    /// Replaces every user selection. `None` selections remove the override
+    /// and return the material to "Auto".
+    pub fn replace_overrides(&mut self, overrides: impl Iterator<Item = MaterialRoleOverride>) {
+        self.selected.clear();
+        for MaterialRoleOverride {
+            material_index,
+            selected,
+        } in overrides
+        {
+            match selected {
+                Some(role) => {
+                    self.selected.insert(material_index, role);
+                }
+                None => {
+                    self.selected.remove(&material_index);
+                }
+            }
+        }
+    }
+
+    /// The effective role of one material: the user selection, else the
+    /// inferred role, else `General`.
+    #[must_use]
+    pub fn role(&self, index: usize) -> MaterialRole {
+        let inferred = self
+            .inferred
+            .get(&index)
+            .copied()
+            .unwrap_or(MaterialRole::General);
+        resolve_material_role(inferred, self.selected.get(&index).copied())
+    }
+
+    /// The material name recorded for one index, if the glTF source named it.
+    #[must_use]
+    pub fn name(&self, index: usize) -> Option<&str> {
+        self.names.get(&index).map(String::as_str)
+    }
+
+    /// The recorded materials as `(index, name, user selection)` triples in
+    /// ascending index order.
+    #[must_use]
+    pub fn entries(&self) -> Vec<(usize, &str, Option<MaterialRole>)> {
+        self.inferred
+            .keys()
+            .chain(self.selected.keys())
+            .copied()
+            .collect::<BTreeSet<usize>>()
+            .into_iter()
+            .map(|index| {
+                (
+                    index,
+                    self.name(index).unwrap_or(""),
+                    self.selected.get(&index).copied(),
+                )
+            })
+            .collect()
+    }
+
+    /// Drops every recorded material and selection.
+    pub fn clear(&mut self) {
+        self.inferred.clear();
+        self.selected.clear();
+        self.names.clear();
+    }
+}
+
+/// Requests that [`AvatarMaterialRoles`] replace its user selections.
+#[derive(Message, Clone, Debug, PartialEq)]
+pub struct MaterialRoleOverridesChanged(pub Vec<MaterialRoleOverride>);
+
+/// Copies queued role-override changes into [`AvatarMaterialRoles`].
+///
+/// This system only updates the resource: it never touches materials, files or
+/// the inference.
+pub fn apply_material_role_overrides(
+    mut changes: MessageReader<MaterialRoleOverridesChanged>,
+    mut roles: ResMut<AvatarMaterialRoles>,
+) {
+    for change in changes.read() {
+        roles.replace_overrides(change.0.iter().copied());
+    }
+}
 
 /// The relative roughness the rich look starts from. This is an adjustment
 /// starting point, not a measured optimum: it keeps the author's roughness
@@ -22,29 +250,63 @@ use crate::look::preset::{RichLookSettings, blend_look_scalar, effective_look_st
 /// studio lights.
 const RICH_ROUGHNESS_SCALE: f32 = 0.95;
 
-/// Resolves the look-owned `StandardMaterial` values for one material.
+/// The per-role relative roughness the Standard look starts from.
+///
+/// These are adjustment starting points, not measured optima. `General` is the
+/// first version's modest common enhancement. `Face` and `Skin` soften the
+/// roughness slightly more for their broader, weaker gloss and `Hair` the most
+/// for its clearer highlight. `Fabric` keeps the author's roughness variation,
+/// and `Metal` and `Eye` keep the authored surface entirely.
+fn role_roughness_scale(role: MaterialRole) -> f32 {
+    match role {
+        MaterialRole::General => RICH_ROUGHNESS_SCALE,
+        MaterialRole::Face => 0.92,
+        MaterialRole::Skin => 0.85,
+        MaterialRole::Hair => 0.75,
+        MaterialRole::Fabric | MaterialRole::Metal | MaterialRole::Eye => 1.0,
+    }
+}
+
+/// Resolves the look-owned `StandardMaterial` values for one material role.
 ///
 /// The look keeps the author reflectance, clearcoat and clearcoat roughness in
-/// the general preset, so only the perceptual roughness moves. Unlit materials
-/// and a zero strength return the captured values unchanged.
+/// every role, so only the perceptual roughness moves, and roles that keep the
+/// authored surface (`Fabric`, `Metal`, `Eye`) return the original unchanged.
+/// Unlit materials and a zero strength return the captured values unchanged.
 #[must_use]
-pub fn resolve_standard_portrait(
+pub fn resolve_standard_role_params(
     original: StandardLookBase,
     settings: RichLookSettings,
+    role: MaterialRole,
     unlit: bool,
 ) -> StandardLookBase {
     let strength = effective_look_strength(settings);
     if unlit || strength == 0.0 {
         return original;
     }
+    let scale = role_roughness_scale(role);
+    if scale == 1.0 {
+        return original;
+    }
     StandardLookBase {
         perceptual_roughness: blend_look_scalar(
             original.perceptual_roughness,
-            original.perceptual_roughness * RICH_ROUGHNESS_SCALE,
+            original.perceptual_roughness * scale,
             strength,
         ),
         ..original
     }
+}
+
+/// Resolves the look-owned `StandardMaterial` values for one material with the
+/// first version's general preset.
+#[must_use]
+pub fn resolve_standard_portrait(
+    original: StandardLookBase,
+    settings: RichLookSettings,
+    unlit: bool,
+) -> StandardLookBase {
+    resolve_standard_role_params(original, settings, MaterialRole::General, unlit)
 }
 
 /// Writes the look-owned values back into the material.
@@ -71,18 +333,23 @@ fn write_standard_look(material: &mut StandardMaterial, values: StandardLookBase
 /// materials that were captured for this avatar.
 pub fn apply_standard_portrait_settings(
     settings: Res<AvatarLookSettings>,
+    roles: Res<AvatarMaterialRoles>,
     bases: Res<StandardLookBases>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    meshes: Query<&MeshMaterial3d<StandardMaterial>, With<VrmMaterialBaseValues>>,
+    meshes: Query<
+        (&MeshMaterial3d<StandardMaterial>, &VrmMaterialIndex),
+        With<VrmMaterialBaseValues>,
+    >,
 ) {
-    for handle in &meshes {
+    for (handle, index) in &meshes {
         let Some(original) = bases.get(handle.id()) else {
             continue;
         };
         let Some(material) = materials.get(handle.id()) else {
             continue;
         };
-        let values = resolve_standard_portrait(original, settings.0, material.unlit);
+        let values =
+            resolve_standard_role_params(original, settings.0, roles.role(index.0), material.unlit);
         if capture_standard_look_base(material) == values {
             continue;
         }
@@ -130,11 +397,7 @@ pub struct StandardLookBases {
 
 impl StandardLookBases {
     /// Records a base value once. Returns `true` when it was newly recorded.
-    pub fn record(
-        &mut self,
-        id: AssetId<StandardMaterial>,
-        base: StandardLookBase,
-    ) -> bool {
+    pub fn record(&mut self, id: AssetId<StandardMaterial>, base: StandardLookBase) -> bool {
         if self.bases.contains_key(&id) {
             return false;
         }
@@ -166,36 +429,78 @@ impl StandardLookBases {
     }
 }
 
-/// Captures the look-owned `StandardMaterial` fields once, after the VRM
-/// material setup has finalized a mesh material.
+/// Captures the look-owned `StandardMaterial` fields and the material role
+/// once, after the VRM material setup has finalized a mesh material.
 ///
 /// `Added<VrmMaterialBaseValues>` fires exactly once per finalized material,
 /// so repeating load/ON/OFF cycles can never promote a modified value back to
 /// the base.
+#[allow(clippy::type_complexity)]
 pub fn initialize_look_materials(
     mut bases: ResMut<StandardLookBases>,
+    mut roles: ResMut<AvatarMaterialRoles>,
     finalized: Query<
-        (&MeshMaterial3d<StandardMaterial>,),
+        (Entity, &MeshMaterial3d<StandardMaterial>, &VrmMaterialIndex),
         Added<VrmMaterialBaseValues>,
     >,
     materials: Res<Assets<StandardMaterial>>,
+    registries: Query<&VrmcMaterialRegistry>,
+    parents: Query<&ChildOf>,
 ) {
-    for (handle,) in &finalized {
+    for (entity, handle, index) in &finalized {
         let Some(material) = materials.get(handle.id()) else {
             continue;
         };
         bases.record(handle.id(), capture_standard_look_base(material));
+        let name = gltf_material_name(&registries, &parents, entity, index.0);
+        roles.record(index.0, &name, false, Some(material.metallic));
     }
 }
 
-/// Releases the captured materials when the active avatar leaves the ready
-/// state (unload, replacement or failed load).
+/// Captures the material role of each finalized MToon material.
+///
+/// MToon materials keep their glTF-compatible PBR values, so no Standard
+/// metallic is handed to the inference.
+pub fn initialize_mtoon_look_materials(
+    mut roles: ResMut<AvatarMaterialRoles>,
+    finalized: Query<
+        (Entity, &MeshMaterial3d<MToonMaterial>, &VrmMaterialIndex),
+        Added<VrmMaterialBaseValues>,
+    >,
+    registries: Query<&VrmcMaterialRegistry>,
+    parents: Query<&ChildOf>,
+) {
+    for (entity, _, index) in &finalized {
+        let name = gltf_material_name(&registries, &parents, entity, index.0);
+        roles.record(index.0, &name, true, None);
+    }
+}
+
+/// The glTF material name recorded for one finalized material entity.
+fn gltf_material_name(
+    registries: &Query<&VrmcMaterialRegistry>,
+    parents: &Query<&ChildOf>,
+    entity: Entity,
+    index: usize,
+) -> String {
+    let root = parents.root_ancestor(entity);
+    registries
+        .get(root)
+        .ok()
+        .and_then(|registry| registry.names.get(&index).cloned())
+        .unwrap_or_default()
+}
+
+/// Releases the captured materials and roles when the active avatar leaves the
+/// ready state (unload, replacement or failed load).
 pub fn clear_look_materials_on_unload(
     lifecycle: Res<AvatarLifecycle>,
     mut bases: ResMut<StandardLookBases>,
+    mut roles: ResMut<AvatarMaterialRoles>,
 ) {
     if lifecycle.is_changed() && lifecycle.state() != AvatarLifecycleState::Ready {
         bases.clear();
+        roles.clear();
     }
 }
 
@@ -208,8 +513,12 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Assets<StandardMaterial>>()
             .init_resource::<StandardLookBases>()
+            .init_resource::<AvatarMaterialRoles>()
             .init_resource::<AvatarLifecycle>()
-            .add_systems(Update, (initialize_look_materials, clear_look_materials_on_unload));
+            .add_systems(
+                Update,
+                (initialize_look_materials, clear_look_materials_on_unload),
+            );
         app
     }
 
@@ -302,7 +611,9 @@ mod tests {
             reflectance: 0.35,
             clearcoat: 0.25,
             clearcoat_perceptual_roughness: 0.45,
-            metallic: 0.7,
+            // Not metallic: an unnamed metallic material would infer the Metal
+            // role, which keeps the authored surface untouched.
+            metallic: 0.0,
             alpha_mode: AlphaMode::Blend,
             double_sided: true,
             unlit: false,
@@ -314,6 +625,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Assets<StandardMaterial>>()
             .init_resource::<StandardLookBases>()
+            .init_resource::<AvatarMaterialRoles>()
             .init_resource::<AvatarLookSettings>()
             .add_systems(
                 Update,
@@ -321,15 +633,22 @@ mod tests {
             );
         let handle = add_material(&mut app, standard_material());
         let base = VrmMaterialBaseValues::from_standard(
-            app.world().resource::<Assets<StandardMaterial>>().get(&handle).unwrap(),
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap(),
         );
-        app.world_mut().spawn((MeshMaterial3d(handle.clone()), base));
+        app.world_mut()
+            .spawn((MeshMaterial3d(handle.clone()), base, VrmMaterialIndex(0)));
         (app, handle)
     }
 
     fn owned_values(app: &App, handle: &Handle<StandardMaterial>) -> StandardLookBase {
         capture_standard_look_base(
-            app.world().resource::<Assets<StandardMaterial>>().get(handle).unwrap(),
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(handle)
+                .unwrap(),
         )
     }
 
@@ -378,7 +697,10 @@ mod tests {
             strength: 1.0,
         };
         app.update();
-        assert_eq!(owned_values(&app, &handle), capture_standard_look_base(&before));
+        assert_eq!(
+            owned_values(&app, &handle),
+            capture_standard_look_base(&before)
+        );
     }
 
     #[test]
@@ -451,6 +773,7 @@ mod tests {
         app.init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<MToonMaterial>>()
             .init_resource::<StandardLookBases>()
+            .init_resource::<AvatarMaterialRoles>()
             .init_resource::<AvatarLookSettings>()
             .add_systems(
                 Update,
@@ -460,10 +783,10 @@ mod tests {
             .world_mut()
             .resource_mut::<Assets<MToonMaterial>>()
             .add(MToonMaterial::default());
-        app.world_mut()
-            .spawn((MeshMaterial3d(mtoon), VrmMaterialBaseValues::from_mtoon(
-                &MToonMaterial::default(),
-            )));
+        app.world_mut().spawn((
+            MeshMaterial3d(mtoon),
+            VrmMaterialBaseValues::from_mtoon(&MToonMaterial::default()),
+        ));
         app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
             enabled: true,
             strength: 1.0,
@@ -504,11 +827,14 @@ mod tests {
             },
         );
         let base = VrmMaterialBaseValues::from_standard(
-            app.world().resource::<Assets<StandardMaterial>>().get(&handle).unwrap(),
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap(),
         );
         let entity = app
             .world_mut()
-            .spawn((MeshMaterial3d(handle.clone()), base))
+            .spawn((MeshMaterial3d(handle.clone()), base, VrmMaterialIndex(0)))
             .id();
 
         app.update();
@@ -547,11 +873,17 @@ mod tests {
         let mut app = test_app();
         let handle = add_material(&mut app, StandardMaterial::default());
         let component = VrmMaterialBaseValues::from_standard(
-            app.world().resource::<Assets<StandardMaterial>>().get(&handle).unwrap(),
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap(),
         );
         for _ in 0..3 {
-            app.world_mut()
-                .spawn((MeshMaterial3d(handle.clone()), component));
+            app.world_mut().spawn((
+                MeshMaterial3d(handle.clone()),
+                component,
+                VrmMaterialIndex(0),
+            ));
         }
 
         app.update();
@@ -576,10 +908,13 @@ mod tests {
         let mut app = test_app();
         let handle = add_material(&mut app, StandardMaterial::default());
         let component = VrmMaterialBaseValues::from_standard(
-            app.world().resource::<Assets<StandardMaterial>>().get(&handle).unwrap(),
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap(),
         );
         app.world_mut()
-            .spawn((MeshMaterial3d(handle), component));
+            .spawn((MeshMaterial3d(handle), component, VrmMaterialIndex(0)));
         app.update();
         assert_eq!(app.world().resource::<StandardLookBases>().len(), 1);
 
@@ -591,5 +926,269 @@ mod tests {
         app.update();
 
         assert!(app.world().resource::<StandardLookBases>().is_empty());
+    }
+
+    #[test]
+    fn role_names_resolve_to_distinct_roles() {
+        for (name, expected) in [
+            ("Face", MaterialRole::Face),
+            ("face_01", MaterialRole::Face),
+            ("顔", MaterialRole::Face),
+            ("Skin", MaterialRole::Skin),
+            ("body", MaterialRole::Skin),
+            ("肌", MaterialRole::Skin),
+            ("Hair_Front", MaterialRole::Hair),
+            ("髪", MaterialRole::Hair),
+            ("Eye_L", MaterialRole::Eye),
+            ("eyewhite", MaterialRole::Eye),
+            ("瞳", MaterialRole::Eye),
+            ("Fabric", MaterialRole::Fabric),
+            ("cloth_01", MaterialRole::Fabric),
+            ("服", MaterialRole::Fabric),
+            ("Metal", MaterialRole::Metal),
+            ("金属", MaterialRole::Metal),
+            ("UnknownMaterial", MaterialRole::General),
+            ("衣装_01", MaterialRole::General),
+        ] {
+            assert_eq!(
+                infer_material_role(name, false, None),
+                expected,
+                "name {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_is_skin_even_when_face_like_words_follow() {
+        assert_eq!(
+            infer_material_role("body_face", false, None),
+            MaterialRole::Skin
+        );
+        // A face material is never mistaken for the body skin.
+        assert_eq!(infer_material_role("Face", false, None), MaterialRole::Face);
+    }
+
+    #[test]
+    fn the_metallic_hint_applies_only_to_true_standard_materials() {
+        assert_eq!(
+            infer_material_role("UnknownMaterial", false, Some(0.8)),
+            MaterialRole::Metal
+        );
+        assert_eq!(
+            infer_material_role("UnknownMaterial", false, Some(0.5)),
+            MaterialRole::Metal
+        );
+        // Below the threshold, or MToon's glTF-compatible PBR values, the hint
+        // never fires.
+        assert_eq!(
+            infer_material_role("UnknownMaterial", false, Some(0.49)),
+            MaterialRole::General
+        );
+        assert_eq!(
+            infer_material_role("UnknownMaterial", true, Some(0.8)),
+            MaterialRole::General
+        );
+        // A named material keeps its name role over the metallic hint.
+        assert_eq!(
+            infer_material_role("Hair", false, Some(0.9)),
+            MaterialRole::Hair
+        );
+    }
+
+    #[test]
+    fn a_user_selection_wins_and_auto_keeps_the_inference() {
+        assert_eq!(
+            resolve_material_role(MaterialRole::Skin, None),
+            MaterialRole::Skin
+        );
+        assert_eq!(
+            resolve_material_role(MaterialRole::Skin, Some(MaterialRole::Face)),
+            MaterialRole::Face
+        );
+    }
+
+    #[test]
+    fn standard_role_params_differ_per_role_and_keep_the_author_fields() {
+        let original = StandardLookBase {
+            perceptual_roughness: 0.5,
+            reflectance: 0.3,
+            clearcoat: 0.2,
+            clearcoat_perceptual_roughness: 0.4,
+        };
+        let on = RichLookSettings {
+            enabled: true,
+            strength: 1.0,
+        };
+        let general = resolve_standard_role_params(original, on, MaterialRole::General, false);
+        assert!((general.perceptual_roughness - 0.475).abs() < 1e-6);
+        let face = resolve_standard_role_params(original, on, MaterialRole::Face, false);
+        assert!((face.perceptual_roughness - 0.46).abs() < 1e-6);
+        let skin = resolve_standard_role_params(original, on, MaterialRole::Skin, false);
+        assert!((skin.perceptual_roughness - 0.425).abs() < 1e-6);
+        let hair = resolve_standard_role_params(original, on, MaterialRole::Hair, false);
+        assert!((hair.perceptual_roughness - 0.375).abs() < 1e-6);
+        for role in [MaterialRole::Fabric, MaterialRole::Metal, MaterialRole::Eye] {
+            assert_eq!(
+                resolve_standard_role_params(original, on, role, false),
+                original,
+                "role {role:?} keeps the authored surface"
+            );
+        }
+        for role in [
+            MaterialRole::General,
+            MaterialRole::Face,
+            MaterialRole::Skin,
+            MaterialRole::Hair,
+            MaterialRole::Fabric,
+            MaterialRole::Metal,
+            MaterialRole::Eye,
+        ] {
+            let resolved = resolve_standard_role_params(original, on, role, false);
+            assert_eq!(resolved.reflectance, original.reflectance);
+            assert_eq!(resolved.clearcoat, original.clearcoat);
+            assert_eq!(
+                resolved.clearcoat_perceptual_roughness,
+                original.clearcoat_perceptual_roughness
+            );
+            assert_eq!(
+                resolve_standard_role_params(original, on, role, true),
+                original,
+                "unlit role {role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn role_overrides_replace_and_clear_by_index() {
+        let mut roles = AvatarMaterialRoles::default();
+        roles.record(0, "Face", true, None);
+        roles.record(1, "body", true, None);
+        assert_eq!(roles.role(0), MaterialRole::Face);
+        assert_eq!(roles.role(1), MaterialRole::Skin);
+        roles.replace_overrides(
+            [
+                MaterialRoleOverride {
+                    material_index: 0,
+                    selected: Some(MaterialRole::Hair),
+                },
+                MaterialRoleOverride {
+                    material_index: 1,
+                    selected: None,
+                },
+            ]
+            .into_iter(),
+        );
+        assert_eq!(roles.role(0), MaterialRole::Hair);
+        assert_eq!(roles.role(1), MaterialRole::Skin);
+        assert_eq!(roles.name(0), Some("Face"));
+        assert_eq!(
+            roles.entries(),
+            vec![(0, "Face", Some(MaterialRole::Hair)), (1, "body", None),]
+        );
+        roles.clear();
+        assert_eq!(roles.role(0), MaterialRole::General);
+        assert!(roles.entries().is_empty());
+    }
+
+    #[test]
+    fn override_messages_replace_the_resource_selections() {
+        let mut app = App::new();
+        app.init_resource::<AvatarMaterialRoles>()
+            .add_message::<MaterialRoleOverridesChanged>()
+            .add_systems(Update, apply_material_role_overrides);
+        app.world_mut()
+            .resource_mut::<Messages<MaterialRoleOverridesChanged>>()
+            .write(MaterialRoleOverridesChanged(vec![MaterialRoleOverride {
+                material_index: 2,
+                selected: Some(MaterialRole::Eye),
+            }]));
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(2),
+            MaterialRole::Eye
+        );
+    }
+
+    #[test]
+    fn mtoon_roles_are_captured_without_the_metallic_hint() {
+        let mut app = App::new();
+        app.init_resource::<Assets<MToonMaterial>>()
+            .init_resource::<AvatarMaterialRoles>()
+            .add_systems(Update, initialize_mtoon_look_materials);
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<MToonMaterial>>()
+            .add(MToonMaterial::default());
+        let root = app
+            .world_mut()
+            .spawn(VrmcMaterialRegistry {
+                names: HashMap::from([(0, "Face".to_string())]),
+                ..default()
+            })
+            .id();
+        let entity = app
+            .world_mut()
+            .spawn((
+                MeshMaterial3d(handle),
+                VrmMaterialBaseValues::from_mtoon(&MToonMaterial::default()),
+                VrmMaterialIndex(0),
+                ChildOf(root),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Face
+        );
+        app.world_mut().despawn(entity);
+    }
+
+    #[test]
+    fn a_material_role_override_switches_the_applied_standard_preset() {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<StandardLookBases>()
+            .init_resource::<AvatarMaterialRoles>()
+            .init_resource::<AvatarLookSettings>()
+            .add_message::<MaterialRoleOverridesChanged>()
+            .add_systems(
+                Update,
+                (
+                    initialize_look_materials,
+                    apply_material_role_overrides,
+                    apply_standard_portrait_settings,
+                )
+                    .chain(),
+            );
+        let handle = add_material(
+            &mut app,
+            StandardMaterial {
+                perceptual_roughness: 0.5,
+                ..default()
+            },
+        );
+        let base = VrmMaterialBaseValues::from_standard(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap(),
+        );
+        app.world_mut()
+            .spawn((MeshMaterial3d(handle.clone()), base, VrmMaterialIndex(0)));
+        app.world_mut()
+            .resource_mut::<Messages<MaterialRoleOverridesChanged>>()
+            .write(MaterialRoleOverridesChanged(vec![MaterialRoleOverride {
+                material_index: 0,
+                selected: Some(MaterialRole::Hair),
+            }]));
+        app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
+            enabled: true,
+            strength: 1.0,
+        };
+        app.update();
+        assert!(
+            (owned_values(&app, &handle).perceptual_roughness - 0.375).abs() < 1e-6,
+            "the Hair preset applies through the runtime override"
+        );
     }
 }

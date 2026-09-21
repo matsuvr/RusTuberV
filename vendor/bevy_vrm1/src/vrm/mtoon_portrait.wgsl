@@ -154,3 +154,21 @@ fn compose_rich_mtoon(
     }
     return vec4<f32>(mix(native.rgb, rich_rgb, strength), native.a);
 }
+
+// The Face-role diffuse lighting normal: the mesh normal at `amount == 0` and,
+// above zero, slightly steered toward the head's world forward so the face's
+// shading reads as one lit plane without flattening the whole head.
+//
+// The maximum blend of 0.25 at amount 1 is an art-tuning starting point, not a
+// guaranteed optimum. This function is pure: it only reads its arguments and
+// mirrors `vtuber_avatar`'s `face_lighting_normal` exactly.
+fn portrait_face_normal(
+    mesh_normal: vec3<f32>,
+    head_forward: vec3<f32>,
+    amount: f32,
+) -> vec3<f32> {
+    if (amount <= 0.0) {
+        return mesh_normal;
+    }
+    return normalize(mix(mesh_normal, head_forward, 0.25 * amount));
+}

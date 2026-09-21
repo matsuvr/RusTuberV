@@ -211,11 +211,17 @@ impl Plugin for UiShellPlugin {
         .add_systems(
             Update,
             (
-                process_ui_actions_system,
+                // Role-override messages written by the action processing must
+                // reach the avatar side in the same frame.
+                process_ui_actions_system
+                    .before(vtuber_avatar::look::apply_material_role_overrides),
                 apply_arm_pose_profile_changes,
                 sync_avatar_lifecycle_system
                     .after(vtuber_avatar::unload::despawn_unloading_avatar)
                     .before(vtuber_avatar::look::apply_look_settings_changes),
+                crate::orchestrator::sync_look_material_view_model
+                    .after(process_ui_actions_system)
+                    .after(vtuber_avatar::look::apply_material_role_overrides),
             )
                 .chain(),
         )

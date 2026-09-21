@@ -81,22 +81,32 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<crate::tracking_profile::GlobalBodyTrackingProfile>()
             .init_resource::<crate::look::AvatarLookSettings>()
             .init_resource::<crate::look::StandardLookBases>()
+            .init_resource::<crate::look::AvatarMaterialRoles>()
             .init_resource::<crate::look::StudioLookState>()
             .init_resource::<crate::look::PortraitFinishState>()
             .add_message::<crate::look::LookSettingsChanged>()
+            .add_message::<crate::look::MaterialRoleOverridesChanged>()
             .add_systems(
                 Update,
                 (
                     crate::look::apply_look_settings_changes,
+                    crate::look::apply_material_role_overrides,
                     crate::look::sync_portrait_finish
                         .after(crate::look::apply_look_settings_changes),
                     crate::look::initialize_look_materials,
+                    crate::look::initialize_mtoon_look_materials,
                     crate::look::clear_look_materials_on_unload.after(despawn_unloading_avatar),
                     crate::look::setup_studio_lighting,
                     crate::look::apply_environment_to_avatar_cameras,
+                ),
+            )
+            .add_systems(
+                PostUpdate,
+                (
                     crate::look::apply_standard_portrait_settings,
                     crate::look::apply_mtoon_portrait_settings,
-                ),
+                )
+                    .after(TransformSystems::Propagate),
             )
             .add_message::<LoadAvatarRequest>()
             .add_message::<LoadAvatarResult>()

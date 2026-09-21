@@ -9,11 +9,13 @@
 
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{
-    MToonMaterial, MToonPortraitParams, MToonShadingMode, VrmMaterialBaseValues,
+    MToonMaterial, MToonPortraitParams, MToonShadingMode, VrmMaterialBaseValues, VrmMaterialIndex,
 };
 
+use crate::binding::AvatarBinding;
 use crate::look::AvatarLookSettings;
-use crate::look::preset::{MTOON_PORTRAIT_PRESET, RichLookSettings, effective_look_strength};
+use crate::look::material::{AvatarMaterialRoles, MaterialRole};
+use crate::look::preset::{RichLookSettings, resolve_mtoon_role_params};
 
 /// Resolves the MToon display path for the current look settings.
 ///
@@ -36,21 +38,51 @@ pub fn resolve_mtoon_shading_mode(settings: RichLookSettings) -> MToonShadingMod
 /// user can change and is applied once, in the shader.
 #[must_use]
 pub fn resolve_mtoon_portrait(settings: RichLookSettings) -> MToonPortraitParams {
-    MToonPortraitParams {
-        strength: effective_look_strength(settings),
-        ..MTOON_PORTRAIT_PRESET
-    }
+    resolve_mtoon_role_params(settings, MaterialRole::General)
 }
 
-/// Mirrors the resolved portrait values onto the avatar's MToon materials.
+/// The world unit vector of the rendered head's face front.
+///
+/// The head bone's own `+Z` axis is the canonical front shared by the
+/// normalization and the LookAt convention; reading the rendered
+/// [`GlobalTransform`] keeps the steering on the same head pose the frame is
+/// drawn with.
+#[must_use]
+pub fn head_world_forward(head: &GlobalTransform) -> Vec3 {
+    head.rotation() * Vec3::Z
+}
+
+/// Mirrors the resolved role values onto the avatar's MToon materials.
+///
+/// Each material receives the gains of its effective role. `Face` materials
+/// additionally carry the rendered head's forward and a steering amount that
+/// scales with the look strength, so at strength 0 the authored normal is kept
+/// exactly.
+#[allow(clippy::type_complexity)]
 pub fn apply_mtoon_portrait_settings(
     settings: Res<AvatarLookSettings>,
+    roles: Res<AvatarMaterialRoles>,
+    lifecycle: Res<crate::lifecycle::AvatarLifecycle>,
+    bindings: Query<&AvatarBinding>,
+    transforms: Query<&GlobalTransform>,
     mut materials: ResMut<Assets<MToonMaterial>>,
-    meshes: Query<&MeshMaterial3d<MToonMaterial>, With<VrmMaterialBaseValues>>,
+    meshes: Query<(&MeshMaterial3d<MToonMaterial>, &VrmMaterialIndex), With<VrmMaterialBaseValues>>,
 ) {
     let mode = resolve_mtoon_shading_mode(settings.0);
-    let params = resolve_mtoon_portrait(settings.0);
-    for handle in &meshes {
+    let face_forward = lifecycle
+        .active_root()
+        .and_then(|root| bindings.get(root).ok())
+        .and_then(|binding| transforms.get(binding.head).ok())
+        .map(head_world_forward);
+    for (handle, index) in &meshes {
+        let role = roles.role(index.0);
+        let mut params = resolve_mtoon_role_params(settings.0, role);
+        match face_forward {
+            Some(forward) => params.face_forward = forward,
+            // Without the rendered head pose there is no face forward to steer
+            // toward, so the authored normal is kept.
+            None => params.face_normal_amount = 0.0,
+        }
         let Some(mut material) = materials.get_mut(handle.id()) else {
             continue;
         };
@@ -66,11 +98,16 @@ pub fn apply_mtoon_portrait_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::AvatarLifecycle;
+    use crate::look::MaterialRoleOverride;
+    use crate::look::preset::{MTOON_PORTRAIT_PRESET, face_lighting_normal};
 
     fn app_with_material() -> (App, Handle<MToonMaterial>) {
         let mut app = App::new();
         app.init_resource::<Assets<MToonMaterial>>()
             .init_resource::<AvatarLookSettings>()
+            .init_resource::<AvatarMaterialRoles>()
+            .init_resource::<AvatarLifecycle>()
             .add_systems(Update, apply_mtoon_portrait_settings);
         let handle = app
             .world_mut()
@@ -79,6 +116,7 @@ mod tests {
         app.world_mut().spawn((
             MeshMaterial3d(handle.clone()),
             VrmMaterialBaseValues::from_mtoon(&MToonMaterial::default()),
+            VrmMaterialIndex(0),
         ));
         (app, handle)
     }
@@ -198,5 +236,107 @@ mod tests {
         );
         assert_eq!(portrait(&app, &handle).strength, 0.0);
         assert_eq!(shading_mode(&app, &handle), MToonShadingMode::Native);
+    }
+
+    #[test]
+    fn role_gains_differ_and_face_carries_the_normal_amount() {
+        let on = RichLookSettings {
+            enabled: true,
+            strength: 1.0,
+        };
+        let general = resolve_mtoon_role_params(on, MaterialRole::General);
+        assert_eq!(general.specular_gain, MTOON_PORTRAIT_PRESET.specular_gain);
+        assert_eq!(general.face_normal_amount, 0.0);
+        let face = resolve_mtoon_role_params(on, MaterialRole::Face);
+        assert!(face.specular_gain < general.specular_gain);
+        assert_eq!(face.face_normal_amount, 1.0);
+        let skin = resolve_mtoon_role_params(on, MaterialRole::Skin);
+        assert!(skin.specular_gain < face.specular_gain);
+        let hair = resolve_mtoon_role_params(on, MaterialRole::Hair);
+        assert!(hair.specular_gain > general.specular_gain);
+        for role in [MaterialRole::Fabric, MaterialRole::Metal, MaterialRole::Eye] {
+            assert_eq!(
+                resolve_mtoon_role_params(on, role).face_normal_amount,
+                0.0,
+                "role {role:?} never steers the diffuse normal"
+            );
+        }
+        let zero = resolve_mtoon_role_params(
+            RichLookSettings {
+                enabled: true,
+                strength: 0.0,
+            },
+            MaterialRole::Face,
+        );
+        assert_eq!(zero.strength, 0.0);
+        assert_eq!(zero.face_normal_amount, 0.0);
+    }
+
+    #[test]
+    fn face_lighting_normal_matches_the_wgsl_formula() {
+        let mesh = Vec3::new(0.0, 0.0, 1.0).normalize();
+        let forward = Vec3::X;
+        assert_eq!(
+            face_lighting_normal(mesh, forward, 0.0),
+            mesh,
+            "zero amount keeps the mesh normal exactly"
+        );
+        let full = face_lighting_normal(mesh, forward, 1.0);
+        let expected = mesh.lerp(forward, 0.25).normalize();
+        assert!(full.distance(expected) < 1e-6);
+        let half = face_lighting_normal(mesh, forward, 0.5);
+        assert!(half.distance(mesh.lerp(forward, 0.125).normalize()) < 1e-6);
+        // The steering stays strictly between the mesh normal and the forward.
+        assert!(full.dot(mesh) < 1.0 && full.dot(forward) > 0.0);
+    }
+
+    #[test]
+    fn the_head_pose_drives_the_face_normal_and_the_strength_gates_it() {
+        let (mut app, handle) = app_with_material();
+        app.world_mut()
+            .resource_mut::<AvatarMaterialRoles>()
+            .replace_overrides(
+                [MaterialRoleOverride {
+                    material_index: 0,
+                    selected: Some(MaterialRole::Face),
+                }]
+                .into_iter(),
+            );
+        let head = app
+            .world_mut()
+            .spawn(GlobalTransform::from_rotation(Quat::from_rotation_y(
+                std::f32::consts::FRAC_PI_2,
+            )))
+            .id();
+        let root = app.world_mut().spawn_empty().id();
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .unwrap();
+        app.world_mut()
+            .entity_mut(root)
+            .insert(AvatarBinding::head_only(root, head, generation));
+        app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
+            enabled: true,
+            strength: 1.0,
+        };
+        app.update();
+        let resolved = portrait(&app, &handle);
+        assert_eq!(resolved.face_normal_amount, 1.0);
+        let expected = head_world_forward(app.world().get::<GlobalTransform>(head).unwrap());
+        assert!(resolved.face_forward.distance(expected) < 1e-6);
+
+        app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
+            enabled: false,
+            strength: 1.0,
+        };
+        app.update();
+        let resolved = portrait(&app, &handle);
+        assert_eq!(resolved.face_normal_amount, 0.0);
+        assert_eq!(resolved.strength, 0.0);
     }
 }
