@@ -94,15 +94,19 @@ fn fragment(
         discard;
     }
 
+    // The Rich terms are a lit-pass layer: the outline pass keeps the author's
+    // own outline result, mixed from the fixed Native lit color, so the added
+    // portrait specular/IBL/rim never flows into the line color and the line
+    // is the same as the Native display's at any strength.
+#ifdef OUTLINE_PASS
+    let outline_color = material.outline_color.rgb * mix(vec3(1.), native.rgb, material.outline_lighting_mix_factor);
+    var color = vec4(outline_color, native_input.lit_color.a);
+#else
     let rich_pbr_input = make_rich_pbr_input(vertex_input, is_front);
     let rich_input = make_mtoon_input(vertex_input, rich_pbr_input);
     let rich_rgb = apply_rich_mtoon_lighting(rich_input, make_portrait_params());
 
     var color = compose_rich_mtoon(native, rich_rgb, material.portrait_strength);
-
-#ifdef OUTLINE_PASS
-    let outline_color = material.outline_color.rgb * mix(vec3(1.), color.rgb, material.outline_lighting_mix_factor);
-    color = vec4(outline_color, native_input.lit_color.a);
 #endif
 
     var out: FragmentOutput;
@@ -183,10 +187,14 @@ fn apply_rich_mtoon_lighting(in: MToonInput, params: MToonPortraitUniform) -> ve
     // The added portrait terms carry their own exposure so the terms and the
     // scene light stay on the same scale.
     let base = view.exposure * (lights_result.direct + indirect + author_rim) + emissive;
+    // The environment reflection takes the *perceptual* roughness: Bevy's
+    // prefiltered mips and its environment BRDF (`F_AB`) are both keyed by it.
+    // The added direct specular keeps the physical roughness its BRDF
+    // functions (`D_GGX`, `V_SmithGGXCorrelated`) require.
     let environment_specular = portrait_environment_specular(
         in.world_normal,
         in.world_view_dir,
-        perceptualRoughnessToRoughness(params.perceptual_roughness),
+        params.perceptual_roughness,
         in.world_position.xyz,
     );
     let extra = params.specular_gain * lights_result.specular

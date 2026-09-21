@@ -228,6 +228,117 @@ other than the RTX 4090 above. The #77 final acceptance (head turn, camera
 orbit, model size differences, moving bangs/hand shadows, first-version device
 tuning) remains with #77 and is not claimed here.
 
+## #72 measured: environment reflection and the outline line (Windows/Vulkan/RTX 4090)
+
+The 2026-09-20 review found two gaps in the merged portrait work, and both are
+closed here:
+
+1. `mtoon_portrait.wgsl::portrait_environment_sample` returned
+   `vec3<f32>(0.0)` unconditionally, so the added MToon environment reflection
+   never sampled anything. It now samples the view's prefiltered specular
+   cubemap (`specular_environment_maps` binding array or the single
+   `specular_environment_map`) through `environment_map_sampler` at the
+   roughness-selected mip, guarded by the same `ENVIRONMENT_MAP`/`MULTIPLE_LIGHT_PROBES_IN_ARRAY`
+   shader defs Bevy's own PBR shader uses; without a view environment map the
+   term stays zero. The sample reuses Bevy's split-sum BRDF (`F_AB`) and the
+   view probe intensity; no environment diffuse is added (the MToon GI reads
+   only `lights.ambient_color`, so attaching an environment map cannot
+   double-add diffuse).
+2. The Rich `OUTLINE_PASS` composed the portrait terms into the color the
+   author's `outline_lighting_mix_factor` mixes into the line. It now keeps
+   the author's own outline result: the line color is mixed from the fixed
+   Native lit color, so the added specular/IBL/rim never enters the line and
+   the line is identical to the Native display's at any strength.
+
+The environment term consumes the *perceptual* roughness everywhere, matching
+Bevy 0.19's own contracts: the GPU prefilter keys output mip `k` by the
+perceptual roughness `k/(mips-1)` (`environment_filter.wgsl` converts
+`constants.roughness` internally), Bevy's own sampler indexes
+`perceptual_roughness * max_mip` (`environment_map.wgsl`), and `F_AB`
+takes the perceptual roughness (`pbr_lighting.wgsl`). The term forwards
+`params.perceptual_roughness` unchanged to both the mip index and `F_AB`;
+the added direct specular keeps the physical roughness its BRDF functions
+(`D_GGX`, `V_SmithGGXCorrelated`) require. An earlier draft of this section
+described the mip mapping as physical roughness; that was a misreading of
+`generate.rs`'s variable name and the review caught it.
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-portrait` (extension): with the
+added direct specular and rim at zero and only the generated studio cubemap
+attached (no directional light), the MToon plane reads `[0, 0, 0, 255]` at
+environment gain 0 and `[10, 9, 9, 255]` at gain 1 (with the pre-fix squared
+roughness the gain-one frame read `[12, 10, 10, 255]`; the perceptual
+roughness selects a blurrier studio mip). Before this change the gain-one
+frame was `[0, 0, 0, 255]` entirely (the sample was hard zero), so the
+fixture measures the gap it fixes.
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-environment-roughness` (new,
+the R1 roughness regression): the scene attaches a plain, unfiltered cubemap
+whose own mip chain carries one flat linear color per mip
+(`[1.0, 0.3, 1.0, 0.6, 0.35]`, laid out mip-major through
+`Image::data_order`), so the sampled radiance is exactly the selected mip's
+color and the mip index the roughness chose is readable from the pixel —
+independent of Bevy's prefilter. The environment BRDF factor is Bevy
+0.19's `F_AB` polynomial, reimplemented verbatim in the fixture
+(`dfg_lut` is off), and the sphere's center pixel has `NdotV = 1` exactly,
+so the expected pixel ratio `L(0.5)/L(0.25)` is independent of the MToon
+shader and of the readback's exposure scale:
+
+| contract | expected ratio | measured |
+|---|---:|---:|
+| perceptual (0.5 → mip 2, 0.25 → mip 1, `F_AB` at 0.5/0.25) | `2.679` | `2.646` (PASS, within quantization) |
+| squared input (0.5 → mip 1, 0.25 → the 75/25 mip-0/mip-1 blend, `F_AB` at 0.25/0.0625) | `0.417` | — |
+
+With the pre-fix squared input the same probe measures `0.319` and fails, so
+it detects the wrong roughness input rather than only a nonzero reflection
+or a generic change with roughness. The `data_order` note: the mip chain is
+built mip-major and `Image::data_order` must be `TextureDataOrder::MipMajor`
+(bevy's default is the layer-major DDS layout, which misread the ladder and
+made every mip carry the same radiance).
+
+`cargo run -p xtask -j 1 -- rich-look mtoon-outline-mix` (new): a sphere with
+an outline whose `outline_lighting_mix_factor` is 1.0 and a gray outline
+color. The fixture masks the 46 outline-only pixels outside the silhouette
+(opaque only in the outlined render) and requires them byte-identical between
+the Native display and Rich at strength 1 with the nominal gains:
+`line_differing_pixels=0`, while the lit body differs in 468 pixels, so the
+added terms are active in the same comparison. With the pre-change Rich
+outline color (composed including the portrait terms) the same fixture fails:
+46/46 outline pixels differ (max channel difference 247), so it measures the
+leak it fixes.
+
+Re-run after both fixes (same build, device and cases as the sections above):
+
+| check | result |
+|---|---|
+| `mtoon-reference` (reference vs Native, Native vs Rich(0)) | 0 differing pixels on all four scenes; Rich(1) values unchanged (468/452/409/1058) |
+| `mtoon-rich-zero` (Native vs Rich(0)) | 0 differing pixels on all three scenes; Rich(1) values unchanged |
+| `mtoon-blend-depth`, `mtoon-cutout-shadow` | PASS, same numbers as above (outline/alpha/prepass regressions none) |
+| `mtoon-portrait` single light | `native=[255,255,255,255]`, `rich_strength_zero=[255,255,255,255]`, `rich=[253,253,253,255]`, `rich_rotated_light=[244,244,244,255]` |
+| `vrm-render inore-vrm1.vrm` | off `72.21`, on `61.11`, OFF restore `0.001`, ON repeat `0.000`, strength 0 `0.001`, opaque `19848/19848` |
+| `vrm-render tsukuyomi-chan.vrm` | off `39.01`, on `31.27`, OFF restore `0.004`, ON repeat `0.003`, strength 0 `0.004`, opaque `10455/10455` |
+
+The ON means moved from the earlier `61.07`/`31.25` by less than a tenth of a
+mean byte: the outline-line fix and the perceptual-roughness mip/BRDF input
+are both the fix itself. OFF, OFF-restore and strength-0 are unchanged within
+the same `<= 0.004` bound as before, so the Rich-zero/Native identity still
+holds on the real models.
+
+Not measured in this change: the key-light shadow through-check for the added
+direct specular as a separate GPU scene (the visibility multiplication that
+gates it is the same `fetch_directional_shadow` sample the Native direct term
+reuses in `mtoon_rich_fragment.wgsl::calc_rich_light_visibility`), real NDI
+send/receive, macOS, and any GPU other than the RTX 4090 above. The initial
+value tuning on real models remains with #77.
+
+Local validation for this change: `cargo test --workspace -j 4` and
+`cargo clippy --workspace --all-targets -j 4 -- -D warnings` PASS; the 16 GPU
+cases (`mtoon-outline-mix` and `mtoon-environment-roughness` are new) re-ran
+PASS on the Windows/Vulkan/RTX 4090 device, plus the two `vrm-render` models
+above. The three new checks were verified against the pre-fix behavior they
+replace (the hard-zero environment sample, the composed Rich outline color,
+and the squared-input roughness) and fail on it, so they measure the gaps
+they close.
+
 ### Other reused fixtures
 
 `mtoon-normal` runs on the Rich display (normal texture, scale and TBN wiring
@@ -537,7 +648,7 @@ restart.
 
 | Issue | State |
 |---|---|
-| #72 MToon glossy/environment/extra rim | Implemented. `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl` and the view environment specular are in place; verified by `mtoon-portrait` and the per-model table above. After #69 the terms are composed by `compose_rich_mtoon` on the Rich display path. |
+| #72 MToon glossy/environment/extra rim | Implemented and measured (see the "#72 measured" section): `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl`, the Rich `OUTLINE_PASS` keeps the author's line, the added environment reflection actually samples the view's prefiltered specular cubemap, and the term consumes the perceptual roughness for both the mip index and `F_AB`; verified by `mtoon-portrait`, `mtoon-outline-mix`, `mtoon-environment-roughness` and the re-run identity fixtures. The 2026-09-20 review's gaps (the hard-zero environment sample, the added gloss flowing into the outline line, and the squared roughness input) are fixed and measured. |
 | #74 HDR finish and transparency | Implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table exist in `crates/vtuber-avatar/src/look/finish.rs` and `finish.wgsl`; verified by the #74 measurements above. |
 | #75 one-click UI, 4 languages, per-model save | Partially implemented: the switch and the strength slider exist in the settings screen in four languages (see above). Persistence, per-model settings and restore on model switch are not implemented. |
 | #76 material roles | Not implemented. `MaterialRole`, `infer_material_role`, `resolve_material_role`, the role param resolvers and `face_lighting_normal` do not exist. |
