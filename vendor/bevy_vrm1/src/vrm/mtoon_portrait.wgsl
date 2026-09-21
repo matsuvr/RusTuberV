@@ -18,6 +18,12 @@
     },
     mesh_view_bindings::light_probes,
 }
+// The view environment cubemaps are only bound while the view has an
+// environment map (`ENVIRONMENT_MAP`), so the sampling below is guarded the
+// same way and returns zero without one. The whole-module import keeps the
+// conditional bindings reachable without importing names that a define set
+// without `ENVIRONMENT_MAP` does not export.
+#import bevy_pbr::mesh_view_bindings as mtoon_env_bindings
 
 // The added direct-light specular for one light.
 //
@@ -80,7 +86,25 @@ fn portrait_environment_specular(
 }
 
 fn portrait_environment_sample(probe_index: i32, direction: vec3<f32>, mip: f32) -> vec3<f32> {
+#ifdef ENVIRONMENT_MAP
+#ifdef MULTIPLE_LIGHT_PROBES_IN_ARRAY
+    return textureSampleLevel(
+        mtoon_env_bindings::specular_environment_maps[probe_index],
+        mtoon_env_bindings::environment_map_sampler,
+        direction,
+        mip,
+    ).rgb;
+#else
+    return textureSampleLevel(
+        mtoon_env_bindings::specular_environment_map,
+        mtoon_env_bindings::environment_map_sampler,
+        direction,
+        mip,
+    ).rgb;
+#endif
+#else
     return vec3<f32>(0.0);
+#endif
 }
 
 fn portrait_quat_rotate(q: vec4<f32>, direction: vec3<f32>) -> vec3<f32> {

@@ -107,6 +107,14 @@ struct MtoonScene {
     rim_lighting: RimLighting,
     /// Whether the material draws its inverted-hull outline.
     outline: bool,
+    /// The author's outline color. `BLACK` keeps the default black line.
+    outline_color: LinearRgba,
+    /// The author's outline lighting mix; nonzero makes the line color follow
+    /// the material's lit result.
+    outline_lighting_mix: f32,
+    /// The generated studio environment intensity attached to the fixture
+    /// cameras; `None` renders without a view environment map.
+    environment: Option<f32>,
     /// The material's portrait values; strength 0 is the zero added effect.
     portrait: MToonPortraitParams,
     /// Which MToon display path the material uses.
@@ -138,6 +146,9 @@ impl MtoonScene {
             transparent_with_z_write: false,
             rim_lighting: RimLighting::default(),
             outline: false,
+            outline_color: LinearRgba::BLACK,
+            outline_lighting_mix: 0.0,
+            environment: None,
             portrait: MToonPortraitParams::default(),
             shading_mode: MToonShadingMode::Native,
             uv_animation: UVAnimation::default(),
@@ -174,6 +185,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-standard" => mtoon_standard(),
         "mtoon-reference" => mtoon_reference(),
         "mtoon-rich-zero" => mtoon_rich_zero(),
+        "mtoon-outline-mix" => mtoon_outline_mix(),
         "mtoon-blend-depth" => mtoon_blend_depth(),
         "mtoon-normal" => mtoon_normal(),
         "standard-look" => standard_look(),
@@ -186,6 +198,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-standard  the Native display is the plain authored display");
             println!("  mtoon-reference upstream reference vs Native vs Rich(0) on the GPU");
             println!("  mtoon-rich-zero Native vs Rich with zero added effect, byte-compared");
+            println!("  mtoon-outline-mix added portrait terms stay out of the outline line");
             println!("  mtoon-blend-depth Blend outline transparency and Z-write occlusion");
             println!("  standard-look   Standard/Unlit against the untouched material");
             println!("  finish-alpha    HDR finish, sRGB premultiplication and readback");
@@ -542,7 +555,38 @@ fn mtoon_portrait() -> Result<String, RichLookError> {
             "the added specular did not follow the light: fixed={rich:?} rotated={rotated:?}"
         )));
     }
-    report.push_str("checks=zero_effect_matches_native,extras_change,specular_follows_light\n");
+
+    // The environment reflection must come from the view's prefiltered
+    // specular cubemap. With the added direct specular and rim at zero, only
+    // the environment gain separates the two renders, so the difference is
+    // the real cubemap sample.
+    let environment_only = |environment_gain: f32| MtoonScene {
+        lights: Vec::new(),
+        environment: Some(300.0),
+        portrait: MToonPortraitParams {
+            strength: 1.0,
+            specular_gain: 0.0,
+            rim_gain: 0.0,
+            environment_gain,
+            ..preset
+        },
+        shading_mode: MToonShadingMode::Rich,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, light)
+    };
+    let environment_off = center_pixel(&render_environment(&environment_only(0.0))?);
+    let environment_on = center_pixel(&render_environment(&environment_only(1.0))?);
+
+    report.push_str(&format!(
+        "environment_only gain_zero={environment_off:?} gain_one={environment_on:?}\n"
+    ));
+    if luma_diff(environment_on, environment_off) <= 1 {
+        return Err(RichLookError::Failed(format!(
+            "the added environment reflection did not change the MToon material: \
+             gain_zero={environment_off:?} gain_one={environment_on:?}"
+        )));
+    }
+
+    report.push_str("checks=zero_effect_matches_native,extras_change,specular_follows_light,environment_reflects\n");
     Ok(report)
 }
 
@@ -981,6 +1025,69 @@ struct BlendDepthScene {
     strength: f32,
 }
 
+/// The author's outline color must not receive the added portrait terms.
+///
+/// The outline pass draws the inverted hull with the material's authored
+/// outline color mixed toward its lit result by `outline_lighting_mix_factor`.
+/// With a nonzero mix, a highlight that leaked into the line would brighten
+/// the ring outside the silhouette, so the fixture masks exactly those
+/// outline-only pixels and requires them to be byte-identical between the
+/// Native display and Rich with the nominal gains.
+fn mtoon_outline_mix() -> Result<String, RichLookError> {
+    let key = LightSpec {
+        direction: Vec3::NEG_Z,
+        color: Color::WHITE,
+        illuminance: 500.0,
+        shadows_enabled: true,
+    };
+    let outlined = MtoonScene {
+        mesh: MeshSpec::Sphere,
+        outline: true,
+        outline_color: LinearRgba::new(0.5, 0.5, 0.5, 1.0),
+        outline_lighting_mix: 1.0,
+        normal_map: Some([0, 128, 255, 255]),
+        ..MtoonScene::lit(Color::srgb(0.8, 0.7, 0.6), Color::srgb(0.1, 0.1, 0.15), key)
+    };
+    let without_outline = MtoonScene {
+        outline: false,
+        outline_lighting_mix: 0.0,
+        ..outlined.clone()
+    };
+
+    let native_outline = render(&outlined)?;
+    let native_body = render(&without_outline)?;
+    let outline_mask = opaque_only_in(&native_outline, &native_body);
+    let outline_pixels = outline_mask.iter().filter(|drawn| **drawn).count();
+    let rich_full = render(&outlined.clone().rich(1.0))?;
+    let (line_differing, line_max_difference) =
+        masked_pixel_difference(&native_outline, &rich_full, &outline_mask);
+    let (total_differing, _) = pixel_difference(&native_outline, &rich_full);
+
+    let mut report = format!(
+        "case=mtoon-outline-mix\n\
+         outline_only_pixels={outline_pixels}\n\
+         line_differing_pixels={line_differing} max_channel_diff={line_max_difference}\n\
+         body_differing_pixels={total_differing}\n"
+    );
+    if outline_pixels == 0 {
+        return Err(RichLookError::Failed(
+            "the outline ring was not visible outside the silhouette".into(),
+        ));
+    }
+    if line_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the added portrait terms entered the outline color in {line_differing} of {outline_pixels} outline pixels (max channel difference {line_max_difference})"
+        )));
+    }
+    if total_differing == 0 {
+        return Err(RichLookError::Failed(
+            "Rich with a positive strength did not change the lit body at all".into(),
+        ));
+    }
+    report.push_str("checks=line_free_of_added_terms,rich_positive_changes_body\n");
+    Ok(report)
+}
+
 fn render_blend_depth(spec: BlendDepthScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     let mut app = App::new();
     app.add_plugins(
@@ -1354,6 +1461,10 @@ struct EnvironmentScene {
 #[derive(Resource, Default)]
 struct EnvironmentMapHandle(Option<Handle<Image>>);
 
+/// The generated studio environment intensity for the MToon fixture cameras.
+#[derive(Resource, Clone, Copy)]
+struct FixtureEnvironment(f32);
+
 /// The attachment point: the avatar is drawn by the offscreen output camera,
 /// so the environment must reach that camera too, not only the viewport one.
 // The camera query is a small, fixed two-marker union.\r
@@ -1375,6 +1486,33 @@ fn attach_environment(
             commands.entity(entity).insert(GeneratedEnvironmentMapLight {
                 environment_map: environment_map.clone(),
                 intensity: scene.intensity,
+                ..default()
+            });
+        }
+    }
+}
+
+/// The same attachment for the MToon fixture app, which keeps the environment
+/// only while the scene asks for one.
+// The camera query is a small, fixed two-marker union.\r
+#[allow(clippy::type_complexity)]
+fn attach_fixture_environment(
+    mut commands: Commands,
+    scene: Res<FixtureEnvironment>,
+    map: Res<EnvironmentMapHandle>,
+    cameras: Query<
+        (Entity, Option<&GeneratedEnvironmentMapLight>),
+        Or<(With<AvatarViewportCamera>, With<vtuber_avatar::AvatarOutputCamera>)>,
+    >,
+) {
+    let Some(environment_map) = map.0.clone() else {
+        return;
+    };
+    for (entity, existing) in &cameras {
+        if existing.is_none() {
+            commands.entity(entity).insert(GeneratedEnvironmentMapLight {
+                environment_map: environment_map.clone(),
+                intensity: scene.0,
                 ..default()
             });
         }
@@ -1911,6 +2049,42 @@ fn black_opaque_pixel_count(pixels: &[[u8; 4]]) -> usize {
         .iter()
         .filter(|pixel| pixel[3] > 0 && pixel[0] < 24 && pixel[1] < 24 && pixel[2] < 24)
         .count()
+}
+
+/// Pixels that have coverage in the first frame and none in the second: the
+/// outline ring outside the mesh silhouette.
+fn opaque_only_in(with: &[[u8; 4]], without: &[[u8; 4]]) -> Vec<bool> {
+    with
+        .iter()
+        .zip(without)
+        .map(|(with, without)| with[3] > 0 && without[3] == 0)
+        .collect()
+}
+
+/// The number of differing pixels and the largest per-channel difference,
+/// counted over the masked pixels only.
+// The mask and the frames share the fixture's fixed output dimensions, so
+// indexing stays in bounds by construction; see the AGENTS.md panic policy.
+#[allow(clippy::indexing_slicing)]
+fn masked_pixel_difference(first: &[[u8; 4]], second: &[[u8; 4]], mask: &[bool]) -> (usize, u32) {
+    let mut differing = 0;
+    let mut max_difference = 0;
+    for (index, sampled) in mask.iter().enumerate() {
+        if !*sampled {
+            continue;
+        }
+        let left = &first[index];
+        let right = &second[index];
+        let mut difference = 0;
+        for (left, right) in left.iter().zip(right) {
+            difference = difference.max(u32::from(left.abs_diff(*right)));
+        }
+        if difference > 0 {
+            differing += 1;
+            max_difference = max_difference.max(difference);
+        }
+    }
+    (differing, max_difference)
 }
 
 /// Count the pixels on the middle scanline that are neither fully lit nor
@@ -2790,6 +2964,32 @@ fn render(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
     render_app(fixture_app(scene, false)?)
 }
 
+/// Renders a scene that carries the generated studio environment.
+///
+/// The capture starts only after Bevy's GPU prefilter has inserted the
+/// `EnvironmentMapLight`, so every compared frame includes the environment;
+/// the settle rule then applies as usual.
+fn render_environment(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
+    let mut app = fixture_app(scene, false)?;
+    let deadline = Instant::now() + MAX_WAIT;
+    while Instant::now() < deadline {
+        app.update();
+        let generated = app
+            .world_mut()
+            .query::<&EnvironmentMapLight>()
+            .iter(app.world())
+            .next()
+            .is_some();
+        if generated {
+            return settle_captured_frames(app, deadline, EmptyReadback::NotReady);
+        }
+    }
+    Err(RichLookError::NotRun(
+        "the environment prefilter did not complete; the local renderer/GPU path is unavailable"
+            .into(),
+    ))
+}
+
 /// Renders a scene whose measured image is legitimately fully transparent
 /// (the fixture asserts that the Rich display discards every fragment).
 fn render_expected_empty(scene: &MtoonScene) -> Result<Vec<[u8; 4]>, RichLookError> {
@@ -2941,6 +3141,11 @@ fn fixture_app(scene: &MtoonScene, upstream_reference: bool) -> Result<App, Rich
             );
     }
     register_output_systems(&mut app);
+    app.init_resource::<EnvironmentMapHandle>();
+    if let Some(intensity) = scene.environment {
+        app.insert_resource(FixtureEnvironment(intensity));
+        app.add_systems(Update, attach_fixture_environment);
+    }
     app.add_systems(Startup, setup_fixture_scene);
     app.add_systems(Update, (activate_output_after_setup, advance_fixture_clock));
     app.finish();
@@ -2991,9 +3196,14 @@ fn setup_fixture_scene(
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     scene: Res<FixtureScene>,
+    mut environment_map: ResMut<EnvironmentMapHandle>,
 ) {
     let scene = &scene.0;
-    for light in &scene.lights {
+    if let Some(intensity) = scene.environment
+        && intensity > 0.0
+    {
+        environment_map.0 = Some(images.add(vtuber_avatar::look::studio_environment_cubemap()));
+    }    for light in &scene.lights {
         commands.spawn((
             DirectionalLight {
                 illuminance: light.illuminance,
@@ -3103,8 +3313,8 @@ fn setup_fixture_scene(
                 OutlineWidthMode::None
             },
             width_factor: 0.04,
-            color: LinearRgba::BLACK,
-            lighting_mix_factor: 0.0,
+            color: scene.outline_color,
+            lighting_mix_factor: scene.outline_lighting_mix,
         },
         alpha_mode: scene.alpha_mode,
         transparent_with_z_write: scene.transparent_with_z_write,
