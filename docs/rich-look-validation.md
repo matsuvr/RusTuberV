@@ -355,6 +355,20 @@ shadow map.
 
 ### Standard/Unlit
 
+Issue #73 follow-up: the Standard roughness now uses `blend_look_scalar`
+between the captured original and `original * 0.95`. Previously every positive
+strength selected the full correction. For original roughness 0.5, strengths
+0 / 0.01 / 0.5 / 1 resolve to 0.5 / 0.49975 / 0.4875 / 0.475.
+The other three owned fields stay at their original values. Regression tests
+cover intermediate strengths, OFF/Unlit, and repeated strength changes through
+the production capture/apply systems without snapshot drift. Real-model
+material differences and final preset tuning remain part of #77 acceptance.
+
+Follow-up validation (2026-09-21): all 11 `look::material` unit tests and
+`cargo clippy --workspace --all-targets -j 1` passed locally. The `standard-look`
+GPU fixture was rerun and passed with the pixel counts below unchanged.
+This does not add real-model or macOS validation.
+
 `cargo run -p xtask -j 1 -- rich-look standard-look` compares the production
 `initialize_look_materials`/`apply_standard_portrait_settings` against a control
 app that has no look systems at all:
