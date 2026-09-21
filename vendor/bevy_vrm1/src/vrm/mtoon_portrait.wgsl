@@ -54,12 +54,19 @@ fn portrait_direct_specular(
 // roughness mips. The environment diffuse is intentionally not added: the
 // standard MToon GI already carries it.
 //
+// Bevy's environment prefilter keys each output mip by a *perceptual*
+// roughness (`environment_filter.wgsl` treats `constants.roughness` as
+// perceptual and converts internally), and Bevy's own sampler selects the mip
+// as `perceptual_roughness * max_mip`, so this term receives and forwards the
+// perceptual roughness unchanged. The environment BRDF (`F_AB`) has the same
+// contract.
+//
 // `world_position` is part of the term's contract, but a view environment
 // probe does not depend on the sample position.
 fn portrait_environment_specular(
     n: vec3<f32>,
     v: vec3<f32>,
-    roughness: f32,
+    perceptual_roughness: f32,
     world_position: vec3<f32>,
 ) -> vec3<f32> {
     // The sample position does not affect a view environment probe, but it is
@@ -68,7 +75,9 @@ fn portrait_environment_specular(
     if (probe_index < 0) {
         return vec3<f32>(0.0);
     }
-    let mip = roughness * f32(light_probes.smallest_specular_mip_level_for_view);
+    // The same mip index rule as Bevy's own environment sampler: the
+    // perceptual roughness against the smallest (coarsest) specular mip.
+    let mip = perceptual_roughness * f32(light_probes.smallest_specular_mip_level_for_view);
 
     // Rotate the reflection by the probe rotation; cube maps are left-handed.
     let reflection = reflect(-v, n);
@@ -78,9 +87,10 @@ fn portrait_environment_specular(
     let radiance = portrait_environment_sample(probe_index, direction, mip);
 
     // Split-sum approximation: the prefiltered radiance times the environment
-    // BRDF for a non-metal dielectric. The environment diffuse is intentionally
-    // not added; the standard MToon GI already carries it.
-    let f_ab = F_AB(roughness, saturate(dot(n, v)));
+    // BRDF for a non-metal dielectric. `F_AB` takes the perceptual roughness,
+    // not the squared one. The environment diffuse is intentionally not
+    // added; the standard MToon GI already carries it.
+    let f_ab = F_AB(perceptual_roughness, saturate(dot(n, v)));
     let fss_ess = vec3<f32>(0.04) * f_ab.x + f_ab.y;
     return radiance * fss_ess * light_probes.intensity_for_view;
 }

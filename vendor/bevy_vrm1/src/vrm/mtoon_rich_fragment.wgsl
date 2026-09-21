@@ -187,10 +187,14 @@ fn apply_rich_mtoon_lighting(in: MToonInput, params: MToonPortraitUniform) -> ve
     // The added portrait terms carry their own exposure so the terms and the
     // scene light stay on the same scale.
     let base = view.exposure * (lights_result.direct + indirect + author_rim) + emissive;
+    // The environment reflection takes the *perceptual* roughness: Bevy's
+    // prefiltered mips and its environment BRDF (`F_AB`) are both keyed by it.
+    // The added direct specular keeps the physical roughness its BRDF
+    // functions (`D_GGX`, `V_SmithGGXCorrelated`) require.
     let environment_specular = portrait_environment_specular(
         in.world_normal,
         in.world_view_dir,
-        perceptualRoughnessToRoughness(params.perceptual_roughness),
+        params.perceptual_roughness,
         in.world_position.xyz,
     );
     let extra = params.specular_gain * lights_result.specular
