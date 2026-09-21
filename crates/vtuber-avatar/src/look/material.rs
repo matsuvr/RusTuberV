@@ -14,7 +14,7 @@ use bevy_vrm1::prelude::VrmMaterialBaseValues;
 
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 use crate::look::AvatarLookSettings;
-use crate::look::preset::{RichLookSettings, effective_look_strength};
+use crate::look::preset::{RichLookSettings, blend_look_scalar, effective_look_strength};
 
 /// The relative roughness the rich look starts from. This is an adjustment
 /// starting point, not a measured optimum: it keeps the author's roughness
@@ -38,7 +38,11 @@ pub fn resolve_standard_portrait(
         return original;
     }
     StandardLookBase {
-        perceptual_roughness: original.perceptual_roughness * RICH_ROUGHNESS_SCALE,
+        perceptual_roughness: blend_look_scalar(
+            original.perceptual_roughness,
+            original.perceptual_roughness * RICH_ROUGHNESS_SCALE,
+            strength,
+        ),
         ..original
     }
 }
@@ -250,6 +254,46 @@ mod tests {
         assert_eq!(resolve_standard_portrait(original, on, true), original);
     }
 
+    #[test]
+    fn resolve_interpolates_roughness_at_intermediate_strengths() {
+        let original = StandardLookBase {
+            perceptual_roughness: 0.5,
+            reflectance: 0.3,
+            clearcoat: 0.2,
+            clearcoat_perceptual_roughness: 0.4,
+        };
+        for (strength, expected) in [(0.0, 0.5), (0.01, 0.49975), (0.5, 0.4875), (1.0, 0.475)] {
+            let settings = RichLookSettings {
+                enabled: true,
+                strength,
+            };
+            let resolved = resolve_standard_portrait(original, settings, false);
+            assert!((resolved.perceptual_roughness - expected).abs() < 1e-6);
+            assert_eq!(
+                StandardLookBase {
+                    perceptual_roughness: original.perceptual_roughness,
+                    ..resolved
+                },
+                original
+            );
+            assert_eq!(
+                resolve_standard_portrait(original, settings, true),
+                original
+            );
+            assert_eq!(
+                resolve_standard_portrait(
+                    original,
+                    RichLookSettings {
+                        enabled: false,
+                        ..settings
+                    },
+                    false
+                ),
+                original
+            );
+        }
+    }
+
     fn standard_material() -> StandardMaterial {
         StandardMaterial {
             base_color: Color::srgb(0.4, 0.5, 0.6),
@@ -335,6 +379,43 @@ mod tests {
         };
         app.update();
         assert_eq!(owned_values(&app, &handle), capture_standard_look_base(&before));
+    }
+
+    #[test]
+    fn strength_changes_always_use_the_captured_original() {
+        let (mut app, handle) = portrait_app();
+        app.update();
+        let original = owned_values(&app, &handle);
+        for _ in 0..3 {
+            for (enabled, strength, expected) in [
+                (true, 0.0, 0.6),
+                (true, 1.0, 0.57),
+                (true, 0.5, 0.585),
+                (false, 0.5, 0.6),
+                (true, 0.5, 0.585),
+                (true, 0.0, 0.6),
+            ] {
+                app.world_mut().resource_mut::<AvatarLookSettings>().0 =
+                    RichLookSettings { enabled, strength };
+                app.update();
+                let actual = owned_values(&app, &handle);
+                assert!((actual.perceptual_roughness - expected).abs() < 1e-6);
+                assert_eq!(
+                    StandardLookBase {
+                        perceptual_roughness: original.perceptual_roughness,
+                        ..actual
+                    },
+                    original
+                );
+                assert_eq!(
+                    app.world().resource::<StandardLookBases>().get(handle.id()),
+                    Some(original)
+                );
+                if !enabled || strength == 0.0 {
+                    assert_eq!(actual, original);
+                }
+            }
+        }
     }
 
     #[test]
