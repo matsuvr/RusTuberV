@@ -190,8 +190,23 @@ struct StartupImportedAvatar(ImportedAvatar);
 fn submit_startup_model_request(
     startup: Option<Res<StartupImportedAvatar>>,
     mut load_requests: MessageWriter<LoadImportedAvatarRequest>,
+    mut persistent: ResMut<ArmPoseSettings>,
+    mut look: ResMut<vtuber_avatar::AvatarLookSettings>,
+    mut changes: MessageWriter<vtuber_avatar::LookSettingsChanged>,
+    mut orchestrator: ResMut<Orchestrator>,
 ) {
     let Some(imported) = startup else { return };
+    if let Err(error) = vtuber_app::orchestrator::restore_model_look(
+        &imported.0.id.0,
+        &mut persistent,
+        &mut look,
+        &mut changes,
+    ) {
+        orchestrator.set_last_error(Some(
+            vtuber_app::orchestrator::OrchestratorError::ArmPoseSettingsFailed(error.to_string()),
+        ));
+        return;
+    }
     load_requests.write(LoadImportedAvatarRequest {
         request_id: 0,
         imported: imported.0.clone(),

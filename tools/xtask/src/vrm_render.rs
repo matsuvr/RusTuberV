@@ -3,9 +3,9 @@
 //! This is the mechanical check for the review requirement that switching the
 //! look off reproduces the plain display and switching it on changes the
 //! pixels: for every model it renders the same pose and camera through
-//! OFF -> ON -> OFF -> ON -> strength 0, then reports the pixel differences.
+//! OFF -> ON -> strength 0.5 -> OFF -> ON -> strength 0, then reports the pixel differences.
 //! When no GPU/readback is available the command exits 2 (`NOT RUN`) instead
-//! of reporting success.
+//! of reporting success. Look changes use the production UI action/orchestrator path.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -100,12 +100,9 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     std::fs::create_dir_all(&managed_root)
         .map_err(|error| RenderError::Failed(format!("cannot create managed root: {error}")))?;
 
-    let imported = vtuber_app::import::import_vrm(
-        path,
-        &managed_root,
-        vtuber_app::import::DEFAULT_SIZE_LIMIT,
-    )
-    .map_err(|error| RenderError::Failed(format!("import failed: {error}")))?;
+    let imported =
+        vtuber_app::import::import_vrm(path, &managed_root, vtuber_app::import::DEFAULT_SIZE_LIMIT)
+            .map_err(|error| RenderError::Failed(format!("import failed: {error}")))?;
     let asset_id = vtuber_avatar::AvatarAssetId::new(&imported.id);
     let asset_path = UserAssetPath::avatar_model_path(&asset_id)
         .map_err(|error| RenderError::Failed(format!("asset path failed: {error}")))?;
@@ -149,6 +146,13 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
                 .disable::<bevy::winit::WinitPlugin>(),
         )
         .add_plugins(VtuberAvatarPlugin)
+        .init_resource::<vtuber_app::orchestrator::Orchestrator>()
+        .init_resource::<vtuber_app::ui::UiState>()
+        .init_resource::<vtuber_app::ui_model::UiViewModel>()
+        .init_resource::<vtuber_app::preview::PreviewState>()
+        .init_resource::<vtuber_app::ndi_output::NdiOutputIntent>()
+        .add_systems(Update, vtuber_app::orchestrator::process_ui_actions_system
+            .before(vtuber_avatar::look::apply_look_settings_changes))
         .add_systems(Startup, emit_load)
         .add_systems(Update, (place_camera, activate_output));
     app.finish();
@@ -190,6 +194,12 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     }
     let on = take_frame(&mut app, deadline)?;
 
+    set_look(&mut app, true, 0.5);
+    for _ in 0..SETTLE_FRAMES {
+        app.update();
+    }
+    let half = take_frame(&mut app, deadline)?;
+
     set_look(&mut app, false, 1.0);
     for _ in 0..SETTLE_FRAMES {
         app.update();
@@ -221,6 +231,7 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     )?;
     write_png(&out_dir.join(format!("{name}.off.png")), &off)?;
     write_png(&out_dir.join(format!("{name}.on.png")), &on)?;
+    write_png(&out_dir.join(format!("{name}.half.png")), &half)?;
     write_png(
         &out_dir.join(format!("{name}.off-restored.png")),
         &off_restored,
@@ -235,10 +246,26 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     let off_restore_difference = mean_absolute_difference(&off.data, &off_restored.data);
     let on_repeat_difference = mean_absolute_difference(&on.data, &on_again.data);
     let strength_zero_difference = mean_absolute_difference(&off.data, &strength_zero.data);
+    let half_difference = mean_absolute_difference(&off.data, &half.data);
+    let half_full_difference = mean_absolute_difference(&half.data, &on.data);
+    if app
+        .world()
+        .resource::<vtuber_app::ndi_output::NdiOutputIntent>()
+        .is_requested()
+    {
+        return Err(RenderError::Failed(
+            "look edits unexpectedly enabled NDI".into(),
+        ));
+    }
+    if half_difference == 0.0 || half_full_difference == 0.0 {
+        return Err(RenderError::Failed(
+            "strength 0.5 did not produce a distinct image".into(),
+        ));
+    }
     let summary = format!(
         "{name}: off_mean={:.2} on_mean={:.2} mean_abs_diff={difference:.3} \
          off_restore_diff={off_restore_difference:.3} on_repeat_diff={on_repeat_difference:.3} \
-         strength_zero_diff={strength_zero_difference:.3} off_opaque={} on_opaque={}\n  \
+         strength_zero_diff={strength_zero_difference:.3} half_diff={half_difference:.3} half_full_diff={half_full_difference:.3} off_opaque={} on_opaque={}\n  \
          probes off={:?} on={:?} off_restored={:?} strength_zero={:?}\n",
         mean(&off.data),
         mean(&on.data),
@@ -312,9 +339,10 @@ fn activate_output(
 }
 
 fn set_look(app: &mut App, enabled: bool, strength: f32) {
-    app.world_mut()
-        .resource_mut::<vtuber_avatar::AvatarLookSettings>()
-        .0 = vtuber_avatar::RichLookSettings { enabled, strength };
+    use vtuber_app::actions::{RichLookChange, UiAction};
+    let mut ui = app.world_mut().resource_mut::<vtuber_app::ui::UiState>();
+    ui.emit(UiAction::ChangeRichLook(RichLookChange::Enabled(enabled)));
+    ui.emit(UiAction::ChangeRichLook(RichLookChange::Strength(strength)));
 }
 
 fn exited(app: &mut App) -> bool {
@@ -355,9 +383,9 @@ fn write_png(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
     }
     let buffer = image::RgbaImage::from_raw(WIDTH, HEIGHT, rgba)
         .ok_or_else(|| RenderError::Failed("frame size does not match the profile".to_owned()))?;
-    buffer.save(path).map_err(|error| {
-        RenderError::Failed(format!("cannot write {}: {error}", path.display()))
-    })
+    buffer
+        .save(path)
+        .map_err(|error| RenderError::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
 /// RGBA at the face, jacket and legs so a missing material is visible.
@@ -368,13 +396,22 @@ fn probes(data: &[u8]) -> Vec<[u8; 4]> {
     #[allow(clippy::indexing_slicing)]
     let at = |x: u32, y: u32| {
         let index = ((y * WIDTH + x) * 4) as usize;
-        [data[index], data[index + 1], data[index + 2], data[index + 3]]
+        [
+            data[index],
+            data[index + 1],
+            data[index + 2],
+            data[index + 3],
+        ]
     };
     vec![at(128, 55), at(128, 130), at(128, 215)]
 }
 
 fn opaque_pixels(data: &[u8]) -> usize {
-    data.as_chunks::<4>().0.iter().filter(|pixel| pixel[3] > 0).count()
+    data.as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[3] > 0)
+        .count()
 }
 
 fn mean(data: &[u8]) -> f64 {

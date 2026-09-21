@@ -8,6 +8,26 @@ use std::path::PathBuf;
 
 use vtuber_avatar::ArmPoseProfileOverride;
 
+/// An independent edit to the look switch or strength.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RichLookChange {
+    /// Keep the configured strength while switching the effect.
+    Enabled(bool),
+    /// Keep the switch, including when the strength becomes zero.
+    Strength(f32),
+}
+
+pub(crate) fn reduce_rich_look(
+    mut current: vtuber_avatar::RichLookSettings,
+    change: RichLookChange,
+) -> vtuber_avatar::RichLookSettings {
+    match change {
+        RichLookChange::Enabled(enabled) => current.enabled = enabled,
+        RichLookChange::Strength(strength) => current.strength = strength,
+    }
+    current
+}
+
 /// Actions that the UI can emit.
 ///
 /// These are processed by the orchestrator, which translates them into
@@ -150,16 +170,10 @@ pub enum UiAction {
     SetLanguage(crate::settings::UiLanguage),
 
     // --- Rich look ---
-    /// Switch the rich look on or off.
-    SetRichLookEnabled {
-        /// Whether the rich look should be applied.
-        enabled: bool,
-    },
-    /// Set the rich look strength.
-    SetRichLookStrength {
-        /// Effect strength in `0..=1`.
-        strength: f32,
-    },
+    /// Change the live look without writing the settings file.
+    ChangeRichLook(RichLookChange),
+    /// Persist the look when a checkbox or slider edit is complete.
+    SaveRichLook,
 }
 
 impl UiAction {
@@ -306,21 +320,44 @@ mod tests {
     }
 
     #[test]
+    fn rich_reducer_keeps_switch_and_strength_independent() {
+        use vtuber_avatar::RichLookSettings;
+        let initial = RichLookSettings::default();
+        assert!(!initial.enabled);
+        assert_eq!(initial.strength, 1.0);
+        for strength in [0.0, 0.5, 1.0] {
+            let tuned = reduce_rich_look(initial, RichLookChange::Strength(strength));
+            let on = reduce_rich_look(tuned, RichLookChange::Enabled(true));
+            let off = reduce_rich_look(on, RichLookChange::Enabled(false));
+            assert_eq!(
+                off,
+                RichLookSettings {
+                    enabled: false,
+                    strength
+                }
+            );
+            assert_eq!(reduce_rich_look(off, RichLookChange::Enabled(true)), on);
+        }
+    }
+
+    #[test]
     fn rich_look_actions_carry_their_value() {
         assert_eq!(
-            UiAction::SetRichLookEnabled { enabled: true },
-            UiAction::SetRichLookEnabled { enabled: true }
+            UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
+            UiAction::ChangeRichLook(RichLookChange::Enabled(true))
         );
         assert_ne!(
-            UiAction::SetRichLookEnabled { enabled: true },
-            UiAction::SetRichLookEnabled { enabled: false }
+            UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
+            UiAction::ChangeRichLook(RichLookChange::Enabled(false))
         );
         assert_eq!(
-            UiAction::SetRichLookStrength { strength: 0.25 },
-            UiAction::SetRichLookStrength { strength: 0.25 }
+            UiAction::ChangeRichLook(RichLookChange::Strength(0.25)),
+            UiAction::ChangeRichLook(RichLookChange::Strength(0.25))
         );
-        assert!(!UiAction::SetRichLookEnabled { enabled: true }.is_navigation());
-        assert!(!UiAction::SetRichLookStrength { strength: 1.0 }.requires_running_pipeline());
+        assert!(!UiAction::ChangeRichLook(RichLookChange::Enabled(true)).is_navigation());
+        assert!(
+            !UiAction::ChangeRichLook(RichLookChange::Strength(1.0)).requires_running_pipeline()
+        );
     }
 
     #[test]
