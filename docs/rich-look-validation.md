@@ -655,8 +655,9 @@ Standard materials return to their captured values, so the plain
 MToon/Standard/Unlit display is what renders.
 
 #75 now persists `[rich_look."<existing model ID>"]` in `settings.toml`.
-Both UI imports and CLI startup restore the selected model before its load
-request. A missing model entry means OFF / strength 1. Switching OFF preserves
+UI imports and CLI startup read saved settings before submitting a load request.
+The accepted model, runtime look and save owner change together only when the
+matching `LoadImportedAvatarResult::Accepted` is consumed. A missing model entry means OFF / strength 1. Switching OFF preserves
 the last strength; ON / strength 0 is saved without changing the switch.
 The slider sends live changes during dragging and `SaveRichLook` on release
 (or a non-drag edit); checkbox changes also save. No render-frame write or
@@ -726,14 +727,15 @@ and restored. The role-based adjustments of #76 are not implemented.
 
 Implementation: this PR, based on `ef532e0`. Pure `reduce_rich_look` and
 `merge_model_look_settings` separate value updates from runtime messages and
-settings I/O. The existing settings resource remembers the restored model ID;
-failed restores and unloads cannot save a new edit under the old model ID.
+settings I/O. The existing settings resource remembers the accepted model ID.
+After the R1 correction below, a rejected switch or failed settings read leaves
+the previous model, look and save owner unchanged. Unload clears the save owner.
 All four existing writers (language, arm pose including dynamic profiles, arm
 tracking, expression bindings) preserve the rich-look section, and rich-look
 writes preserve their sections and the other models. Legacy files without the
 new section remain valid. Corrupt files are returned as errors, not replaced.
 
-Local verification:
+Initial verification at `fc891e59f3ff1985969694dd361d700cfe8d418a` (before R1):
 
 - `cargo test -p vtuber-app -p vtuber-avatar -j 1`: 726 tests passed; settings round trips,
   bidirectional preservation, missing/corrupt files, live edits without writes,
@@ -779,3 +781,57 @@ while webcam tracking and blink/mouth/color/UV expressions are active; NDI
 receiver image comparison while changing the look; macOS and other GPUs;
 release performance and final preset tuning. The four-language egui render test
 and unchanged NDI intent are automated evidence only.
+
+## PR #85 R1: commit model look only on load acceptance
+
+`prepare_avatar_load` reads the saved values and constructs the request without
+changing the accepted model. The orchestrator retains the model and saved look
+under the existing `request_id`. On a matching `Accepted`, the selected model,
+look, save owner and published UI snapshot are updated together, after the
+engine load/unload systems have run. `Rejected` discards that request and
+reports the existing error while preserving the actual model's lifecycle.
+A settings read/parse error sends no request and leaves the accepted selection
+intact. CLI startup uses the same queue and result path. No default-profile
+fallback, switch restriction, shader or preset change is included.
+
+Regression fixtures use the production `handle_load_imported_avatar_requests`,
+`apply_avatar_request_events`, `despawn_unloading_avatar` and orchestrator result
+consumer. Only asset initialization/bone binding completion is driven explicitly
+to hold A in Loading or Binding and later make it Ready. Assertions inspect the
+actual root's asset ID, the orchestrator, the published UI snapshot, live look,
+save owner and saved TOML. The existing rich-look tests now use this same handler
+instead of ending at pending-request submission. Test setup registers `VrmAsset`
+through a dev dependency on the already pinned bevy_vrm1 revision; runtime
+packages and versions are unchanged.
+
+Before the fix, the focused suite was run against `fc891e5` plus the regression
+tests and handler visibility needed by the fixture, with no behavior changes:
+`cargo test -p vtuber-app --lib rich_lifecycle -j 1` failed 4 tests and passed the
+normal-success test (`target/issue85-r1-before.log`).
+
+| Regression | Before | After |
+|---|---|---|
+| A Loading, B rejected; A becomes Ready and later edits save only A | FAIL (actual A / UI B) | PASS |
+| A Binding, B rejected; A becomes Ready and later edits save only A | FAIL (actual A / UI B) | PASS |
+| A Ready, B settings parse fails; no B request, preserve A, then reselect B after repair | FAIL (actual A / UI B) | PASS |
+| Same with settings read failure (directory at settings path) | FAIL (actual A / UI B) | PASS |
+| Accepted A-to-B replacement despawns A, restores B and saves later edits only to B | PASS | PASS |
+
+The failure cases also check that pending/submitted B does not prematurely
+change A, and that the broken file is not rewritten. Successful B selection is
+not blocked. New-model OFF/1, OFF-to-ON strength retention, ON/0, live/commit
+separation, four-language UI, NDI intent and bidirectional settings preservation
+remain covered by the existing suites.
+
+R1 local verification:
+
+- `cargo test -p vtuber-app -p vtuber-avatar -j 1`: 731 tests passed, no failures
+  (`target/issue85-r1-tests.log`).
+- `cargo clippy --workspace --all-targets -j 1`: passed; no new Rust/Clippy
+  warnings (the existing desktop NDI DLL staging build-script notice remains).
+- `rustfmt --check --edition 2024 --config skip_children=true` on all four
+  changed Rust files: passed. `git diff --check`: passed.
+
+GPU renders above belong to `fc891e5`; they were not rerun for this lifecycle-only
+revision. Camera tracking, live NDI receiver and macOS acceptance remain unrun
+under #77. No new GPU matrix or CI infrastructure was added.

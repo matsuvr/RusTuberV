@@ -288,7 +288,7 @@ impl LoadImportedAvatarError {
 ///   is discarded and a new [`ReplaceAvatarRequest`] is emitted for the latest
 ///   request (coalescing).
 /// - Otherwise the request is rejected and no root is spawned.
-pub(crate) fn handle_load_imported_avatar_requests(
+pub fn handle_load_imported_avatar_requests(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     lifecycle: Res<AvatarLifecycle>,

@@ -214,6 +214,7 @@ impl Plugin for UiShellPlugin {
                 process_ui_actions_system,
                 apply_arm_pose_profile_changes,
                 sync_avatar_lifecycle_system
+                    .after(vtuber_avatar::unload::despawn_unloading_avatar)
                     .before(vtuber_avatar::look::apply_look_settings_changes),
             )
                 .chain(),
