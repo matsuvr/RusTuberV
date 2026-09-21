@@ -13,7 +13,9 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::expression_keys::{ExpressionBindingStore, ExpressionBindings};
-use vtuber_avatar::{ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride};
+use vtuber_avatar::{
+    ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride, RichLookSettings,
+};
 
 /// Version of the application settings document.
 pub const ARM_POSE_SETTINGS_SCHEMA_VERSION: u32 = 1;
@@ -55,6 +57,8 @@ impl UiLanguage {
 pub struct ArmPoseSettings {
     path: Option<PathBuf>,
     restored: ArmPoseOverrideStore,
+    /// Model whose look was restored, including CLI startup loads.
+    pub(crate) look_model_id: Option<String>,
     restored_expression_bindings: ExpressionBindingStore,
     language: UiLanguage,
     arm_tracking_enabled: bool,
@@ -65,6 +69,7 @@ impl Default for ArmPoseSettings {
         Self {
             path: default_settings_path(),
             restored: ArmPoseOverrideStore::default(),
+            look_model_id: None,
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
             arm_tracking_enabled: false,
@@ -101,6 +106,7 @@ impl ArmPoseSettings {
         Self {
             path: Some(path),
             restored,
+            look_model_id: None,
             restored_expression_bindings,
             language,
             arm_tracking_enabled,
@@ -122,6 +128,7 @@ impl ArmPoseSettings {
         Self {
             path: Some(path.into()),
             restored: ArmPoseOverrideStore::default(),
+            look_model_id: None,
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
             arm_tracking_enabled: false,
@@ -162,6 +169,33 @@ impl ArmPoseSettings {
             return Err(ArmPoseSettingsError::NoConfigDirectory);
         };
         save_expression_bindings(path, store)
+    }
+
+    /// Loads the selected model's look; a model without an entry starts OFF.
+    pub(crate) fn rich_look_for(
+        &self,
+        model_id: &str,
+    ) -> Result<RichLookSettings, ArmPoseSettingsError> {
+        let path = self
+            .path
+            .as_deref()
+            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+        Ok(load_rich_look_settings(path)?
+            .get(model_id)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    pub(crate) fn save_rich_look(
+        &self,
+        model_id: String,
+        settings: RichLookSettings,
+    ) -> Result<(), ArmPoseSettingsError> {
+        let path = self
+            .path
+            .as_deref()
+            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+        save_rich_look_settings(path, model_id, settings)
     }
 
     /// Returns the UI language loaded at startup.
@@ -302,6 +336,7 @@ pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSet
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
+            rich_look: BTreeMap::new(),
         }
     };
     document.language = language;
@@ -331,6 +366,7 @@ pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), ArmPo
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
+            rich_look: BTreeMap::new(),
         }
     };
     document.arm_tracking_enabled = enabled;
@@ -380,6 +416,7 @@ pub fn save_expression_bindings(
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
+            rich_look: BTreeMap::new(),
         }
     };
     document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
@@ -437,6 +474,7 @@ pub fn save_arm_pose_overrides(
             arm_pose_overrides: BTreeMap::new(),
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
+            rich_look: BTreeMap::new(),
         }
     };
     document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
@@ -453,6 +491,45 @@ pub fn save_arm_pose_overrides(
             )
         })
         .collect();
+    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+}
+
+fn merge_model_look_settings(
+    mut document: ArmPoseSettingsDocument,
+    model_id: String,
+    settings: RichLookSettings,
+) -> ArmPoseSettingsDocument {
+    document.rich_look.insert(model_id, settings);
+    document
+}
+
+fn read_look_document(path: &Path) -> Result<ArmPoseSettingsDocument, ArmPoseSettingsError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "schema_version = 1".into(),
+        Err(error) => return Err(error.into()),
+    };
+    let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
+    if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
+        return Err(ArmPoseSettingsError::UnsupportedSchema {
+            version: document.schema_version,
+        });
+    }
+    Ok(document)
+}
+
+fn load_rich_look_settings(
+    path: &Path,
+) -> Result<BTreeMap<String, RichLookSettings>, ArmPoseSettingsError> {
+    Ok(read_look_document(path)?.rich_look)
+}
+
+fn save_rich_look_settings(
+    path: &Path,
+    model_id: String,
+    settings: RichLookSettings,
+) -> Result<(), ArmPoseSettingsError> {
+    let document = merge_model_look_settings(read_look_document(path)?, model_id, settings);
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
@@ -491,6 +568,8 @@ struct ArmPoseSettingsDocument {
     /// entry means the model still uses the initial assignment.
     #[serde(default)]
     expression_bindings: BTreeMap<String, ExpressionBindings>,
+    #[serde(default)]
+    rich_look: BTreeMap<String, RichLookSettings>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -617,6 +696,84 @@ mod tests {
             arm_drop_radians: drop,
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn rich_look_and_every_other_writer_preserve_each_other() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let id = AvatarAssetId::new("sha256:first");
+        let zero = RichLookSettings {
+            enabled: true,
+            strength: 0.0,
+        };
+        let half = RichLookSettings {
+            enabled: false,
+            strength: 0.5,
+        };
+        let mut arms = ArmPoseOverrideStore::default();
+        arms.set(id.0.clone(), profile(0.55)).unwrap();
+        arms.set_dynamic_profile(
+            id.0.clone(),
+            DynamicArmProfileOverride::from_profile(vtuber_avatar::DynamicArmProfile {
+                shoulder_elevation_trim_radians: -0.1,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let mut expressions = ExpressionBindingStore::default();
+        expressions.set(id.0.clone(), bindings(&[(ExpressionKey::KeyA, "smile")]));
+        save_language(&path, UiLanguage::Ko).unwrap();
+        save_arm_pose_overrides(&path, &arms).unwrap();
+        save_arm_tracking_enabled(&path, true).unwrap();
+        save_expression_bindings(&path, &expressions).unwrap();
+        let before: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        save_rich_look_settings(&path, id.0.clone(), zero).unwrap();
+        save_rich_look_settings(&path, "sha256:second".into(), half).unwrap();
+        let mut after: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        after.as_table_mut().unwrap().remove("rich_look");
+        let mut before = before;
+        before.as_table_mut().unwrap().remove("rich_look");
+        assert_eq!(after, before);
+        let expected = load_rich_look_settings(&path).unwrap();
+        save_language(&path, UiLanguage::En).unwrap();
+        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
+        save_arm_pose_overrides(&path, &arms).unwrap();
+        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
+        save_arm_tracking_enabled(&path, false).unwrap();
+        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
+        save_expression_bindings(&path, &expressions).unwrap();
+        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
+        let restarted = ArmPoseSettings::load(&path);
+        assert_eq!(restarted.rich_look_for(&id.0).unwrap(), zero);
+        assert_eq!(restarted.rich_look_for("sha256:second").unwrap(), half);
+        assert_eq!(
+            restarted.rich_look_for("sha256:new").unwrap(),
+            RichLookSettings::default()
+        );
+    }
+
+    #[test]
+    fn rich_look_missing_section_defaults_but_invalid_files_return_errors() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        assert!(load_rich_look_settings(&path).unwrap().is_empty());
+        fs::write(&path, "schema_version = 1\nlanguage = 'en'\n").unwrap();
+        assert!(load_rich_look_settings(&path).unwrap().is_empty());
+        for invalid in [
+            "broken = [",
+            "schema_version = 99",
+            "schema_version = 1\n[rich_look.model]\nenabled = true\nstrength = 'bad'",
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(load_rich_look_settings(&path).is_err());
+            assert!(
+                save_rich_look_settings(&path, "model".into(), RichLookSettings::default())
+                    .is_err()
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+        }
+        assert!(load_rich_look_settings(directory.path()).is_err());
     }
 
     #[test]

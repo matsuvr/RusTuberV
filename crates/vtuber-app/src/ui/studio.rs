@@ -1080,7 +1080,7 @@ fn overview(
         },
     );
     expression_status_section(ui, vm, state, lang);
-    rich_look_section(ui, vm, state, lang);
+    render_rich_look_controls(ui, vm, state, lang);
 }
 
 fn avatar_page(
@@ -1667,29 +1667,30 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
 ///
 /// The strength scales the whole look, so at 0 the scene is the standard
 /// display even while the switch is on.
-fn rich_look_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
     let switch = lang.pick("リッチ表示", "Enhanced look", "增强显示", "고급 렌더링");
     section(ui, switch, |ui| {
         let mut enabled = vm.look.enabled;
         if ui.checkbox(&mut enabled, switch).changed() {
-            state.emit(UiAction::SetRichLookEnabled { enabled });
+            state.emit(UiAction::ChangeRichLook(
+                crate::actions::RichLookChange::Enabled(enabled),
+            ));
+            state.emit(UiAction::SaveRichLook);
         }
         let mut percent = vm.look.strength * 100.0;
         let slider = ui.add_enabled(
             enabled,
             egui::Slider::new(&mut percent, 0.0..=100.0)
                 .suffix("%")
-                .text(lang.pick(
-                    "明るさ・効果の強さ",
-                    "Lighting / effect strength",
-                    "亮度·效果强度",
-                    "밝기·효과 강도",
-                )),
+                .text(lang.pick("効果の強さ", "Effect strength", "效果强度", "효과 강도")),
         );
         if slider.changed() {
-            state.emit(UiAction::SetRichLookStrength {
-                strength: (percent / 100.0).clamp(0.0, 1.0),
-            });
+            state.emit(UiAction::ChangeRichLook(
+                crate::actions::RichLookChange::Strength(percent / 100.0),
+            ));
+        }
+        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+            state.emit(UiAction::SaveRichLook);
         }
         ui.add_space(4.0);
         ui.label(lang.pick(
@@ -1702,7 +1703,7 @@ fn rich_look_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: U
 }
 
 fn settings_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
-    rich_look_section(ui, vm, state, lang);
+    render_rich_look_controls(ui, vm, state, lang);
     expression_settings_section(ui, vm, state, lang);
     section(
         ui,
@@ -2786,7 +2787,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_look_section_renders_in_every_language() {
+    fn render_rich_look_controls_renders_in_every_language() {
         for lang in [
             UiLanguage::Ja,
             UiLanguage::En,
@@ -2799,13 +2800,14 @@ mod tests {
             vm.look.enabled = true;
             vm.look.strength = 0.5;
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                rich_look_section(ui, &vm, &mut state, lang);
+                render_rich_look_controls(ui, &vm, &mut state, lang);
             });
             let mut off = vm;
             off.look.enabled = false;
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                rich_look_section(ui, &off, &mut state, lang);
+                render_rich_look_controls(ui, &off, &mut state, lang);
             });
+            assert!(state.take_actions().is_empty());
         }
     }
 

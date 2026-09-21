@@ -26,10 +26,7 @@ use vtuber_app::orchestrator::Orchestrator;
 use vtuber_app::settings::ArmPoseSettings;
 use vtuber_app::tracking_file::{TRACKING_PROFILE_FILE_NAME, load_tracking_profile};
 use vtuber_app::ui::UiShellPlugin;
-use vtuber_avatar::{
-    ArmPoseSourceKind, ArmSourceSelection, AvatarAssetId, ExpectedVrmGeneration, ImportedAvatar,
-    LoadImportedAvatarRequest, StartupModelPath, UserAssetPath, VtuberAvatarPlugin,
-};
+use vtuber_avatar::{ArmPoseSourceKind, ArmSourceSelection, StartupModelPath, VtuberAvatarPlugin};
 
 fn main() {
     let managed_root = managed_asset_root();
@@ -49,24 +46,7 @@ fn main() {
     // `user://avatars/<sha256>/model.vrm` path invariant is used.
     let startup_model = parse_model_arg().and_then(|path| {
         match import::import_vrm(&path, &managed_root, import::DEFAULT_SIZE_LIMIT) {
-            Ok(model) => {
-                let id = AvatarAssetId::new(&model.id);
-                match UserAssetPath::avatar_model_path(&id) {
-                    Ok(asset_path) => Some(ImportedAvatar::new(
-                        id,
-                        asset_path,
-                        model.name.clone(),
-                        match model.summary.generation {
-                            import::VrmGeneration::Vrm0 => ExpectedVrmGeneration::Vrm0,
-                            import::VrmGeneration::Vrm1 => ExpectedVrmGeneration::Vrm1,
-                        },
-                    )),
-                    Err(e) => {
-                        eprintln!("Failed to construct user asset path for CLI model: {e}");
-                        None
-                    }
-                }
-            }
+            Ok(model) => Some(model),
             Err(e) => {
                 eprintln!("Failed to import CLI model: {e}");
                 None
@@ -112,11 +92,11 @@ fn main() {
         .insert_resource(Orchestrator::new(managed_root));
 
     if let Some(imported) = startup_model {
-        app.insert_resource(StartupModelPath(Some(imported.id.0.clone())));
-        app.insert_resource(StartupImportedAvatar(imported));
+        app.insert_resource(StartupModelPath(Some(imported.id.clone())));
+        app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .queue_imported_model(imported);
     }
-
-    app.add_systems(Startup, submit_startup_model_request);
 
     // Dev-only synthetic tracking: generates AvatarControlFrame values from
     // sine waves so the avatar apply path can be verified without a camera.
@@ -174,26 +154,4 @@ fn parse_model_arg() -> Option<String> {
         }
     }
     None
-}
-
-/// Resource holding the imported avatar from the CLI `--model` argument.
-///
-/// The startup system reads this and emits a [`LoadImportedAvatarRequest`]
-/// so the model is loaded through the avatar lifecycle.
-#[derive(Resource, Debug)]
-struct StartupImportedAvatar(ImportedAvatar);
-
-/// Startup system that submits a CLI-imported model to the avatar lifecycle.
-///
-/// Reads the [`StartupImportedAvatar`] resource (if present) and writes a
-/// [`LoadImportedAvatarRequest`] message that the avatar plugin consumes.
-fn submit_startup_model_request(
-    startup: Option<Res<StartupImportedAvatar>>,
-    mut load_requests: MessageWriter<LoadImportedAvatarRequest>,
-) {
-    let Some(imported) = startup else { return };
-    load_requests.write(LoadImportedAvatarRequest {
-        request_id: 0,
-        imported: imported.0.clone(),
-    });
 }

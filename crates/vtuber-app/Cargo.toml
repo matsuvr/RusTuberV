@@ -32,6 +32,7 @@ dev-synthetic-input = []
 ndi-output = ["vtuber-ndi/ndi-sdk"]
 
 [dev-dependencies]
+bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", rev = "f9593fd78136fb9e0507bcae111e09291ec9b82a", features = ["log"] }
 tempfile = "3"
 
 [lints]

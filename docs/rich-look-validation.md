@@ -645,18 +645,24 @@ the standard-path invariants, not by running the old build.
 
 
 The "Enhanced look" section with the ON/OFF switch and the 0-100%
-brightness/effect-strength slider is on the **Studio** pane and the settings
+effect-strength slider is on the **Studio** pane and the settings
 pane, in all four languages, wired through
-`UiAction::SetRichLookEnabled`/`SetRichLookStrength` to `AvatarLookSettings`
+`UiAction::ChangeRichLook(RichLookChange)` to `AvatarLookSettings`
 and `LookSettingsChanged`. With the switch off, no look system writes
 anything: the studio rig restores the scene's own key light, fill/rim stay at
 zero, the ambient and environment return to their original values, and
 Standard materials return to their captured values, so the plain
 MToon/Standard/Unlit display is what renders.
 
-Not done from #75: persistence to `settings.toml`, per-model settings, and
-restore on model switch. The switch therefore starts OFF again after a
-restart.
+#75 now persists `[rich_look."<existing model ID>"]` in `settings.toml`.
+UI imports and CLI startup read saved settings before submitting a load request.
+The accepted model, runtime look and save owner change together only when the
+matching `LoadImportedAvatarResult::Accepted` is consumed. A missing model entry means OFF / strength 1. Switching OFF preserves
+the last strength; ON / strength 0 is saved without changing the switch.
+The slider sends live changes during dragging and `SaveRichLook` on release
+(or a non-drag edit); checkbox changes also save. No render-frame write or
+additional debounce is used. Parse and I/O failures reach the existing UI
+settings error path, and a failed restore does not submit the new model.
 
 ## Not implemented
 
@@ -664,14 +670,14 @@ restart.
 |---|---|
 | #72 MToon glossy/environment/extra rim | Implemented and measured (see the "#72 measured" section): `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl`, the Rich `OUTLINE_PASS` keeps the author's line, the added environment reflection actually samples the view's prefiltered specular cubemap, and the term consumes the perceptual roughness for both the mip index and `F_AB`; verified by `mtoon-portrait`, `mtoon-outline-mix`, `mtoon-environment-roughness` and the re-run identity fixtures. The 2026-09-20 review's gaps (the hard-zero environment sample, the added gloss flowing into the outline line, and the squared roughness input) are fixed and measured. |
 | #74 HDR finish and transparency | Implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table exist in `crates/vtuber-avatar/src/look/finish.rs` and `finish.wgsl`; verified by the #74 measurements above. |
-| #75 one-click UI, 4 languages, per-model save | Partially implemented: the switch and the strength slider exist in the settings screen in four languages (see above). Persistence, per-model settings and restore on model switch are not implemented. |
+| #75 one-click UI, 4 languages, per-model save | Implemented, including model-specific persistence and restore. Local settings/ECS tests and Windows GPU action-to-render checks are recorded below; interactive tracking and NDI receiver acceptance remain with #77. |
 | #76 material roles | Not implemented. `MaterialRole`, `infer_material_role`, `resolve_material_role`, the role param resolvers and `face_lighting_normal` do not exist. |
-| #77 final acceptance | Partially covered by this document (the measurements above). The #75 first-version and #76 role comparisons are not possible yet because those issues are not implemented. |
+| #77 final acceptance | Partially covered by this document (the measurements above). The #75 action-to-render first-version check is recorded below. Interactive acceptance remains unrun, and #76 role comparisons are not possible yet. |
 
 Consequences: the epic's completion criteria are not fully met yet. The
 finish/tone change (#74) is in place and the look can be switched on and
-adjusted from the settings screen; per-model look settings are not saved or
-restored, and the role-based adjustments of #76 are not implemented.
+adjusted from the settings screen, and model-specific look settings are saved
+and restored. The role-based adjustments of #76 are not implemented.
 
 ## Known limitations in the implemented parts
 
@@ -717,8 +723,115 @@ restored, and the role-based adjustments of #76 are not implemented.
   which is the specification's own toon behavior; the preset keeps every light
   at or below 900 lx so a fully lit surface does not clip.
 
-## Settings screen controls (part of #75)
+## #75 model persistence and UI action integration (2026-09-21)
 
-(see above)
+Implementation: this PR, based on `ef532e0`. Pure `reduce_rich_look` and
+`merge_model_look_settings` separate value updates from runtime messages and
+settings I/O. The existing settings resource remembers the accepted model ID.
+After the R1 correction below, a rejected switch or failed settings read leaves
+the previous model, look and save owner unchanged. Unload clears the save owner.
+All four existing writers (language, arm pose including dynamic profiles, arm
+tracking, expression bindings) preserve the rich-look section, and rich-look
+writes preserve their sections and the other models. Legacy files without the
+new section remain valid. Corrupt files are returned as errors, not replaced.
 
+Initial verification at `fc891e59f3ff1985969694dd361d700cfe8d418a` (before R1):
 
+- `cargo test -p vtuber-app -p vtuber-avatar -j 1`: 726 tests passed; settings round trips,
+  bidirectional preservation, missing/corrupt files, live edits without writes,
+  commit, model switch/unload/restart, ON/zero, save/load errors, and the existing
+  renderer/lifecycle/expression tests.
+- `cargo clippy --workspace --all-targets -j 1`.
+- `rustfmt --check` on changed Rust files, and `git diff --check`.
+- Existing `vrm-render` now emits the production `UiAction::ChangeRichLook`
+  through `process_ui_actions_system` and `LookSettingsChanged`. It also renders
+  strength 0.5 and checks that the actions leave NDI intent off.
+
+Windows 11 / RTX 4090, driver 610.47, Vulkan, 256x256 offscreen output, debug build,
+frozen clock and pose. Captured PNGs were visually inspected. These are actual
+GPU renders of imported VRMs, not an interactive desktop/camera session.
+
+| Model | OFF/ON mean absolute byte difference | OFF restore | ON repeat | ON/zero vs OFF | half vs OFF | half vs full | occupied pixels OFF/ON |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `inore-vrm1.vrm` (VRM 1.0) | 11.151 | 0.000 | 0.000 | 0.000 | 12.256 | 1.779 | 19848 / 19848 |
+| `tsukuyomi-chan.vrm` (VRM 0.x) | 7.759 | 0.004 | 0.003 | 0.005 | 7.337 | 0.990 | 10455 / 10455 |
+
+The existing restoration tolerance is retained; the small VRM 0.x differences
+are reported rather than described as byte identity. Half strength produces a
+distinct image, but pixel difference from OFF is not necessarily monotonic with
+strength. This check does not change or retune the lighting/material presets.
+The independent fixed-upstream Native comparison remains the #69 fixture above.
+
+Reproduce in PowerShell:
+
+```powershell
+$env:WGPU_BACKEND = 'vulkan'
+$env:WGPU_ADAPTER_NAME = 'NVIDIA GeForce RTX 4090'
+cargo run -p xtask -j 1 -- vrm-render tests/fixtures/vrm/inore-vrm1.vrm target/issue75-vrm1
+cargo run -p xtask -j 1 -- vrm-render tests/fixtures/vrm/tsukuyomi-chan.vrm target/issue75-vrm0
+```
+
+Output directories
+contain `.off.png`, `.on.png`, `.half.png`, `.off-restored.png`, `.on-again.png`
+and `.strength-zero.png`. The local `alicia-solid.vrm` fixture was rejected by
+the GLB parser and was not used as successful render evidence.
+
+Unrun acceptance carried to #77: mouse/keyboard interaction in the real desktop
+while webcam tracking and blink/mouth/color/UV expressions are active; NDI
+receiver image comparison while changing the look; macOS and other GPUs;
+release performance and final preset tuning. The four-language egui render test
+and unchanged NDI intent are automated evidence only.
+
+## PR #85 R1: commit model look only on load acceptance
+
+`prepare_avatar_load` reads the saved values and constructs the request without
+changing the accepted model. The orchestrator retains the model and saved look
+under the existing `request_id`. On a matching `Accepted`, the selected model,
+look, save owner and published UI snapshot are updated together, after the
+engine load/unload systems have run. `Rejected` discards that request and
+reports the existing error while preserving the actual model's lifecycle.
+A settings read/parse error sends no request and leaves the accepted selection
+intact. CLI startup uses the same queue and result path. No default-profile
+fallback, switch restriction, shader or preset change is included.
+
+Regression fixtures use the production `handle_load_imported_avatar_requests`,
+`apply_avatar_request_events`, `despawn_unloading_avatar` and orchestrator result
+consumer. Only asset initialization/bone binding completion is driven explicitly
+to hold A in Loading or Binding and later make it Ready. Assertions inspect the
+actual root's asset ID, the orchestrator, the published UI snapshot, live look,
+save owner and saved TOML. The existing rich-look tests now use this same handler
+instead of ending at pending-request submission. Test setup registers `VrmAsset`
+through a dev dependency on the already pinned bevy_vrm1 revision; runtime
+packages and versions are unchanged.
+
+Before the fix, the focused suite was run against `fc891e5` plus the regression
+tests and handler visibility needed by the fixture, with no behavior changes:
+`cargo test -p vtuber-app --lib rich_lifecycle -j 1` failed 4 tests and passed the
+normal-success test (`target/issue85-r1-before.log`).
+
+| Regression | Before | After |
+|---|---|---|
+| A Loading, B rejected; A becomes Ready and later edits save only A | FAIL (actual A / UI B) | PASS |
+| A Binding, B rejected; A becomes Ready and later edits save only A | FAIL (actual A / UI B) | PASS |
+| A Ready, B settings parse fails; no B request, preserve A, then reselect B after repair | FAIL (actual A / UI B) | PASS |
+| Same with settings read failure (directory at settings path) | FAIL (actual A / UI B) | PASS |
+| Accepted A-to-B replacement despawns A, restores B and saves later edits only to B | PASS | PASS |
+
+The failure cases also check that pending/submitted B does not prematurely
+change A, and that the broken file is not rewritten. Successful B selection is
+not blocked. New-model OFF/1, OFF-to-ON strength retention, ON/0, live/commit
+separation, four-language UI, NDI intent and bidirectional settings preservation
+remain covered by the existing suites.
+
+R1 local verification:
+
+- `cargo test -p vtuber-app -p vtuber-avatar -j 1`: 731 tests passed, no failures
+  (`target/issue85-r1-tests.log`).
+- `cargo clippy --workspace --all-targets -j 1`: passed; no new Rust/Clippy
+  warnings (the existing desktop NDI DLL staging build-script notice remains).
+- `rustfmt --check --edition 2024 --config skip_children=true` on all four
+  changed Rust files: passed. `git diff --check`: passed.
+
+GPU renders above belong to `fc891e5`; they were not rerun for this lifecycle-only
+revision. Camera tracking, live NDI receiver and macOS acceptance remain unrun
+under #77. No new GPU matrix or CI infrastructure was added.

@@ -213,7 +213,9 @@ impl Plugin for UiShellPlugin {
             (
                 process_ui_actions_system,
                 apply_arm_pose_profile_changes,
-                sync_avatar_lifecycle_system,
+                sync_avatar_lifecycle_system
+                    .after(vtuber_avatar::unload::despawn_unloading_avatar)
+                    .before(vtuber_avatar::look::apply_look_settings_changes),
             )
                 .chain(),
         )
@@ -426,10 +428,7 @@ fn ui_render_system(
         .as_ref()
         .and_then(|image| contexts.image_id(image.id()));
     let avatar_texture = target.as_ref().map(|target| {
-        super::avatar_preview::AvatarPreviewTexture::new(
-            target.image().clone(),
-            target.profile(),
-        )
+        super::avatar_preview::AvatarPreviewTexture::new(target.image().clone(), target.profile())
     });
     let ctx = contexts.ctx_mut()?;
     state.sync_pane(vm.pane);
