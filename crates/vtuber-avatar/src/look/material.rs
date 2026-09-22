@@ -968,6 +968,36 @@ mod tests {
         assert_eq!(infer_material_role("Face", false, None), MaterialRole::Face);
     }
 
+    /// Real material names from `tests/fixtures/vrm`: multi-word and
+    /// `(Instance)`-suffixed names resolve by the first matching table row.
+    /// `Face_00_SKIN` carries both words and resolves to Skin (the skin row
+    /// runs first), which is the recorded behavior for this ambiguity.
+    #[test]
+    fn fixture_model_material_names_resolve_deterministically() {
+        for (name, expected) in [
+            (
+                "N00_000_00_FaceMouth_00_FACE (Instance)",
+                MaterialRole::Face,
+            ),
+            ("N00_000_00_Face_00_SKIN (Instance)", MaterialRole::Skin),
+            ("N00_000_00_Body_00_SKIN (Instance)", MaterialRole::Skin),
+            ("N00_000_00_EyeIris_00_EYE (Instance)", MaterialRole::Eye),
+            ("N00_000_00_FaceBrow_00_FACE (Instance)", MaterialRole::Face),
+            ("N00_000_00_HairBack_00_HAIR (Instance)", MaterialRole::Hair),
+            ("N00_002_01_Tops_01_CLOTH (Instance)", MaterialRole::Fabric),
+            (
+                "N00_001_02_Accessory_Tie_01_CLOTH (Instance)",
+                MaterialRole::Fabric,
+            ),
+        ] {
+            assert_eq!(
+                infer_material_role(name, true, None),
+                expected,
+                "name {name:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_metallic_hint_applies_only_to_true_standard_materials() {
         assert_eq!(

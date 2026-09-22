@@ -35,8 +35,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vtuber_app::ui::{AvatarPreviewPlugin, paint_avatar_preview};
 use vtuber_avatar::look::{
-    AvatarLookSettings, AvatarMaterialRoles, MTOON_PORTRAIT_PRESET, RichLookSettings,
+    AvatarLookSettings, AvatarMaterialRoles, MTOON_PORTRAIT_PRESET, MaterialRole, RichLookSettings,
     StandardLookBases, apply_standard_portrait_settings, initialize_look_materials,
+    resolve_mtoon_role_params,
 };
 use vtuber_avatar::{
     AVATAR_RENDER_LAYER, AvatarOutputFrameSlot, AvatarOutputState, AvatarViewportCamera,
@@ -217,6 +218,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-blend-depth" => mtoon_blend_depth(),
         "mtoon-normal" => mtoon_normal(),
         "mtoon-face-normal" => mtoon_face_normal(),
+        "mtoon-role-gloss" => mtoon_role_gloss(),
         "standard-look" => standard_look(),
         "help" | "--help" | "-h" => {
             println!("cargo xtask rich-look <case> [--evidence <file>]");
@@ -226,6 +228,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-normal    normal texture, scale and TBN wiring");
             println!(
                 "  mtoon-face-normal the Face-role diffuse-normal steering and its strength gate"
+            );
+            println!(
+                "  mtoon-role-gloss per-role MToon gloss differs at strength 1 and vanishes at 0"
             );
             println!("  mtoon-standard  the Native display is the plain authored display");
             println!("  mtoon-reference upstream reference vs Native vs Rich(0) on the GPU");
@@ -2309,6 +2314,123 @@ fn mtoon_face_normal() -> Result<String, RichLookError> {
     report.push_str("checks=amount_zero_identity,steering_reaches_diffuse,strength_zero_native\n");
     Ok(report)
 }
+
+/// Per-role MToon gloss must reach the lit body at strength 1, keep the
+/// author's outline line and alpha, and disappear entirely at strength 0.
+fn mtoon_role_gloss() -> Result<String, RichLookError> {
+    let key = LightSpec {
+        direction: -Vec3::new(0.3, 0.2, 0.9).normalize(),
+        color: Color::WHITE,
+        illuminance: 600.0,
+        shadows_enabled: false,
+    };
+    let base = MtoonScene {
+        mesh: MeshSpec::Sphere,
+        outline: true,
+        outline_color: LinearRgba::new(0.5, 0.5, 0.5, 1.0),
+        outline_lighting_mix: 1.0,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+    };
+    let mut body_only = base.clone();
+    body_only.outline = false;
+    body_only.outline_lighting_mix = 0.0;
+    let native_outline = render(&base)?;
+    let native_body = render(&body_only)?;
+    let outline_mask = opaque_only_in(&native_outline, &native_body);
+    let outline_pixels = outline_mask.iter().filter(|drawn| **drawn).count();
+
+    let on = RichLookSettings {
+        enabled: true,
+        strength: 1.0,
+    };
+    let zero = RichLookSettings {
+        enabled: true,
+        strength: 0.0,
+    };
+    let render_role = |settings: RichLookSettings, role: MaterialRole, outline: bool| {
+        let mut scene = if outline {
+            base.clone()
+        } else {
+            body_only.clone()
+        };
+        scene.shading_mode = MToonShadingMode::Rich;
+        scene.portrait = resolve_mtoon_role_params(settings, role);
+        render(&scene)
+    };
+
+    let general = render_role(on, MaterialRole::General, true)?;
+    let hair = render_role(on, MaterialRole::Hair, true)?;
+    let face = render_role(on, MaterialRole::Face, true)?;
+    let fabric = render_role(on, MaterialRole::Fabric, true)?;
+    let hair_zero = render_role(zero, MaterialRole::Hair, false)?;
+    let face_zero = render_role(zero, MaterialRole::Face, false)?;
+    let general_zero = render_role(zero, MaterialRole::General, false)?;
+
+    let (line_hair_face, line_max) = masked_pixel_difference(&hair, &face, &outline_mask);
+    let (hair_face_differing, _) = pixel_difference(&hair, &face);
+    let (hair_fabric_differing, _) = pixel_difference(&hair, &fabric);
+    let (hair_general_differing, _) = pixel_difference(&hair, &general);
+    let (zero_role_differing, _) = pixel_difference(&hair_zero, &face_zero);
+    let (zero_general_differing, _) = pixel_difference(&general_zero, &hair_zero);
+    let (zero_native_differing, _) = pixel_difference(&face_zero, &native_body);
+    let opaque_general = opaque_pixel_count(&general);
+    let opaque_hair = opaque_pixel_count(&hair);
+    let opaque_face = opaque_pixel_count(&face);
+    let opaque_fabric = opaque_pixel_count(&fabric);
+    if opaque_hair != opaque_general
+        || opaque_face != opaque_general
+        || opaque_fabric != opaque_general
+    {
+        return Err(RichLookError::Failed(format!(
+            "role gains changed the covered pixel count: general={opaque_general} hair={opaque_hair} face={opaque_face} fabric={opaque_fabric}"
+        )));
+    }
+    let mut report = format!(
+        "case=mtoon-role-gloss\n\
+         outline_only_pixels={outline_pixels}\n\
+         hair_vs_face line_differing={line_hair_face} max_channel_diff={line_max} body_differing={hair_face_differing}\n\
+         hair_vs_fabric_differing={hair_fabric_differing}\n\
+         hair_vs_general_differing={hair_general_differing}\n\
+         strength_zero hair_vs_face_differing={zero_role_differing} general_vs_hair_differing={zero_general_differing} face_vs_native_differing={zero_native_differing}\n\
+         opaque_count={opaque_general}\n"
+    );
+    if outline_pixels == 0 {
+        return Err(RichLookError::Failed(
+            "the outline ring was not visible outside the silhouette".into(),
+        ));
+    }
+    if line_hair_face != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the role gains changed the outline line in {line_hair_face} of {outline_pixels} outline pixels (max channel difference {line_max})"
+        )));
+    }
+    for (label, differing) in [
+        ("Hair vs Face", hair_face_differing),
+        ("Hair vs Fabric", hair_fabric_differing),
+        ("Hair vs General", hair_general_differing),
+    ] {
+        if differing == 0 {
+            return Err(RichLookError::Failed(format!(
+                "{label} role gloss did not change any lit pixel"
+            )));
+        }
+    }
+    if zero_role_differing != 0 || zero_general_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "role gains leaked into the strength-0 display: hair_vs_face={zero_role_differing} general_vs_hair={zero_general_differing}"
+        )));
+    }
+    if zero_native_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "strength-0 Face-role Rich differs from Native in {zero_native_differing} pixels"
+        )));
+    }
+    report.push_str(
+        "checks=line_free_of_role_gains,roles_change_body,strength_zero_identity,opaque_counts_stable\n",
+    );
+    Ok(report)
+}
+
 fn luma(pixel: [u8; 4]) -> u32 {
     u32::from(pixel[0]) + u32::from(pixel[1]) + u32::from(pixel[2])
 }
