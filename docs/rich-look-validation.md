@@ -324,12 +324,9 @@ are both the fix itself. OFF, OFF-restore and strength-0 are unchanged within
 the same `<= 0.004` bound as before, so the Rich-zero/Native identity still
 holds on the real models.
 
-Not measured in this change: the key-light shadow through-check for the added
-direct specular as a separate GPU scene (the visibility multiplication that
-gates it is the same `fetch_directional_shadow` sample the Native direct term
-reuses in `mtoon_rich_fragment.wgsl::calc_rich_light_visibility`), real NDI
-send/receive, macOS, and any GPU other than the RTX 4090 above. The initial
-value tuning on real models remains with #77.
+Not measured in this change: real NDI send/receive, macOS, and any GPU other
+than the RTX 4090 above. The initial value tuning on real models remains with
+#77.
 
 Local validation for this change: `cargo test --workspace -j 4` and
 `cargo clippy --workspace --all-targets -j 4 -- -D warnings` PASS; the 16 GPU
@@ -339,6 +336,25 @@ above. The three new checks were verified against the pre-fix behavior they
 replace (the hard-zero environment sample, the composed Rich outline color,
 and the squared-input roughness) and fail on it, so they measure the gaps
 they close.
+
+### #72 key-light shadow through-check (`mtoon-specular-shadow`)
+
+The previously unmeasured gate is now a dedicated GPU scene. A StandardMaterial
+box occluder casts the key light's shadow onto a MToon plane. Four renders
+(shadows on/off × specular gain 0/1) separate "the added specular exists" from
+"the term is gated by the same `fetch_directional_shadow` visibility the
+diffuse uses":
+
+| check | result |
+|---|---|
+| deep-shadow interior (opaque, darkened ≥48 luma vs shadows-off, 3×3 eroded) | 124 pixels |
+| specular without shadows (opaque pixels, gain 1 vs 0, luma Δ > 4) | 932 pixels |
+| shadow footprint ∩ unshadowed-specular (gated) | 124 pixels |
+| unshadowed peak | column 20 row 9, gain_zero `[30,30,30,255]` → gain_one `[139,139,139,255]` |
+| deep-shadow leak (gated pixels, shadows on, gain 1 vs 0) | 0 differing, max channel diff 0 |
+| lit plane peak with shadows still on | same peak, gain_zero `[30,30,30,255]` → gain_one `[139,139,139,255]` |
+
+`checks=occluder_darkens_plane,specular_visible_unshadowed,shadow_overlaps_highlight,specular_respects_shadow,specular_visible_lit_with_shadows`. The shadow-map PCF fringe is excluded by the luma floor and the 3×3 erosion so the leak check measures the shadow interior only. Re-run with the full suite below (19/19 PASS).
 
 ### Other reused fixtures
 
@@ -680,7 +696,7 @@ Pure checks (`cargo test --workspace -j 4`, all PASS):
 - `face_lighting_normal` stays within 0.06 of native steering and returns the
   native vector at strength 0; the WGSL `portrait_face_normal` mirror matches.
 
-GPU fixtures (`$env:WGPU_BACKEND='vulkan'; cargo run -q -p xtask -j 1 -- rich-look <case>`, all PASS, 18/18 cases):
+GPU fixtures (`$env:WGPU_BACKEND='vulkan'; cargo run -q -p xtask -j 1 -- rich-look <case>`, all PASS, 19/19 cases):
 
 | case | key measurements |
 |---|---|
@@ -699,7 +715,7 @@ not yet visually inspected in this revision.
 
 Local gates: `cargo clippy --workspace --all-targets -- -D warnings` PASS;
 `cargo test --workspace -j 4` PASS; `rustfmt --check` on changed files PASS;
-18/18 GPU rich-look cases PASS (17 existing + `mtoon-role-gloss`).
+19/19 GPU rich-look cases PASS (18 existing + `mtoon-specular-shadow`).
 
 Unrun / handed to #77: visual role-gloss comparison on a real model under
 interactive head motion; macOS/other GPUs; final per-role preset tuning.
@@ -779,7 +795,7 @@ fail (`-Z` vs `+Z`, rotated rest vs `+Z`, `-X` vs `+X`); after the fix all pass.
 - `cargo test --workspace -j 4`: PASS (`vtuber-avatar` 365, `vtuber-app` 250,
   including 6 new R1 and 5 new R2 tests).
 - GPU fixtures (`$env:WGPU_BACKEND='vulkan'; cargo run -q -p xtask -j 1 --
-  rich-look <case>`, Windows/Vulkan/RTX 4090, 18/18 PASS, existing/new counted
+  rich-look <case>`, Windows/Vulkan/RTX 4090, 19/19 PASS, existing/new counted
   from the actual run list): `mtoon-lighting`, `mtoon-shading`, `mtoon-normal`,
   `mtoon-face-normal` (`unsteered=[118,118,118,255] steered=[122,122,122,255]
   strength_zero=[243,243,243,255] native=[243,243,243,255]`),
@@ -789,6 +805,7 @@ fail (`-Z` vs `+Z`, rotated rest vs `+Z`, `-X` vs `+X`); after the fix all pass.
   `mtoon-environment-roughness` (ratio 2.646 vs perceptual 2.679),
   `mtoon-outline-mix` (line 0, body 468), `mtoon-blend-depth`,
   `mtoon-cutout-shadow`, `mtoon-portrait`, `mtoon-shadow`,
+  `mtoon-specular-shadow` (deep_shadow 124, gated 124, leak 0),
   `standard-look` (lit Rich(1) 99, unlit 0), `studio-environment`,
   `finish-alpha`, `avatar-ui-alpha`.
 - Real VRM `vrm-render` (same device, frozen clock/pose, production managed
@@ -815,7 +832,7 @@ outline untouched (Face diffuse-normal steering only).
 
 | Issue | State |
 |---|---|
-| #72 MToon glossy/environment/extra rim | Implemented and measured (see the "#72 measured" section): `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl`, the Rich `OUTLINE_PASS` keeps the author's line, the added environment reflection actually samples the view's prefiltered specular cubemap, and the term consumes the perceptual roughness for both the mip index and `F_AB`; verified by `mtoon-portrait`, `mtoon-outline-mix`, `mtoon-environment-roughness` and the re-run identity fixtures. The 2026-09-20 review's gaps (the hard-zero environment sample, the added gloss flowing into the outline line, and the squared roughness input) are fixed and measured. |
+| #72 MToon glossy/environment/extra rim | Implemented and measured (see the "#72 measured" section and `mtoon-specular-shadow`): `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl`, the Rich `OUTLINE_PASS` keeps the author's line, the added environment reflection actually samples the view's prefiltered specular cubemap, the term consumes the perceptual roughness for both the mip index and `F_AB`, and the added direct specular is gated by the key light's shadow visibility (deep-shadow leak 0/124). Verified by `mtoon-portrait`, `mtoon-outline-mix`, `mtoon-environment-roughness`, `mtoon-specular-shadow` and the re-run identity fixtures. The 2026-09-20 review's gaps (the hard-zero environment sample, the added gloss flowing into the outline line, and the squared roughness input) are fixed and measured. |
 | #74 HDR finish and transparency | Implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table exist in `crates/vtuber-avatar/src/look/finish.rs` and `finish.wgsl`; verified by the #74 measurements above. |
 | #75 one-click UI, 4 languages, per-model save | Implemented, including model-specific persistence and restore. Local settings/ECS tests and Windows GPU action-to-render checks are recorded below; interactive tracking and NDI receiver acceptance remain with #77. |
 | #76 material roles | Implemented and measured (see the "#76 measured" section): `MaterialRole`, the five pure resolvers, `face_lighting_normal`, the per-model `material_roles` settings section, the four-language role list, and the GPU fixtures `mtoon-face-normal` and `mtoon-role-gloss`. Real-model role appearance under head motion remains with #77. |
