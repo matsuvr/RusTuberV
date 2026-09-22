@@ -69,6 +69,14 @@ pub struct MToonPortraitParams {
     pub rim_gain: f32,
     /// The falloff power of the added rim.
     pub rim_power: f32,
+    /// The diffuse-normal steering amount in `0..=1` for Face-role materials.
+    ///
+    /// Zero keeps the authored diffuse normal everywhere; the shader blends at
+    /// most a quarter of the way toward `face_forward` at amount 1. The
+    /// forward is filled per frame from the rendered head pose.
+    pub face_normal_amount: f32,
+    /// The head's world forward unit vector used by the face normal steering.
+    pub face_forward: Vec3,
 }
 
 impl Default for MToonPortraitParams {
@@ -80,6 +88,8 @@ impl Default for MToonPortraitParams {
             environment_gain: 0.50,
             rim_gain: 0.25,
             rim_power: 3.0,
+            face_normal_amount: 0.0,
+            face_forward: Vec3::Z,
         }
     }
 }
@@ -426,6 +436,13 @@ pub struct MToonMaterialUniform {
     pub portrait_environment_gain: f32,
     pub portrait_rim_gain: f32,
     pub portrait_rim_power: f32,
+    /// The head's world forward components, kept as scalars so the uniform's
+    /// member layout stays all-scalar after the portrait block.
+    pub portrait_face_forward_x: f32,
+    pub portrait_face_forward_y: f32,
+    pub portrait_face_forward_z: f32,
+    /// The diffuse-normal steering amount in `0..=1` for Face-role materials.
+    pub portrait_face_normal_amount: f32,
 }
 
 impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
@@ -472,6 +489,10 @@ impl AsBindGroupShaderType<MToonMaterialUniform> for MToonMaterial {
             portrait_environment_gain: self.portrait.environment_gain,
             portrait_rim_gain: self.portrait.rim_gain,
             portrait_rim_power: self.portrait.rim_power,
+            portrait_face_forward_x: self.portrait.face_forward.x,
+            portrait_face_forward_y: self.portrait.face_forward.y,
+            portrait_face_forward_z: self.portrait.face_forward.z,
+            portrait_face_normal_amount: self.portrait.face_normal_amount,
         }
     }
 }

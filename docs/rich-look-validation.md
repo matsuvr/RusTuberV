@@ -31,6 +31,7 @@ implemented and not measured, and is not claimed as working.
 | #71 cutout base alpha | this change (working tree on `4bc53a2`) | `mtoon::alpha::mtoon_alpha_at_uv` now returns the authored base alpha (`material.base_color.a` times the base color texel); the Rich fragment discard imports that shared function instead of its private copy and the prepass tests the same value, so a cutout whose lit Mask test discards for a zero authored base alpha no longer casts the opaque texel's shadow. `mtoon-cutout-shadow` adds the zero-base-alpha scene. Native (and Rich(0)) keep the upstream depth-only shadow. |
 | #73 Standard portrait | `a0d64f6` | `resolve_standard_portrait`/`apply_standard_portrait_settings` (roughness-only relative adjustment, unlit and MToon untouched) |
 | #74 HDR finish | this PR | `PortraitFinish`/`PORTRAIT_FINISH`/`resolve_portrait_finish`, `sync_portrait_finish` capture-once/restore, `Hdr`+`Exposure`+`Tonemapping` camera components, and the alpha-aware finish pass (`finish.wgsl`: `finish_straight_linear_rgb`/`finish_premultiplied_linear`) with the explicit final contract `a * E(T(C))` |
+| #76 material roles | `bd1b2d2` (PR #86) | `MaterialRole`/`infer_material_role`/`resolve_material_role`, per-role `resolve_mtoon_role_params`/`resolve_standard_role_params`, Face-only `face_lighting_normal` + WGSL `portrait_face_normal`, per-model `material_roles` settings, settings-screen role list in four languages, and the GPU fixtures `mtoon-face-normal`/`mtoon-role-gloss` |
 | #79 avatar UI alpha boundary | this PR | avatar-only callback for the monitor and expanding transition; the shared `Bgra8UnormSrgb` image remains gamma-premultiplied while the callback supplies linear-premultiplied RGB to the UI blend |
 
 Supporting reusable code: `tools/xtask/src/rich_look.rs` (the GPU cases,
@@ -664,6 +665,152 @@ The slider sends live changes during dragging and `SaveRichLook` on release
 additional debounce is used. Parse and I/O failures reach the existing UI
 settings error path, and a failed restore does not submit the new model.
 
+## #76 measured: material roles and Face lighting normal (2026-09-22)
+
+Pure checks (`cargo test --workspace -j 4`, all PASS):
+
+- Five resolvers (`infer_material_role`, `resolve_material_role`,
+  `resolve_mtoon_role_params`, `resolve_standard_role_params`,
+  `face_lighting_normal`) with name/extension/auto priorities.
+- `fixture_model_material_names_resolve_deterministically` records the
+  observed fixture-material map: `Face_00_SKIN` resolves to Skin (the skin
+  rule fires before Face; both orders stay deterministic),
+  `FaceMouth`/`FaceBrow`/`FaceEyeline` → Face, `Body_00_SKIN` → Skin,
+  `EyeIris`/`EyeWhite` → Eye, `Hair*` → Hair, `*_CLOTH` → Fabric.
+- `face_lighting_normal` stays within 0.06 of native steering and returns the
+  native vector at strength 0; the WGSL `portrait_face_normal` mirror matches.
+
+GPU fixtures (`$env:WGPU_BACKEND='vulkan'; cargo run -q -p xtask -j 1 -- rich-look <case>`, all PASS, 18/18 cases):
+
+| case | key measurements |
+|---|---|
+| `mtoon-face-normal` | `unsteered=[118,118,118,255] steered=[122,122,122,255] strength_zero=[243,243,243,255] native=[243,243,243,255]` — Face-only re-steer changes only Face, strength 0 restores Native identity |
+| `mtoon-role-gloss` | `outline_only_pixels=46`, `hair_vs_face line_differing=0 max_channel_diff=0`, `body_differing=307`, `hair_vs_fabric_differing=297`, `hair_vs_general_differing=247`, `strength_zero hair_vs_face=0 general_vs_hair=0 face_vs_native=0`, `opaque_count=514`, `checks=line_free_of_role_gains,roles_change_body,strength_zero_identity,opaque_counts_stable` — role gloss differs between Hair/Fabric/General/Body, does not leak into the outline line, and vanishes at strength 0 |
+
+Real VRM `vrm-render` re-run with role resolution active:
+
+| model | off mean | on mean | mean abs diff | off restore | on repeat | strength 0 vs off | half vs off | half vs full | opaque OFF/ON |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `inore-vrm1.vrm` (VRM 1.0) | 72.21 | 61.02 | 11.224 | 0.000 | 0.000 | 0.000 | 12.300 | 1.731 | 19848 / 19848 |
+| `tsukuyomi-chan.vrm` (VRM 0.x) | 39.01 | 31.24 | 7.787 | 0.004 | 0.003 | 0.005 | 7.350 | 0.983 | 10455 / 10455 |
+
+OFF/ON PNGs are written under `target/rich-look-validation/*-role/`. They were
+not yet visually inspected in this revision.
+
+Local gates: `cargo clippy --workspace --all-targets -- -D warnings` PASS;
+`cargo test --workspace -j 4` PASS; `rustfmt --check` on changed files PASS;
+18/18 GPU rich-look cases PASS (17 existing + `mtoon-role-gloss`).
+
+Unrun / handed to #77: visual role-gloss comparison on a real model under
+interactive head motion; macOS/other GPUs; final per-role preset tuning.
+
+## PR #86 R1/R2 fixes (2026-09-22, code fix at `850b350`)
+
+Base review HEAD: `2a79dff`. No new PR; fixes land on
+`feat/76-material-role-presets`. No preset retuning and no #77 final
+acceptance front-loading.
+
+### R1: restored roles survive Loading -> Binding -> Ready
+
+`clear_look_materials_on_unload` was `is_changed() && state != Ready`, so a
+restore applied on `Accepted` was wiped by the same model's later
+Loading/Binding clear, and the one-shot `Added<VrmMaterialBaseValues>`
+capture never recovered. The fix distinguishes old-model destruction from
+new-model restore/init:
+
+- `Unloading`/`NoAvatar`/`Failed` always clears; `Loading`/`Binding` clears
+  only on a lifecycle-generation change; `Ready` never clears.
+- Production order is explicit: `despawn_unloading_avatar` ->
+  `clear_look_materials_on_unload` -> `apply_material_role_overrides` /
+  `initialize_look_materials` / `initialize_mtoon_look_materials`, and
+  `sync_avatar_lifecycle_system` -> `apply_material_role_overrides` before the
+  UI role-list sync. No first-frame luck and no fixed-frame waits; the existing
+  model ID / lifecycle generation is the only owner signal.
+
+Added ECS tests (production clear + role-apply + material init):
+
+- `saved_manual_survives_loading_to_ready`
+- `inferred_roles_survive_binding_without_selection`
+- `binding_multiple_frames_retain_roles_names_and_bases`
+- `model_switch_restores_each_without_mixing` (A -> B -> A, no cross-talk)
+- `unload_and_failure_drop_old_lists`
+- `shared_index_meshes_share_one_role_application`
+
+`rich_look_app` (`vtuber-app/src/orchestrator.rs`) now includes the production
+clear + both material initializers in chained order; it previously had no
+clear and could not detect the bug. Before the fix the new avatar-level tests
+fail (`General` instead of `Face`/`Hair`/`Skin` after Binding); after the fix
+all pass.
+
+### R2: head forward uses the rest frame, not head local +Z
+
+`head_world_forward` was `head.rotation() * Vec3::Z`, which misreads the face
+front: VRM 0.x's `Y = pi` basis makes an identity head rest report `-Z`, and a
+non-identity VRM 1.0 head rest leaks into the front. The fix keeps the
+normalized initial front (`+Z` in application-root space, with the
+generation's basis already baked into the immutable rests) converted once into
+the head rest frame: `current * inverse(rest) * +Z`. Both rotations are the
+propagated draw pose, so yaw/pitch/parent/app-root motion is followed without
+double-applying the VRM 0.x correction. Tracking, LookAt and bone Transforms
+are untouched; the old "`+Z` is normalization/LookAt-shared" comment is
+corrected. `apply_mtoon_portrait_settings` now requires both the rendered
+`GlobalTransform` and the immutable `RestGlobalTransform`; a missing rest keeps
+the authored normal (`face_normal_amount = 0`).
+
+Added tests (expected values are known cardinals, never the function itself):
+
+- `vrm0_basis_with_identity_head_rest_faces_plus_z` (`+Z`, old gave `-Z`)
+- `vrm1_non_identity_head_rest_matches_model_forward_at_rest` (`+Z`)
+- `head_yaw_pitch_parent_and_app_root_are_followed` (yaw `+X`, pitch `-Y`,
+  VRM 0.x relative yaw and app-root yaw without doubling)
+- `only_face_gets_the_normal_steer_and_zero_keeps_the_authored`
+- `missing_rest_keeps_the_authored_normal`
+- Updated `the_head_pose_drives_the_face_normal_and_the_strength_gates_it`
+  to assert the known `+X` front.
+
+Before the fix (body `current * +Z`, rest ignored) the three pure forward tests
+fail (`-Z` vs `+Z`, rotated rest vs `+Z`, `-X` vs `+X`); after the fix all pass.
+
+### Re-validation at the R1/R2 tree
+
+- `rustfmt --check --edition 2024` on the five changed Rust files: PASS.
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS (only the
+  existing desktop NDI DLL staging notice).
+- `cargo test --workspace -j 4`: PASS (`vtuber-avatar` 365, `vtuber-app` 250,
+  including 6 new R1 and 5 new R2 tests).
+- GPU fixtures (`$env:WGPU_BACKEND='vulkan'; cargo run -q -p xtask -j 1 --
+  rich-look <case>`, Windows/Vulkan/RTX 4090, 18/18 PASS, existing/new counted
+  from the actual run list): `mtoon-lighting`, `mtoon-shading`, `mtoon-normal`,
+  `mtoon-face-normal` (`unsteered=[118,118,118,255] steered=[122,122,122,255]
+  strength_zero=[243,243,243,255] native=[243,243,243,255]`),
+  `mtoon-role-gloss` (`outline_only_pixels=46 line_differing=0 body 307/297/247,
+  strength-zero 0/0/0, opaque 514`), `mtoon-standard`, `mtoon-reference`
+  (0/0 on all four scenes), `mtoon-rich-zero` (0 on all three),
+  `mtoon-environment-roughness` (ratio 2.646 vs perceptual 2.679),
+  `mtoon-outline-mix` (line 0, body 468), `mtoon-blend-depth`,
+  `mtoon-cutout-shadow`, `mtoon-portrait`, `mtoon-shadow`,
+  `standard-look` (lit Rich(1) 99, unlit 0), `studio-environment`,
+  `finish-alpha`, `avatar-ui-alpha`.
+- Real VRM `vrm-render` (same device, frozen clock/pose, production managed
+  lifecycle with role resolution active):
+
+| model | off mean | on mean | mean abs diff | off restore | on repeat | strength 0 vs off | half vs off | half vs full | opaque OFF/ON |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `inore-vrm1.vrm` (VRM 1.0) | 72.21 | 61.02 | 11.224 | 0.000 | 0.000 | 0.000 | 12.300 | 1.731 | 19848 / 19848 |
+| `tsukuyomi-chan.vrm` (VRM 0.x) | 39.01 | 31.24 | 7.787 | 0.004 | 0.003 | 0.005 | 7.349 | 0.983 | 10455 / 10455 |
+
+  Outputs under `target/rich-look-validation/inore-vrm1-role-r1r2/` and
+  `.../tsukuyomi-chan-role-r1r2/`. Numbers are byte means from the fixture;
+  OFF/ON PNGs for both models were visually inspected (overall silhouette,
+  hair/clothing areas, no missing parts; ON shows the portrait rig change).
+  The numbers match the pre-fix #76 table, so Native/Rich(0) identity and the
+  OFF restoration still hold with roles active and the corrected face forward.
+
+Unrun / handed to #77: final per-role look, interactive head-turn/expression,
+NDI receiver image, macOS/other GPUs. The fixes keep Native == Rich(0) for all
+roles, no Unlit->Lit or MToon->PBR conversion, and author color/UV/alpha/
+outline untouched (Face diffuse-normal steering only).
+
 ## Not implemented
 
 | Issue | State |
@@ -671,13 +818,14 @@ settings error path, and a failed restore does not submit the new model.
 | #72 MToon glossy/environment/extra rim | Implemented and measured (see the "#72 measured" section): `MToonPortraitParams` on the material, `resolve_mtoon_portrait`, `apply_mtoon_portrait_settings`, `mtoon_portrait.wgsl`, the Rich `OUTLINE_PASS` keeps the author's line, the added environment reflection actually samples the view's prefiltered specular cubemap, and the term consumes the perceptual roughness for both the mip index and `F_AB`; verified by `mtoon-portrait`, `mtoon-outline-mix`, `mtoon-environment-roughness` and the re-run identity fixtures. The 2026-09-20 review's gaps (the hard-zero environment sample, the added gloss flowing into the outline line, and the squared roughness input) are fixed and measured. |
 | #74 HDR finish and transparency | Implemented. `PortraitFinish`, `resolve_portrait_finish`, `sync_portrait_finish`, `finish_straight_linear_rgb`/`finish_premultiplied_linear` and the alpha/color-space contract table exist in `crates/vtuber-avatar/src/look/finish.rs` and `finish.wgsl`; verified by the #74 measurements above. |
 | #75 one-click UI, 4 languages, per-model save | Implemented, including model-specific persistence and restore. Local settings/ECS tests and Windows GPU action-to-render checks are recorded below; interactive tracking and NDI receiver acceptance remain with #77. |
-| #76 material roles | Not implemented. `MaterialRole`, `infer_material_role`, `resolve_material_role`, the role param resolvers and `face_lighting_normal` do not exist. |
-| #77 final acceptance | Partially covered by this document (the measurements above). The #75 action-to-render first-version check is recorded below. Interactive acceptance remains unrun, and #76 role comparisons are not possible yet. |
+| #76 material roles | Implemented and measured (see the "#76 measured" section): `MaterialRole`, the five pure resolvers, `face_lighting_normal`, the per-model `material_roles` settings section, the four-language role list, and the GPU fixtures `mtoon-face-normal` and `mtoon-role-gloss`. Real-model role appearance under head motion remains with #77. |
+| #77 final acceptance | Partially covered by this document (the measurements above). The #75 action-to-render first-version check is recorded below. Interactive acceptance remains unrun. |
 
 Consequences: the epic's completion criteria are not fully met yet. The
 finish/tone change (#74) is in place and the look can be switched on and
-adjusted from the settings screen, and model-specific look settings are saved
-and restored. The role-based adjustments of #76 are not implemented.
+adjusted from the settings screen, model-specific look settings are saved
+and restored, and the role-based adjustments of #76 are implemented and
+measured. What remains for the epic is the #77 interactive acceptance.
 
 ## Known limitations in the implemented parts
 

@@ -29,14 +29,15 @@ use bevy::winit::WinitPlugin;
 use bevy_egui::{EguiContext, EguiMultipassSchedule, EguiPlugin};
 use bevy_vrm1::prelude::{
     MToonMaterial, MToonOutline, MToonPortraitParams, MToonShadingMode, MtoonMaterialPlugin,
-    OutlineWidthMode, RimLighting, Shade, UVAnimation, VrmMaterialBaseValues,
+    OutlineWidthMode, RimLighting, Shade, UVAnimation, VrmMaterialBaseValues, VrmMaterialIndex,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use vtuber_app::ui::{AvatarPreviewPlugin, paint_avatar_preview};
 use vtuber_avatar::look::{
-    AvatarLookSettings, MTOON_PORTRAIT_PRESET, RichLookSettings, StandardLookBases,
-    apply_standard_portrait_settings, initialize_look_materials,
+    AvatarLookSettings, AvatarMaterialRoles, MTOON_PORTRAIT_PRESET, MaterialRole, RichLookSettings,
+    StandardLookBases, apply_standard_portrait_settings, initialize_look_materials,
+    resolve_mtoon_role_params,
 };
 use vtuber_avatar::{
     AVATAR_RENDER_LAYER, AvatarOutputFrameSlot, AvatarOutputState, AvatarViewportCamera,
@@ -216,6 +217,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-outline-mix" => mtoon_outline_mix(),
         "mtoon-blend-depth" => mtoon_blend_depth(),
         "mtoon-normal" => mtoon_normal(),
+        "mtoon-face-normal" => mtoon_face_normal(),
+        "mtoon-role-gloss" => mtoon_role_gloss(),
         "standard-look" => standard_look(),
         "help" | "--help" | "-h" => {
             println!("cargo xtask rich-look <case> [--evidence <file>]");
@@ -223,6 +226,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-lighting  directional-light color/intensity response");
             println!("  mtoon-shading   signed NdotL, shading shift and toony endpoints");
             println!("  mtoon-normal    normal texture, scale and TBN wiring");
+            println!(
+                "  mtoon-face-normal the Face-role diffuse-normal steering and its strength gate"
+            );
+            println!(
+                "  mtoon-role-gloss per-role MToon gloss differs at strength 1 and vanishes at 0"
+            );
             println!("  mtoon-standard  the Native display is the plain authored display");
             println!("  mtoon-reference upstream reference vs Native vs Rich(0) on the GPU");
             println!("  mtoon-rich-zero Native vs Rich with zero added effect, byte-compared");
@@ -231,7 +240,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-blend-depth Blend outline transparency and Z-write occlusion");
             println!("  standard-look   Standard/Unlit against the untouched material");
             println!("  finish-alpha    HDR finish, sRGB premultiplication and readback");
-            println!("  avatar-ui-alpha shared avatar image through the real egui preview callback");
+            println!(
+                "  avatar-ui-alpha shared avatar image through the real egui preview callback"
+            );
             println!("  mtoon-authored  (renamed to mtoon-standard)");
             return Ok(());
         }
@@ -666,12 +677,16 @@ fn mtoon_environment_roughness() -> Result<String, RichLookError> {
         },
         shading_mode: MToonShadingMode::Rich,
         mesh: MeshSpec::Sphere,
-        ..MtoonScene::lit(Color::WHITE, Color::BLACK, LightSpec {
-            direction: Vec3::NEG_Z,
-            color: Color::WHITE,
-            illuminance: 0.0,
-            shadows_enabled: false,
-        })
+        ..MtoonScene::lit(
+            Color::WHITE,
+            Color::BLACK,
+            LightSpec {
+                direction: Vec3::NEG_Z,
+                color: Color::WHITE,
+                illuminance: 0.0,
+                shadows_enabled: false,
+            },
+        )
     };
 
     let mid = center_pixel(&render_environment(&scene(0.5))?);
@@ -768,11 +783,7 @@ fn mtoon_rich_zero() -> Result<String, RichLookError> {
             ..default()
         },
         outline: true,
-        ..MtoonScene::lit(
-            Color::srgb(0.8, 0.7, 0.6),
-            Color::srgb(0.1, 0.1, 0.15),
-            key,
-        )
+        ..MtoonScene::lit(Color::srgb(0.8, 0.7, 0.6), Color::srgb(0.1, 0.1, 0.15), key)
     };
     // The tilted normal map is a Rich-only input: it must change the Rich
     // image, while the Native identity comparison below uses it unchanged.
@@ -877,11 +888,7 @@ fn mtoon_reference() -> Result<String, RichLookError> {
             ..default()
         },
         outline: true,
-        ..MtoonScene::lit(
-            Color::srgb(0.8, 0.7, 0.6),
-            Color::srgb(0.1, 0.1, 0.15),
-            key,
-        )
+        ..MtoonScene::lit(Color::srgb(0.8, 0.7, 0.6), Color::srgb(0.1, 0.1, 0.15), key)
     };
     let mask = MtoonScene {
         mesh: MeshSpec::Sphere,
@@ -975,7 +982,8 @@ fn mtoon_reference() -> Result<String, RichLookError> {
         ..multi.clone()
     };
     let reference_without_normal = render_reference(&without_normal)?;
-    let (reference_normal_differing, _) = pixel_difference(&reference_multi, &reference_without_normal);
+    let (reference_normal_differing, _) =
+        pixel_difference(&reference_multi, &reference_without_normal);
     let rich_full = render(&multi.clone().rich(1.0))?;
     let rich_full_without_normal = render(&without_normal.clone().rich(1.0))?;
     let (rich_normal_differing, _) = pixel_difference(&rich_full, &rich_full_without_normal);
@@ -1436,6 +1444,7 @@ fn render_standard_look(spec: StandardLookScene) -> Result<Vec<[u8; 4]>, RichLoo
     .insert_resource(OutputArmed(false));
     if spec.look.is_some() {
         app.init_resource::<StandardLookBases>()
+            .init_resource::<AvatarMaterialRoles>()
             .init_resource::<AvatarLookSettings>()
             .add_systems(
                 Update,
@@ -1470,6 +1479,7 @@ fn setup_standard_look_scene(
         Mesh3d(meshes.add(sphere)),
         MeshMaterial3d(materials.add(source)),
         base,
+        VrmMaterialIndex(0),
         RenderLayers::layer(AVATAR_RENDER_LAYER),
     ));
     commands.spawn((
@@ -1619,7 +1629,10 @@ fn attach_environment(
     map: Res<EnvironmentMapHandle>,
     cameras: Query<
         (Entity, Option<&GeneratedEnvironmentMapLight>),
-        Or<(With<AvatarViewportCamera>, With<vtuber_avatar::AvatarOutputCamera>)>,
+        Or<(
+            With<AvatarViewportCamera>,
+            With<vtuber_avatar::AvatarOutputCamera>,
+        )>,
     >,
 ) {
     let Some(environment_map) = map.0.clone() else {
@@ -1627,11 +1640,13 @@ fn attach_environment(
     };
     for (entity, existing) in &cameras {
         if existing.is_none() {
-            commands.entity(entity).insert(GeneratedEnvironmentMapLight {
-                environment_map: environment_map.clone(),
-                intensity: scene.intensity,
-                ..default()
-            });
+            commands
+                .entity(entity)
+                .insert(GeneratedEnvironmentMapLight {
+                    environment_map: environment_map.clone(),
+                    intensity: scene.intensity,
+                    ..default()
+                });
         }
     }
 }
@@ -1647,7 +1662,10 @@ fn attach_fixture_environment(
     environment: Res<FixtureEnvironment>,
     cameras: Query<
         (Entity, Option<&GeneratedEnvironmentMapLight>),
-        Or<(With<AvatarViewportCamera>, With<vtuber_avatar::AvatarOutputCamera>)>,
+        Or<(
+            With<AvatarViewportCamera>,
+            With<vtuber_avatar::AvatarOutputCamera>,
+        )>,
     >,
 ) {
     for (entity, existing) in &cameras {
@@ -1655,11 +1673,13 @@ fn attach_fixture_environment(
             continue;
         }
         if environment.generated {
-            commands.entity(entity).insert(GeneratedEnvironmentMapLight {
-                environment_map: environment.specular.clone(),
-                intensity: environment.intensity,
-                ..default()
-            });
+            commands
+                .entity(entity)
+                .insert(GeneratedEnvironmentMapLight {
+                    environment_map: environment.specular.clone(),
+                    intensity: environment.intensity,
+                    ..default()
+                });
         } else {
             commands.entity(entity).insert(EnvironmentMapLight {
                 diffuse_map: environment.diffuse.clone(),
@@ -1821,10 +1841,8 @@ fn mtoon_cutout_shadow() -> Result<String, RichLookError> {
     let (still_static_differing, _) = pixel_difference(&animated_still, &cutout);
     let (left_shadowed, right_shadowed) = (ground_band(&cutout, 26), ground_band(&cutout, 38));
     let (left_lit, right_lit) = (ground_band(&flat, 26), ground_band(&flat, 38));
-    let (invisible_left, invisible_right) = (
-        ground_band(&invisible, 26),
-        ground_band(&invisible, 38),
-    );
+    let (invisible_left, invisible_right) =
+        (ground_band(&invisible, 26), ground_band(&invisible, 38));
     let (still_left, still_right) = (
         ground_band(&animated_still, 26),
         ground_band(&animated_still, 38),
@@ -2230,6 +2248,189 @@ fn mtoon_normal() -> Result<String, RichLookError> {
     report.push_str("checks=identity_unchanged,tilt_applied,scale_zero_matches_flat\n");
     Ok(report)
 }
+
+/// The Face role's diffuse-normal steering: at amount 0 the authored shading
+/// is kept, at amount 1 the diffuse normal is steered a quarter of the way
+/// toward the head's forward, and at look strength 0 the composition stays the
+/// Native result regardless of the amount.
+fn mtoon_face_normal() -> Result<String, RichLookError> {
+    // A smooth ramp (toony 0) keeps the diffuse response proportional to the
+    // steered NdotL. The plane faces +Z and the key points mostly at the
+    // camera, so steering toward -X turns the surface away from the light.
+    let mut base = MtoonScene::lit(
+        Color::WHITE,
+        Color::BLACK,
+        LightSpec {
+            direction: -Vec3::new(0.6, 0.0, 0.8).normalize(),
+            color: Color::WHITE,
+            illuminance: 200.0,
+            shadows_enabled: false,
+        },
+    )
+    .rich(1.0);
+    base.toony_factor = 0.0;
+
+    let unsteered = center_pixel(&render(&{
+        let mut scene = base.clone();
+        scene.portrait.face_forward = Vec3::X;
+        scene
+    })?);
+    let steered = center_pixel(&render(&{
+        let mut scene = base.clone();
+        scene.portrait.face_forward = Vec3::X;
+        scene.portrait.face_normal_amount = 1.0;
+        scene
+    })?);
+    let strength_zero = center_pixel(&render(&{
+        let mut scene = base.clone();
+        scene.portrait.strength = 0.0;
+        scene.portrait.face_forward = Vec3::X;
+        scene.portrait.face_normal_amount = 1.0;
+        scene
+    })?);
+    let native = center_pixel(&render(&{
+        let mut scene = base.clone();
+        scene.shading_mode = MToonShadingMode::Native;
+        scene
+    })?);
+
+    let mut report = format!(
+        "case=mtoon-face-normal\n\
+         unsteered={unsteered:?}\n\
+         steered={steered:?}\n\
+         strength_zero={strength_zero:?}\n\
+         native={native:?}\n"
+    );
+    if luma_diff(steered, unsteered) <= 4 {
+        return Err(RichLookError::Failed(format!(
+            "the Face-role diffuse-normal steering did not reach the lighting: unsteered={unsteered:?} steered={steered:?}"
+        )));
+    }
+    if luma_diff(strength_zero, native) > 1 {
+        return Err(RichLookError::Failed(format!(
+            "a nonzero steering amount leaked into the strength-0 display: strength_zero={strength_zero:?} native={native:?}"
+        )));
+    }
+    report.push_str("checks=amount_zero_identity,steering_reaches_diffuse,strength_zero_native\n");
+    Ok(report)
+}
+
+/// Per-role MToon gloss must reach the lit body at strength 1, keep the
+/// author's outline line and alpha, and disappear entirely at strength 0.
+fn mtoon_role_gloss() -> Result<String, RichLookError> {
+    let key = LightSpec {
+        direction: -Vec3::new(0.3, 0.2, 0.9).normalize(),
+        color: Color::WHITE,
+        illuminance: 600.0,
+        shadows_enabled: false,
+    };
+    let base = MtoonScene {
+        mesh: MeshSpec::Sphere,
+        outline: true,
+        outline_color: LinearRgba::new(0.5, 0.5, 0.5, 1.0),
+        outline_lighting_mix: 1.0,
+        ..MtoonScene::lit(Color::WHITE, Color::BLACK, key)
+    };
+    let mut body_only = base.clone();
+    body_only.outline = false;
+    body_only.outline_lighting_mix = 0.0;
+    let native_outline = render(&base)?;
+    let native_body = render(&body_only)?;
+    let outline_mask = opaque_only_in(&native_outline, &native_body);
+    let outline_pixels = outline_mask.iter().filter(|drawn| **drawn).count();
+
+    let on = RichLookSettings {
+        enabled: true,
+        strength: 1.0,
+    };
+    let zero = RichLookSettings {
+        enabled: true,
+        strength: 0.0,
+    };
+    let render_role = |settings: RichLookSettings, role: MaterialRole, outline: bool| {
+        let mut scene = if outline {
+            base.clone()
+        } else {
+            body_only.clone()
+        };
+        scene.shading_mode = MToonShadingMode::Rich;
+        scene.portrait = resolve_mtoon_role_params(settings, role);
+        render(&scene)
+    };
+
+    let general = render_role(on, MaterialRole::General, true)?;
+    let hair = render_role(on, MaterialRole::Hair, true)?;
+    let face = render_role(on, MaterialRole::Face, true)?;
+    let fabric = render_role(on, MaterialRole::Fabric, true)?;
+    let hair_zero = render_role(zero, MaterialRole::Hair, false)?;
+    let face_zero = render_role(zero, MaterialRole::Face, false)?;
+    let general_zero = render_role(zero, MaterialRole::General, false)?;
+
+    let (line_hair_face, line_max) = masked_pixel_difference(&hair, &face, &outline_mask);
+    let (hair_face_differing, _) = pixel_difference(&hair, &face);
+    let (hair_fabric_differing, _) = pixel_difference(&hair, &fabric);
+    let (hair_general_differing, _) = pixel_difference(&hair, &general);
+    let (zero_role_differing, _) = pixel_difference(&hair_zero, &face_zero);
+    let (zero_general_differing, _) = pixel_difference(&general_zero, &hair_zero);
+    let (zero_native_differing, _) = pixel_difference(&face_zero, &native_body);
+    let opaque_general = opaque_pixel_count(&general);
+    let opaque_hair = opaque_pixel_count(&hair);
+    let opaque_face = opaque_pixel_count(&face);
+    let opaque_fabric = opaque_pixel_count(&fabric);
+    if opaque_hair != opaque_general
+        || opaque_face != opaque_general
+        || opaque_fabric != opaque_general
+    {
+        return Err(RichLookError::Failed(format!(
+            "role gains changed the covered pixel count: general={opaque_general} hair={opaque_hair} face={opaque_face} fabric={opaque_fabric}"
+        )));
+    }
+    let mut report = format!(
+        "case=mtoon-role-gloss\n\
+         outline_only_pixels={outline_pixels}\n\
+         hair_vs_face line_differing={line_hair_face} max_channel_diff={line_max} body_differing={hair_face_differing}\n\
+         hair_vs_fabric_differing={hair_fabric_differing}\n\
+         hair_vs_general_differing={hair_general_differing}\n\
+         strength_zero hair_vs_face_differing={zero_role_differing} general_vs_hair_differing={zero_general_differing} face_vs_native_differing={zero_native_differing}\n\
+         opaque_count={opaque_general}\n"
+    );
+    if outline_pixels == 0 {
+        return Err(RichLookError::Failed(
+            "the outline ring was not visible outside the silhouette".into(),
+        ));
+    }
+    if line_hair_face != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the role gains changed the outline line in {line_hair_face} of {outline_pixels} outline pixels (max channel difference {line_max})"
+        )));
+    }
+    for (label, differing) in [
+        ("Hair vs Face", hair_face_differing),
+        ("Hair vs Fabric", hair_fabric_differing),
+        ("Hair vs General", hair_general_differing),
+    ] {
+        if differing == 0 {
+            return Err(RichLookError::Failed(format!(
+                "{label} role gloss did not change any lit pixel"
+            )));
+        }
+    }
+    if zero_role_differing != 0 || zero_general_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "role gains leaked into the strength-0 display: hair_vs_face={zero_role_differing} general_vs_hair={zero_general_differing}"
+        )));
+    }
+    if zero_native_differing != 0 {
+        return Err(RichLookError::Failed(format!(
+            "strength-0 Face-role Rich differs from Native in {zero_native_differing} pixels"
+        )));
+    }
+    report.push_str(
+        "checks=line_free_of_role_gains,roles_change_body,strength_zero_identity,opaque_counts_stable\n",
+    );
+    Ok(report)
+}
+
 fn luma(pixel: [u8; 4]) -> u32 {
     u32::from(pixel[0]) + u32::from(pixel[1]) + u32::from(pixel[2])
 }
@@ -2273,8 +2474,7 @@ fn black_opaque_pixel_count(pixels: &[[u8; 4]]) -> usize {
 /// Pixels that have coverage in the first frame and none in the second: the
 /// outline ring outside the mesh silhouette.
 fn opaque_only_in(with: &[[u8; 4]], without: &[[u8; 4]]) -> Vec<bool> {
-    with
-        .iter()
+    with.iter()
         .zip(without)
         .map(|(with, without)| with[3] > 0 && without[3] == 0)
         .collect()
@@ -2439,12 +2639,8 @@ const AVATAR_UI_SETTLE_FRAMES: u32 = 12;
 const AVATAR_UI_EDGE_COLUMN: u32 = 30;
 const AVATAR_UI_TONE_AFTER_LINEAR: [f32; 3] = [0.5, 0.2, 0.05];
 const AVATAR_UI_ALPHA_VALUES: [f32; 4] = [0.0, 0.25, 0.5, 1.0];
-const AVATAR_UI_BACKGROUNDS: [[u8; 3]; 4] = [
-    [0, 0, 0],
-    [255, 255, 255],
-    [24, 96, 180],
-    [228, 228, 228],
-];
+const AVATAR_UI_BACKGROUNDS: [[u8; 3]; 4] =
+    [[0, 0, 0], [255, 255, 255], [24, 96, 180], [228, 228, 228]];
 
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 struct AvatarUiFixturePass;
@@ -2488,13 +2684,8 @@ fn avatar_ui_alpha() -> Result<String, RichLookError> {
             let x = background_index as u32 * AVATAR_UI_TILE as u32 + 32;
             let y = 32;
             let actual = encoded_ui_pixel(&pixels, x, y);
-            let expected = expected_ui_pixel(
-                AvatarUiFixtureMode::Uniform { alpha },
-                1,
-                1,
-                0,
-                background,
-            );
+            let expected =
+                expected_ui_pixel(AvatarUiFixtureMode::Uniform { alpha }, 1, 1, 0, background);
             if rgb_distance(actual, expected) > 4 {
                 return Err(RichLookError::Failed(format!(
                     "uniform UI composite changed at alpha={alpha} background={background:?}: actual={actual:?} expected={expected:?}"
@@ -2674,11 +2865,12 @@ fn draw_avatar_ui_fixture(
             }
         }
         AvatarUiFixtureMode::TransparentEdge => {
-            ctx.layer_painter(bevy_egui::egui::LayerId::background()).rect_filled(
-                full_rect,
-                bevy_egui::egui::CornerRadius::ZERO,
-                bevy_egui::egui::Color32::from_gray(228),
-            );
+            ctx.layer_painter(bevy_egui::egui::LayerId::background())
+                .rect_filled(
+                    full_rect,
+                    bevy_egui::egui::CornerRadius::ZERO,
+                    bevy_egui::egui::Color32::from_gray(228),
+                );
             paint_avatar_ui_tile(
                 &mut root,
                 bevy_egui::egui::Rect::from_min_size(
@@ -2786,7 +2978,12 @@ fn avatar_ui_source_pixel(spec: AvatarUiFixtureMode, x: u32, _y: u32) -> [u8; 4]
         }
         AvatarUiFixtureMode::TransparentEdge => {
             if x < AVATAR_UI_EDGE_COLUMN {
-                [quantize(encoded[0]), quantize(encoded[1]), quantize(encoded[2]), 255]
+                [
+                    quantize(encoded[0]),
+                    quantize(encoded[1]),
+                    quantize(encoded[2]),
+                    255,
+                ]
             } else {
                 [0, 0, 0, 0]
             }
@@ -2823,12 +3020,11 @@ fn expected_ui_pixel(
         AvatarUiFixtureMode::Uniform { .. } => 1,
         AvatarUiFixtureMode::TransparentEdge => AVATAR_UI_SOURCE_SIZE,
     };
-    let source_x = ((local_x as f32 + 0.5) / display_width as f32 * source_size as f32 - 0.5)
-        .max(-0.5);
-    let source_y = ((display_height as f32 * 0.5) / display_height as f32
-        * source_size as f32
+    let source_x =
+        ((local_x as f32 + 0.5) / display_width as f32 * source_size as f32 - 0.5).max(-0.5);
+    let source_y = ((display_height as f32 * 0.5) / display_height as f32 * source_size as f32
         - 0.5)
-    .max(-0.5);
+        .max(-0.5);
     let base_x = source_x.floor() as i32;
     let base_y = source_y.floor() as i32;
     let fraction_x = source_x - base_x as f32;
@@ -2938,9 +3134,15 @@ fn composite_ui_pixel(source: [f32; 4], background: [u8; 3]) -> [u8; 4] {
     let alpha = source[3];
     let background_linear = background.map(|channel| srgb_decode(f32::from(channel) / 255.0));
     [
-        quantize(srgb_encode(source[0] + background_linear[0] * (1.0 - alpha))),
-        quantize(srgb_encode(source[1] + background_linear[1] * (1.0 - alpha))),
-        quantize(srgb_encode(source[2] + background_linear[2] * (1.0 - alpha))),
+        quantize(srgb_encode(
+            source[0] + background_linear[0] * (1.0 - alpha),
+        )),
+        quantize(srgb_encode(
+            source[1] + background_linear[1] * (1.0 - alpha),
+        )),
+        quantize(srgb_encode(
+            source[2] + background_linear[2] * (1.0 - alpha),
+        )),
         255,
     ]
 }
@@ -3349,15 +3551,10 @@ fn fixture_app(scene: &MtoonScene, upstream_reference: bool) -> Result<App, Rich
     .insert_resource(FixtureScene(scene.clone()))
     .insert_resource(OutputArmed(false));
     if upstream_reference {
-        let _ = app.world_mut()
-            .resource_mut::<Assets<Shader>>()
-            .insert(
-                &UPSTREAM_REFERENCE_FRAGMENT_HANDLE,
-                Shader::from_wgsl(
-                    UPSTREAM_REFERENCE_FRAGMENT,
-                    "mtoon_upstream_reference.wgsl",
-                ),
-            );
+        let _ = app.world_mut().resource_mut::<Assets<Shader>>().insert(
+            &UPSTREAM_REFERENCE_FRAGMENT_HANDLE,
+            Shader::from_wgsl(UPSTREAM_REFERENCE_FRAGMENT, "mtoon_upstream_reference.wgsl"),
+        );
     }
     register_output_systems(&mut app);
     if scene.environment.is_some() {
@@ -3431,7 +3628,8 @@ fn setup_fixture_scene(
                 EnvironmentMapKind::Test(FixtureEnvironmentMap::MipLadder)
             ),
         });
-    }    for light in &scene.lights {
+    }
+    for light in &scene.lights {
         commands.spawn((
             DirectionalLight {
                 illuminance: light.illuminance,
@@ -3546,7 +3744,9 @@ fn setup_fixture_scene(
         },
         alpha_mode: scene.alpha_mode,
         transparent_with_z_write: scene.transparent_with_z_write,
-        cull_mode: scene.outline.then_some(bevy::render::render_resource::Face::Back),
+        cull_mode: scene
+            .outline
+            .then_some(bevy::render::render_resource::Face::Back),
         portrait: scene.portrait,
         shading_mode: scene.shading_mode,
         ..default()

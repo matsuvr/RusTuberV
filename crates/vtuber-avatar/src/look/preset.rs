@@ -4,6 +4,8 @@ use bevy::prelude::{LinearRgba, Vec3};
 use bevy_vrm1::prelude::MToonPortraitParams;
 use serde::{Deserialize, Serialize};
 
+use super::material::MaterialRole;
+
 /// The single look switch and strength shared by lighting, materials and the
 /// finish.
 ///
@@ -30,7 +32,11 @@ impl Default for RichLookSettings {
 /// The strength every look stage must use: zero while the look is OFF.
 #[must_use]
 pub fn effective_look_strength(settings: RichLookSettings) -> f32 {
-    if settings.enabled { settings.strength } else { 0.0 }
+    if settings.enabled {
+        settings.strength
+    } else {
+        0.0
+    }
 }
 
 /// Interpolates between the original and rich value for one scalar.
@@ -119,7 +125,90 @@ pub const MTOON_PORTRAIT_PRESET: MToonPortraitParams = MToonPortraitParams {
     environment_gain: 1.00,
     rim_gain: 0.60,
     rim_power: 3.0,
+    face_normal_amount: 0.0,
+    face_forward: Vec3::Z,
 };
+
+/// One material role's `(specular_gain, perceptual_roughness,
+/// environment_gain, rim_gain)` for the added MToon terms.
+///
+/// These are adjustment starting points, not measured optima. `General` is the
+/// first version's preset. `Face` keeps a weak gloss and a quiet rim so the
+/// author's colors and shade stay dominant. `Skin` spreads the gloss broadly
+/// and weakly. `Hair` gets the clearest highlight. `Fabric` stays restrained,
+/// `Metal` and `Eye` keep their added terms small so the authored surface, the
+/// MatCap and the drawn eye expression dominate. The rim power stays at the
+/// preset value for every role.
+fn mtoon_role_gains(role: MaterialRole) -> (f32, f32, f32, f32) {
+    match role {
+        MaterialRole::General => (
+            MTOON_PORTRAIT_PRESET.specular_gain,
+            MTOON_PORTRAIT_PRESET.perceptual_roughness,
+            MTOON_PORTRAIT_PRESET.environment_gain,
+            MTOON_PORTRAIT_PRESET.rim_gain,
+        ),
+        MaterialRole::Face => (0.50, 0.60, 0.40, 0.25),
+        MaterialRole::Skin => (0.35, 0.70, 0.30, 0.20),
+        MaterialRole::Hair => (1.60, 0.30, 1.20, 0.80),
+        MaterialRole::Fabric => (0.60, 0.60, 0.50, 0.30),
+        MaterialRole::Metal => (0.80, 0.35, 1.50, 0.30),
+        MaterialRole::Eye => (0.25, 0.55, 0.25, 0.15),
+    }
+}
+
+/// Resolves the extra MToon portrait values for one material role.
+///
+/// `strength` is the only user-adjusted value and is applied once, in the
+/// shader. Only `Face` materials get a diffuse-normal steering amount; the
+/// head's world forward itself is filled in per frame from the rendered head
+/// pose, so the resolver starts from the canonical +Z front.
+#[must_use]
+pub fn resolve_mtoon_role_params(
+    settings: RichLookSettings,
+    role: MaterialRole,
+) -> MToonPortraitParams {
+    let strength = effective_look_strength(settings);
+    let (specular_gain, perceptual_roughness, environment_gain, rim_gain) = mtoon_role_gains(role);
+    MToonPortraitParams {
+        strength,
+        specular_gain,
+        perceptual_roughness,
+        environment_gain,
+        rim_gain,
+        rim_power: MTOON_PORTRAIT_PRESET.rim_power,
+        face_normal_amount: if role == MaterialRole::Face {
+            strength
+        } else {
+            0.0
+        },
+        ..MTOON_PORTRAIT_PRESET
+    }
+}
+
+/// The maximum share of the head's forward blended into a Face material's
+/// diffuse normal. An art-tuning starting point, not a precision guarantee.
+const FACE_NORMAL_MAX_BLEND: f32 = 0.25;
+
+/// Steers a face material's diffuse lighting normal toward the head's forward.
+///
+/// `amount` is `0..=1` (the look strength for Face materials); at zero the
+/// mesh normal is returned unchanged. At full amount the mix reaches
+/// [`FACE_NORMAL_MAX_BLEND`], so the authored shading never fully flattens.
+/// This is the CPU mirror of the WGSL `portrait_face_normal`; keep both in
+/// sync.
+#[must_use]
+pub fn face_lighting_normal(
+    mesh_world_normal: Vec3,
+    head_world_forward: Vec3,
+    amount: f32,
+) -> Vec3 {
+    if amount <= 0.0 {
+        return mesh_world_normal;
+    }
+    mesh_world_normal
+        .lerp(head_world_forward, FACE_NORMAL_MAX_BLEND * amount)
+        .normalize()
+}
 
 #[cfg(test)]
 mod tests {
@@ -161,6 +250,3 @@ mod tests {
         );
     }
 }
-
-
-

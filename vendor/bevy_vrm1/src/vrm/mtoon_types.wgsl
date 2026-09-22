@@ -33,6 +33,10 @@ struct MToonMaterialUniform {
     portrait_environment_gain: f32,
     portrait_rim_gain: f32,
     portrait_rim_power: f32,
+    portrait_face_forward_x: f32,
+    portrait_face_forward_y: f32,
+    portrait_face_forward_z: f32,
+    portrait_face_normal_amount: f32,
 }
 
 /// The rich look's extra terms, unpacked from the material uniform so the

@@ -1702,8 +1702,91 @@ fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
     });
 }
 
+/// The four-language label of a material role; `None` is the "Auto" entry.
+fn material_role_label(
+    lang: UiLanguage,
+    role: Option<vtuber_avatar::MaterialRole>,
+) -> &'static str {
+    match role {
+        None => lang.pick("自動", "Auto", "自动", "자동"),
+        Some(vtuber_avatar::MaterialRole::General) => lang.pick("一般", "General", "通用", "일반"),
+        Some(vtuber_avatar::MaterialRole::Face) => lang.pick("顔", "Face", "面部", "얼굴"),
+        Some(vtuber_avatar::MaterialRole::Skin) => lang.pick("肌", "Skin", "皮肤", "피부"),
+        Some(vtuber_avatar::MaterialRole::Hair) => lang.pick("髪", "Hair", "头发", "머리카락"),
+        Some(vtuber_avatar::MaterialRole::Fabric) => lang.pick("布", "Fabric", "布料", "천"),
+        Some(vtuber_avatar::MaterialRole::Metal) => lang.pick("金属", "Metal", "金属", "금속"),
+        Some(vtuber_avatar::MaterialRole::Eye) => lang.pick("目", "Eyes", "眼睛", "눈"),
+    }
+}
+
+/// Per-material role selection inside the look's detail section.
+///
+/// The list only names the loaded model's materials and their current
+/// selection; every numeric shader detail stays hidden.
+fn render_material_role_controls(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
+    if vm.look_materials.is_empty() {
+        return;
+    }
+    section(
+        ui,
+        lang.pick("材質の役割", "Material roles", "材质角色", "재질 역할"),
+        |ui| {
+            ui.label(lang.pick(
+                "各材質の役割を選ぶと、光沢や陰影の調整がその役割に合います。「自動」は材質名からの判定です。",
+                "Pick each material's role so the gloss and shading fit it. \"Auto\" decides from the material name.",
+                "为每种材质选择角色，让光泽与阴影更贴合。“自动”根据材质名判断。",
+                "각 재질의 역할을 선택하면 광택과 음영이 역할에 맞게 조정됩니다. \"자동\"은 재질 이름으로 판단합니다.",
+            ));
+            for entry in &vm.look_materials {
+                ui.horizontal(|ui| {
+                    let label = if entry.name.is_empty() {
+                        format!("#{}", entry.material_index)
+                    } else {
+                        entry.name.clone()
+                    };
+                    ui.label(label);
+                    let current = material_role_label(lang, entry.selected);
+                    egui::ComboBox::from_id_salt(("material_role", entry.material_index))
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for role in [
+                                None,
+                                Some(vtuber_avatar::MaterialRole::General),
+                                Some(vtuber_avatar::MaterialRole::Face),
+                                Some(vtuber_avatar::MaterialRole::Skin),
+                                Some(vtuber_avatar::MaterialRole::Hair),
+                                Some(vtuber_avatar::MaterialRole::Fabric),
+                                Some(vtuber_avatar::MaterialRole::Metal),
+                                Some(vtuber_avatar::MaterialRole::Eye),
+                            ] {
+                                if ui
+                                    .selectable_label(
+                                        entry.selected == role,
+                                        material_role_label(lang, role),
+                                    )
+                                    .clicked()
+                                {
+                                    state.emit(UiAction::SetMaterialRole {
+                                        material_index: entry.material_index,
+                                        selected: role,
+                                    });
+                                }
+                            }
+                        });
+                });
+            }
+        },
+    );
+}
+
 fn settings_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
     render_rich_look_controls(ui, vm, state, lang);
+    render_material_role_controls(ui, vm, state, lang);
     expression_settings_section(ui, vm, state, lang);
     section(
         ui,
@@ -2809,6 +2892,90 @@ mod tests {
             });
             assert!(state.take_actions().is_empty());
         }
+    }
+
+    #[test]
+    fn material_role_controls_render_every_entry_and_stay_hidden_without_one() {
+        use crate::ui_model::MaterialRoleEntryViewModel;
+        for lang in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            let ctx = egui::Context::default();
+            let mut state = UiState::default();
+            let vm = UiViewModel {
+                look_materials: vec![
+                    MaterialRoleEntryViewModel {
+                        material_index: 0,
+                        name: "Face".into(),
+                        selected: Some(vtuber_avatar::MaterialRole::Face),
+                    },
+                    MaterialRoleEntryViewModel {
+                        material_index: 3,
+                        name: String::new(),
+                        selected: None,
+                    },
+                ],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                render_material_role_controls(ui, &vm, &mut state, lang);
+            });
+            assert!(state.take_actions().is_empty());
+        }
+        // Without a loaded model's materials nothing renders and no section
+        // appears on the two-operation normal screen.
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let vm = UiViewModel::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            render_material_role_controls(ui, &vm, &mut state, UiLanguage::Ja);
+        });
+        assert!(state.take_actions().is_empty());
+    }
+
+    #[test]
+    fn material_role_labels_cover_every_role_in_four_languages() {
+        use vtuber_avatar::MaterialRole;
+        let roles = [
+            None,
+            Some(MaterialRole::General),
+            Some(MaterialRole::Face),
+            Some(MaterialRole::Skin),
+            Some(MaterialRole::Hair),
+            Some(MaterialRole::Fabric),
+            Some(MaterialRole::Metal),
+            Some(MaterialRole::Eye),
+        ];
+        for lang in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            for (index, role) in roles.iter().enumerate() {
+                let label = material_role_label(lang, *role);
+                for (other_index, other) in roles.iter().enumerate() {
+                    if index != other_index {
+                        assert_ne!(
+                            label,
+                            material_role_label(lang, *other),
+                            "{lang:?}: {label} is ambiguous"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(material_role_label(UiLanguage::Ja, None), "自動");
+        assert_eq!(
+            material_role_label(UiLanguage::Ja, Some(MaterialRole::Face)),
+            "顔"
+        );
+        assert_eq!(material_role_label(UiLanguage::En, None), "Auto");
+        assert_eq!(material_role_label(UiLanguage::Zh, None), "自动");
+        assert_eq!(material_role_label(UiLanguage::Ko, None), "자동");
     }
 
     #[test]

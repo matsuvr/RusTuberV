@@ -56,6 +56,7 @@
     portrait_direct_specular,
     portrait_environment_specular,
     portrait_rim,
+    portrait_face_normal,
 }
 
 @fragment
@@ -177,8 +178,23 @@ struct MToonRichDirectResult {
 }
 
 fn apply_rich_mtoon_lighting(in: MToonInput, params: MToonPortraitUniform) -> vec3<f32> {
-    let lights_result = apply_directional_lights(in, params);
-    let indirect = apply_rich_global_illumination(in);
+    // Face-role materials steer only the diffuse lighting normal toward the
+    // head's forward. At amount 0 the input normal passes through unchanged,
+    // so the normal map keeps reaching the diffuse for every other material.
+    // The added specular, the author's rim, the shadow fetch and the outline
+    // geometry keep the mesh/normal-mapped normal unsteered.
+    let face_forward = vec3<f32>(
+        material.portrait_face_forward_x,
+        material.portrait_face_forward_y,
+        material.portrait_face_forward_z,
+    );
+    let diffuse_normal = portrait_face_normal(
+        in.world_normal,
+        face_forward,
+        material.portrait_face_normal_amount,
+    );
+    let lights_result = apply_directional_lights(in, params, diffuse_normal);
+    let indirect = apply_rich_global_illumination(in, diffuse_normal);
     let emissive = apply_emissive_light(in);
     // The author's own MatCap/parametric rim stays exactly as authored.
     let author_rim = apply_rim_lighting(in.pbr, in.uv, lights_result.direct, indirect);
@@ -203,7 +219,11 @@ fn apply_rich_mtoon_lighting(in: MToonInput, params: MToonPortraitUniform) -> ve
     return base + view.exposure * extra;
 }
 
-fn apply_directional_lights(in: MToonInput, params: MToonPortraitUniform) -> MToonRichDirectResult {
+fn apply_directional_lights(
+    in: MToonInput,
+    params: MToonPortraitUniform,
+    diffuse_normal: vec3<f32>,
+) -> MToonRichDirectResult {
     let shade_color: vec3<f32> = calc_shade_color(in);
     let shade_shift: f32 = calc_mtoon_lighting_reflectance_shading_shift(in);
     let roughness = perceptualRoughnessToRoughness(params.perceptual_roughness);
@@ -216,7 +236,7 @@ fn apply_directional_lights(in: MToonInput, params: MToonPortraitUniform) -> MTo
         let light = &lights.directional_lights[i];
         let visibility = calc_rich_light_visibility(in, i);
         let shading = mtoon_shading_weight(
-            dot(in.world_normal, (*light).direction_to_light),
+            dot(diffuse_normal, (*light).direction_to_light),
             shade_shift,
             material.shading_toony_factor,
         ) * visibility;
@@ -271,13 +291,17 @@ fn calc_rich_light_visibility(
 }
 
 // The Rich global illumination: the same ambient read as the Native path with
-// the specification's two-point `giEqualizationFactor` approximation.
-fn apply_rich_global_illumination(in: MToonInput) -> vec3<f32> {
+// the specification's two-point `giEqualizationFactor` approximation. The
+// indirect diffuse follows the same possibly-steered diffuse normal.
+fn apply_rich_global_illumination(
+    in: MToonInput,
+    diffuse_normal: vec3<f32>,
+) -> vec3<f32> {
     let diffuse_color = calc_diffuse_color(
         in.lit_color.rgb,
         in.pbr.material.diffuse_transmission,
     );
-    let passthrough = rich_ambient(in, in.world_normal, diffuse_color);
+    let passthrough = rich_ambient(in, diffuse_normal, diffuse_color);
     let uniformed = 0.5 * (rich_ambient(in, vec3<f32>(0.0, 1.0, 0.0), diffuse_color)
         + rich_ambient(in, vec3<f32>(0.0, -1.0, 0.0), diffuse_color));
     return mix(passthrough, uniformed, material.gi_equalization_factor);

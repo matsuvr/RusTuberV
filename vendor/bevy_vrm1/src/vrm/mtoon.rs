@@ -142,6 +142,9 @@ pub struct VrmcMaterialRegistry {
     /// glTF material index for each loaded `StandardMaterial` asset id.
     /// Expression material binds reference materials by this stable index.
     pub indices: HashMap<AssetId<StandardMaterial>, usize>,
+    /// glTF material name for each glTF material index. Names are not unique
+    /// across materials, so they are resolved through the index only.
+    pub names: HashMap<usize, String>,
 }
 
 impl VrmcMaterialRegistry {
@@ -177,10 +180,14 @@ impl VrmcMaterialRegistry {
             plan_legacy_render_queue_offsets(&legacy_properties, source.materials().count());
         let mut materials = HashMap::new();
         let mut indices = HashMap::new();
+        let mut names = HashMap::new();
         for material in source.materials() {
             let Some(index) = material.index() else {
                 continue;
             };
+            if let Some(name) = material.name() {
+                names.insert(index, name.to_string());
+            }
             let Some(gltf_material_path) = gltf.materials.get(index).and_then(|m| m.path()) else {
                 continue;
             };
@@ -261,6 +268,7 @@ impl VrmcMaterialRegistry {
             materials,
             images,
             indices,
+            names,
         })
     }
 }

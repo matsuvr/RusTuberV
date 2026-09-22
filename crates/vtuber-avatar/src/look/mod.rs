@@ -21,16 +21,19 @@ pub use lighting::{
     sync_studio_lighting,
 };
 pub use material::{
-    StandardLookBase, StandardLookBases, apply_standard_portrait_settings,
-    capture_standard_look_base, clear_look_materials_on_unload, initialize_look_materials,
-    resolve_standard_portrait,
+    AvatarMaterialRoles, MaterialRole, MaterialRoleOverride, MaterialRoleOverridesChanged,
+    StandardLookBase, StandardLookBases, apply_material_role_overrides,
+    apply_standard_portrait_settings, capture_standard_look_base, clear_look_materials_on_unload,
+    infer_material_role, initialize_look_materials, initialize_mtoon_look_materials,
+    resolve_material_role, resolve_standard_portrait, resolve_standard_role_params,
 };
 pub use mtoon::{
-    apply_mtoon_portrait_settings, resolve_mtoon_portrait, resolve_mtoon_shading_mode,
+    apply_mtoon_portrait_settings, head_world_forward, resolve_mtoon_portrait,
+    resolve_mtoon_shading_mode,
 };
 pub use preset::{
     MTOON_PORTRAIT_PRESET, RichLookSettings, STUDIO_PRESET, StudioLightPreset, StudioPreset,
-    blend_look_scalar, effective_look_strength,
+    blend_look_scalar, effective_look_strength, face_lighting_normal, resolve_mtoon_role_params,
 };
 
 use bevy::prelude::*;
