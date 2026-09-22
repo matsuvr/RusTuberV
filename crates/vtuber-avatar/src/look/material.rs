@@ -16,7 +16,7 @@ use bevy_vrm1::prelude::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
+use crate::lifecycle::{AvatarGeneration, AvatarLifecycle, AvatarLifecycleState};
 use crate::look::AvatarLookSettings;
 use crate::look::preset::{RichLookSettings, blend_look_scalar, effective_look_strength};
 
@@ -491,17 +491,39 @@ fn gltf_material_name(
         .unwrap_or_default()
 }
 
-/// Releases the captured materials and roles when the active avatar leaves the
-/// ready state (unload, replacement or failed load).
+/// Releases the captured materials and roles when the old avatar goes away,
+/// while keeping one model's `Loading -> Binding -> Ready` progression intact.
+///
+/// Old-model destruction (`Unloading`, `NoAvatar`, `Failed`) always clears.
+/// `Loading`/`Binding` clears only when the lifecycle generation changed, so a
+/// new model drops the previous model's data while the same model's binding
+/// keeps restored selections and captured bases. `Ready` never clears.
+///
+/// This system must run before [`apply_material_role_overrides`],
+/// [`initialize_look_materials`] and [`initialize_mtoon_look_materials`] in
+/// the same frame, so a new model's restore and capture land after the old
+/// data is gone instead of being wiped by it.
 pub fn clear_look_materials_on_unload(
     lifecycle: Res<AvatarLifecycle>,
     mut bases: ResMut<StandardLookBases>,
     mut roles: ResMut<AvatarMaterialRoles>,
+    mut last_generation: Local<Option<AvatarGeneration>>,
 ) {
-    if lifecycle.is_changed() && lifecycle.state() != AvatarLifecycleState::Ready {
+    let state = lifecycle.state();
+    let generation = lifecycle.current_generation();
+    let generation_changed = *last_generation != Some(generation);
+    let should_clear = match state {
+        AvatarLifecycleState::Failed
+        | AvatarLifecycleState::NoAvatar
+        | AvatarLifecycleState::Unloading => true,
+        AvatarLifecycleState::Loading | AvatarLifecycleState::Binding => generation_changed,
+        AvatarLifecycleState::Ready => false,
+    };
+    if should_clear && (lifecycle.is_changed() || generation_changed) {
         bases.clear();
         roles.clear();
     }
+    *last_generation = Some(generation);
 }
 
 #[cfg(test)]
@@ -517,7 +539,10 @@ mod tests {
             .init_resource::<AvatarLifecycle>()
             .add_systems(
                 Update,
-                (initialize_look_materials, clear_look_materials_on_unload),
+                (
+                    clear_look_materials_on_unload,
+                    initialize_look_materials.after(clear_look_materials_on_unload),
+                ),
             );
         app
     }
@@ -1171,6 +1196,464 @@ mod tests {
             MaterialRole::Face
         );
         app.world_mut().despawn(entity);
+    }
+
+    fn full_look_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<MToonMaterial>>()
+            .init_resource::<StandardLookBases>()
+            .init_resource::<AvatarMaterialRoles>()
+            .init_resource::<AvatarLookSettings>()
+            .init_resource::<AvatarLifecycle>()
+            .add_message::<MaterialRoleOverridesChanged>()
+            .add_systems(
+                Update,
+                (
+                    clear_look_materials_on_unload,
+                    apply_material_role_overrides.after(clear_look_materials_on_unload),
+                    initialize_look_materials.after(clear_look_materials_on_unload),
+                    initialize_mtoon_look_materials.after(clear_look_materials_on_unload),
+                    apply_standard_portrait_settings
+                        .after(initialize_look_materials)
+                        .after(apply_material_role_overrides),
+                )
+                    .chain(),
+            );
+        app
+    }
+
+    fn spawn_standard_material_entity(
+        app: &mut App,
+        handle: Handle<StandardMaterial>,
+        index: usize,
+    ) {
+        let base = VrmMaterialBaseValues::from_standard(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap(),
+        );
+        app.world_mut()
+            .spawn((MeshMaterial3d(handle), base, VrmMaterialIndex(index)));
+    }
+
+    fn restore_roles(app: &mut App, overrides: Vec<MaterialRoleOverride>) {
+        app.world_mut()
+            .resource_mut::<Messages<MaterialRoleOverridesChanged>>()
+            .write(MaterialRoleOverridesChanged(overrides));
+    }
+
+    fn spawn_named_standard_material_entity(
+        app: &mut App,
+        handle: Handle<StandardMaterial>,
+        index: usize,
+        name: &str,
+    ) {
+        use std::collections::HashMap;
+        let registry_root = app
+            .world_mut()
+            .spawn(bevy_vrm1::prelude::VrmcMaterialRegistry {
+                names: HashMap::from([(index, name.to_string())]),
+                ..default()
+            })
+            .id();
+        let base = VrmMaterialBaseValues::from_standard(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap(),
+        );
+        app.world_mut().spawn((
+            MeshMaterial3d(handle),
+            base,
+            VrmMaterialIndex(index),
+            ChildOf(registry_root),
+        ));
+    }
+
+    #[test]
+    fn saved_manual_survives_loading_to_ready() {
+        let mut app = full_look_app();
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .unwrap();
+        let handle = add_material(&mut app, StandardMaterial::default());
+        spawn_standard_material_entity(&mut app, handle.clone(), 0);
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 0,
+                selected: Some(MaterialRole::Face),
+            }],
+        );
+        // Loading -> Binding -> Ready keeps the restored selection and capture.
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Face
+        );
+        assert_eq!(app.world().resource::<StandardLookBases>().len(), 1);
+        assert!(
+            !app.world()
+                .resource::<AvatarMaterialRoles>()
+                .entries()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inferred_roles_survive_binding_without_selection() {
+        let mut app = full_look_app();
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .unwrap();
+        let handle = add_material(&mut app, StandardMaterial::default());
+        spawn_named_standard_material_entity(&mut app, handle, 0, "body");
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Skin,
+            "Auto resolves through the captured inference"
+        );
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Skin,
+            "Binding frames must not drop the captured inference"
+        );
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().name(0),
+            Some("body")
+        );
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Skin
+        );
+    }
+
+    #[test]
+    fn binding_multiple_frames_retain_roles_names_and_bases() {
+        let mut app = full_look_app();
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .unwrap();
+        let handle = add_material(&mut app, StandardMaterial::default());
+        spawn_standard_material_entity(&mut app, handle.clone(), 0);
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 0,
+                selected: Some(MaterialRole::Hair),
+            }],
+        );
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Hair
+        );
+        assert_eq!(app.world().resource::<StandardLookBases>().len(), 1);
+        assert_eq!(
+            app.world()
+                .resource::<AvatarMaterialRoles>()
+                .entries()
+                .len(),
+            1
+        );
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Hair
+        );
+    }
+
+    #[test]
+    fn model_switch_restores_each_without_mixing() {
+        let mut app = full_look_app();
+        // Model A.
+        let root_a = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root_a)
+            .unwrap();
+        let handle_a = add_material(&mut app, StandardMaterial::default());
+        spawn_standard_material_entity(&mut app, handle_a.clone(), 0);
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 0,
+                selected: Some(MaterialRole::Face),
+            }],
+        );
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root_a);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Face
+        );
+
+        // Model A -> B replaces the generation and clears A's data first.
+        let root_b = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_replace(root_b)
+            .unwrap();
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_unload();
+        app.update();
+        assert!(app.world().resource::<StandardLookBases>().is_empty());
+        assert!(
+            app.world()
+                .resource::<AvatarMaterialRoles>()
+                .entries()
+                .is_empty()
+        );
+
+        let handle_b = add_material(&mut app, StandardMaterial::default());
+        spawn_standard_material_entity(&mut app, handle_b.clone(), 1);
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 1,
+                selected: Some(MaterialRole::Hair),
+            }],
+        );
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root_b);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(1),
+            MaterialRole::Hair
+        );
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::General,
+            "model B must not carry model A's role"
+        );
+
+        // Model B -> A again restores A's selection without B leaking in.
+        let root_a2 = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_replace(root_a2)
+            .unwrap();
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_unload();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<AvatarMaterialRoles>()
+                .entries()
+                .is_empty()
+        );
+        let handle_a2 = add_material(&mut app, StandardMaterial::default());
+        spawn_standard_material_entity(&mut app, handle_a2.clone(), 0);
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 0,
+                selected: Some(MaterialRole::Face),
+            }],
+        );
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root_a2);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(0),
+            MaterialRole::Face
+        );
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(1),
+            MaterialRole::General,
+            "model A must not carry model B's role"
+        );
+    }
+
+    #[test]
+    fn unload_and_failure_drop_old_lists() {
+        let mut app = full_look_app();
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .unwrap();
+        let handle = add_material(&mut app, StandardMaterial::default());
+        spawn_standard_material_entity(&mut app, handle, 0);
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 0,
+                selected: Some(MaterialRole::Face),
+            }],
+        );
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<AvatarMaterialRoles>()
+                .entries()
+                .is_empty()
+        );
+
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_unload()
+            .unwrap();
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_unload();
+        app.update();
+        assert!(app.world().resource::<StandardLookBases>().is_empty());
+        assert!(
+            app.world()
+                .resource::<AvatarMaterialRoles>()
+                .entries()
+                .is_empty()
+        );
+
+        let root_b = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root_b)
+            .unwrap();
+        let handle_b = add_material(&mut app, StandardMaterial::default());
+        spawn_standard_material_entity(&mut app, handle_b, 0);
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 0,
+                selected: Some(MaterialRole::Hair),
+            }],
+        );
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root_b);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .fail(crate::lifecycle::AvatarLifecycleFailure::AssetLoadFailed);
+        app.update();
+        assert!(app.world().resource::<StandardLookBases>().is_empty());
+        assert!(
+            app.world()
+                .resource::<AvatarMaterialRoles>()
+                .entries()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shared_index_meshes_share_one_role_application() {
+        let mut app = full_look_app();
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .unwrap();
+        let handle = add_material(
+            &mut app,
+            StandardMaterial {
+                perceptual_roughness: 0.5,
+                ..default()
+            },
+        );
+        // Two meshes share one material handle and one glTF index.
+        for _ in 0..2 {
+            spawn_standard_material_entity(&mut app, handle.clone(), 3);
+        }
+        restore_roles(
+            &mut app,
+            vec![MaterialRoleOverride {
+                material_index: 3,
+                selected: Some(MaterialRole::Hair),
+            }],
+        );
+        app.world_mut().resource_mut::<AvatarLookSettings>().0 = RichLookSettings {
+            enabled: true,
+            strength: 1.0,
+        };
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .start_binding(root);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .finish_ready();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AvatarMaterialRoles>().role(3),
+            MaterialRole::Hair
+        );
+        assert!(
+            (owned_values(&app, &handle).perceptual_roughness - 0.375).abs() < 1e-6,
+            "shared meshes resolve through their shared index"
+        );
+        assert_eq!(app.world().resource::<StandardLookBases>().len(), 1);
     }
 
     #[test]

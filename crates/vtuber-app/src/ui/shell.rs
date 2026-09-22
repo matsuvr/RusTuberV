@@ -218,7 +218,8 @@ impl Plugin for UiShellPlugin {
                 apply_arm_pose_profile_changes,
                 sync_avatar_lifecycle_system
                     .after(vtuber_avatar::unload::despawn_unloading_avatar)
-                    .before(vtuber_avatar::look::apply_look_settings_changes),
+                    .before(vtuber_avatar::look::apply_look_settings_changes)
+                    .before(vtuber_avatar::look::apply_material_role_overrides),
                 crate::orchestrator::sync_look_material_view_model
                     .after(process_ui_actions_system)
                     .after(vtuber_avatar::look::apply_material_role_overrides),

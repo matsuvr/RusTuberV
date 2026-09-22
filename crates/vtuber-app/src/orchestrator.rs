@@ -1710,6 +1710,9 @@ mod tests {
             .init_resource::<AvatarLifecycle>()
             .init_resource::<vtuber_avatar::AvatarLookSettings>()
             .init_resource::<vtuber_avatar::AvatarMaterialRoles>()
+            .init_resource::<vtuber_avatar::StandardLookBases>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<bevy_vrm1::prelude::MToonMaterial>>()
             .insert_resource(ArmPoseSettings::empty_at(path))
             .add_message::<vtuber_avatar::LookSettingsChanged>()
             .add_message::<vtuber_avatar::MaterialRoleOverridesChanged>()
@@ -1721,8 +1724,11 @@ mod tests {
                 (
                     process_ui_actions_system,
                     sync_avatar_lifecycle_system,
+                    vtuber_avatar::look::clear_look_materials_on_unload,
                     vtuber_avatar::look::apply_look_settings_changes,
                     vtuber_avatar::look::apply_material_role_overrides,
+                    vtuber_avatar::look::initialize_look_materials,
+                    vtuber_avatar::look::initialize_mtoon_look_materials,
                 )
                     .chain(),
             );

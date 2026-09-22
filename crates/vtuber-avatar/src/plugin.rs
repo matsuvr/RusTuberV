@@ -90,11 +90,14 @@ impl Plugin for VtuberAvatarPlugin {
                 Update,
                 (
                     crate::look::apply_look_settings_changes,
-                    crate::look::apply_material_role_overrides,
+                    crate::look::apply_material_role_overrides
+                        .after(crate::look::clear_look_materials_on_unload),
                     crate::look::sync_portrait_finish
                         .after(crate::look::apply_look_settings_changes),
-                    crate::look::initialize_look_materials,
-                    crate::look::initialize_mtoon_look_materials,
+                    crate::look::initialize_look_materials
+                        .after(crate::look::clear_look_materials_on_unload),
+                    crate::look::initialize_mtoon_look_materials
+                        .after(crate::look::clear_look_materials_on_unload),
                     crate::look::clear_look_materials_on_unload.after(despawn_unloading_avatar),
                     crate::look::setup_studio_lighting,
                     crate::look::apply_environment_to_avatar_cameras,
