@@ -297,7 +297,9 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
 
     // The virtual blend source, computed exactly as the system does, then a
     // tracked target whose converted pole is reflected through the converted
-    // wrist, so the two planes are opposed and blending is degenerate.
+    // wrist, so the two planes are opposed and blending at an intermediate
+    // weight is degenerate. Endpoint weights reproduce their side exactly, so
+    // the weight stays in the middle to exercise the hold.
     let opposed = {
         let binding = app.world().get::<AvatarBinding>(rig.root).expect("binding");
         let chain = binding.left_arm.as_ref().expect("left chain");
@@ -342,7 +344,11 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
                 right: None,
             },
             ArmBlendWeights {
-                left: ArmBlendWeight::ONE,
+                left: ArmBlendWeight {
+                    wrist: 0.5,
+                    pole: 0.5,
+                    palm: 0.0,
+                },
                 right: ArmBlendWeight::ZERO,
             },
         ),

@@ -47,16 +47,51 @@ pub fn blend_arm_targets(
     }
     let wrist_weight = weights.wrist.clamp(0.0, 1.0);
     let pole_weight = weights.pole.clamp(0.0, 1.0);
-    let wrist = virtual_target
-        .wrist
-        .lerp(tracked_target.wrist, wrist_weight);
+    // Endpoint wrist weights reproduce their side exactly, so a held
+    // observation with a non-finite channel cannot poison the virtual return
+    // through `lerp`'s `INFINITY * 0.0`.
+    let wrist = if wrist_weight <= f32::EPSILON {
+        virtual_target.wrist
+    } else if wrist_weight >= 1.0 - f32::EPSILON {
+        tracked_target.wrist
+    } else {
+        virtual_target
+            .wrist
+            .lerp(tracked_target.wrist, wrist_weight)
+    };
+    if !wrist.is_finite() {
+        return Err(ArmIkError::NonFiniteInput);
+    }
+    // Endpoint poles reproduce their side exactly without inspecting the
+    // other one. A frame-out holds the last observation while its weight
+    // eases to zero; requiring the held pole to stay well-conditioned
+    // against the virtual wrist would keep reporting degenerate and freeze
+    // the compositor on the stale bend instead of returning to initial.
+    if pole_weight <= f32::EPSILON {
+        if !virtual_target.elbow_pole.is_finite() {
+            return Err(ArmIkError::NonFiniteInput);
+        }
+        return Ok(ArmIkTarget {
+            wrist,
+            elbow_pole: virtual_target.elbow_pole,
+        });
+    }
+    if pole_weight >= 1.0 - f32::EPSILON {
+        if !tracked_target.elbow_pole.is_finite() {
+            return Err(ArmIkError::NonFiniteInput);
+        }
+        return Ok(ArmIkTarget {
+            wrist,
+            elbow_pole: tracked_target.elbow_pole,
+        });
+    }
     let elbow_pole = blend_pole(
         virtual_target.elbow_pole,
         tracked_target.elbow_pole,
         wrist,
         pole_weight,
     )?;
-    if !wrist.is_finite() || !elbow_pole.is_finite() {
+    if !elbow_pole.is_finite() {
         return Err(ArmIkError::NonFiniteInput);
     }
     Ok(ArmIkTarget { wrist, elbow_pole })
@@ -467,6 +502,54 @@ mod tests {
             ),
             Err(ArmIkError::DegenerateGeometry)
         );
+    }
+
+    #[test]
+    fn lost_channels_return_to_virtual_without_inspecting_the_held_pole() {
+        // Frame-out holds the last observation while its weight eases to
+        // zero. The held pole may sit opposite the virtual one; the return
+        // must still reproduce the initial pose instead of reporting
+        // degenerate and freezing the compositor on the stale bend.
+        let origin = Vec3::new(0.0, 1.0, 0.0);
+        let virtual_target = ArmIkTarget {
+            wrist: origin,
+            elbow_pole: origin + Vec3::Z * 0.4,
+        };
+        let tracked_target = ArmIkTarget {
+            wrist: Vec3::new(0.6, 0.2, 0.1),
+            elbow_pole: origin - Vec3::Z * 0.4,
+        };
+        let returned =
+            blend_arm_targets(virtual_target, tracked_target, ArmBlendWeight::ZERO).unwrap();
+        near(returned.wrist, virtual_target.wrist);
+        near(returned.elbow_pole, virtual_target.elbow_pole);
+
+        // A pole held exactly on the blended wrist is degenerate for the
+        // direction blend, but weight zero still means the initial pose.
+        let degenerate_tracked = ArmIkTarget {
+            wrist: Vec3::new(0.6, 0.2, 0.1),
+            elbow_pole: origin,
+        };
+        let returned =
+            blend_arm_targets(virtual_target, degenerate_tracked, ArmBlendWeight::ZERO).unwrap();
+        near(returned.elbow_pole, virtual_target.elbow_pole);
+    }
+
+    #[test]
+    fn full_weight_reproduces_the_observation_without_inspecting_virtual() {
+        let origin = Vec3::new(0.0, 1.0, 0.0);
+        let virtual_target = ArmIkTarget {
+            wrist: origin,
+            elbow_pole: origin + Vec3::Z * 0.4,
+        };
+        let tracked_target = ArmIkTarget {
+            wrist: Vec3::new(0.6, 0.2, 0.1),
+            elbow_pole: origin - Vec3::Z * 0.4,
+        };
+        let observed =
+            blend_arm_targets(virtual_target, tracked_target, ArmBlendWeight::ONE).unwrap();
+        near(observed.wrist, tracked_target.wrist);
+        near(observed.elbow_pole, tracked_target.elbow_pole);
     }
 
     #[test]
