@@ -118,6 +118,9 @@ struct MtoonScene {
     mesh: MeshSpec,
     /// Whether a lit ground plane is placed below the subject.
     ground: bool,
+    /// Whether a StandardMaterial box is placed in front of the subject to
+    /// cast a key-light shadow onto it.
+    occluder: bool,
     /// Optional constant normal texture, one RGBA pixel.
     normal_map: Option<[u8; 4]>,
     normal_scale: f32,
@@ -165,6 +168,7 @@ impl MtoonScene {
             shading_shift_factor: 0.0,
             mesh: MeshSpec::Plane,
             ground: false,
+            occluder: false,
             normal_map: None,
             normal_scale: 1.0,
             matcap_map: None,
@@ -207,6 +211,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "mtoon-lighting" => mtoon_lighting(),
         "mtoon-shading" => mtoon_shading(),
         "mtoon-portrait" => mtoon_portrait(),
+        "mtoon-specular-shadow" => mtoon_specular_shadow(),
         "mtoon-shadow" => mtoon_shadow(),
         "mtoon-cutout-shadow" => mtoon_cutout_shadow(),
         "studio-environment" => studio_environment(),
@@ -237,6 +242,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  mtoon-rich-zero Native vs Rich with zero added effect, byte-compared");
             println!("  mtoon-environment-roughness the env term takes perceptual roughness");
             println!("  mtoon-outline-mix added portrait terms stay out of the outline line");
+            println!(
+                "  mtoon-specular-shadow the added direct specular respects the key-light shadow"
+            );
             println!("  mtoon-blend-depth Blend outline transparency and Z-write occlusion");
             println!("  standard-look   Standard/Unlit against the untouched material");
             println!("  finish-alpha    HDR finish, sRGB premultiplication and readback");
@@ -630,6 +638,179 @@ fn mtoon_portrait() -> Result<String, RichLookError> {
     }
 
     report.push_str("checks=zero_effect_matches_native,extras_change,specular_follows_light,environment_reflects\n");
+    Ok(report)
+}
+
+/// The added direct specular must respect the key light's shadow map: with
+/// shadows off the specular gain brightens the lit surface; with shadows on
+/// the gain changes nothing inside the occluder's shadow, while the same
+/// gain still brightens a lit probe.
+///
+/// A box occluder casts the key's shadow onto a MToon plane. Four renders
+/// (shadows on/off × specular gain 0/1) separate "the term exists" from
+/// "the term is gated by the same visibility the diffuse uses".
+// Bounds are guaranteed by construction (every buffer is WIDTH*HEIGHT and
+// indices come from enumerating those buffers); see the AGENTS.md production
+// panic policy.
+#[allow(clippy::indexing_slicing)]
+fn mtoon_specular_shadow() -> Result<String, RichLookError> {
+    // Near-frontal key: the half-vector stays close to the plane normal so
+    // the added specular is strong, while the slight upper offset still
+    // throws the box's shadow onto the plane below it.
+    let light = LightSpec {
+        direction: Vec3::new(0.2, -0.45, -1.0).normalize(),
+        color: Color::WHITE,
+        illuminance: 400.0,
+        shadows_enabled: true,
+    };
+    let preset = MToonPortraitParams {
+        strength: 1.0,
+        specular_gain: 4.0,
+        perceptual_roughness: 0.25,
+        rim_gain: 0.0,
+        environment_gain: 0.0,
+        ..MTOON_PORTRAIT_PRESET
+    };
+    let scene = |shadows_enabled: bool, specular_gain: f32| MtoonScene {
+        lights: vec![LightSpec {
+            shadows_enabled,
+            ..light
+        }],
+        occluder: true,
+        portrait: MToonPortraitParams {
+            specular_gain,
+            ..preset
+        },
+        shading_mode: MToonShadingMode::Rich,
+        ..MtoonScene::lit(Color::srgb(0.2, 0.2, 0.2), Color::BLACK, light)
+    };
+
+    let shadow_gain_zero = render(&scene(true, 0.0))?;
+    let shadow_gain_one = render(&scene(true, 1.0))?;
+    let lit_gain_zero = render(&scene(false, 0.0))?;
+    let lit_gain_one = render(&scene(false, 1.0))?;
+
+    // Opaque plane pixels the occluder fully covers: dark enough that the
+    // shadow-map PCF fringe and any residual visibility cannot sit inside
+    // the gated set. The 3x3 erosion keeps only the shadow interior.
+    let mut deep_shadow = vec![false; (WIDTH * HEIGHT) as usize];
+    for (index, (on_zero, off_zero)) in shadow_gain_zero.iter().zip(&lit_gain_zero).enumerate() {
+        deep_shadow[index] = on_zero[3] == 255
+            && off_zero[3] == 255
+            && luma(*on_zero) + 48 <= luma(*off_zero)
+            && luma(*on_zero) <= 12;
+    }
+    let mut shadow_interior = deep_shadow.clone();
+    for row in 1..HEIGHT - 1 {
+        for column in 1..WIDTH - 1 {
+            let index = (row * WIDTH + column) as usize;
+            if !deep_shadow[index] {
+                continue;
+            }
+            for neighbor_row in row - 1..=row + 1 {
+                for neighbor_column in column - 1..=column + 1 {
+                    let neighbor = (neighbor_row * WIDTH + neighbor_column) as usize;
+                    if !deep_shadow[neighbor] {
+                        shadow_interior[index] = false;
+                    }
+                }
+            }
+        }
+    }
+    let deep_shadow_count = shadow_interior.iter().filter(|covered| **covered).count();
+
+    // Opaque plane pixels where the added specular shows without shadows.
+    let mut unshadowed_specular = vec![false; (WIDTH * HEIGHT) as usize];
+    let mut peak = (0usize, 0u32);
+    for (index, (zero, one)) in lit_gain_zero.iter().zip(&lit_gain_one).enumerate() {
+        if zero[3] != 255 || one[3] != 255 {
+            continue;
+        }
+        let delta = luma_diff(*zero, *one);
+        if delta > 4 {
+            unshadowed_specular[index] = true;
+        }
+        if delta > peak.1 {
+            peak = (index, delta);
+        }
+    }
+    let unshadowed_specular_count = unshadowed_specular.iter().filter(|shown| **shown).count();
+
+    // Wherever the specular would show and the pixel is also deep-shadowed,
+    // turning the gain on must not move the shadowed render.
+    let mut gated = vec![false; shadow_interior.len()];
+    for index in 0..gated.len() {
+        gated[index] = shadow_interior[index] && unshadowed_specular[index];
+    }
+    let gated_count = gated.iter().filter(|covered| **covered).count();
+    let (shadow_leak_pixels, shadow_leak_max) =
+        masked_pixel_difference(&shadow_gain_zero, &shadow_gain_one, &gated);
+
+    // Peak specular on the lit plane with shadows still on.
+    let mut lit_peak = (0usize, 0u32);
+    for (index, (zero, one)) in shadow_gain_zero.iter().zip(&shadow_gain_one).enumerate() {
+        if zero[3] != 255 || one[3] != 255 || shadow_interior[index] {
+            continue;
+        }
+        if luma(*zero) < 32 {
+            continue;
+        }
+        let delta = luma_diff(*zero, *one);
+        if delta > lit_peak.1 {
+            lit_peak = (index, delta);
+        }
+    }
+
+    let peak_column = (peak.0 as u32) % WIDTH;
+    let peak_row = (peak.0 as u32) / WIDTH;
+    let peak_zero = lit_gain_zero[peak.0];
+    let peak_one = lit_gain_one[peak.0];
+    let lit_peak_column = (lit_peak.0 as u32) % WIDTH;
+    let lit_peak_row = (lit_peak.0 as u32) / WIDTH;
+    let lit_peak_zero = shadow_gain_zero[lit_peak.0];
+    let lit_peak_one = shadow_gain_one[lit_peak.0];
+
+    let mut report = format!(
+        "case=mtoon-specular-shadow\n\
+         deep_shadow_pixels={deep_shadow_count}\n\
+         unshadowed_specular_pixels={unshadowed_specular_count}\n\
+         gated_pixels={gated_count}\n\
+         unshadowed_peak column={peak_column} row={peak_row} gain_zero={peak_zero:?} gain_one={peak_one:?}\n\
+         lit_peak column={lit_peak_column} row={lit_peak_row} gain_zero={lit_peak_zero:?} gain_one={lit_peak_one:?}\n\
+         deep_shadow_leak differing={shadow_leak_pixels} max_channel_diff={shadow_leak_max}\n"
+    );
+
+    if deep_shadow_count < 8 {
+        return Err(RichLookError::Failed(format!(
+            "the occluder did not darken enough plane pixels: deep_shadow_pixels={deep_shadow_count}"
+        )));
+    }
+    if unshadowed_specular_count == 0 || peak.1 <= 4 {
+        return Err(RichLookError::Failed(format!(
+            "the added specular did not appear without shadows: pixels={unshadowed_specular_count} peak_delta={}",
+            peak.1
+        )));
+    }
+    if gated_count == 0 {
+        return Err(RichLookError::Failed(
+            "the specular highlight and the occluder shadow do not overlap on the plane".into(),
+        ));
+    }
+    if shadow_leak_pixels != 0 {
+        return Err(RichLookError::Failed(format!(
+            "the added specular leaked through the key-light shadow in {shadow_leak_pixels} gated pixels (max channel diff {shadow_leak_max})"
+        )));
+    }
+    if lit_peak.1 <= 4 {
+        return Err(RichLookError::Failed(format!(
+            "the added specular did not appear on the lit plane with shadows on: lit_peak_delta={}",
+            lit_peak.1
+        )));
+    }
+
+    report.push_str(
+        "checks=occluder_darkens_plane,specular_visible_unshadowed,shadow_overlaps_highlight,specular_respects_shadow,specular_visible_lit_with_shadows\n",
+    );
     Ok(report)
 }
 
@@ -3651,6 +3832,19 @@ fn setup_fixture_scene(
                 ..default()
             })),
             Transform::from_xyz(0.0, -1.2, 0.0),
+            RenderLayers::layer(AVATAR_RENDER_LAYER),
+        ));
+    }
+
+    if scene.occluder {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(1.2, 1.2, 1.2))),
+            MeshMaterial3d(standard_materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                perceptual_roughness: 0.9,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, 1.4, 1.2),
             RenderLayers::layer(AVATAR_RENDER_LAYER),
         ));
     }
