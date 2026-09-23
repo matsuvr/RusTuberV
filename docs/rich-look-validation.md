@@ -1,5 +1,7 @@
 # Rich look validation (Issues #68-#79)
 
+> 注記: この記録は旧リッチ表示設計 (#68-#79) の実測履歴であり、#89 で置換された。新実装の完成根拠にはしない。実測値自体は歴史として残す。
+
 This is the measurement record for the rich-look epic. It covers only what was
 actually implemented and measured; everything else is listed as not
 implemented and not measured, and is not claimed as working.
