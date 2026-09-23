@@ -181,14 +181,6 @@ pub(crate) fn avatar_focus_point(head: Vec3, hips: Vec3) -> Option<Vec3> {
     upper_body_bounds(head, hips).map(|bounds| bounds.center())
 }
 
-/// The world-space radius the studio rig's shadow range must cover.
-///
-/// This reuses the framing solve's upper-body bounds rather than introducing a
-/// second body-measurement path.
-pub(crate) fn avatar_lighting_extent(head: Vec3, hips: Vec3) -> Option<f32> {
-    upper_body_bounds(head, hips).map(|bounds| (bounds.max().y - bounds.min().y) * 2.0)
-}
-
 fn upper_body_bounds(head: Vec3, hips: Vec3) -> Option<WorldBounds> {
     if !head.is_finite() || !hips.is_finite() {
         return None;

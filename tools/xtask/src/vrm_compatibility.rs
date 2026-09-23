@@ -94,13 +94,12 @@ pub fn run_single(path: &Path) -> Result<CompatibilityResult, String> {
     let preflight = inspect_vrm(path).map_err(|e| format!("{e}"));
 
     // If preflight fails, there is no point asking bevy_vrm1 to load it.
-    let (runtime, runner_error) = if preflight.is_ok() {
-        match load_and_inspect(path) {
+    let (runtime, runner_error) = match &preflight {
+        Ok(summary) => match load_and_inspect(path, summary) {
             Ok(report) => (Some(report), None),
             Err(error) => (None, Some(format!("runner error: {error}"))),
-        }
-    } else {
-        (None, None)
+        },
+        Err(_) => (None, None),
     };
 
     Ok(CompatibilityResult {
@@ -137,32 +136,44 @@ fn fingerprint(path: &Path) -> Result<(u64, String), String> {
     Ok((file_size, format!("{:X}", hasher.finalize())))
 }
 
-fn load_and_inspect(path: &Path) -> Result<VrmCompatibilityReport, String> {
-    // The application normalizes imported copies before the runtime loads
-    // them; the gate exercises the same normalization so it reflects what
-    // users experience. The temp file must outlive the Bevy app below.
+fn load_and_inspect(
+    path: &Path,
+    summary: &vtuber_app::import::VrmInspectionSummary,
+) -> Result<VrmCompatibilityReport, String> {
+    // The application converts VRM 0.x imports and normalizes morph targets
+    // before the runtime loads them; the gate exercises the same path so it
+    // reflects what users experience. The temp file must outlive the Bevy app
+    // below.
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let normalized_temp: Option<tempfile::NamedTempFile> =
-        match vtuber_app::import::normalize_vrm_morph_targets(&bytes) {
-            Some(normalized) => {
-                let temp = tempfile::Builder::new()
-                    .prefix("rustuberv-compat-")
-                    .suffix(".vrm")
-                    .tempfile()
-                    .map_err(|error| format!("failed to create temp file: {error}"))?;
-                std::fs::write(temp.path(), &normalized)
-                    .map_err(|error| format!("failed to write temp model: {error}"))?;
-                Some(temp)
-            }
-            None => None,
-        };
+    let runtime_bytes = vtuber_app::import::runtime_ready_source_bytes(&bytes, summary.generation)
+        .map_err(|error| format!("failed to convert {}: {error}", path.display()))?;
+    let normalized = vtuber_app::import::normalize_vrm_morph_targets(&runtime_bytes);
+    let staged_bytes = normalized.as_ref().unwrap_or(&runtime_bytes);
+    // Stage a temp copy whenever the runtime bytes differ from the source
+    // file (VRM 0.x conversion and/or morph normalization).
+    let staged_temp: Option<tempfile::NamedTempFile> = if staged_bytes != &bytes {
+        let temp = tempfile::Builder::new()
+            .prefix("rustuberv-compat-")
+            .suffix(".vrm")
+            .tempfile()
+            .map_err(|error| format!("failed to create temp file: {error}"))?;
+        std::fs::write(temp.path(), staged_bytes)
+            .map_err(|error| format!("failed to write temp model: {error}"))?;
+        Some(temp)
+    } else {
+        None
+    };
 
-    let model_path = normalized_temp
+    let model_path = staged_temp
         .as_ref()
         .map(tempfile::NamedTempFile::path)
         .unwrap_or(path);
-    let model = ModelPath(model_path.to_string_lossy().to_string());
+    let model = ModelPath {
+        path: model_path.to_string_lossy().to_string(),
+        generation: summary.generation,
+        warnings: summary.compatibility_warnings.clone(),
+    };
 
     let mut app = App::new();
 
@@ -199,19 +210,30 @@ fn load_and_inspect(path: &Path) -> Result<VrmCompatibilityReport, String> {
     .add_systems(Update, tick_timeout);
 
     let report = wait_for_report(&mut app)?;
-    drop(normalized_temp);
+    drop(staged_temp);
     Ok(report)
 }
 
 #[derive(Resource, Debug, Clone)]
-struct ModelPath(String);
+struct ModelPath {
+    path: String,
+    generation: vtuber_app::import::VrmGeneration,
+    warnings: Vec<vtuber_avatar::VrmCompatibilityWarning>,
+}
 
 #[derive(Resource, Debug, Clone, Default)]
 struct TimeoutFrames(usize);
 
 fn spawn_model(mut commands: Commands, asset_server: Res<AssetServer>, model: Res<ModelPath>) {
-    let handle: Handle<VrmAsset> = asset_server.load(model.0.clone());
-    commands.spawn(VrmHandle(handle));
+    let handle: Handle<VrmAsset> = asset_server.load(model.path.clone());
+    commands.spawn((
+        VrmHandle(handle),
+        match model.generation {
+            vtuber_app::import::VrmGeneration::Vrm0 => vtuber_avatar::ExpectedVrmGeneration::Vrm0,
+            vtuber_app::import::VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
+        },
+        vtuber_avatar::VrmSourceWarnings(model.warnings.clone()),
+    ));
     commands.insert_resource(TimeoutFrames(0));
 }
 

@@ -10,7 +10,9 @@
 
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
-use bevy_vrm1::vrm::body_tracking::apply_direct_body_tracking;
+use vtuber_avatar::{
+    BodyBoneHalfLives, BodyTrackingPoseInput, BodyTrackingProfile, apply_direct_body_tracking,
+};
 
 const EPSILON: f32 = 1.0e-4;
 

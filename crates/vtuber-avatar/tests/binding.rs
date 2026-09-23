@@ -16,6 +16,10 @@ use vtuber_avatar::arm::ArmSide;
 use vtuber_avatar::bind::BindTriggered;
 use vtuber_avatar::binding::{AvatarBinding, bind_humanoid_bones};
 use vtuber_avatar::lifecycle::{ActiveAvatar, AvatarLifecycle, AvatarLifecycleState};
+use vtuber_avatar::{
+    BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingPositionProfile,
+    BodyTrackingProfile,
+};
 
 fn test_app() -> App {
     let mut app = App::new();

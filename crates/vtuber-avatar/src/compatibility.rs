@@ -1,14 +1,21 @@
-//! VRM 0.x/1.0 compatibility gate for the shared `bevy_vrm1` runtime.
+//! VRM 0.x/1.0 compatibility gate for the shared upstream runtime.
 //!
 //! This module introspects a loaded VRM model and records which runtime
 //! capabilities are present. It is used by the compatibility runner and by
-//! unit tests to guard against upstream behaviour changes at the pinned
-//! revision.
+//! unit tests to guard against upstream behaviour changes at the pinned tag.
+//!
+//! Generation and import warnings are source records: the import pipeline
+//! converts VRM 0.x sources into VRM 1.0-shaped managed copies, so the
+//! runtime boundary itself no longer reports a generation. The expected
+//! generation and the preflight warnings travel on the avatar root
+//! (`ExpectedVrmGeneration`, [`VrmSourceWarnings`]).
 
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
 use crate::capabilities::PerfectSyncCapabilities;
+use crate::load::ExpectedVrmGeneration;
+use crate::vrm0::VrmCompatibilityWarning;
 
 /// Plugin that installs compatibility-report systems.
 #[derive(Default)]
@@ -22,10 +29,18 @@ impl Plugin for VrmCompatibilityPlugin {
     }
 }
 
+/// Import warnings carried on the avatar root for the compatibility report.
+///
+/// The runtime only sees converted content, so the source diagnostics travel
+/// here instead of living on a runtime component.
+#[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
+pub struct VrmSourceWarnings(pub Vec<VrmCompatibilityWarning>);
+
 /// Bone capability tuple used when querying a freshly-initialized VRM.
 type InitializedVrmBones<'w, 's> = (
     Entity,
-    Option<&'static VrmCoordinateBasis>,
+    Option<&'static ExpectedVrmGeneration>,
+    Option<&'static VrmSourceWarnings>,
     Option<&'static HeadBoneEntity>,
     Option<&'static NeckBoneEntity>,
     Option<&'static LeftEyeBoneEntity>,
@@ -40,8 +55,8 @@ type InitializedVrmBones<'w, 's> = (
 pub struct VrmCompatibilityReport {
     /// Active runtime root owning this report.
     pub root: Option<Entity>,
-    /// Generation selected by the runtime normalization boundary.
-    pub generation: Option<VrmGeneration>,
+    /// Generation recorded by app-side inspection at import.
+    pub generation: Option<ExpectedVrmGeneration>,
     /// Whether a `Vrm` component was observed.
     pub vrm_loaded: bool,
     /// Whether the `Initialized` marker was observed.
@@ -64,7 +79,7 @@ pub struct VrmCompatibilityReport {
     pub has_body_tracking_component: bool,
     /// Number of `SpringRoot` components found (proxy for SpringBone presence).
     pub spring_root_count: usize,
-    /// Typed warnings from the active source generation only.
+    /// Import warnings from the active source generation.
     pub warnings: Vec<VrmCompatibilityWarning>,
 }
 
@@ -101,16 +116,15 @@ fn inspect_initialized_vrm(
     mut report: ResMut<VrmCompatibilityReport>,
     vrms: Query<InitializedVrmBones, (With<Vrm>, Added<Initialized>)>,
     all_vrms: Query<Entity, With<Vrm>>,
-    diagnostics: Query<&VrmCompatibilityDiagnostics>,
     spring_roots: Query<&SpringRoot>,
-    expression_status: Query<Option<&ExpressionBindingStatus>>,
 ) {
     if report.root.is_some_and(|root| !all_vrms.contains(root)) {
         *report = VrmCompatibilityReport::default();
     }
     for (
         entity,
-        coordinate_basis,
+        expected_generation,
+        source_warnings,
         head,
         neck,
         left_eye,
@@ -123,10 +137,7 @@ fn inspect_initialized_vrm(
         report.root = Some(entity);
         report.vrm_loaded = true;
         report.initialized = true;
-        report.generation = coordinate_basis.map(|basis| match basis.0 {
-            CoordinateBasis::Vrm0Y180 => VrmGeneration::Vrm0,
-            CoordinateBasis::Vrm1Identity => VrmGeneration::Vrm1,
-        });
+        report.generation = expected_generation.copied();
         report.has_head = head.is_some();
         report.has_neck = neck.is_some();
         report.has_left_eye = left_eye.is_some();
@@ -134,17 +145,15 @@ fn inspect_initialized_vrm(
         report.has_look_at_component = look_at.is_some();
         report.has_body_tracking_component = body_tracking.is_some();
         report.spring_root_count = spring_roots.iter().count();
+        // The runner inspects raw runtime initialization, which runs before
+        // the application bind step records per-expression statuses.
+        // Presence in the map implies effectiveness here: the import
+        // preflight validates every node, mesh, and morph reference before a
+        // model reaches the runtime.
         report.perfect_sync =
-            PerfectSyncCapabilities::from_map_with_effective(expression_map, |expression_entity| {
-                expression_status
-                    .get(expression_entity)
-                    .is_ok_and(|status| {
-                        status.is_some_and(|status| status.resolved_morph_bind_count > 0)
-                    })
-            });
-        report.warnings = diagnostics
-            .get(entity)
-            .map(|diagnostics| diagnostics.warnings.clone())
+            PerfectSyncCapabilities::from_map_with_effective(expression_map, |_| true);
+        report.warnings = source_warnings
+            .map(|warnings| warnings.0.clone())
             .unwrap_or_default();
 
         if let Some(map) = expression_map {
@@ -202,15 +211,11 @@ mod tests {
             .spawn((
                 Vrm,
                 Initialized,
-                VrmCoordinateBasis(CoordinateBasis::Vrm0Y180),
-                VrmCompatibilityDiagnostics {
-                    generation: VrmGeneration::Vrm0,
-                    legacy_meta: None,
-                    warnings: vec![VrmCompatibilityWarning::new(
-                        VrmCompatibilityWarningCode::EmptyLegacyExpressionName,
-                        "old-root",
-                    )],
-                },
+                ExpectedVrmGeneration::Vrm0,
+                VrmSourceWarnings(vec![VrmCompatibilityWarning::new(
+                    crate::vrm0::VrmCompatibilityWarningCode::EmptyLegacyExpressionName,
+                    "old-root",
+                )]),
             ))
             .id();
         app.update();

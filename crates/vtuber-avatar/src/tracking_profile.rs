@@ -11,11 +11,11 @@
 //! document schema, the default template, and the merge into runtime
 //! profiles.
 
-use bevy::prelude::*;
-use bevy_vrm1::prelude::{
+use crate::direct_pose::{
     BodyBoneHalfLives, BodyBoneRotationLimits, BodyBoneWeights, BodyTrackingProfile,
     BoneRotationLimit,
 };
+use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::arm_pipeline::DynamicArmProfile;

@@ -1,18 +1,19 @@
 //! Direct-pose body-tracking input bridge.
 //!
 //! Reads the latest [`ActiveControlFrame`] and updates
-//! [`BodyTrackingPoseInput`](bevy_vrm1::prelude::BodyTrackingPoseInput) on the
-//! active avatar root. Bone transforms are owned exclusively by
-//! `bevy_vrm1::BodyTracking`.
+//! [`BodyTrackingPoseInput`](crate::direct_pose::BodyTrackingPoseInput) on the
+//! active avatar root. Bone transforms are owned exclusively by the
+//! application direct-pose writer.
 
 use bevy::prelude::*;
 use vtuber_core::metrics::FixedStats;
 use vtuber_core::monotonic_now;
 use vtuber_core::types::AvatarControlFrame;
 
+use crate::direct_pose::{BodyTrackingPoseInput, BodyTrackingProfile};
+use crate::direct_position::BodyTrackingPositionInput;
 use bevy_vrm1::prelude::{
-    BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingProfile, ChestBoneEntity,
-    HeadBoneEntity, HipsBoneEntity, RestTransform, UpperChestBoneEntity, VrmPath,
+    ChestBoneEntity, HeadBoneEntity, HipsBoneEntity, RestTransform, UpperChestBoneEntity, VrmPath,
 };
 
 use crate::binding::AvatarBinding;
@@ -106,12 +107,12 @@ impl PoseApplyMetrics {
     }
 }
 
-/// System that updates the direct pose consumed by `bevy_vrm1::BodyTracking`.
+/// System that updates the direct pose consumed by the application body tracking.
 ///
 /// # Schedule
 ///
 /// Runs in `PostUpdate`, after `AnimationSystems`. It does not write any bone
-/// `Transform`; the dependency-owned direct body-tracking system is the sole
+/// `Transform`; the application-owned direct body-tracking system is the sole
 /// humanoid pose writer.
 ///
 /// # Skip conditions

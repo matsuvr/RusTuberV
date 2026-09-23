@@ -1,7 +1,9 @@
 //! Bridge from normalized tracking gaze to direct VRM LookAt input.
 
 use bevy::prelude::*;
-use bevy_vrm1::prelude::{DirectLookAtInput, LookAtProperties, LookAtType, RangeMap};
+use bevy_vrm1::prelude::{LookAtProperties, LookAtType, RangeMap};
+
+use crate::direct_look::DirectLookAtInput;
 
 use crate::capabilities::SelectedGazeBackend;
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
@@ -64,8 +66,8 @@ pub fn fallback_look_at_properties(backend: SelectedGazeBackend) -> LookAtProper
 
 /// Updates only the direct LookAt input on the active VRM root.
 ///
-/// The vendored runtime owns eye local rotations and expression range mapping;
-/// this bridge never writes eye, head, or world transforms.
+/// The application gaze writer owns eye local rotations and expression range
+/// mapping; this bridge never writes eye, head, or world transforms.
 pub fn update_direct_look_at_input(
     lifecycle: Res<AvatarLifecycle>,
     control_frame: Res<ActiveControlFrame>,

@@ -3,23 +3,23 @@
 //! Consumes the active [`AvatarControlFrame`], shapes the neutral-relative
 //! head translation with the Issue #164 soft-cap profile, splits it into
 //! virtual head/body targets with the Issue #165 axis-selective policy, and
-//! feeds both channels to `bevy_vrm1::BodyTrackingPositionInput`.
+//! feeds both channels to [`BodyTrackingPositionInput`](crate::direct_position::BodyTrackingPositionInput).
 //!
 //! Writer ownership stays unique per Transform channel:
 //!
-//! - head/neck/upper-chest/chest/spine **rotation**: `bevy_vrm1` direct-pose
+//! - head/neck/upper-chest/chest/spine **rotation**: the application direct-pose
 //!   writer (`update_body_tracking_pose_input` is its only input writer).
 //! - hips translation: no runtime writer. The idle contract retires the #20
 //!   breathing writer; the authored or animated rest value is the idle value.
-//! - avatar-root translation + torso lean: `bevy_vrm1`
+//! - avatar-root translation + torso lean: the application
 //!   `apply_direct_body_position`, whose only input writer is this module.
 //!
 //! This system never touches camera transforms/projections or VRM generation
 //! normalization; mirroring is a semantic flip of the lateral axis applied in
 //! one place, matching the pose bridge.
 
+use crate::direct_position::BodyTrackingPositionInput;
 use bevy::prelude::*;
-use bevy_vrm1::prelude::BodyTrackingPositionInput;
 
 use vtuber_core::types::AvatarControlFrame;
 use vtuber_core::types::MonoTimeNs;

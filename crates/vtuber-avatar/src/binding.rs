@@ -24,6 +24,10 @@ use crate::capabilities::{
     AvatarCapabilities, BonePresence, DeclaredLookAtType, ExpressionCapabilities,
     PerfectSyncCapabilities, SelectedGazeBackend,
 };
+use crate::direct_look::DirectLookAtInput;
+use crate::direct_pose::BodyTrackingPoseInput;
+use crate::direct_position::{BodyTrackingPositionInput, BodyTrackingPositionProfile};
+use crate::expression::status::ExpressionBindingStatus;
 use crate::gaze::fallback_look_at_properties;
 use crate::lifecycle::{
     ActiveAvatar, AvatarGeneration, AvatarLifecycle, AvatarLifecycleFailure, AvatarLifecycleState,
@@ -401,14 +405,26 @@ pub fn bind_humanoid_bones(
                 );
             }
 
-            // The position input pair activates the ADR-019 position-aware
+            // The position input pair activates the application position-aware
             // upper-body solve (bounded torso lean + root/body translation
             // follow). Without it the head motion would stop at the neck:
             // the arms consume the same channels directly, so the body below
             // the neck would stay rigid while the arms follow. The writer is
             // `update_body_tracking_position_input`; this only provides the
-            // inert (inactive) component the writer and the vendor solve
+            // inert (inactive) component the writer and the application solve
             // require on the root.
+            // The upstream runtime publishes no bind counts, so the application
+            // records presence-based facts here: models that reach binding
+            // passed the import preflight, which validates every node, mesh,
+            // and morph reference, so a declared expression present in the
+            // runtime map is effective.
+            if let Some(map) = expression_map {
+                for entity in map.0.values() {
+                    commands
+                        .entity(*entity)
+                        .insert(ExpressionBindingStatus::assumed_effective());
+                }
+            }
             commands.entity(root_entity).insert((
                 binding,
                 default_arm_pose,

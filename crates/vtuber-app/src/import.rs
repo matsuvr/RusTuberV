@@ -248,10 +248,12 @@ pub struct ImportMeta {
 /// The copied file is placed at `asset_root/avatars/<sha256>/model.vrm`.
 /// A metadata file is written at `asset_root/avatars/<sha256>/import.toml`.
 ///
-/// When the source declares more morph targets per mesh than the Bevy runtime
-/// supports, the stored copy is normalized by
-/// [`normalize_vrm_morph_targets`]; the identity hash always refers to the
-/// original source bytes.
+/// VRM 0.x sources are converted into VRM 1.0-shaped bytes by
+/// `vtuber_avatar::convert_vrm0_to_vrm1` before storing, so the unmodified
+/// upstream runtime loads the managed copy directly. When the source declares
+/// more morph targets per mesh than the Bevy runtime supports, the stored
+/// copy is additionally normalized by [`normalize_vrm_morph_targets`]; the
+/// identity hash always refers to the original source bytes.
 pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
     source: P,
     asset_root: Q,
@@ -288,10 +290,11 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let source_bytes = fs::read(source)?;
     let id = format!("{:x}", Sha256::digest(&source_bytes));
-    let stored_bytes = match normalize_vrm_morph_targets(&source_bytes) {
+    let runtime_bytes = runtime_ready_source_bytes(&source_bytes, summary.generation)?;
+    let stored_bytes = match normalize_vrm_morph_targets(&runtime_bytes) {
         Some(normalized) => normalized,
         None => {
-            if let Some(target_count) = over_limit_morph_target_count(&source_bytes) {
+            if let Some(target_count) = over_limit_morph_target_count(&runtime_bytes) {
                 return Err(ModelImportError::InvalidVrmField {
                     path: "meshes[*].primitives[*].targets".to_string(),
                     reason: format!(
@@ -300,7 +303,7 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
                     ),
                 });
             }
-            source_bytes
+            runtime_bytes
         }
     };
 
@@ -1073,6 +1076,81 @@ fn check_external_uris(document: &gltf::Document) -> Result<(), ModelImportError
         }
     }
     Ok(())
+}
+
+/// Converts a VRM 0.x source into VRM 1.0-shaped bytes for the runtime.
+///
+/// VRM 1.0 sources pass through unchanged. Conversion failures become
+/// [`ModelImportError`]s; the source file itself is never modified.
+pub fn runtime_ready_source_bytes(
+    source_bytes: &[u8],
+    generation: VrmGeneration,
+) -> Result<Vec<u8>, ModelImportError> {
+    if generation != VrmGeneration::Vrm0 {
+        return Ok(source_bytes.to_vec());
+    }
+    match vtuber_avatar::convert_vrm0_to_vrm1(source_bytes) {
+        Ok(Some(converted)) => Ok(converted),
+        Ok(None) => Err(ModelImportError::NotVrm {
+            reason: "preflight classified the source as VRM 0.x but it carries no VRM extension"
+                .to_string(),
+        }),
+        Err(error) => Err(vrm0_convert_error(error)),
+    }
+}
+
+/// Upgrades a managed copy stored before the VRM 0.x conversion.
+///
+/// Models imported by older versions keep raw VRM 0.x bytes at their managed
+/// path, which the unmodified upstream runtime cannot load. When the stored
+/// summary says VRM 0.x but the managed file still carries the root `VRM`
+/// extension without `VRMC_vrm`, the file is converted in place (the managed
+/// copy is a cache; the user's source file is untouched). Returns `true`
+/// when the file was rewritten.
+pub fn ensure_managed_model_ready(
+    managed_path: &Path,
+    generation: VrmGeneration,
+) -> Result<bool, ModelImportError> {
+    if generation != VrmGeneration::Vrm0 {
+        return Ok(false);
+    }
+    let bytes = fs::read(managed_path)?;
+    if !is_unconverted_vrm0(&bytes) {
+        return Ok(false);
+    }
+    let converted = match vtuber_avatar::convert_vrm0_to_vrm1(&bytes) {
+        Ok(Some(converted)) => converted,
+        Ok(None) => return Ok(false),
+        Err(error) => return Err(vrm0_convert_error(error)),
+    };
+    write_atomic(managed_path, &converted)?;
+    Ok(true)
+}
+
+/// Returns `true` when GLB bytes carry the root `VRM` extension without a
+/// converted `VRMC_vrm` extension.
+fn is_unconverted_vrm0(bytes: &[u8]) -> bool {
+    let Some((json, _)) = parse_glb(bytes) else {
+        return false;
+    };
+    let extensions = json.get("extensions").and_then(Value::as_object);
+    extensions.is_some_and(|extensions| {
+        extensions.contains_key("VRM") && !extensions.contains_key("VRMC_vrm")
+    })
+}
+
+fn vrm0_convert_error(error: vtuber_avatar::Vrm0ConvertError) -> ModelImportError {
+    use vtuber_avatar::Vrm0ConvertError as ConvertError;
+    match error {
+        ConvertError::NotGlb => ModelImportError::GlbParse("not a binary glTF container".into()),
+        ConvertError::InvalidJson(reason) => ModelImportError::GlbParse(reason),
+        ConvertError::NotVrm0 => ModelImportError::NotVrm {
+            reason: "no VRM 0.x extension to convert".to_string(),
+        },
+        ConvertError::InvalidField { path, reason } => {
+            ModelImportError::InvalidVrmField { path, reason }
+        }
+    }
 }
 
 /// Rewrites a GLB so that no mesh carries more than [`MAX_MORPH_TARGETS`]
@@ -1954,12 +2032,16 @@ humanoid_nodes = { hips = 0, head = 1 }
             .expect("over-limit model should import");
 
         // Identity remains keyed to the original bytes; the stored copy is
-        // normalized.
+        // the VRM 1.0-shaped conversion, morph-normalized.
         let source_bytes = fs::read(&source).unwrap();
         assert_eq!(imported.id, format!("{:x}", Sha256::digest(&source_bytes)));
         assert_ne!(fs::read(&imported.asset_path).unwrap(), source_bytes);
 
         let json = stored_glb_json(&imported);
+        assert!(
+            json["extensions"].get("VRM").is_none(),
+            "managed copy is VRM 1.0-shaped"
+        );
         let mesh = &json["meshes"][0];
         let targets = mesh["primitives"][0]["targets"].as_array().unwrap();
         assert_eq!(targets.len(), 2);
@@ -1970,11 +2052,22 @@ humanoid_nodes = { hips = 0, head = 1 }
         assert_eq!(weights[0], 0.25);
         assert_eq!(weights[1], 0.75);
 
-        let groups = &json["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"];
-        let binds = groups[0]["binds"].as_array().unwrap();
-        assert_eq!(binds[0]["mesh"], 0);
-        assert_eq!(binds[0]["index"], 0);
-        assert_eq!(binds[1]["index"], 1);
+        // The legacy mesh/morph binds were converted to node binds (mesh 0 is
+        // instanced by nodes 3 and 4) and remapped to the reduced targets.
+        let binds =
+            json["extensions"]["VRMC_vrm"]["expressions"]["preset"]["aa"]["morphTargetBinds"]
+                .as_array()
+                .unwrap();
+        let pairs = binds
+            .iter()
+            .map(|bind| {
+                (
+                    bind["node"].as_u64().unwrap(),
+                    bind["index"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pairs, vec![(3, 0), (4, 0), (3, 1), (4, 1)]);
 
         // Re-import is idempotent and keeps the normalized copy.
         let reimported =
@@ -1987,15 +2080,30 @@ humanoid_nodes = { hips = 0, head = 1 }
     }
 
     #[test]
-    fn import_keeps_models_within_the_morph_limit_unchanged() {
+    fn import_converts_vrm0_within_limits_to_vrm1_shape() {
         let dir = TempDir::new().unwrap();
         let source = vrm0_fixture(&dir);
         let asset_root = dir.path().join("asset-root");
         let imported =
             import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+        // Identity stays keyed to the source bytes, but the managed copy is
+        // the converted VRM 1.0 shape with the binary chunk preserved.
+        let source_bytes = fs::read(&source).unwrap();
+        assert_eq!(imported.id, format!("{:x}", Sha256::digest(&source_bytes)));
+        let json = stored_glb_json(&imported);
+        assert!(
+            json["extensions"].get("VRM").is_none(),
+            "managed copy drops the legacy extension"
+        );
         assert_eq!(
-            fs::read(&imported.asset_path).unwrap(),
-            fs::read(&source).unwrap()
+            json["extensions"]["VRMC_vrm"]["specVersion"], "1.0",
+            "managed copy carries the normalized descriptor"
+        );
+        assert!(
+            json["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]
+                .as_object()
+                .is_some_and(|bones| !bones.is_empty()),
+            "humanoid survives conversion"
         );
     }
 

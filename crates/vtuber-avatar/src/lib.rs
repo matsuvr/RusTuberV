@@ -29,6 +29,9 @@ pub mod body_motion;
 pub mod body_scale;
 pub mod capabilities;
 pub mod compatibility;
+pub mod direct_look;
+pub mod direct_pose;
+pub mod direct_position;
 pub mod expression;
 pub mod expression_catalog;
 mod framing;
@@ -44,6 +47,7 @@ pub mod pose;
 pub mod render_output;
 pub mod tracking_profile;
 pub mod unload;
+pub mod vrm0;
 
 pub use arm::{
     ARM_POSE_PROFILE_OVERRIDE_VERSION, ArmChainBinding, ArmChainCapabilities, ArmChainReferences,
@@ -69,10 +73,6 @@ pub use arm_pose::{
     DefaultArmPose, ResolvedArmPose, ResolvedBoneDelta, ResolvedFingerJointPose,
     ResolvedFingerPose, apply_arm_pose_profile_changes, apply_default_arm_pose,
 };
-pub use bevy_vrm1::prelude::{
-    LegacyShaderKind, Vrm0MetaDiagnostics, VrmCompatibilityWarning, VrmCompatibilityWarningCode,
-    VrmRuntimeDescriptor, classify_legacy_shader, collect_legacy_compatibility_warnings,
-};
 pub use bind::BindTriggered;
 pub use binding::{AvatarBindError, AvatarBinding, bind_humanoid_bones};
 pub use body_motion::{
@@ -84,10 +84,21 @@ pub use capabilities::{
     ExpressionCapabilities, GazeFallbackReason, LookDirectionSet, MouthMode,
     PerfectSyncCapabilities, SelectedGazeBackend, select_gaze_backend,
 };
+pub use compatibility::{VrmCompatibilityPlugin, VrmCompatibilityReport, VrmSourceWarnings};
+pub use direct_look::{DirectLookAtInput, LookAtExpressionWeights};
+pub use direct_pose::{
+    BodyBoneHalfLives, BodyBoneRotationLimits, BodyBoneWeights, BodyTrackingPoseInput,
+    BodyTrackingProfile, BoneRotationLimit, apply_direct_body_tracking,
+};
+pub use direct_position::{
+    BodyTrackingPositionInput, BodyTrackingPositionProfile, apply_direct_body_position,
+    lean_angles_model_space, semantic_offset_to_model,
+};
 pub use expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
     apply_manual_expression_requests, is_tracking_selection,
 };
+pub use expression::status::ExpressionBindingStatus;
 pub use expression_catalog::{
     AvatarExpressionCatalog, EMOTIONAL_PRESETS, ExpressionAvailability, ExpressionCatalogEntry,
     ExpressionCatalogInput, ExpressionKind, NEUTRAL_PRESET, build_catalog, classify_expression,
@@ -109,13 +120,8 @@ pub use load::{
 };
 pub use look::{
     AvatarLookSettings, AvatarMaterialRoles, LookSettingsChanged, MaterialRole,
-    MaterialRoleOverride, MaterialRoleOverridesChanged, PORTRAIT_FINISH, PortraitFinish,
-    PortraitFinishPass, PortraitFinishState, RichLookSettings, StandardLookBase, StandardLookBases,
-    apply_standard_portrait_settings, blend_look_scalar, capture_standard_look_base,
-    effective_look_strength, face_lighting_normal, infer_material_role, register_portrait_finish,
-    resolve_material_role, resolve_mtoon_role_params, resolve_mtoon_shading_mode,
-    resolve_portrait_finish, resolve_standard_portrait, resolve_standard_role_params,
-    studio_environment_cubemap, sync_portrait_finish,
+    MaterialRoleOverride, MaterialRoleOverridesChanged, RichLookSettings,
+    apply_look_settings_changes, apply_material_role_overrides, resolve_material_role,
 };
 pub use mirror::AvatarMotionMirror;
 pub use plugin::{StartupModelPath, VtuberAvatarPlugin};
@@ -134,4 +140,8 @@ pub use tracking_profile::{
 };
 pub use unload::{
     ActiveControlFrame, ControlFrameError, set_active_control_frame, tag_control_frame,
+};
+pub use vrm0::{
+    LegacyShaderKind, Vrm0ConvertError, VrmCompatibilityWarning, VrmCompatibilityWarningCode,
+    classify_legacy_shader, collect_legacy_compatibility_warnings, convert_vrm0_to_vrm1,
 };

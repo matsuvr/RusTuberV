@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_vrm1::prelude::*;
-use bevy_vrm1::vrm::body_tracking::{apply_direct_body_position, apply_direct_body_tracking};
+use vtuber_avatar::{
+    BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingPositionProfile,
+    apply_direct_body_position, apply_direct_body_tracking,
+};
 
 const EPSILON: f32 = 1.0e-4;
 const FRAME_MILLIS: u64 = 16;

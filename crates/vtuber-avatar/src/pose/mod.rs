@@ -10,7 +10,7 @@ pub use system::{
     update_body_tracking_pose_input,
 };
 
-use bevy_vrm1::prelude::{
+use crate::direct_pose::{
     BodyBoneHalfLives, BodyBoneRotationLimits, BodyBoneWeights, BodyTrackingProfile,
     BoneRotationLimit,
 };

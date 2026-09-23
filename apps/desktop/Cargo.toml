@@ -17,7 +17,7 @@ vtuber-app = { path = "../../crates/vtuber-app" }
 vtuber-avatar = { path = "../../crates/vtuber-avatar" }
 bevy = "=0.19.0"
 bevy_egui = { workspace = true }
-bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", rev = "f9593fd78136fb9e0507bcae111e09291ec9b82a", features = ["log"] }
+bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", tag = "v0.9.3", features = ["log"] }
 directories = "5"
 
 [build-dependencies]

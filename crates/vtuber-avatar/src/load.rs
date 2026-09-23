@@ -11,6 +11,9 @@
 use bevy::asset::AssetPath;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::VrmHandle;
+
+use crate::compatibility::VrmSourceWarnings;
+use crate::vrm0::VrmCompatibilityWarning;
 use std::fmt;
 
 use crate::lifecycle::{
@@ -182,6 +185,8 @@ pub struct ImportedAvatar {
     pub name: String,
     /// Generation established by app-side preflight.
     pub expected_generation: ExpectedVrmGeneration,
+    /// Import warnings established by app-side preflight.
+    pub warnings: Vec<VrmCompatibilityWarning>,
 }
 
 impl ImportedAvatar {
@@ -198,7 +203,15 @@ impl ImportedAvatar {
             asset_path,
             name: name.into(),
             expected_generation,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Attaches the import warnings established by app-side preflight.
+    #[must_use]
+    pub fn with_warnings(mut self, warnings: Vec<VrmCompatibilityWarning>) -> Self {
+        self.warnings = warnings;
+        self
     }
 }
 
@@ -360,6 +373,7 @@ pub fn handle_load_imported_avatar_requests(
                 },
                 request.imported.id.clone(),
                 request.imported.expected_generation,
+                VrmSourceWarnings(request.imported.warnings.clone()),
                 VrmHandle(asset_server.load(asset_path)),
                 Transform::default(),
                 GlobalTransform::default(),

@@ -9,8 +9,8 @@
 //! Body-tracking input lifecycle integration tests.
 
 use bevy::prelude::*;
-use bevy_vrm1::prelude::BodyTrackingPoseInput;
 use vtuber_avatar::AvatarMotionMirror;
+use vtuber_avatar::BodyTrackingPoseInput;
 use vtuber_avatar::binding::AvatarBinding;
 use vtuber_avatar::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 use vtuber_avatar::pose::{PoseApplyMetrics, update_body_tracking_pose_input};

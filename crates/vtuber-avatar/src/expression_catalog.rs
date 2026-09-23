@@ -6,8 +6,10 @@
 //! provides a deterministic auto-assignment order. It contains no Bevy
 //! entities and no `bevy_vrm1` types.
 
-use bevy_vrm1::prelude::{ExpressionBindingStatus, ExpressionEntityMap};
+use bevy_vrm1::prelude::ExpressionEntityMap;
 use vtuber_core::ArkitBlendshape;
+
+use crate::expression::status::ExpressionBindingStatus;
 
 /// Standard emotion presets in the product priority order.
 pub const EMOTIONAL_PRESETS: [&str; 5] = ["happy", "angry", "sad", "relaxed", "surprised"];

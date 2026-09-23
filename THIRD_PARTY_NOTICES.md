@@ -1,5 +1,20 @@
 # Third-party notices
 
+## bevy_vrm1 (unmodified upstream)
+
+The VRM runtime is the unmodified upstream
+[not-elm/bevy_vrm1](https://github.com/not-elm/bevy_vrm1) at tag `v0.9.3`
+(commit `bf0ec103970fdf9091134fe0f208cf3590031c80`, Bevy 0.19 support),
+licensed under MIT OR Apache-2.0. It is used as a direct git dependency;
+no vendored copy or path patch remains in this repository.
+
+The VRM 0.x import-time normalization, the direct-pose / direct-gaze input
+components and writers, and the expression bind-status records in
+`crates/vtuber-avatar` are application code owned by this repository (MIT),
+ported from the retired `vendor/bevy_vrm1` patch so the unmodified upstream
+runtime can stay untouched. They carry no separate upstream license beyond
+the MIT terms of this application.
+
 ## NDI® runtime
 
 This application uses the NDI Standard SDK runtime for
