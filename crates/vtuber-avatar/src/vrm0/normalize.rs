@@ -8,30 +8,33 @@
 //! Differences from the vendored shape are upstream-driven, not behavioral:
 //! upstream `Expressions` carries a single `preset` map (standard and custom
 //! entries share it, standards win on collision) and upstream `VrmPreset`
-//! carries morph binds only. Legacy material/texture expression binds cannot
-//! be represented upstream and are dropped here; the import diagnostics
-//! already report them as unsupported.
+//! carries morph binds only. Legacy `materialValues` color binds are
+//! therefore written as `materialColorBinds` next to the morph binds and the
+//! custom-origin record is kept under `custom`: both are ignored by upstream
+//! serde but preserved for the application's source-facts parser and the
+//! app-side material bind writer (`expression::material`).
+//!
+//! The managed copy's `VRMC_vrm.meta` is a rendering-input record only. VRM
+//! 0.x permission strings that map onto VRM 1.0 fields are carried through
+//! unchanged; fields with no VRM 0.x counterpart default to `false`, which
+//! records no permission instead of inventing one. The author's original
+//! license facts stay in the source file, the import summary, and the
+//! diagnostics retained on the root.
 use std::collections::BTreeSet;
 
 use anyhow::Context;
 use bevy::platform::collections::HashMap;
 use bevy_vrm1::prelude::{
-    Collider, ColliderGroup, ColliderShape, Expressions, FirstPerson, FirstPersonFlag, Humanoid,
-    LookAtProperties, LookAtType, MeshAnnotation, Meta, MorphTargetBind, RangeMap, Sphere, Spring,
-    SpringJoint, VRMCSpringBone, VrmNode, VrmPreset, VrmcVrm,
+    Collider, ColliderGroup, ColliderShape, FirstPerson, FirstPersonFlag, Humanoid,
+    LookAtProperties, LookAtType, MeshAnnotation, Meta, RangeMap, Sphere, Spring, SpringJoint,
+    VRMCSpringBone, VrmNode, VrmcVrm,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use super::descriptor::{
-    VrmCompatibilityWarning, VrmFirstPersonFlag, VrmLookAtType, VrmRuntimeDescriptor,
-};
+use super::descriptor::{VrmFirstPersonFlag, VrmLookAtType, VrmRuntimeDescriptor};
 
 type AppResult<T> = anyhow::Result<T>;
-pub(crate) fn normalized_legacy_vrm(
-    descriptor: &VrmRuntimeDescriptor,
-    legacy: &Value,
-    root: &Value,
-) -> AppResult<VrmcVrm> {
+pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> AppResult<VrmcVrm> {
     let human_bones = descriptor
         .humanoid
         .human_bones
@@ -79,41 +82,55 @@ pub(crate) fn normalized_legacy_vrm(
             VrmLookAtType::Expression => LookAtType::Expression,
         },
     });
+    // VRM 0.x permission strings carried through unchanged; fields the VRM 0.x
+    // meta does not define record no permission (`false`), never a fabricated
+    // allowance. See the module docs for the source/runtime boundary.
+    let legacy_meta = descriptor.legacy_meta.as_ref();
+    let is_allowed = |field: &Option<String>| field.as_deref() == Some("Allow");
 
     Ok(VrmcVrm {
-        expressions: normalized_legacy_expressions(
-            legacy,
-            root,
-            &descriptor.compatibility_warnings,
-        )?,
+        // Built as raw JSON below and injected by `convert`; the upstream
+        // `Expressions` type cannot carry the material bind records.
+        expressions: None,
         first_person,
         humanoid: Humanoid { human_bones },
         look_at,
         meta: Some(Meta {
-            allow_antisocial_or_hate_usage: true,
-            allow_excessively_sexual_usage: true,
-            allow_excessively_violent_usage: true,
-            allow_political_or_religious_usage: true,
-            allow_redistribution: true,
+            allow_antisocial_or_hate_usage: false,
+            allow_excessively_sexual_usage: legacy_meta
+                .is_some_and(|meta| is_allowed(&meta.sexual_usage_name)),
+            allow_excessively_violent_usage: legacy_meta
+                .is_some_and(|meta| is_allowed(&meta.violent_usage_name)),
+            allow_political_or_religious_usage: false,
+            allow_redistribution: false,
             authors: descriptor.meta.authors.clone(),
-            avatar_permission: None,
-            commercial_usage: None,
+            avatar_permission: legacy_meta.and_then(|meta| meta.allowed_user_name.clone()),
+            commercial_usage: legacy_meta.and_then(|meta| meta.commercial_usage_name.clone()),
             credit_notation: None,
             license_url: descriptor.meta.license_url.clone(),
             modification: None,
             name: descriptor.meta.name.clone(),
-            other_license_url: None,
+            other_license_url: legacy_meta.and_then(|meta| {
+                meta.other_license_url.clone().or_else(|| meta.other_permission_url.clone())
+            }),
             thumbnail_image: None,
             version: None,
         }),
         spec_version: "1.0".into(),
     })
 }
-fn normalized_legacy_expressions(
+
+/// Builds the `VRMC_vrm.expressions` JSON for the converted managed copy.
+///
+/// Every expression enters `preset` (the only map the upstream runtime
+/// reads), and custom-origin expressions additionally appear under `custom`
+/// as the provenance record. Legacy `materialValues` color binds are
+/// converted into `materialColorBinds`; nothing from the source section is
+/// silently dropped.
+pub(crate) fn normalized_legacy_expressions(
     legacy: &Value,
     root: &Value,
-    _compatibility_warnings: &[VrmCompatibilityWarning],
-) -> AppResult<Option<Expressions>> {
+) -> AppResult<Option<Value>> {
     let groups = legacy
         .get("blendShapeMaster")
         .and_then(|master| master.get("blendShapeGroups"))
@@ -121,10 +138,9 @@ fn normalized_legacy_expressions(
     let Some(groups) = groups else {
         return Ok(None);
     };
-    // The upstream contract carries a single `preset` map. Standards are
-    // collected first so they win the rare collision where a custom author
-    // name spells a standard runtime ID; only known VRM 0.x semantics enter
-    // as standards, everything else keeps the author name.
+    // Standards are collected first so they win the rare collision where a
+    // custom author name spells a standard runtime ID; only known VRM 0.x
+    // semantics enter as standards, everything else keeps the author name.
     let mut standards = Vec::new();
     let mut customs = Vec::new();
     for (group_index, group) in groups.iter().enumerate() {
@@ -137,16 +153,22 @@ fn normalized_legacy_expressions(
             customs.push((name, group_index));
         }
     }
-    let mut preset = HashMap::default();
+    let material_indices = legacy_material_indices(root);
+    let mut preset = serde_json::Map::new();
+    let mut custom = serde_json::Map::new();
     // Bounds are guaranteed by construction: every stored index comes from
     // enumerating this same `groups` array above. See the AGENTS.md
     // production panic policy.
     #[allow(clippy::indexing_slicing)]
-    for (name, group_index) in standards.into_iter().chain(customs.into_iter()) {
-        let group = &groups[group_index];
+    for (name, group_index, is_standard) in standards
+        .into_iter()
+        .map(|(name, index)| (name, index, true))
+        .chain(customs.into_iter().map(|(name, index)| (name, index, false)))
+    {
         if preset.contains_key(&name) {
             continue;
         }
+        let group = &groups[group_index];
         let morph_target_binds = group
             .get("binds")
             .and_then(Value::as_array)
@@ -182,37 +204,129 @@ fn normalized_legacy_expressions(
                         let normalized = nodes
                             .into_iter()
                             .filter_map(|node| {
-                                seen.insert((node, morph_index)).then_some(MorphTargetBind {
-                                    index: morph_index,
-                                    node,
-                                    weight: weight / 100.0,
-                                })
+                                seen.insert((node, morph_index)).then_some(json!({
+                                    "index": morph_index,
+                                    "node": node,
+                                    "weight": weight / 100.0,
+                                }))
                             })
                             .collect::<Vec<_>>();
                         Ok(normalized.into_iter())
                     })
                     .collect::<AppResult<Vec<_>>>()
-                    .map(|binds| binds.into_iter().flatten().collect())
+                    .map(|binds| binds.into_iter().flatten().collect::<Vec<_>>())
             })
-            .transpose()?;
-        // Legacy material/texture binds cannot be represented by the
-        // upstream contract and are dropped here; the import diagnostics
-        // already report them as unsupported.
-        preset.insert(
-            name,
-            VrmPreset {
-                is_binary: group
-                    .get("isBinary")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                morph_target_binds,
-                override_blink: "none".into(),
-                override_look_at: "none".into(),
-                override_mouth: "none".into(),
-            },
-        );
+            .transpose()?
+            .unwrap_or_default();
+        let (material_color_binds, _unsupported_material_values) =
+            normalized_legacy_material_color_binds(group, &material_indices);
+        let entry = json!({
+            "isBinary": group.get("isBinary").and_then(Value::as_bool).unwrap_or(false),
+            "morphTargetBinds": morph_target_binds,
+            "materialColorBinds": material_color_binds,
+            "overrideBlink": "none",
+            "overrideLookAt": "none",
+            "overrideMouth": "none",
+        });
+        preset.insert(name.clone(), entry.clone());
+        if !is_standard {
+            custom.insert(name, entry);
+        }
     }
-    Ok(Some(Expressions { preset }))
+    let mut expressions = serde_json::Map::new();
+    expressions.insert("preset".to_string(), Value::Object(preset));
+    if !custom.is_empty() {
+        expressions.insert("custom".to_string(), Value::Object(custom));
+    }
+    Ok(Some(Value::Object(expressions)))
+}
+
+/// Maps glTF material names to their glTF material index. The index is the
+/// stable identity; VRM 0.x `materialValues` reference materials by name.
+pub(crate) fn legacy_material_indices(root: &Value) -> HashMap<String, usize> {
+    let mut indices = HashMap::default();
+    for (index, material) in root
+        .get("materials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let Some(name) = material
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        indices.entry(name.to_owned()).or_insert(index);
+    }
+    indices
+}
+
+/// Converts the known subset of legacy `materialValues` into the VRM 1.0
+/// `materialColorBinds` runtime shape. Unknown Unity shader properties are
+/// intentionally dropped here; the diagnostics report them as unsupported.
+fn normalized_legacy_material_color_binds(
+    group: &Value,
+    material_indices: &HashMap<String, usize>,
+) -> (Vec<Value>, usize) {
+    let Some(values) = group.get("materialValues").and_then(Value::as_array) else {
+        return (Vec::new(), 0);
+    };
+    let mut converted = Vec::with_capacity(values.len());
+    let mut unsupported = 0;
+    for value in values {
+        match legacy_material_color_bind(value, material_indices) {
+            Some(bind) => converted.push(bind),
+            None => unsupported += 1,
+        }
+    }
+    (converted, unsupported)
+}
+
+/// Returns `true` when one legacy `materialValues` entry converts into a
+/// VRM 1.0 material color bind; `false` marks an entry the conversion drops
+/// (unknown property, unresolvable material, or malformed value).
+pub(crate) fn legacy_material_value_converts(
+    value: &Value,
+    material_indices: &HashMap<String, usize>,
+) -> bool {
+    legacy_material_color_bind(value, material_indices).is_some()
+}
+
+fn legacy_material_color_bind(
+    value: &Value,
+    material_indices: &HashMap<String, usize>,
+) -> Option<Value> {
+    let material_name = value.get("materialName").and_then(Value::as_str)?;
+    let material = material_indices.get(material_name).copied()?;
+    let property = value.get("propertyName").and_then(Value::as_str)?;
+    let bind_type = match property {
+        "_Color" | "_MainColor" | "_BaseColor" => "color",
+        "_EmissionColor" => "emissionColor",
+        "_ShadeColor" => "shadeColor",
+        "_RimColor" => "rimColor",
+        "_OutlineColor" => "outlineColor",
+        _ => return None,
+    };
+    let target = value.get("targetValue").and_then(Value::as_array)?;
+    let components: Vec<f32> = target
+        .iter()
+        .filter_map(|component| component.as_f64().map(|value| value as f32))
+        .collect();
+    let [red, green, blue, alpha]: [f32; 4] = match components.as_slice() {
+        [red, green, blue, alpha] => [*red, *green, *blue, *alpha],
+        // Legacy entries sometimes omit alpha; treat it as opaque rather
+        // than dropping a visible color bind.
+        [red, green, blue] => [*red, *green, *blue, 1.0],
+        _ => return None,
+    };
+    Some(json!({
+        "material": material,
+        "type": bind_type,
+        "targetValue": [red, green, blue, alpha],
+    }))
 }
 /// Maps a known VRM 0.x `presetName` to the VRM 1.0 runtime ID.
 ///

@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use bevy_vrm1::prelude::VrmHandle;
 
 use crate::compatibility::VrmSourceWarnings;
+use crate::expression::source::SourceExpressions;
 use crate::vrm0::VrmCompatibilityWarning;
 use std::fmt;
 
@@ -175,7 +176,7 @@ pub enum ExpectedVrmGeneration {
 }
 
 /// The engine-facing description of an imported avatar.
-#[derive(Clone, Debug, PartialEq, Eq, Component)]
+#[derive(Clone, Debug, PartialEq, Component)]
 pub struct ImportedAvatar {
     /// Stable asset identifier.
     pub id: AvatarAssetId,
@@ -187,6 +188,10 @@ pub struct ImportedAvatar {
     pub expected_generation: ExpectedVrmGeneration,
     /// Import warnings established by app-side preflight.
     pub warnings: Vec<VrmCompatibilityWarning>,
+    /// Source expression facts parsed from the managed model
+    /// (`VRMC_vrm.expressions`, including the app-retained custom-origin
+    /// record and material bind entries).
+    pub expressions: SourceExpressions,
 }
 
 impl ImportedAvatar {
@@ -204,6 +209,7 @@ impl ImportedAvatar {
             name: name.into(),
             expected_generation,
             warnings: Vec::new(),
+            expressions: SourceExpressions::default(),
         }
     }
 
@@ -213,13 +219,29 @@ impl ImportedAvatar {
         self.warnings = warnings;
         self
     }
+
+    /// Attaches the source expression facts parsed from the managed model.
+    #[must_use]
+    pub fn with_expressions(mut self, expressions: SourceExpressions) -> Self {
+        self.expressions = expressions;
+        self
+    }
 }
+
+/// Source expression facts carried on the avatar root.
+///
+/// Parsed by the app from the managed model and consumed by
+/// [`bind_humanoid_bones`](crate::binding::bind_humanoid_bones) to build the
+/// per-expression bind statuses, the catalog, the Perfect Sync capability,
+/// and the material bind writer inputs.
+#[derive(Clone, Debug, Default, PartialEq, Component)]
+pub struct VrmSourceExpressions(pub crate::expression::source::SourceExpressions);
 
 /// Opaque identifier used to correlate import requests with their results.
 pub type AvatarLoadRequestId = u64;
 
 /// Request to spawn and load a VRM root from an import result.
-#[derive(Message, Clone, Debug, PartialEq, Eq)]
+#[derive(Message, Clone, Debug, PartialEq)]
 pub struct LoadImportedAvatarRequest {
     /// Client-supplied correlation identifier.
     pub request_id: AvatarLoadRequestId,
@@ -374,6 +396,7 @@ pub fn handle_load_imported_avatar_requests(
                 request.imported.id.clone(),
                 request.imported.expected_generation,
                 VrmSourceWarnings(request.imported.warnings.clone()),
+                VrmSourceExpressions(request.imported.expressions.clone()),
                 VrmHandle(asset_server.load(asset_path)),
                 Transform::default(),
                 GlobalTransform::default(),

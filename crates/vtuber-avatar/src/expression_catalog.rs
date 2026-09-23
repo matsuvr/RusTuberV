@@ -220,27 +220,31 @@ impl AvatarExpressionCatalog {
 }
 
 /// Builds the catalog from the runtime expression map and bind statuses.
+///
+/// `status` resolves one expression's bind facts by its exact runtime ID; a
+/// missing entry means the fact could not be established and the expression
+/// is treated as empty rather than assumed effective.
 #[must_use]
 pub fn build_catalog(
     model_id: String,
     generation: u64,
     map: &ExpressionEntityMap,
-    status: impl Fn(bevy::prelude::Entity) -> Option<ExpressionBindingStatus>,
+    status: impl Fn(&str) -> Option<ExpressionBindingStatus>,
 ) -> AvatarExpressionCatalog {
     AvatarExpressionCatalog::build(
         model_id,
         generation,
-        map.0.iter().map(|(name, &entity)| {
-            let status = status(entity).unwrap_or_default();
+        map.0.iter().map(|(name, _)| {
+            let facts = status(name.as_str()).unwrap_or_default();
             ExpressionCatalogInput {
                 id: name.0.as_str(),
-                declared_as_preset: status.declared_as_preset,
-                declared_morph_bind_count: status.declared_morph_bind_count,
-                resolved_morph_bind_count: status.resolved_morph_bind_count,
-                declared_material_bind_count: status.declared_material_bind_count,
-                resolved_material_bind_count: status.resolved_material_bind_count,
-                unresolved_material_bind_count: status.unresolved_material_bind_count,
-                unsupported_material_bind_count: status.unsupported_material_bind_count,
+                declared_as_preset: facts.declared_as_preset,
+                declared_morph_bind_count: facts.declared_morph_bind_count,
+                resolved_morph_bind_count: facts.resolved_morph_bind_count,
+                declared_material_bind_count: facts.declared_material_bind_count,
+                resolved_material_bind_count: facts.resolved_material_bind_count,
+                unresolved_material_bind_count: facts.unresolved_material_bind_count,
+                unsupported_material_bind_count: facts.unsupported_material_bind_count,
             }
         }),
     )

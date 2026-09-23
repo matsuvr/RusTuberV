@@ -772,3 +772,185 @@ fn humanoid_binding_no_repeated_lookup_after_ready() {
         "binding must not rewrite a ready avatar's transform"
     );
 }
+
+/// Binds a root whose expression facts and runtime map are populated, with no
+/// `ExpressionBindingStatus` inserted by hand, and verifies that the catalog
+/// and the per-expression statuses are derived from the real initialization
+/// order (source facts resolved against the scene) -- PR #98 R1.
+#[test]
+fn binding_derives_expression_catalog_and_statuses_from_source_facts() {
+    use vtuber_avatar::expression::material::ExpressionMaterialBinds;
+    use vtuber_avatar::expression::source::{
+        MaterialColorTarget, SourceMaterialColorBind, SourceMorphBind, SourceExpressions,
+    };
+    use vtuber_avatar::{
+        AvatarAssetId, ExpressionBindingStatus, SourceExpressionEntry, VrmMaterialIndex,
+        VrmSourceExpressions,
+    };
+
+    let mut app = test_app();
+
+    let happy = app.world_mut().spawn_empty().id();
+    let smile = app.world_mut().spawn_empty().id();
+    let hollow = app.world_mut().spawn_empty().id();
+    let shade_only = app.world_mut().spawn_empty().id();
+    let head = spawn_bone(&mut app);
+    let root = app
+        .world_mut()
+        .spawn((
+            ActiveAvatar,
+            BindTriggered,
+            HeadBoneEntity(head),
+            AvatarAssetId::new("facts-model"),
+            ExpressionEntityMap(
+                bevy::platform::collections::HashMap::from([
+                    (VrmExpression::from("happy"), happy),
+                    (VrmExpression::from("smile"), smile),
+                    (VrmExpression::from("hollow"), hollow),
+                    (VrmExpression::from("shadeOnly"), shade_only),
+                ]),
+            ),
+            VrmSourceExpressions(SourceExpressions {
+                entries: vec![
+                    SourceExpressionEntry {
+                        name: "happy".into(),
+                        declared_as_preset: true,
+                        is_binary: false,
+                        override_mouth: "none".into(),
+                        override_blink: "none".into(),
+                        override_look_at: "none".into(),
+                        morph_binds: vec![SourceMorphBind {
+                            node_name: "Body".into(),
+                            morph_index: 0,
+                            weight: 1.0,
+                        }],
+                        material_color_binds: Vec::new(),
+                        texture_transform_binds: Vec::new(),
+                    },
+                    // Custom origin: the import conversion records custom
+                    // expressions even after merging them into `preset`.
+                    SourceExpressionEntry {
+                        name: "smile".into(),
+                        declared_as_preset: false,
+                        is_binary: false,
+                        override_mouth: "none".into(),
+                        override_blink: "none".into(),
+                        override_look_at: "none".into(),
+                        morph_binds: vec![SourceMorphBind {
+                            node_name: "Missing".into(),
+                            morph_index: 1,
+                            weight: 1.0,
+                        }],
+                        material_color_binds: Vec::new(),
+                        texture_transform_binds: Vec::new(),
+                    },
+                    SourceExpressionEntry {
+                        name: "hollow".into(),
+                        declared_as_preset: true,
+                        is_binary: false,
+                        override_mouth: "none".into(),
+                        override_blink: "none".into(),
+                        override_look_at: "none".into(),
+                        morph_binds: Vec::new(),
+                        material_color_binds: Vec::new(),
+                        texture_transform_binds: Vec::new(),
+                    },
+                    SourceExpressionEntry {
+                        name: "shadeOnly".into(),
+                        declared_as_preset: false,
+                        is_binary: false,
+                        override_mouth: "none".into(),
+                        override_blink: "none".into(),
+                        override_look_at: "none".into(),
+                        morph_binds: Vec::new(),
+                        material_color_binds: vec![SourceMaterialColorBind {
+                            material: 0,
+                            target: Some(MaterialColorTarget::ShadeColor),
+                            target_value: [1.0, 0.0, 0.0, 1.0],
+                        }],
+                        texture_transform_binds: Vec::new(),
+                    },
+                ],
+            }),
+            Visibility::Hidden,
+        ))
+        .id();
+    // The morph bind for `happy` resolves through this named child; the
+    // `smile` bind points at `Missing`, which has no scene node. The mesh
+    // carries glTF material index 0 without an MToon material, so the
+    // shadeColor bind on it is unsupported rather than resolved.
+    app.world_mut().spawn((Name::new("Body"), ChildOf(root)));
+    app.world_mut()
+        .spawn((VrmMaterialIndex(0), ChildOf(root)));
+
+    enter_binding(&mut app, root);
+    app.update();
+
+    assert_eq!(
+        app.world().resource::<AvatarLifecycle>().state(),
+        AvatarLifecycleState::Ready
+    );
+    let catalog = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .expression_catalog()
+        .expect("catalog published at Ready")
+        .clone();
+    assert_eq!(catalog.entries.len(), 4);
+    let happy_entry = catalog.entry("happy").expect("happy entry");
+    assert!(happy_entry.availability.is_ready());
+    assert_eq!(
+        happy_entry.kind,
+        vtuber_avatar::expression_catalog::ExpressionKind::EmotionalPreset
+    );
+    let smile_entry = catalog.entry("smile").expect("smile entry");
+    assert!(matches!(
+        smile_entry.availability,
+        vtuber_avatar::expression_catalog::ExpressionAvailability::Unresolved { .. }
+    ));
+    assert_eq!(
+        smile_entry.kind,
+        vtuber_avatar::expression_catalog::ExpressionKind::Custom
+    );
+    assert_eq!(
+        catalog.entry("hollow").unwrap().availability,
+        vtuber_avatar::expression_catalog::ExpressionAvailability::Empty
+    );
+    assert!(matches!(
+        catalog.entry("shadeOnly").unwrap().availability,
+        vtuber_avatar::expression_catalog::ExpressionAvailability::Unsupported { .. }
+    ));
+
+    // The statuses are also inserted on the expression entities for the
+    // steady-state writers, with counts from the resolved facts.
+    let happy_status = app
+        .world()
+        .get::<ExpressionBindingStatus>(happy)
+        .copied()
+        .expect("status inserted by binding");
+    assert_eq!(happy_status.resolved_morph_bind_count, 1);
+    assert!(happy_status.declared_as_preset);
+    let smile_status = app
+        .world()
+        .get::<ExpressionBindingStatus>(smile)
+        .copied()
+        .expect("status inserted by binding");
+    assert_eq!(smile_status.resolved_morph_bind_count, 0);
+    assert_eq!(smile_status.declared_morph_bind_count, 1);
+    assert!(!smile_status.declared_as_preset);
+    let shade_status = app
+        .world()
+        .get::<ExpressionBindingStatus>(shade_only)
+        .copied()
+        .expect("status inserted by binding");
+    assert_eq!(shade_status.declared_material_bind_count, 1);
+    assert_eq!(shade_status.unsupported_material_bind_count, 1);
+
+    // The custom shade bind reached the expression entity for the writer.
+    let binds = app
+        .world()
+        .get::<ExpressionMaterialBinds>(shade_only)
+        .expect("material binds inserted by binding");
+    assert_eq!(binds.colors.len(), 1);
+    assert_eq!(binds.colors[0].material_index, 0);
+}

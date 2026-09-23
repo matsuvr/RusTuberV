@@ -14,7 +14,8 @@ use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
 use crate::capabilities::PerfectSyncCapabilities;
-use crate::load::ExpectedVrmGeneration;
+use crate::expression::material::VrmMaterialIndex;
+use crate::load::{ExpectedVrmGeneration, VrmSourceExpressions};
 use crate::vrm0::VrmCompatibilityWarning;
 
 /// Plugin that installs compatibility-report systems.
@@ -112,11 +113,16 @@ impl VrmCompatibilityReport {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inspect_initialized_vrm(
     mut report: ResMut<VrmCompatibilityReport>,
     vrms: Query<InitializedVrmBones, (With<Vrm>, Added<Initialized>)>,
     all_vrms: Query<Entity, With<Vrm>>,
     spring_roots: Query<&SpringRoot>,
+    source_facts: Query<&VrmSourceExpressions>,
+    names: Query<(Entity, &Name)>,
+    parents: Query<&ChildOf>,
+    materials: Query<(Entity, &VrmMaterialIndex, Option<&MeshMaterial3d<MToonMaterial>>)>,
 ) {
     if report.root.is_some_and(|root| !all_vrms.contains(root)) {
         *report = VrmCompatibilityReport::default();
@@ -146,12 +152,42 @@ fn inspect_initialized_vrm(
         report.has_body_tracking_component = body_tracking.is_some();
         report.spring_root_count = spring_roots.iter().count();
         // The runner inspects raw runtime initialization, which runs before
-        // the application bind step records per-expression statuses.
-        // Presence in the map implies effectiveness here: the import
-        // preflight validates every node, mesh, and morph reference before a
-        // model reaches the runtime.
-        report.perfect_sync =
-            PerfectSyncCapabilities::from_map_with_effective(expression_map, |_| true);
+        // the application bind step. The same source facts and scene
+        // resolution the bind step uses decide whether a morph bind is
+        // effective; without facts the capability stays empty instead of
+        // assuming every mapped expression works.
+        let effective_entities: Option<std::collections::HashSet<Entity>> =
+            expression_map.and_then(|map| {
+                let facts = source_facts.get(entity).ok()?;
+                let descendant_names =
+                    crate::binding::descendant_names_of(entity, &names, &parents);
+                let material_kinds =
+                    crate::binding::resolved_material_kinds(entity, &materials, &parents);
+                let statuses = crate::expression::source::build_binding_statuses(
+                    &facts.0,
+                    |node_name| descendant_names.contains(node_name),
+                    |material| material_kinds.get(&material).copied(),
+                );
+                Some(
+                    map.0
+                        .iter()
+                        .filter_map(|(name, &expression_entity)| {
+                            statuses
+                                .get(name.as_str())
+                                .filter(|status| status.resolved_morph_bind_count > 0)
+                                .map(|_| expression_entity)
+                        })
+                        .collect(),
+                )
+            });
+        report.perfect_sync = PerfectSyncCapabilities::from_map_with_effective(
+            expression_map,
+            |expression_entity| {
+                effective_entities
+                    .as_ref()
+                    .is_some_and(|effective| effective.contains(&expression_entity))
+            },
+        );
         report.warnings = source_warnings
             .map(|warnings| warnings.0.clone())
             .unwrap_or_default();

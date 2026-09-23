@@ -225,6 +225,13 @@ struct ModelPath {
 struct TimeoutFrames(usize);
 
 fn spawn_model(mut commands: Commands, asset_server: Res<AssetServer>, model: Res<ModelPath>) {
+    // The expression facts the app derives from the managed copy; the gate
+    // exercises the same path so Perfect Sync is judged from the same facts
+    // as the application.
+    let expressions = vtuber_app::import::read_runtime_expression_facts(
+        Path::new(&model.path),
+    )
+    .unwrap_or_default();
     let handle: Handle<VrmAsset> = asset_server.load(model.path.clone());
     commands.spawn((
         VrmHandle(handle),
@@ -233,6 +240,7 @@ fn spawn_model(mut commands: Commands, asset_server: Res<AssetServer>, model: Re
             vtuber_app::import::VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
         },
         vtuber_avatar::VrmSourceWarnings(model.warnings.clone()),
+        vtuber_avatar::VrmSourceExpressions(expressions),
     ));
     commands.insert_resource(TimeoutFrames(0));
 }

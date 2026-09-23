@@ -31,7 +31,9 @@ use super::materials::{
     LegacyAlphaMode, convert_legacy_material_properties_with_render_queue_offset,
     legacy_alpha_mode, plan_legacy_render_queue_offsets,
 };
-use super::normalize::{normalized_legacy_spring_bone, normalized_legacy_vrm};
+use super::normalize::{
+    normalized_legacy_expressions, normalized_legacy_spring_bone, normalized_legacy_vrm,
+};
 
 /// Errors that can occur while converting a VRM 0.x source file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,19 +92,31 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
             path: "extensions.VRM".to_string(),
             reason: error.to_string(),
         })?;
-    let vrmc = normalized_legacy_vrm(&descriptor, &legacy, &document).map_err(invalid_field)?;
+    let vrmc = normalized_legacy_vrm(&descriptor).map_err(invalid_field)?;
     let spring = normalized_legacy_spring_bone(&document, &legacy).map_err(invalid_field)?;
 
     convert_materials(&mut document, &legacy)?;
     bake_y_pi_basis(&mut document);
-    inject_extension(
-        &mut document,
-        "VRMC_vrm",
+    let mut vrmc_value =
         serde_json::to_value(&vrmc).map_err(|error| Vrm0ConvertError::InvalidField {
             path: "extensions.VRMC_vrm".to_string(),
             reason: error.to_string(),
-        })?,
-    );
+        })?;
+    // The upstream `Expressions` type cannot carry material color binds or
+    // the custom-origin record, so the expression section is built as raw
+    // JSON and injected over the (null) placeholder.
+    let expressions = normalized_legacy_expressions(&legacy, &document).map_err(|error| {
+        Vrm0ConvertError::InvalidField {
+            path: "extensions.VRM.blendShapeMaster".to_string(),
+            reason: error.to_string(),
+        }
+    })?;
+    if let Some(expressions) = expressions
+        && let Some(slot) = vrmc_value.get_mut("expressions")
+    {
+        *slot = expressions;
+    }
+    inject_extension(&mut document, "VRMC_vrm", vrmc_value);
     if let Some(spring) = spring {
         inject_extension(
             &mut document,
@@ -524,7 +538,7 @@ fn bake_y_pi_basis(document: &mut Value) {
 }
 
 /// Splits GLB bytes into the JSON document and the binary chunk.
-fn parse_glb(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>), Vrm0ConvertError> {
+pub(crate) fn parse_glb(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>), Vrm0ConvertError> {
     if bytes.get(0..4) != Some(b"glTF".as_slice()) {
         return Err(Vrm0ConvertError::NotGlb);
     }
@@ -559,7 +573,7 @@ fn parse_glb(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>), Vrm0ConvertError>
 }
 
 /// Repacks a JSON document and an optional binary chunk into GLB bytes.
-fn repack_glb(json: &[u8], bin: Option<Vec<u8>>) -> Vec<u8> {
+pub(crate) fn repack_glb(json: &[u8], bin: Option<Vec<u8>>) -> Vec<u8> {
     let json_padded = pad_chunk(json, 0x20);
     let mut out = Vec::with_capacity(28 + json_padded.len() + bin.as_ref().map_or(0, Vec::len));
     out.extend_from_slice(b"glTF");

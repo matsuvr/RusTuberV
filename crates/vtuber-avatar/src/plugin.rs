@@ -21,6 +21,9 @@ use crate::direct_look::register_direct_look;
 use crate::direct_pose::{apply_direct_body_tracking, register_direct_pose};
 use crate::direct_position::register_direct_position;
 use crate::expression::apply_tracked_expressions;
+use crate::expression::material::{
+    apply_expression_materials, register_gltf_material_index_handler,
+};
 use crate::expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
     apply_manual_expression_requests,
@@ -58,6 +61,10 @@ pub struct VtuberAvatarPlugin;
 
 impl Plugin for VtuberAvatarPlugin {
     fn build(&self, app: &mut App) {
+        // The glTF loader handler must be registered before the loader
+        // plugin's `finish` snapshots the handler list; it tags mesh
+        // entities with their glTF material index at load time.
+        register_gltf_material_index_handler(app);
         app.add_plugins(VrmPlugin)
             .add_plugins(crate::compatibility::VrmCompatibilityPlugin);
         register_direct_pose(app);
@@ -188,6 +195,10 @@ impl Plugin for VtuberAvatarPlugin {
                 apply_tracked_expressions
                     .after(VrmSystemSets::GazeControl)
                     .before(VrmSystemSets::Expressions),
+            )
+            .add_systems(
+                PostUpdate,
+                apply_expression_materials.after(VrmSystemSets::Expressions),
             )
             .add_systems(Update, reset_pose_metrics_on_lifecycle_change)
             .add_systems(Update, reset_position_metrics_on_lifecycle_change)

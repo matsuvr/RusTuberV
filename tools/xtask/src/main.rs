@@ -335,6 +335,11 @@ fn print_result(result: &vrm_compatibility::CompatibilityResult) {
         println!("    rightEye: {}", report.has_right_eye);
         println!("    expressions: {:?}", report.expressions);
         println!("    spring roots: {}", report.spring_root_count);
+        println!(
+            "    perfect sync: present={} effective={}",
+            report.perfect_sync.present_count(),
+            report.perfect_sync.effective_count()
+        );
         println!("    mvp capable: {}", report.is_mvp_capable());
         println!("    machine.initialize=pass");
         println!(

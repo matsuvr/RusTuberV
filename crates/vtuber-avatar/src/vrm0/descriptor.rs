@@ -573,11 +573,26 @@ pub fn collect_legacy_compatibility_warnings(
                     ),
                 ));
             }
-            if group.get("materialValues").is_some() {
-                warnings.push(VrmCompatibilityWarning::new(
-                    VrmCompatibilityWarningCode::LegacyExpressionMaterialValuesUnsupported,
-                    format!("VRM.blendShapeMaster.blendShapeGroups[{group_index}].materialValues"),
-                ));
+            // Legacy `materialValues` that convert into VRM 1.0 color binds
+            // are retained by the conversion; only entries the conversion
+            // drops (unknown property, unresolvable material, malformed
+            // value) are reported here.
+            if let Some(values) = group.get("materialValues").and_then(Value::as_array) {
+                let material_indices = super::normalize::legacy_material_indices(root);
+                let dropped = values
+                    .iter()
+                    .filter(|value| {
+                        !super::normalize::legacy_material_value_converts(value, &material_indices)
+                    })
+                    .count();
+                if dropped > 0 {
+                    warnings.push(VrmCompatibilityWarning::new(
+                        VrmCompatibilityWarningCode::LegacyExpressionMaterialValuesUnsupported,
+                        format!(
+                            "VRM.blendShapeMaster.blendShapeGroups[{group_index}].materialValues dropped={dropped}"
+                        ),
+                    ));
+                }
             }
             let mut binds = std::collections::BTreeSet::new();
             if let Some(raw_binds) = group.get("binds").and_then(Value::as_array) {

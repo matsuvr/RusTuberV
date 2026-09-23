@@ -48,6 +48,7 @@ pub mod render_output;
 pub mod tracking_profile;
 pub mod unload;
 pub mod vrm0;
+pub mod vrm1;
 
 pub use arm::{
     ARM_POSE_PROFILE_OVERRIDE_VERSION, ArmChainBinding, ArmChainCapabilities, ArmChainReferences,
@@ -98,6 +99,13 @@ pub use expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
     apply_manual_expression_requests, is_tracking_selection,
 };
+pub use expression::material::{
+    ExpressionMaterialBinds, VrmMaterialAppliedValues, VrmMaterialBaseValues, VrmMaterialIndex,
+};
+pub use expression::source::{
+    MaterialColorTarget, MaterialKind, SourceExpressionEntry, SourceExpressions,
+    parse_source_expressions,
+};
 pub use expression::status::ExpressionBindingStatus;
 pub use expression_catalog::{
     AvatarExpressionCatalog, EMOTIONAL_PRESETS, ExpressionAvailability, ExpressionCatalogEntry,
@@ -117,6 +125,7 @@ pub use lifecycle::*;
 pub use load::{
     AssetPathError, AvatarAssetId, ExpectedVrmGeneration, ImportedAvatar, LoadImportedAvatarError,
     LoadImportedAvatarRequest, LoadImportedAvatarResult, PendingAvatarLoad, UserAssetPath,
+    VrmSourceExpressions,
 };
 pub use look::{
     AvatarLookSettings, AvatarMaterialRoles, LookSettingsChanged, MaterialRole,
@@ -145,3 +154,4 @@ pub use vrm0::{
     LegacyShaderKind, Vrm0ConvertError, VrmCompatibilityWarning, VrmCompatibilityWarningCode,
     classify_legacy_shader, collect_legacy_compatibility_warnings, convert_vrm0_to_vrm1,
 };
+pub use vrm1::adapt_vrm1_expressions;
