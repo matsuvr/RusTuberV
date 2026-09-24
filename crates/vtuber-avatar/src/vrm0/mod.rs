@@ -11,7 +11,7 @@ pub mod descriptor;
 pub mod materials;
 pub(crate) mod normalize;
 
-pub use convert::{Vrm0ConvertError, convert_vrm0_to_vrm1};
+pub use convert::{Vrm0ConvertError, convert_vrm0_to_vrm1, prepare_managed_vrm_bytes};
 pub use descriptor::{
     LegacyShaderKind, VrmCompatibilityWarning, VrmCompatibilityWarningCode, classify_legacy_shader,
     collect_legacy_compatibility_warnings,

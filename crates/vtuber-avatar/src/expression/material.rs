@@ -10,18 +10,19 @@
 //!   ([`bevy::gltf::GltfExtensionHandlers`]) tags every spawned mesh entity
 //!   with its glTF material index (`VrmMaterialIndex`) at load time.
 //! - Binding inserts `ExpressionMaterialBinds` (parsed source facts) on each
-//!   expression entity.
+//!   expression entity and `AvatarMaterialExpressionState` on the avatar root.
 //! - [`apply_expression_materials`] evaluates, per frame, the same effective
 //!   weight the upstream morph pass uses (raw override/transform weight,
 //!   binary snapping, category suppression) and writes `base + Σ (target -
-//!   base) · weight` into the resolved scene material asset. The base is the
-//!   author's expression-free value captured before the first write, so a
-//!   weight of 0 restores it exactly and nothing accumulates frame to frame.
-//!   Unchanged values are never written to `Assets`.
+//!   base) · weight` into each resolved scene material asset. The base is the
+//!   author's expression-free value captured once per asset before the first
+//!   write, so a weight of 0 restores it exactly and nothing accumulates frame
+//!   to frame. Each asset is evaluated and written at most once per frame, and
+//!   unchanged values are never written to `Assets`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use bevy::asset::Assets;
+use bevy::asset::{AssetId, Assets};
 use bevy::color::LinearRgba;
 use bevy::gltf::extensions::GltfExtensionHandlers;
 use bevy::math::{Affine2, Vec2};
@@ -46,11 +47,11 @@ use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 #[reflect(Component)]
 pub struct VrmMaterialIndex(pub usize);
 
-/// Expression-free base values captured once per mesh material.
+/// Expression-free base values captured once per material asset.
 ///
 /// Capture happens before the first expression write, so the values are the
 /// author's; a zero weight always evaluates back to them.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VrmMaterialBaseValues {
     /// Expression-free base color.
     pub base_color: LinearRgba,
@@ -66,9 +67,29 @@ pub struct VrmMaterialBaseValues {
     pub uv_transform: Affine2,
 }
 
-/// Last values written for one mesh material, used to skip unchanged writes.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct VrmMaterialAppliedValues(pub VrmMaterialBaseValues);
+/// Expression state owned by one concrete material asset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MaterialExpressionState {
+    /// glTF material index the asset was spawned for.
+    pub material_index: usize,
+    /// Expression-free values captured before the first write.
+    pub base: VrmMaterialBaseValues,
+    /// Last values written to the asset; unchanged evaluations are skipped.
+    pub applied: VrmMaterialBaseValues,
+}
+
+/// Per-avatar expression state keyed by concrete material asset ID.
+///
+/// Mesh entities can share one material asset, so the base and last-applied
+/// values are owned by the asset, not the mesh. The component lives on the
+/// avatar root and is dropped with it by the existing unload lifecycle.
+#[derive(Component, Debug, Clone, Default)]
+pub struct AvatarMaterialExpressionState {
+    /// MToon material state by asset ID.
+    pub mtoon: HashMap<AssetId<MToonMaterial>, MaterialExpressionState>,
+    /// Standard material state by asset ID.
+    pub standard: HashMap<AssetId<StandardMaterial>, MaterialExpressionState>,
+}
 
 /// One material color bind resolved onto an expression entity.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -204,9 +225,7 @@ impl bevy::gltf::extensions::GltfExtensionHandler for GltfMaterialIndexHandler {
 /// plugin's `finish` snapshots the handler list.
 pub fn register_gltf_material_index_handler(app: &mut App) {
     app.init_resource::<GltfExtensionHandlers>();
-    let handlers = app
-        .world_mut()
-        .resource_mut::<GltfExtensionHandlers>();
+    let handlers = app.world_mut().resource_mut::<GltfExtensionHandlers>();
     handlers
         .0
         .write_blocking()
@@ -241,16 +260,31 @@ fn output_weight(raw_weight: f32, is_binary: bool) -> f32 {
     }
 }
 
+/// Final expression weight for one expression, in the same computation order
+/// as the adopted upstream `bind_expressions`: the raw weight is binary-snapped
+/// or clamped first, and a binary expression is fully suppressed (weight 0)
+/// whenever its category multiplier is below 1. Non-binary expressions keep
+/// the ordinary `output * multiplier` product.
+fn effective_expression_weight(raw_weight: f32, is_binary: bool, category_multiplier: f32) -> f32 {
+    let output_weight = output_weight(raw_weight, is_binary);
+    if is_binary && category_multiplier < 1.0 {
+        0.0
+    } else {
+        output_weight * category_multiplier
+    }
+}
+
 /// Applies material binds for the active avatar root each frame.
 ///
 /// Runs in `PostUpdate` after the upstream `Expressions` set so the weights
-/// read here are the ones the morph pass consumed.
+/// read here are the ones the morph pass consumed. Each concrete material
+/// asset is evaluated at most once per frame; meshes sharing one asset share
+/// one base/last-applied record.
 #[allow(clippy::type_complexity)]
 #[allow(clippy::too_many_arguments)]
 pub fn apply_expression_materials(
     lifecycle: Res<AvatarLifecycle>,
-    mut commands: Commands,
-    roots: Query<(Entity, &ExpressionEntityMap)>,
+    mut roots: Query<(&ExpressionEntityMap, &mut AvatarMaterialExpressionState)>,
     expressions: Query<(
         &Name,
         &Transform,
@@ -263,8 +297,6 @@ pub fn apply_expression_materials(
     meshes: Query<(
         Entity,
         &VrmMaterialIndex,
-        Option<&VrmMaterialBaseValues>,
-        Option<&VrmMaterialAppliedValues>,
         Option<&MeshMaterial3d<MToonMaterial>>,
         Option<&MeshMaterial3d<StandardMaterial>>,
     )>,
@@ -281,13 +313,14 @@ pub fn apply_expression_materials(
     let Some(root) = lifecycle.active_root() else {
         return;
     };
-    let Some((_, map)) = roots.iter().find(|(entity, _)| *entity == root) else {
+    let Ok((map, mut state)) = roots.get_mut(root) else {
         return;
     };
     let is_descendant = |entity: Entity| crate::binding::is_descendant(entity, root, &parents);
 
     struct ExpressionEntry<'a> {
-        weight: f32,
+        raw_weight: f32,
+        is_binary: bool,
         category: ExpressionCategory,
         binds: Option<&'a ExpressionMaterialBinds>,
     }
@@ -303,13 +336,14 @@ pub fn apply_expression_materials(
         };
         let raw_weight = override_weight.map_or(transform.translation.x, |w| w.0);
         let is_binary = binary.is_some();
-        let weight = output_weight(raw_weight, is_binary);
+        let output_weight = output_weight(raw_weight, is_binary);
         let category = category_of(expression_name.as_str());
-        mouth_rate += settings.override_mouth.rate(weight);
-        blink_rate += settings.override_blink.rate(weight);
-        look_at_rate += settings.override_look_at.rate(weight);
+        mouth_rate += settings.override_mouth.rate(output_weight);
+        blink_rate += settings.override_blink.rate(output_weight);
+        look_at_rate += settings.override_look_at.rate(output_weight);
         entries.push(ExpressionEntry {
-            weight,
+            raw_weight,
+            is_binary,
             category,
             binds: binds.filter(|binds| !binds.is_empty()),
         });
@@ -318,9 +352,11 @@ pub fn apply_expression_materials(
     let blink_mul = 1.0 - blink_rate.clamp(0.0, 1.0);
     let look_at_mul = 1.0 - look_at_rate.clamp(0.0, 1.0);
 
-    // One weighted bind list per glTF material index.
-    let mut weighted_by_index: HashMap<usize, Vec<(&ExpressionMaterialBinds, f32)>> =
-        HashMap::new();
+    // One weighted bind set per expression. `evaluate_material_values`
+    // selects the binds that target the material it is evaluating, so a set
+    // must be listed exactly once; listing it once per bind in the set would
+    // apply the whole set once per bind.
+    let mut weighted: Vec<(&ExpressionMaterialBinds, f32)> = Vec::new();
     for entry in &entries {
         let Some(binds) = entry.binds else {
             continue;
@@ -331,79 +367,93 @@ pub fn apply_expression_materials(
             ExpressionCategory::LookAt => look_at_mul,
             ExpressionCategory::Other => 1.0,
         };
-        let final_weight = entry.weight * multiplier;
-        if final_weight <= 0.0 {
-            continue;
-        }
-        for index in binds
-            .colors
-            .iter()
-            .map(|bind| bind.material_index)
-            .chain(binds.transforms.iter().map(|bind| bind.material_index))
-        {
-            weighted_by_index
-                .entry(index)
-                .or_default()
-                .push((binds, final_weight));
+        let final_weight =
+            effective_expression_weight(entry.raw_weight, entry.is_binary, multiplier);
+        if final_weight > 0.0 {
+            weighted.push((binds, final_weight));
         }
     }
 
-    // Materials whose binds all weigh zero are still visited: an empty
-    // weighted list evaluates to the base, so releasing an expression
-    // restores the author's values exactly.
-    for (entity, index, base, applied, mtoon_handle, standard_handle) in
-        meshes.iter().filter(|(entity, ..)| is_descendant(*entity))
-    {
-        let weighted = weighted_by_index
-            .get(&index.0)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let base = if let Some(base) = base {
-            *base
-        } else {
-            // First sight of this material: capture the expression-free base
-            // before any write. The MToon pass runs during loading, well
-            // before expressions can apply, so the asset is pristine.
-            let captured = mtoon_handle
-                .and_then(|handle| mtoon_assets.get(handle.id()))
-                .map(VrmMaterialBaseValues::from_mtoon)
-                .or_else(|| {
-                    standard_handle
-                        .and_then(|handle| standard_assets.get(handle.id()))
-                        .map(VrmMaterialBaseValues::from_standard)
-                });
-            let Some(captured) = captured else {
-                continue;
-            };
-            commands.entity(entity).insert((
-                captured,
-                VrmMaterialAppliedValues(captured),
-            ));
-            captured
-        };
-        let evaluated = evaluate_material_values(&base, index.0, weighted);
-        if applied.is_some_and(|applied| applied.0 == evaluated) {
+    let mut visited_mtoon: HashSet<AssetId<MToonMaterial>> = HashSet::new();
+    let mut visited_standard: HashSet<AssetId<StandardMaterial>> = HashSet::new();
+    for (entity, index, mtoon_handle, standard_handle) in meshes.iter() {
+        if !is_descendant(entity) {
             continue;
         }
-        if let Some(handle) = mtoon_handle
-            && let Some(mut material) = mtoon_assets.get_mut(handle.id())
-        {
-            material.base_color = Color::LinearRgba(evaluated.base_color);
-            material.emissive = evaluated.emissive;
-            material.shade.color = evaluated.shade_color;
-            material.rim_lighting.color = evaluated.rim_color;
-            material.outline.color = evaluated.outline_color;
-            material.uv_transform = evaluated.uv_transform;
-        } else if let Some(handle) = standard_handle
-            && let Some(mut material) = standard_assets.get_mut(handle.id())
-        {
-            material.base_color = Color::LinearRgba(evaluated.base_color);
-            material.emissive = evaluated.emissive;
-            material.uv_transform = evaluated.uv_transform;
+        if let Some(handle) = mtoon_handle {
+            let id = handle.id();
+            if !visited_mtoon.insert(id) {
+                continue;
+            }
+            if let std::collections::hash_map::Entry::Vacant(slot) = state.mtoon.entry(id) {
+                // First sight of this asset: capture the expression-free base
+                // before any write. The MToon pass runs during loading, well
+                // before expressions can apply, so the asset is pristine.
+                let Some(base) = mtoon_assets.get(id).map(VrmMaterialBaseValues::from_mtoon) else {
+                    continue;
+                };
+                slot.insert(MaterialExpressionState {
+                    material_index: index.0,
+                    base,
+                    applied: base,
+                });
+            }
+            let Some(material_state) = state.mtoon.get_mut(&id) else {
+                continue;
+            };
+            let evaluated = evaluate_material_values(
+                &material_state.base,
+                material_state.material_index,
+                &weighted,
+            );
+            if material_state.applied == evaluated {
+                continue;
+            }
+            if let Some(mut material) = mtoon_assets.get_mut(id) {
+                material.base_color = Color::LinearRgba(evaluated.base_color);
+                material.emissive = evaluated.emissive;
+                material.shade.color = evaluated.shade_color;
+                material.rim_lighting.color = evaluated.rim_color;
+                material.outline.color = evaluated.outline_color;
+                material.uv_transform = evaluated.uv_transform;
+            }
+            material_state.applied = evaluated;
+        } else if let Some(handle) = standard_handle {
+            let id = handle.id();
+            if !visited_standard.insert(id) {
+                continue;
+            }
+            if let std::collections::hash_map::Entry::Vacant(slot) = state.standard.entry(id) {
+                let Some(base) = standard_assets
+                    .get(id)
+                    .map(VrmMaterialBaseValues::from_standard)
+                else {
+                    continue;
+                };
+                slot.insert(MaterialExpressionState {
+                    material_index: index.0,
+                    base,
+                    applied: base,
+                });
+            }
+            let Some(material_state) = state.standard.get_mut(&id) else {
+                continue;
+            };
+            let evaluated = evaluate_material_values(
+                &material_state.base,
+                material_state.material_index,
+                &weighted,
+            );
+            if material_state.applied == evaluated {
+                continue;
+            }
+            if let Some(mut material) = standard_assets.get_mut(id) {
+                material.base_color = Color::LinearRgba(evaluated.base_color);
+                material.emissive = evaluated.emissive;
+                material.uv_transform = evaluated.uv_transform;
+            }
+            material_state.applied = evaluated;
         }
-        commands
-            .entity(entity)
-            .insert(VrmMaterialAppliedValues(evaluated));
     }
 }
 
@@ -496,7 +546,11 @@ fn blend_expression_uv(
 ) -> Affine2 {
     let x_axis = base.matrix2.x_axis;
     let rotation = x_axis.y.atan2(x_axis.x);
-    let determinant_sign = if base.matrix2.determinant() < 0.0 { -1.0 } else { 1.0 };
+    let determinant_sign = if base.matrix2.determinant() < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
     let base_scale = Vec2::new(
         x_axis.length(),
         base.matrix2.y_axis.length() * determinant_sign,
@@ -526,15 +580,15 @@ mod tests {
             shade_color: LinearRgba::new(0.5, 0.5, 0.5, 1.0),
             rim_color: LinearRgba::BLACK,
             outline_color: LinearRgba::new(0.1, 0.1, 0.1, 1.0),
-            uv_transform: Affine2::from_scale_angle_translation(
-                Vec2::ONE,
-                0.0,
-                Vec2::ZERO,
-            ),
+            uv_transform: Affine2::from_scale_angle_translation(Vec2::ONE, 0.0, Vec2::ZERO),
         }
     }
 
-    fn color_bind(index: usize, target: MaterialColorTarget, value: [f32; 4]) -> ExpressionMaterialColorBind {
+    fn color_bind(
+        index: usize,
+        target: MaterialColorTarget,
+        value: [f32; 4],
+    ) -> ExpressionMaterialColorBind {
         ExpressionMaterialColorBind {
             material_index: index,
             target,
@@ -545,7 +599,11 @@ mod tests {
     #[test]
     fn full_weight_reaches_the_target_color_exactly() {
         let binds = ExpressionMaterialBinds {
-            colors: vec![color_bind(0, MaterialColorTarget::Color, [0.8, 0.2, 0.2, 1.0])],
+            colors: vec![color_bind(
+                0,
+                MaterialColorTarget::Color,
+                [0.8, 0.2, 0.2, 1.0],
+            )],
             transforms: Vec::new(),
         };
         let evaluated = evaluate_material_values(&base(), 0, &[(&binds, 1.0)]);
@@ -558,7 +616,11 @@ mod tests {
     #[test]
     fn zero_weight_restores_the_base_exactly() {
         let binds = ExpressionMaterialBinds {
-            colors: vec![color_bind(0, MaterialColorTarget::Color, [0.8, 0.2, 0.2, 1.0])],
+            colors: vec![color_bind(
+                0,
+                MaterialColorTarget::Color,
+                [0.8, 0.2, 0.2, 1.0],
+            )],
             transforms: Vec::new(),
         };
         let full = evaluate_material_values(&base(), 0, &[(&binds, 1.0)]);
@@ -574,7 +636,11 @@ mod tests {
     #[test]
     fn partial_weight_interpolates_between_base_and_target() {
         let binds = ExpressionMaterialBinds {
-            colors: vec![color_bind(0, MaterialColorTarget::ShadeColor, [1.0, 0.0, 0.0, 1.0])],
+            colors: vec![color_bind(
+                0,
+                MaterialColorTarget::ShadeColor,
+                [1.0, 0.0, 0.0, 1.0],
+            )],
             transforms: Vec::new(),
         };
         let evaluated = evaluate_material_values(&base(), 0, &[(&binds, 0.25)]);
@@ -582,9 +648,37 @@ mod tests {
     }
 
     #[test]
+    fn one_bind_set_is_applied_once_even_with_color_shade_and_uv_binds() {
+        // A single expression changing color, shade and UV of the same
+        // material must be applied once, not once per bind in the set:
+        // base red 0.2 -> target 0.8 at weight 0.5 is 0.5 (not 0.8).
+        let binds = ExpressionMaterialBinds {
+            colors: vec![
+                color_bind(0, MaterialColorTarget::Color, [0.8, 0.2, 0.2, 1.0]),
+                color_bind(0, MaterialColorTarget::ShadeColor, [0.8, 0.5, 0.5, 1.0]),
+            ],
+            transforms: vec![ExpressionTextureTransformBind {
+                material_index: 0,
+                scale: Vec2::new(2.0, 2.0),
+                offset: Vec2::new(0.25, 0.0),
+            }],
+        };
+        let evaluated = evaluate_material_values(&base(), 0, &[(&binds, 0.5)]);
+        assert!((evaluated.base_color.red - 0.5).abs() < 1.0e-6);
+        assert!((evaluated.shade_color.red - 0.65).abs() < 1.0e-6);
+        let scale = evaluated.uv_transform.matrix2.x_axis.length();
+        assert!((scale - 1.5).abs() < 1.0e-6);
+        assert!((evaluated.uv_transform.translation.x - 0.125).abs() < 1.0e-6);
+    }
+
+    #[test]
     fn binds_for_other_materials_do_not_leak() {
         let binds = ExpressionMaterialBinds {
-            colors: vec![color_bind(1, MaterialColorTarget::Color, [1.0, 1.0, 1.0, 1.0])],
+            colors: vec![color_bind(
+                1,
+                MaterialColorTarget::Color,
+                [1.0, 1.0, 1.0, 1.0],
+            )],
             transforms: vec![ExpressionTextureTransformBind {
                 material_index: 1,
                 scale: Vec2::new(3.0, 3.0),
@@ -622,6 +716,21 @@ mod tests {
     }
 
     #[test]
+    fn effective_weight_matches_the_upstream_binary_and_suppression_order() {
+        // Binary entries snap at 0.5 and are fully suppressed by any category
+        // multiplier below 1, exactly like upstream `bind_expressions`:
+        // blink=1 with a 0.25 suppression rate yields 0 for the morph pass
+        // and therefore 0 for the material/UV pass here.
+        assert_eq!(effective_expression_weight(1.0, true, 0.25), 0.0);
+        assert_eq!(effective_expression_weight(0.4, true, 1.0), 0.0);
+        assert_eq!(effective_expression_weight(0.6, true, 1.0), 1.0);
+        // Non-binary entries keep the ordinary multiplication.
+        assert_eq!(effective_expression_weight(1.0, false, 0.25), 0.25);
+        assert_eq!(effective_expression_weight(0.5, false, 1.0), 0.5);
+        assert_eq!(effective_expression_weight(1.5, false, 1.0), 1.0);
+    }
+
+    #[test]
     fn categories_match_the_upstream_name_table() {
         assert_eq!(category_of("aa"), ExpressionCategory::Mouth);
         assert_eq!(category_of("blinkRight"), ExpressionCategory::Blink);
@@ -655,26 +764,65 @@ mod tests {
         assert!(ExpressionMaterialBinds::from_source(&facts, "missing").is_empty());
     }
 
-    #[test]
-    fn writer_applies_binds_to_scene_materials_and_restores_the_base() {
-        use bevy::platform::collections::HashMap as BevyHashMap;
+    use bevy::platform::collections::HashMap as BevyHashMap;
 
-        use bevy_vrm1::prelude::{ExpressionOverrideType, VrmExpression};
+    use bevy_vrm1::prelude::{ExpressionOverrideType, VrmExpression};
 
-        use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
-
+    fn writer_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<MToonMaterial>()
             .init_asset::<StandardMaterial>()
             .init_resource::<AvatarLifecycle>()
             .add_systems(Update, apply_expression_materials);
+        app
+    }
 
-        // The author's base color on the scene material.
+    fn none_settings() -> ExpressionOverrideSettings {
+        ExpressionOverrideSettings {
+            override_mouth: ExpressionOverrideType::None,
+            override_blink: ExpressionOverrideType::None,
+            override_look_at: ExpressionOverrideType::None,
+        }
+    }
+
+    fn spawn_expression(
+        app: &mut App,
+        name: &'static str,
+        settings: ExpressionOverrideSettings,
+        binds: ExpressionMaterialBinds,
+    ) -> Entity {
+        app.world_mut()
+            .spawn((Name::new(name), Transform::default(), settings, binds))
+            .id()
+    }
+
+    fn enter_ready(app: &mut App, root: Entity) {
+        let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
+        lifecycle.request_load(root).unwrap();
+        lifecycle.start_binding(root);
+        lifecycle.finish_ready();
+    }
+
+    fn expression_root(app: &mut App, entries: &[(&str, Entity)]) -> Entity {
+        let map = BevyHashMap::from_iter(
+            entries
+                .iter()
+                .map(|(name, entity)| (VrmExpression::from(*name), *entity)),
+        );
+        app.world_mut()
+            .spawn((
+                ExpressionEntityMap(map),
+                AvatarMaterialExpressionState::default(),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn writer_applies_one_expressions_color_shade_and_uv_binds_once_each() {
+        let mut app = writer_app();
         let material_handle = {
-            let mut materials = app
-                .world_mut()
-                .resource_mut::<Assets<MToonMaterial>>();
+            let mut materials = app.world_mut().resource_mut::<Assets<MToonMaterial>>();
             materials.add(MToonMaterial {
                 base_color: Color::LinearRgba(LinearRgba::new(0.2, 0.3, 0.4, 1.0)),
                 shade: bevy_vrm1::prelude::Shade {
@@ -684,56 +832,32 @@ mod tests {
                 ..MToonMaterial::default()
             })
         };
-
-        let expression = app
-            .world_mut()
-            .spawn((
-                Name::new("cheek"),
-                Transform::default(),
-                ExpressionOverrideSettings {
-                    override_mouth: ExpressionOverrideType::None,
-                    override_blink: ExpressionOverrideType::None,
-                    override_look_at: ExpressionOverrideType::None,
-                },
-                ExpressionMaterialBinds {
-                    colors: vec![color_bind(
-                        0,
-                        MaterialColorTarget::Color,
-                        [0.8, 0.2, 0.2, 1.0],
-                    )],
-                    transforms: Vec::new(),
-                },
-            ))
-            .id();
-        let root = app
-            .world_mut()
-            .spawn(ExpressionEntityMap(
-                BevyHashMap::from([(VrmExpression::from("cheek"), expression)]),
-            ))
-            .id();
-        let mesh = app
-            .world_mut()
-            .spawn((
-                VrmMaterialIndex(0),
-                ChildOf(root),
-                MeshMaterial3d(material_handle.clone()),
-            ))
-            .id();
-
-        {
-            let mut lifecycle = app
-                .world_mut()
-                .resource_mut::<AvatarLifecycle>();
-            lifecycle.request_load(root).unwrap();
-            lifecycle.start_binding(root);
-            lifecycle.finish_ready();
-        }
-        assert_eq!(
-            app.world().resource::<AvatarLifecycle>().state(),
-            AvatarLifecycleState::Ready
+        let expression = spawn_expression(
+            &mut app,
+            "cheek",
+            none_settings(),
+            ExpressionMaterialBinds {
+                colors: vec![
+                    color_bind(0, MaterialColorTarget::Color, [0.8, 0.2, 0.2, 1.0]),
+                    color_bind(0, MaterialColorTarget::ShadeColor, [0.8, 0.5, 0.5, 1.0]),
+                ],
+                transforms: vec![ExpressionTextureTransformBind {
+                    material_index: 0,
+                    scale: Vec2::new(2.0, 2.0),
+                    offset: Vec2::new(0.25, 0.0),
+                }],
+            },
         );
+        let root = expression_root(&mut app, &[("cheek", expression)]);
+        enter_ready(&mut app, root);
+        app.world_mut().spawn((
+            VrmMaterialIndex(0),
+            ChildOf(root),
+            MeshMaterial3d(material_handle.clone()),
+        ));
 
-        // Half weight reaches exactly halfway between base and target.
+        // Half weight: the color component is exactly halfway (0.5), not at
+        // the target 0.8 or a double-applied value.
         app.world_mut()
             .entity_mut(expression)
             .insert(ExpressionOverride(0.5));
@@ -742,15 +866,18 @@ mod tests {
             .world()
             .resource::<Assets<MToonMaterial>>()
             .get(material_handle.id())
-            .unwrap()
-            .base_color
-            .to_linear();
-        assert!((written.red - 0.5).abs() < 1.0e-6);
-        assert!((written.green - 0.25).abs() < 1.0e-6);
-        assert!((written.blue - 0.3).abs() < 1.0e-6);
+            .unwrap();
+        assert!(
+            (written.base_color.to_linear().red - 0.5).abs() < 1.0e-6,
+            "color bind must be applied once, got {:?}",
+            written.base_color
+        );
+        assert!((written.shade.color.red - 0.65).abs() < 1.0e-6);
+        let scale = written.uv_transform.matrix2.x_axis.length();
+        assert!((scale - 1.5).abs() < 1.0e-6);
+        assert!((written.uv_transform.translation.x - 0.125).abs() < 1.0e-6);
 
-        // Releasing the expression restores the author's base exactly, and
-        // steady-state frames do not accumulate.
+        // Releasing the expression restores the author's base exactly.
         app.world_mut()
             .entity_mut(expression)
             .insert(ExpressionOverride(0.0));
@@ -766,18 +893,186 @@ mod tests {
             LinearRgba::new(0.2, 0.3, 0.4, 1.0)
         );
         assert_eq!(restored.shade.color, LinearRgba::new(0.5, 0.5, 0.5, 1.0));
+        assert_eq!(
+            restored.uv_transform,
+            Affine2::from_scale_angle_translation(Vec2::ONE, 0.0, Vec2::ZERO)
+        );
 
-        // The base snapshot and last applied values live on the mesh entity.
-        let base = app
+        // The base and last-applied values are owned by the asset ID on the
+        // avatar root.
+        let state = app
             .world()
-            .get::<VrmMaterialBaseValues>(mesh)
-            .expect("base captured on first apply");
-        assert_eq!(base.base_color, LinearRgba::new(0.2, 0.3, 0.4, 1.0));
-        let applied = app
+            .get::<AvatarMaterialExpressionState>(root)
+            .unwrap();
+        let material_state = state
+            .mtoon
+            .get(&material_handle.id())
+            .expect("state captured on first apply");
+        assert_eq!(material_state.material_index, 0);
+        assert_eq!(
+            material_state.base.base_color,
+            LinearRgba::new(0.2, 0.3, 0.4, 1.0)
+        );
+        assert_eq!(material_state.applied, material_state.base);
+    }
+
+    #[test]
+    fn writer_shares_one_base_per_standard_material_asset_across_meshes() {
+        let mut app = writer_app();
+        let material_handle = {
+            let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            materials.add(StandardMaterial {
+                base_color: Color::LinearRgba(LinearRgba::new(0.2, 0.3, 0.4, 1.0)),
+                ..StandardMaterial::default()
+            })
+        };
+        let expression = spawn_expression(
+            &mut app,
+            "cheek",
+            none_settings(),
+            ExpressionMaterialBinds {
+                colors: vec![color_bind(
+                    0,
+                    MaterialColorTarget::Color,
+                    [0.8, 0.2, 0.2, 1.0],
+                )],
+                transforms: Vec::new(),
+            },
+        );
+        let root = expression_root(&mut app, &[("cheek", expression)]);
+        enter_ready(&mut app, root);
+        let mesh_a = app
+            .world_mut()
+            .spawn((
+                VrmMaterialIndex(0),
+                ChildOf(root),
+                MeshMaterial3d(material_handle.clone()),
+            ))
+            .id();
+        let mesh_b = app
+            .world_mut()
+            .spawn((
+                VrmMaterialIndex(0),
+                ChildOf(root),
+                MeshMaterial3d(material_handle.clone()),
+            ))
+            .id();
+        assert_ne!(mesh_a, mesh_b);
+
+        // Start already at half weight: a per-mesh base would make the second
+        // mesh capture the first mesh's 0.5 write as its own base and write
+        // 0.65.
+        app.world_mut()
+            .entity_mut(expression)
+            .insert(ExpressionOverride(0.5));
+        app.update();
+        let written = app
             .world()
-            .get::<VrmMaterialAppliedValues>(mesh)
-            .expect("applied values tracked")
-            .0;
-        assert_eq!(applied, *base);
+            .resource::<Assets<StandardMaterial>>()
+            .get(material_handle.id())
+            .unwrap()
+            .base_color
+            .to_linear();
+        assert!(
+            (written.red - 0.5).abs() < 1.0e-6,
+            "shared asset must be evaluated once from the author base, got {written:?}"
+        );
+
+        // Both meshes return to the author's base once the weight is 0.
+        app.world_mut()
+            .entity_mut(expression)
+            .insert(ExpressionOverride(0.0));
+        app.update();
+        app.update();
+        let restored = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(material_handle.id())
+            .unwrap()
+            .base_color
+            .to_linear();
+        assert_eq!(restored, LinearRgba::new(0.2, 0.3, 0.4, 1.0));
+
+        let state = app
+            .world()
+            .get::<AvatarMaterialExpressionState>(root)
+            .unwrap();
+        assert_eq!(state.standard.len(), 1, "one state per asset, not per mesh");
+        let material_state = state.standard.get(&material_handle.id()).unwrap();
+        assert_eq!(
+            material_state.base.base_color,
+            LinearRgba::new(0.2, 0.3, 0.4, 1.0)
+        );
+        assert_eq!(material_state.applied, material_state.base);
+    }
+
+    #[test]
+    fn writer_suppresses_a_binary_expressions_material_and_uv_binds_like_upstream() {
+        let mut app = writer_app();
+        let material_handle = {
+            let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            materials.add(StandardMaterial {
+                base_color: Color::LinearRgba(LinearRgba::new(0.2, 0.3, 0.4, 1.0)),
+                ..StandardMaterial::default()
+            })
+        };
+        let blink = spawn_expression(
+            &mut app,
+            "blink",
+            none_settings(),
+            ExpressionMaterialBinds {
+                colors: vec![color_bind(
+                    0,
+                    MaterialColorTarget::Color,
+                    [0.8, 0.2, 0.2, 1.0],
+                )],
+                transforms: vec![ExpressionTextureTransformBind {
+                    material_index: 0,
+                    scale: Vec2::new(2.0, 2.0),
+                    offset: Vec2::ZERO,
+                }],
+            },
+        );
+        app.world_mut().entity_mut(blink).insert(BinaryExpression);
+        let mut blend_settings = none_settings();
+        blend_settings.override_blink = ExpressionOverrideType::Blend;
+        let happy = spawn_expression(
+            &mut app,
+            "happy",
+            blend_settings,
+            ExpressionMaterialBinds::default(),
+        );
+        let root = expression_root(&mut app, &[("blink", blink), ("happy", happy)]);
+        enter_ready(&mut app, root);
+        app.world_mut().spawn((
+            VrmMaterialIndex(0),
+            ChildOf(root),
+            MeshMaterial3d(material_handle.clone()),
+        ));
+
+        // binary blink=1 with a 0.25 blink suppression rate: upstream's morph
+        // pass yields 0, and the material/UV pass must yield 0 as well.
+        app.world_mut()
+            .entity_mut(blink)
+            .insert(ExpressionOverride(1.0));
+        app.world_mut()
+            .entity_mut(happy)
+            .insert(ExpressionOverride(0.25));
+        app.update();
+
+        let written = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(material_handle.id())
+            .unwrap();
+        assert_eq!(
+            written.base_color.to_linear(),
+            LinearRgba::new(0.2, 0.3, 0.4, 1.0),
+            "a suppressed binary expression must not write its binds"
+        );
+        assert_eq!(
+            written.uv_transform,
+            Affine2::from_scale_angle_translation(Vec2::ONE, 0.0, Vec2::ZERO)
+        );
     }
 }

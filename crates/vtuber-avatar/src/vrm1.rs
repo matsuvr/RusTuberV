@@ -20,6 +20,11 @@
 //!   standard preset keeps the standard (matching the vendored behavior) and
 //!   is removed from the retained `custom` section, so "in `custom`" remains
 //!   an exact custom-origin record;
+//! - a merged custom carries the managed-copy marker
+//!   [`MERGED_CUSTOM_MARKER`] in the retained `custom` section. Re-running
+//!   the adaptation therefore keeps that origin record instead of treating
+//!   the entry as a source preset/custom collision, which makes the
+//!   adaptation idempotent;
 //! - omitted `isBinary` / `override*` fields are filled with their
 //!   specification defaults;
 //! - `materialColorBinds` / `textureTransformBinds` and the `custom` section
@@ -30,6 +35,16 @@
 use serde_json::{Map, Value};
 
 use crate::vrm0::convert::{Vrm0ConvertError, parse_glb, repack_glb};
+
+/// Managed-copy marker written into `custom` entries this adaptation merged
+/// into `preset`.
+///
+/// The upstream runtime ignores the `custom` section entirely; the marker is
+/// only for this adaptation, so a second pass can tell "custom copied into
+/// `preset` by the managed-copy adaptation" from a genuine source
+/// preset/custom collision. It is deliberately not a versioned migration
+/// format.
+pub const MERGED_CUSTOM_MARKER: &str = "vtuberManagedCustomOrigin";
 
 /// Adapts `VRMC_vrm.expressions` of a VRM 1.0 GLB to the upstream contract.
 ///
@@ -70,14 +85,22 @@ pub fn adapt_vrm1_expressions(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Conve
     }
     // Merge custom expressions into `preset` (standards win on collision,
     // matching the vendored runtime); a merged custom stays in the `custom`
-    // section as the provenance record. A colliding custom is removed from
-    // the record so the origin rule stays exact.
+    // section as the provenance record, marked so a later pass recognizes
+    // its own copy. A genuine source collision (an unmarked custom sharing a
+    // standard preset name) is removed from the record so the origin rule
+    // stays exact.
     custom.retain(|name, entry| {
         if preset.contains_key(name) {
+            if entry.get(MERGED_CUSTOM_MARKER).and_then(Value::as_bool) == Some(true) {
+                return true;
+            }
             changed = true;
             return false;
         }
         preset.insert(name.clone(), entry.clone());
+        if let Some(object) = entry.as_object_mut() {
+            object.insert(MERGED_CUSTOM_MARKER.to_string(), Value::Bool(true));
+        }
         changed = true;
         true
     });
@@ -189,6 +212,30 @@ mod tests {
             expressions.get("custom").is_none(),
             "the colliding custom record must not survive and blur the origin"
         );
+    }
+
+    #[test]
+    fn custom_only_adaptation_is_idempotent_and_keeps_the_custom_origin() {
+        let source = glb(serde_json::json!({
+            "specVersion": "1.0",
+            "expressions": {"custom": {
+                "smile": {"morphTargetBinds": [{"node": 0, "index": 1, "weight": 1.0}]}
+            }}
+        }));
+        let first = adapt_vrm1_expressions(&source).unwrap().expect("adapted");
+        let facts = crate::expression::source::parse_source_expressions(&json_of(&first));
+        assert!(!facts.entry("smile").unwrap().declared_as_preset);
+
+        // Re-running the adaptation on its own output changes nothing: the
+        // retained custom origin record is not mistaken for a genuine
+        // preset/custom collision.
+        assert!(
+            adapt_vrm1_expressions(&first).unwrap().is_none(),
+            "a second adaptation pass must be a no-op"
+        );
+        let facts_again = crate::expression::source::parse_source_expressions(&json_of(&first));
+        assert!(!facts_again.entry("smile").unwrap().declared_as_preset);
+        assert_eq!(facts, facts_again, "expression facts must not change");
     }
 
     #[test]

@@ -23,8 +23,8 @@ pub use manual::{
     is_tracking_selection,
 };
 pub use material::{
-    ExpressionMaterialBinds, GltfMaterialIndexHandler, VrmMaterialAppliedValues,
-    VrmMaterialBaseValues, VrmMaterialIndex, apply_expression_materials,
+    AvatarMaterialExpressionState, ExpressionMaterialBinds, GltfMaterialIndexHandler,
+    MaterialExpressionState, VrmMaterialBaseValues, VrmMaterialIndex, apply_expression_materials,
     register_gltf_material_index_handler,
 };
 pub use mouth::{

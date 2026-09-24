@@ -482,6 +482,10 @@ pub fn bind_humanoid_bones(
                 arm_motion,
                 crate::arm_pipeline::DynamicArmTargets::default(),
                 Visibility::Inherited,
+                // Expression material bases are owned per concrete material
+                // asset, so the state lives with the avatar root and is
+                // dropped by the existing unload lifecycle.
+                crate::expression::material::AvatarMaterialExpressionState::default(),
             ));
             if capabilities.gaze_backend != SelectedGazeBackend::None {
                 let effective_properties =

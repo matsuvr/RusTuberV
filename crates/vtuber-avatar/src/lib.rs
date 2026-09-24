@@ -100,7 +100,8 @@ pub use expression::manual::{
     apply_manual_expression_requests, is_tracking_selection,
 };
 pub use expression::material::{
-    ExpressionMaterialBinds, VrmMaterialAppliedValues, VrmMaterialBaseValues, VrmMaterialIndex,
+    AvatarMaterialExpressionState, ExpressionMaterialBinds, MaterialExpressionState,
+    VrmMaterialBaseValues, VrmMaterialIndex,
 };
 pub use expression::source::{
     MaterialColorTarget, MaterialKind, SourceExpressionEntry, SourceExpressions,
@@ -153,5 +154,6 @@ pub use unload::{
 pub use vrm0::{
     LegacyShaderKind, Vrm0ConvertError, VrmCompatibilityWarning, VrmCompatibilityWarningCode,
     classify_legacy_shader, collect_legacy_compatibility_warnings, convert_vrm0_to_vrm1,
+    prepare_managed_vrm_bytes,
 };
 pub use vrm1::adapt_vrm1_expressions;

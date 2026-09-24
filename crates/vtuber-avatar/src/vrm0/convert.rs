@@ -136,6 +136,28 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
     Ok(Some(repack_glb(&json, bin)))
 }
 
+/// Prepares a managed model copy for the unmodified upstream runtime.
+///
+/// The adaptation is selected from the root extension actually present:
+/// - root `VRM` without `VRMC_vrm`: VRM 0.x → VRM 1.0 conversion;
+/// - root `VRMC_vrm`: VRM 1.0 expression adaptation
+///   ([`crate::vrm1::adapt_vrm1_expressions`]).
+///
+/// Returns `Ok(None)` when neither shape is present or the input already
+/// satisfies the runtime contract. The managed copy alone carries everything
+/// the adaptation needs; the original source file is not required.
+pub fn prepare_managed_vrm_bytes(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
+    let (document, _) = parse_glb(bytes)?;
+    let extensions = document.get("extensions").and_then(Value::as_object);
+    let has_legacy = extensions.is_some_and(|extensions| extensions.contains_key("VRM"));
+    let has_modern = extensions.is_some_and(|extensions| extensions.contains_key("VRMC_vrm"));
+    match (has_legacy, has_modern) {
+        (true, false) => convert_vrm0_to_vrm1(bytes),
+        (false, true) => crate::vrm1::adapt_vrm1_expressions(bytes),
+        _ => Ok(None),
+    }
+}
+
 fn invalid_field(error: anyhow::Error) -> Vrm0ConvertError {
     Vrm0ConvertError::InvalidField {
         path: "extensions.VRM".to_string(),

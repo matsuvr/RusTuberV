@@ -1081,87 +1081,64 @@ fn check_external_uris(document: &gltf::Document) -> Result<(), ModelImportError
 /// Converts a VRM 0.x source into VRM 1.0-shaped bytes for the runtime and
 /// adapts VRM 1.0 sources to the upstream expression contract.
 ///
-/// VRM 0.x sources are normalized by `vtuber_avatar::convert_vrm0_to_vrm1`.
-/// VRM 1.0 sources get the app-side expression adaptation
-/// (`vtuber_avatar::adapt_vrm1_expressions`): author-defined `custom`
-/// expressions are merged into the `preset` map the unmodified upstream
-/// runtime reads, and the optional `isBinary` / `override*` fields the
-/// upstream serde requires are filled with their specification defaults.
-/// Conversion failures become [`ModelImportError`]s; the source file itself
-/// is never modified.
+/// `generation` is the preflight classification; the adaptation itself is
+/// selected from the root extension by
+/// `vtuber_avatar::prepare_managed_vrm_bytes`. VRM 0.x sources are
+/// normalized into the VRM 1.0 shape, and VRM 1.0 sources get the app-side
+/// expression adaptation: author-defined `custom` expressions are merged
+/// into the `preset` map the unmodified upstream runtime reads, and the
+/// optional `isBinary` / `override*` fields the upstream serde requires are
+/// filled with their specification defaults. Conversion failures become
+/// [`ModelImportError`]s; the source file itself is never modified.
 pub fn runtime_ready_source_bytes(
     source_bytes: &[u8],
     generation: VrmGeneration,
 ) -> Result<Vec<u8>, ModelImportError> {
-    match generation {
-        VrmGeneration::Vrm0 => match vtuber_avatar::convert_vrm0_to_vrm1(source_bytes) {
-            Ok(Some(converted)) => Ok(converted),
-            Ok(None) => Err(ModelImportError::NotVrm {
-                reason: "preflight classified the source as VRM 0.x but it carries no VRM extension"
-                    .to_string(),
+    match vtuber_avatar::prepare_managed_vrm_bytes(source_bytes) {
+        Ok(Some(prepared)) => Ok(prepared),
+        Ok(None) => match generation {
+            VrmGeneration::Vrm0 => Err(ModelImportError::NotVrm {
+                reason:
+                    "preflight classified the source as VRM 0.x but it carries no VRM extension"
+                        .to_string(),
             }),
-            Err(error) => Err(vrm0_convert_error(error)),
+            VrmGeneration::Vrm1 => Ok(source_bytes.to_vec()),
         },
-        VrmGeneration::Vrm1 => match vtuber_avatar::adapt_vrm1_expressions(source_bytes) {
-            Ok(Some(adapted)) => Ok(adapted),
-            Ok(None) => Ok(source_bytes.to_vec()),
-            Err(error) => Err(vrm0_convert_error(error)),
-        },
+        Err(error) => Err(vrm0_convert_error(error)),
     }
 }
 
 /// Upgrades a managed copy stored by an older application version.
 ///
-/// `original` is the user's source file and the import identity it must
-/// still match (`original_path`, expected SHA-256). When the source is
-/// available and unchanged, the managed copy is rebuilt through the current
-/// runtime pipeline (`runtime_ready_source_bytes` plus morph-target
-/// normalization); this upgrades copies created before the VRM 1.0
-/// expression adaptation or the VRM 0.x material-bind migration without
-/// requiring a re-import. When the source is missing or has changed, only
-/// the legacy fallback runs: an unconverted VRM 0.x managed copy (raw root
-/// `VRM` extension) is converted in place.
+/// Reads the managed copy and applies the shared format adaptation
+/// (`vtuber_avatar::prepare_managed_vrm_bytes`): an unconverted VRM 0.x copy
+/// (raw root `VRM` extension) is converted into the VRM 1.0 shape, and a
+/// VRM 1.0 copy gets the expression adaptation (custom merge and omitted
+/// spec defaults). Morph-target normalization is re-applied on top, matching
+/// the import pipeline. The managed copy alone carries everything the
+/// adaptation needs, so a moved or deleted original file does not block it,
+/// and the user's source file is never read or rewritten.
 ///
-/// The managed copy is a cache; the user's source file is untouched.
-/// Returns `true` when the file was rewritten.
-pub fn ensure_managed_model_ready(
-    managed_path: &Path,
-    generation: VrmGeneration,
-    original: Option<(&Path, &str)>,
-) -> Result<bool, ModelImportError> {
-    // Best-effort upgrade from the user's source file. When the source is
-    // missing or has changed, the managed copy stays as stored and the
-    // legacy in-place fallback below still runs.
-    if let Some((original_path, expected_id)) = original
-        && let Ok(source_bytes) = fs::read(original_path)
-    {
-        let actual_id = format!("{:x}", Sha256::digest(&source_bytes));
-        if actual_id == expected_id {
-            let runtime_bytes = runtime_ready_source_bytes(&source_bytes, generation)?;
-            let stored_bytes = normalize_vrm_morph_targets(&runtime_bytes)
-                .unwrap_or_else(|| runtime_bytes.clone());
-            let current = fs::read(managed_path)?;
-            if stored_bytes != current {
-                write_atomic(managed_path, &stored_bytes)?;
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-    }
-    if generation != VrmGeneration::Vrm0 {
-        return Ok(false);
-    }
-    let bytes = fs::read(managed_path)?;
-    if !is_unconverted_vrm0(&bytes) {
-        return Ok(false);
-    }
-    let converted = match vtuber_avatar::convert_vrm0_to_vrm1(&bytes) {
-        Ok(Some(converted)) => converted,
-        Ok(None) => return Ok(false),
+/// The managed copy is a cache. Returns `true` when the file was rewritten.
+pub fn ensure_managed_model_ready(managed_path: &Path) -> Result<bool, ModelImportError> {
+    let current = match fs::read(managed_path) {
+        Ok(current) => current,
+        // There is no managed copy to adapt; the runtime asset load surfaces
+        // the missing file as an avatar load failure.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let runtime_bytes = match vtuber_avatar::prepare_managed_vrm_bytes(&current) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => current.clone(),
         Err(error) => return Err(vrm0_convert_error(error)),
     };
-    write_atomic(managed_path, &converted)?;
-    Ok(true)
+    let stored_bytes = normalize_vrm_morph_targets(&runtime_bytes).unwrap_or(runtime_bytes);
+    if stored_bytes != current {
+        write_atomic(managed_path, &stored_bytes)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Reads the runtime expression facts from a managed model.
@@ -1182,18 +1159,6 @@ pub fn read_runtime_expression_facts(
         ModelImportError::GlbParse("managed model is not a binary glTF container".into())
     })?;
     Ok(vtuber_avatar::parse_source_expressions(&json))
-}
-
-/// Returns `true` when GLB bytes carry the root `VRM` extension without a
-/// converted `VRMC_vrm` extension.
-fn is_unconverted_vrm0(bytes: &[u8]) -> bool {
-    let Some((json, _)) = parse_glb(bytes) else {
-        return false;
-    };
-    let extensions = json.get("extensions").and_then(Value::as_object);
-    extensions.is_some_and(|extensions| {
-        extensions.contains_key("VRM") && !extensions.contains_key("VRMC_vrm")
-    })
 }
 
 fn vrm0_convert_error(error: vtuber_avatar::Vrm0ConvertError) -> ModelImportError {
@@ -2258,45 +2223,64 @@ humanoid_nodes = { hips = 0, head = 1 }
     }
 
     #[test]
-    fn ensure_managed_model_ready_rebuilds_stale_copies_from_unchanged_source() {
+    fn ensure_managed_model_ready_adapts_stale_vrm1_copies_without_the_original() {
         let dir = TempDir::new().unwrap();
         let source = vrm1_fixture(&dir);
         let asset_root = dir.path().join("asset-root");
         let imported =
             import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
         let source_bytes = fs::read(&source).unwrap();
-        let id = format!("{:x}", Sha256::digest(&source_bytes));
+        let expected = runtime_ready_source_bytes(&source_bytes, VrmGeneration::Vrm1).unwrap();
 
-        // Simulate a managed copy stored before the VRM 1.0 adaptation: the
-        // raw source passthrough.
+        // Simulate a managed copy stored before the VRM 1.0 adaptation (the
+        // raw source passthrough) with the original moved away: the managed
+        // copy alone must still be adapted.
         fs::write(&imported.asset_path, &source_bytes).unwrap();
-        let rewritten = ensure_managed_model_ready(
-            &imported.asset_path,
-            VrmGeneration::Vrm1,
-            Some((source.as_path(), id.as_str())),
-        )
-        .expect("managed copy upgrade succeeds");
-        assert!(rewritten, "the stale copy must be rebuilt");
-
-        // The rebuilt copy equals a fresh import and the facts read back.
-        let fresh = import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).unwrap();
-        assert_eq!(
-            fs::read(&imported.asset_path).unwrap(),
-            fs::read(&fresh.asset_path).unwrap()
+        fs::remove_file(&source).unwrap();
+        assert!(
+            ensure_managed_model_ready(&imported.asset_path).expect("adaptation succeeds"),
+            "the stale copy must be rewritten"
         );
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), expected);
+
+        // Custom origin and omitted defaults survive the managed-copy-only
+        // adaptation.
         let facts = read_runtime_expression_facts(&imported.asset_path).unwrap();
         assert!(!facts.entry("JawOpen").unwrap().declared_as_preset);
+        assert!(facts.entry("happy").unwrap().declared_as_preset);
 
-        // A source that changed on disk no longer drives the cache.
-        std::fs::write(&source, b"changed source bytes").unwrap();
+        // A second run is a no-op.
         assert!(
-            !ensure_managed_model_ready(
-                &imported.asset_path,
-                VrmGeneration::Vrm1,
-                Some((source.as_path(), id.as_str())),
-            )
-            .expect("unchanged managed copy stays untouched")
+            !ensure_managed_model_ready(&imported.asset_path).expect("second run succeeds"),
+            "an adapted copy must not be rewritten again"
         );
+    }
+
+    #[test]
+    fn ensure_managed_model_ready_converts_vrm0_copies_without_the_original() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm0_fixture(&dir);
+        let asset_root = dir.path().join("asset-root");
+        let imported =
+            import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+        let source_bytes = fs::read(&source).unwrap();
+        let expected = runtime_ready_source_bytes(&source_bytes, VrmGeneration::Vrm0).unwrap();
+
+        // Simulate an unconverted VRM 0.x managed copy with no original.
+        fs::write(&imported.asset_path, &source_bytes).unwrap();
+        fs::remove_file(&source).unwrap();
+        assert!(
+            ensure_managed_model_ready(&imported.asset_path).expect("conversion succeeds"),
+            "the unconverted copy must be rewritten"
+        );
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), expected);
+
+        let json = stored_glb_json(&imported);
+        assert!(
+            json["extensions"].get("VRM").is_none(),
+            "managed copy is VRM 1.0-shaped"
+        );
+        assert!(json["extensions"].get("VRMC_vrm").is_some());
     }
 
     #[test]
