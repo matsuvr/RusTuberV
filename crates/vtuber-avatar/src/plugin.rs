@@ -5,7 +5,7 @@
 //! re-exported from the crate facade.
 
 use bevy::app::AnimationSystems;
-use bevy::camera::{CompositingSpace, Exposure, visibility::RenderLayers};
+use bevy::camera::{Exposure, visibility::RenderLayers};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
@@ -22,13 +22,13 @@ use crate::direct_look::register_direct_look;
 use crate::direct_pose::{apply_direct_body_tracking, register_direct_pose};
 use crate::direct_position::register_direct_position;
 use crate::expression::apply_tracked_expressions;
-use crate::expression::material::{
-    apply_expression_materials, register_gltf_material_index_handler,
-    restore_expression_materials_on_unload,
-};
 use crate::expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
     apply_manual_expression_requests,
+};
+use crate::expression::material::{
+    apply_expression_materials, register_gltf_material_index_handler,
+    restore_expression_materials_on_unload,
 };
 use crate::framing::camera_control::AvatarCameraControl;
 use crate::framing::camera_control::CameraPointerInputGate;
@@ -261,7 +261,7 @@ fn setup_scene(
         DirectionalLight {
             color: Color::WHITE,
             illuminance: 650.0,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         Transform::from_rotation(camera_transform.rotation),
@@ -284,9 +284,11 @@ fn setup_scene(
 
 // Both cameras exist after Startup, before the first rendered frame.
 // Apply ordinary display settings once, independently of Look: fixed EV100
-// 9.7, SDR (no Hdr component), no tone curve or dithering, and Bevy's sRGB
-// compositing. Keep the existing transparent BGRA output and preview alpha/
-// sRGB conversion unchanged. Later Look systems must not rewrite this policy.
+// 9.7, SDR (no Hdr component), no tone curve or dithering. Both cameras keep
+// Bevy's default sRGB target format; do not set CompositingSpace, which would
+// switch the window pass to Rgba8Unorm and conflict with the egui pipeline.
+// Keep the existing transparent BGRA output and preview alpha/sRGB conversion
+// unchanged. Later Look systems must not rewrite this policy.
 #[allow(clippy::type_complexity)]
 fn setup_avatar_display(
     mut commands: Commands,
@@ -297,7 +299,6 @@ fn setup_avatar_display(
             Exposure::BLENDER,
             Tonemapping::None,
             DebandDither::Disabled,
-            CompositingSpace::Srgb,
         ));
     }
 }
@@ -332,7 +333,7 @@ fn log_head_bone(heads: Query<Entity, Added<HeadBoneEntity>>) {
 mod tests {
     use super::*;
     use crate::render_output::{AvatarOutputState, setup_output_camera};
-    use bevy::camera::{Hdr, RenderTarget};
+    use bevy::camera::{CompositingSpace, Hdr, RenderTarget};
 
     #[test]
     fn setup_scene_keeps_ground_off_the_output_layer() {
@@ -356,10 +357,9 @@ mod tests {
         );
         assert!(!ground_layers[0].intersects(&RenderLayers::layer(AVATAR_RENDER_LAYER)));
 
-        let mut cameras = app.world_mut().query_filtered::<
-            (Entity, &Transform, &RenderLayers),
-            With<AvatarViewportCamera>,
-        >();
+        let mut cameras = app
+            .world_mut()
+            .query_filtered::<(Entity, &Transform, &RenderLayers), With<AvatarViewportCamera>>();
         let (camera_entity, camera_transform, viewport_layers) =
             cameras.single(app.world()).expect("viewport camera");
         let camera_rotation = camera_transform.rotation;
@@ -376,7 +376,7 @@ mod tests {
         assert!(light_layers.intersects(&RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER)));
         assert_eq!(light.color, Color::WHITE);
         assert_eq!(light.illuminance, 650.0);
-        assert!(!light.shadows_enabled);
+        assert!(!light.shadow_maps_enabled);
         assert_eq!(transform.rotation, camera_rotation);
         assert_eq!(app.world().resource::<GlobalAmbientLight>().brightness, 0.0);
 
@@ -395,7 +395,7 @@ mod tests {
         let light = app.world().get::<DirectionalLight>(light_entity).unwrap();
         assert_eq!(light.illuminance, 650.0);
         assert_eq!(light.color, Color::WHITE);
-        assert!(!light.shadows_enabled);
+        assert!(!light.shadow_maps_enabled);
     }
 
     #[test]
@@ -418,22 +418,24 @@ mod tests {
             "egui/webcam overlay on the window must not share the offscreen image target"
         );
 
-        let mut displays = app.world_mut().query_filtered::<
-            (
+        let mut displays =
+            app.world_mut().query_filtered::<(
                 &Exposure,
                 &Tonemapping,
                 &DebandDither,
-                &CompositingSpace,
+                Option<&CompositingSpace>,
                 Option<&Hdr>,
-            ),
-            Or<(With<AvatarViewportCamera>, With<AvatarOutputCamera>)>,
-        >();
+            ), Or<(With<AvatarViewportCamera>, With<AvatarOutputCamera>)>>(
+            );
         assert_eq!(displays.iter(app.world()).count(), 2);
         for (exposure, tone, dither, compositing, hdr) in displays.iter(app.world()) {
             assert_eq!(exposure.ev100, 9.7);
             assert_eq!(*tone, Tonemapping::None);
             assert_eq!(*dither, DebandDither::Disabled);
-            assert_eq!(*compositing, CompositingSpace::Srgb);
+            assert!(
+                compositing.is_none(),
+                "both cameras keep Bevy's default sRGB target format"
+            );
             assert!(hdr.is_none(), "both cameras use the same fixed SDR policy");
         }
     }
