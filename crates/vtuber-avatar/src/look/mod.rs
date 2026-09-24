@@ -1,14 +1,15 @@
-//! Look settings UI state.
+//! Look settings and the additional lights they drive.
 //!
-//! `#91` carries no rich rendering: this module owns only the look
-//! switch/strength resource and the role-selection resource the settings UI
-//! edits. Every system that wrote materials, lights, or the finish was removed
-//! with the old rich implementation; the rendering follow-ups (`#93`–`#96`)
-//! reconnect the UI state kept here.
+//! This module owns the look switch/strength resource, the role-selection
+//! resource the settings UI edits, and the fixed camera-relative additional
+//! light preset (`#93`). The app-side Rich shaders and the settings-UI
+//! reconnection still follow.
 
+mod lighting;
 mod material;
 mod preset;
 
+pub(crate) use lighting::register_look_lighting;
 pub use material::{
     AvatarMaterialRoles, MaterialRole, MaterialRoleOverride, MaterialRoleOverridesChanged,
     apply_material_role_overrides, resolve_material_role,

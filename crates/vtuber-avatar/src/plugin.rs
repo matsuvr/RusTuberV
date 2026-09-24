@@ -211,6 +211,7 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(Update, reset_pose_metrics_on_lifecycle_change)
             .add_systems(Update, reset_position_metrics_on_lifecycle_change)
             .add_systems(Update, crate::pose::debug_propagation_probe);
+        crate::look::register_look_lighting(app);
         register_output_systems(app);
     }
 }
@@ -396,6 +397,78 @@ mod tests {
         assert_eq!(light.illuminance, 650.0);
         assert_eq!(light.color, Color::WHITE);
         assert!(!light.shadow_maps_enabled);
+    }
+
+    #[test]
+    fn look_lights_leave_the_standard_light_untouched() {
+        fn standard_light(app: &mut App) -> (f32, Color, bool, Quat) {
+            let mut query = app.world_mut().query::<(&DirectionalLight, &Transform)>();
+            let lights: Vec<_> = query
+                .iter(app.world())
+                .map(|(light, transform)| {
+                    (
+                        light.illuminance,
+                        light.color,
+                        light.shadow_maps_enabled,
+                        transform.rotation,
+                    )
+                })
+                .collect();
+            assert_eq!(lights.len(), 1, "exactly one standard directional light");
+            lights[0]
+        }
+
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<AvatarLifecycle>()
+            .init_resource::<crate::look::AvatarLookSettings>()
+            .add_systems(Startup, setup_scene)
+            .add_systems(PostStartup, setup_avatar_display)
+            .add_systems(PostUpdate, align_standard_light_to_camera);
+        crate::look::register_look_lighting(&mut app);
+        app.update();
+
+        let head = app
+            .world_mut()
+            .spawn(GlobalTransform::from_xyz(0.0, 1.3, 0.0))
+            .id();
+        let hips = app
+            .world_mut()
+            .spawn(GlobalTransform::from_xyz(0.0, 0.9, 0.0))
+            .id();
+        let root = app
+            .world_mut()
+            .spawn((HeadBoneEntity(head), HipsBoneEntity(hips)))
+            .id();
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .expect("test load request is accepted");
+
+        let before = standard_light(&mut app);
+
+        app.world_mut()
+            .resource_mut::<crate::look::AvatarLookSettings>()
+            .0 = crate::look::RichLookSettings {
+            enabled: true,
+            strength: 0.5,
+        };
+        app.update();
+        let mut spots = app.world_mut().query::<&SpotLight>();
+        assert_eq!(spots.iter(app.world()).count(), 2);
+        assert_eq!(standard_light(&mut app), before);
+
+        app.world_mut()
+            .resource_mut::<crate::look::AvatarLookSettings>()
+            .0 = crate::look::RichLookSettings {
+            enabled: false,
+            strength: 1.0,
+        };
+        app.update();
+        let mut spots = app.world_mut().query::<&SpotLight>();
+        assert_eq!(spots.iter(app.world()).count(), 0);
+        assert_eq!(standard_light(&mut app), before);
     }
 
     #[test]
