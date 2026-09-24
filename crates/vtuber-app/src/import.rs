@@ -2283,6 +2283,64 @@ humanoid_nodes = { hips = 0, head = 1 }
         assert!(json["extensions"].get("VRMC_vrm").is_some());
     }
 
+    /// Builds a VRM 0.x fixture whose only `happy` expression is an author
+    /// custom (`presetName: "unknown"`); the standard Joy group is removed,
+    /// so a later adaptation could mistake the merged copy for a genuine
+    /// standard preset collision.
+    fn vrm0_custom_happy_fixture(dir: &TempDir) -> PathBuf {
+        let mut root: serde_json::Value = serde_json::from_str(VRM0_GLTF_JSON).unwrap();
+        let groups = root["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"]
+            .as_array_mut()
+            .unwrap();
+        groups.retain(|group| group["presetName"] != "Joy");
+        groups.push(serde_json::json!({"name": "happy", "presetName": "unknown"}));
+        write_glb_fixture(dir, "vrm0-custom-happy.vrm", &root.to_string())
+    }
+
+    #[test]
+    fn ensure_managed_model_ready_keeps_a_vrm0_custom_origin_and_classification() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm0_custom_happy_fixture(&dir);
+        let asset_root = dir.path().join("asset-root");
+        let imported =
+            import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+
+        // The VRM0 conversion emits the same output contract as the VRM 1.0
+        // adaptation: the custom origin record carries the merged-custom
+        // marker, while the runtime `preset` copy does not.
+        let json = stored_glb_json(&imported);
+        let expressions = &json["extensions"]["VRMC_vrm"]["expressions"];
+        assert!(expressions["preset"].get("happy").is_some());
+        assert_eq!(
+            expressions["custom"]["happy"][vtuber_avatar::vrm1::MERGED_CUSTOM_MARKER],
+            serde_json::json!(true)
+        );
+
+        // Load preparation re-runs the shared adaptation on the converted
+        // copy. The marked record must survive: origin and classification
+        // stay custom and the managed copy is not rewritten.
+        let managed_before = fs::read(&imported.asset_path).unwrap();
+        assert!(!ensure_managed_model_ready(&imported.asset_path).expect("ensure succeeds"));
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), managed_before);
+        let facts = read_runtime_expression_facts(&imported.asset_path).unwrap();
+        let happy = facts.entry("happy").expect("happy fact");
+        assert!(!happy.declared_as_preset);
+        assert_eq!(
+            vtuber_avatar::classify_expression("happy", happy.declared_as_preset),
+            vtuber_avatar::ExpressionKind::Custom
+        );
+
+        // The managed copy alone carries everything: repeated ensure and a
+        // deleted original change neither the copy nor the facts.
+        fs::remove_file(&source).unwrap();
+        assert!(!ensure_managed_model_ready(&imported.asset_path).expect("ensure succeeds"));
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), managed_before);
+        assert_eq!(
+            read_runtime_expression_facts(&imported.asset_path).unwrap(),
+            facts
+        );
+    }
+
     #[test]
     fn normalization_bails_when_referenced_binds_alone_exceed_the_limit() {
         let dir = TempDir::new().unwrap();

@@ -12,7 +12,10 @@
 //! therefore written as `materialColorBinds` next to the morph binds and the
 //! custom-origin record is kept under `custom`: both are ignored by upstream
 //! serde but preserved for the application's source-facts parser and the
-//! app-side material bind writer (`expression::material`).
+//! app-side material bind writer (`expression::material`). The custom-origin
+//! record carries [`crate::vrm1::MERGED_CUSTOM_MARKER`], so a later VRM 1.0
+//! adaptation pass on this already-converted copy keeps the origin instead of
+//! treating the `preset` copy as a genuine standard/custom collision.
 //!
 //! The managed copy's `VRMC_vrm.meta` is a rendering-input record only. VRM
 //! 0.x permission strings that map onto VRM 1.0 fields are carried through
@@ -124,9 +127,10 @@ pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> AppRes
 ///
 /// Every expression enters `preset` (the only map the upstream runtime
 /// reads), and custom-origin expressions additionally appear under `custom`
-/// as the provenance record. Legacy `materialValues` color binds are
-/// converted into `materialColorBinds`; nothing from the source section is
-/// silently dropped.
+/// as the provenance record, marked with [`crate::vrm1::MERGED_CUSTOM_MARKER`]
+/// so re-running the VRM 1.0 adaptation on this output is a no-op. Legacy
+/// `materialValues` color binds are converted into `materialColorBinds`;
+/// nothing from the source section is silently dropped.
 pub(crate) fn normalized_legacy_expressions(
     legacy: &Value,
     root: &Value,
@@ -230,7 +234,18 @@ pub(crate) fn normalized_legacy_expressions(
         });
         preset.insert(name.clone(), entry.clone());
         if !is_standard {
-            custom.insert(name, entry);
+            // Same output contract as `crate::vrm1::adapt_vrm1_expressions`:
+            // the origin record is marked, so a later adaptation pass on this
+            // converted copy recognizes its own merge and does not delete the
+            // record as a genuine standard/custom collision.
+            let mut record = entry;
+            if let Some(object) = record.as_object_mut() {
+                object.insert(
+                    crate::vrm1::MERGED_CUSTOM_MARKER.to_string(),
+                    Value::Bool(true),
+                );
+            }
+            custom.insert(name, record);
         }
     }
     let mut expressions = serde_json::Map::new();

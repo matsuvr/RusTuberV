@@ -23,6 +23,7 @@ use crate::direct_position::register_direct_position;
 use crate::expression::apply_tracked_expressions;
 use crate::expression::material::{
     apply_expression_materials, register_gltf_material_index_handler,
+    restore_expression_materials_on_unload,
 };
 use crate::expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
@@ -118,6 +119,7 @@ impl Plugin for VtuberAvatarPlugin {
                 (
                     handle_load_imported_avatar_requests,
                     apply_avatar_request_events,
+                    restore_expression_materials_on_unload,
                     despawn_unloading_avatar,
                     observe_initialized,
                     bind_humanoid_bones,

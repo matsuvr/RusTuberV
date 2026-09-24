@@ -457,6 +457,56 @@ pub fn apply_expression_materials(
     }
 }
 
+/// Restores expression-written material fields while the active avatar is
+/// unloading, before the existing despawn drops the state.
+///
+/// The base and last-applied values are owned by the avatar root, but the
+/// expression values were written into shared `Assets`: a strong handle held
+/// elsewhere keeps the changed values alive after the root is gone, and a
+/// later root reusing that asset would capture them as its expression-free
+/// base. This system restores only the assets the writer actually changed
+/// (`applied != base`), using the recorded base; it performs no lifecycle
+/// transition, no despawn, and no file IO.
+pub(crate) fn restore_expression_materials_on_unload(
+    lifecycle: Res<AvatarLifecycle>,
+    states: Query<&AvatarMaterialExpressionState>,
+    mut mtoon_assets: ResMut<Assets<MToonMaterial>>,
+    mut standard_assets: ResMut<Assets<StandardMaterial>>,
+) {
+    if lifecycle.state() != AvatarLifecycleState::Unloading {
+        return;
+    }
+    let Some(root) = lifecycle.active_root() else {
+        return;
+    };
+    let Ok(state) = states.get(root) else {
+        return;
+    };
+    for (id, material_state) in &state.mtoon {
+        if material_state.applied == material_state.base {
+            continue;
+        }
+        if let Some(mut material) = mtoon_assets.get_mut(*id) {
+            material.base_color = Color::LinearRgba(material_state.base.base_color);
+            material.emissive = material_state.base.emissive;
+            material.shade.color = material_state.base.shade_color;
+            material.rim_lighting.color = material_state.base.rim_color;
+            material.outline.color = material_state.base.outline_color;
+            material.uv_transform = material_state.base.uv_transform;
+        }
+    }
+    for (id, material_state) in &state.standard {
+        if material_state.applied == material_state.base {
+            continue;
+        }
+        if let Some(mut material) = standard_assets.get_mut(*id) {
+            material.base_color = Color::LinearRgba(material_state.base.base_color);
+            material.emissive = material_state.base.emissive;
+            material.uv_transform = material_state.base.uv_transform;
+        }
+    }
+}
+
 /// Evaluates one material's base plus every weighted bind targeting
 /// `material_index`. Pure numeric function: `base + Σ (target − base) · weight`.
 fn evaluate_material_values(
@@ -774,7 +824,15 @@ mod tests {
             .init_asset::<MToonMaterial>()
             .init_asset::<StandardMaterial>()
             .init_resource::<AvatarLifecycle>()
-            .add_systems(Update, apply_expression_materials);
+            .add_systems(
+                Update,
+                (
+                    apply_expression_materials,
+                    restore_expression_materials_on_unload,
+                    crate::unload::despawn_unloading_avatar,
+                )
+                    .chain(),
+            );
         app
     }
 
@@ -1004,6 +1062,140 @@ mod tests {
             LinearRgba::new(0.2, 0.3, 0.4, 1.0)
         );
         assert_eq!(material_state.applied, material_state.base);
+    }
+
+    #[test]
+    fn writer_restores_a_shared_material_on_unload_before_a_new_root_reuses_it() {
+        let mut app = writer_app();
+        let material_handle = {
+            let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            materials.add(StandardMaterial {
+                base_color: Color::LinearRgba(LinearRgba::new(0.2, 0.3, 0.4, 1.0)),
+                ..StandardMaterial::default()
+            })
+        };
+        let expression = spawn_expression(
+            &mut app,
+            "cheek",
+            none_settings(),
+            ExpressionMaterialBinds {
+                colors: vec![color_bind(
+                    0,
+                    MaterialColorTarget::Color,
+                    [0.8, 0.2, 0.2, 1.0],
+                )],
+                transforms: vec![ExpressionTextureTransformBind {
+                    material_index: 0,
+                    scale: Vec2::new(2.0, 2.0),
+                    offset: Vec2::new(0.25, 0.0),
+                }],
+            },
+        );
+        let root = expression_root(&mut app, &[("cheek", expression)]);
+        enter_ready(&mut app, root);
+        app.world_mut().spawn((
+            VrmMaterialIndex(0),
+            ChildOf(root),
+            MeshMaterial3d(material_handle.clone()),
+        ));
+
+        // Half weight is applied and never released before the unload; the
+        // strong handle held here outlives the root.
+        app.world_mut()
+            .entity_mut(expression)
+            .insert(ExpressionOverride(0.5));
+        app.update();
+        let applied = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(material_handle.id())
+            .unwrap();
+        assert!((applied.base_color.to_linear().red - 0.5).abs() < 1.0e-6);
+        let applied_scale = applied.uv_transform.matrix2.x_axis.length();
+        assert!((applied_scale - 1.5).abs() < 1.0e-6);
+
+        // Existing unload path: the restore system returns the asset to the
+        // author's base before the despawn drops the root state.
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_unload()
+            .unwrap();
+        app.update();
+
+        assert!(
+            !app.world().entities().contains(root),
+            "the old root is despawned by the existing unload"
+        );
+        let restored = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(material_handle.id())
+            .unwrap();
+        assert_eq!(
+            restored.base_color.to_linear(),
+            LinearRgba::new(0.2, 0.3, 0.4, 1.0),
+            "unload must return the shared asset to the author's base"
+        );
+        assert_eq!(
+            restored.uv_transform,
+            Affine2::from_scale_angle_translation(Vec2::ONE, 0.0, Vec2::ZERO)
+        );
+
+        // Reuse the same asset in a new root at weight 0: the captured base
+        // must be the author's value, not the stale 0.5 write.
+        let expression_b = spawn_expression(
+            &mut app,
+            "cheek",
+            none_settings(),
+            ExpressionMaterialBinds {
+                colors: vec![color_bind(
+                    0,
+                    MaterialColorTarget::Color,
+                    [0.8, 0.2, 0.2, 1.0],
+                )],
+                transforms: vec![ExpressionTextureTransformBind {
+                    material_index: 0,
+                    scale: Vec2::new(2.0, 2.0),
+                    offset: Vec2::new(0.25, 0.0),
+                }],
+            },
+        );
+        let root_b = expression_root(&mut app, &[("cheek", expression_b)]);
+        enter_ready(&mut app, root_b);
+        app.world_mut().spawn((
+            VrmMaterialIndex(0),
+            ChildOf(root_b),
+            MeshMaterial3d(material_handle.clone()),
+        ));
+        app.update();
+
+        let reused = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(material_handle.id())
+            .unwrap();
+        assert_eq!(
+            reused.base_color.to_linear(),
+            LinearRgba::new(0.2, 0.3, 0.4, 1.0)
+        );
+        assert_eq!(
+            reused.uv_transform,
+            Affine2::from_scale_angle_translation(Vec2::ONE, 0.0, Vec2::ZERO)
+        );
+        let state = app
+            .world()
+            .get::<AvatarMaterialExpressionState>(root_b)
+            .unwrap();
+        let captured_base = state.standard.get(&material_handle.id()).unwrap().base;
+        assert_eq!(
+            captured_base.base_color,
+            LinearRgba::new(0.2, 0.3, 0.4, 1.0),
+            "the new root must capture the author's base, not the stale write"
+        );
+        assert_eq!(
+            captured_base.uv_transform,
+            Affine2::from_scale_angle_translation(Vec2::ONE, 0.0, Vec2::ZERO)
+        );
     }
 
     #[test]
