@@ -5,7 +5,8 @@
 //! re-exported from the crate facade.
 
 use bevy::app::AnimationSystems;
-use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{CompositingSpace, Exposure, visibility::RenderLayers};
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
@@ -50,8 +51,7 @@ use crate::pose::{
     PoseApplyMetrics, reset_pose_metrics_on_lifecycle_change, update_body_tracking_pose_input,
 };
 use crate::render_output::{
-    AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER, avatar_display_settings,
-    register_output_systems,
+    AVATAR_RENDER_LAYER, AvatarOutputCamera, VIEWPORT_ONLY_RENDER_LAYER, register_output_systems,
 };
 use crate::unload::{
     ActiveControlFrame, clear_control_cache_on_lifecycle_change, despawn_unloading_avatar,
@@ -115,6 +115,7 @@ impl Plugin for VtuberAvatarPlugin {
             .add_message::<LoadImportedAvatarResult>()
             .add_message::<ResetCameraRequest>()
             .add_systems(Startup, setup_scene)
+            .add_systems(PostStartup, setup_avatar_display)
             .add_systems(
                 Update,
                 (
@@ -268,10 +269,9 @@ fn setup_scene(
         RenderLayers::from_layers(&[AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER]),
     ));
 
-    // Camera framing the upper body, using the same display policy as output.
+    // Camera framing the upper body.
     commands.spawn((
         Camera3d::default(),
-        avatar_display_settings(),
         Projection::Perspective(PerspectiveProjection {
             fov: FIXED_VERTICAL_FOV,
             ..default()
@@ -280,6 +280,26 @@ fn setup_scene(
         camera_transform,
         RenderLayers::from_layers(&[AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER]),
     ));
+}
+
+// Both cameras exist after Startup, before the first rendered frame.
+// Apply ordinary display settings once, independently of Look: fixed EV100
+// 9.7, SDR (no Hdr component), no tone curve or dithering, and Bevy's sRGB
+// compositing. Keep the existing transparent BGRA output and preview alpha/
+// sRGB conversion unchanged. Later Look systems must not rewrite this policy.
+#[allow(clippy::type_complexity)]
+fn setup_avatar_display(
+    mut commands: Commands,
+    cameras: Query<Entity, Or<(With<AvatarViewportCamera>, With<AvatarOutputCamera>)>>,
+) {
+    for camera in &cameras {
+        commands.entity(camera).insert((
+            Exposure::BLENDER,
+            Tonemapping::None,
+            DebandDither::Disabled,
+            CompositingSpace::Srgb,
+        ));
+    }
 }
 
 // Framing writes the camera after transform propagation. Update the root
@@ -311,9 +331,8 @@ fn log_head_bone(heads: Query<Entity, Added<HeadBoneEntity>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::camera::{CompositingSpace, Exposure, Hdr, RenderTarget};
-    use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
-    use crate::render_output::{AvatarOutputCamera, AvatarOutputState, setup_output_camera};
+    use crate::render_output::{AvatarOutputState, setup_output_camera};
+    use bevy::camera::{Hdr, RenderTarget};
 
     #[test]
     fn setup_scene_keeps_ground_off_the_output_layer() {
@@ -321,6 +340,7 @@ mod tests {
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .add_systems(Startup, setup_scene)
+            .add_systems(PostStartup, setup_avatar_display)
             .add_systems(PostUpdate, align_standard_light_to_camera);
         app.update();
 
@@ -342,24 +362,29 @@ mod tests {
         >();
         let (camera_entity, camera_transform, viewport_layers) =
             cameras.single(app.world()).expect("viewport camera");
+        let camera_rotation = camera_transform.rotation;
         assert!(viewport_layers.intersects(&RenderLayers::layer(AVATAR_RENDER_LAYER)));
         assert!(viewport_layers.intersects(&RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER)));
 
         let mut lights = app
             .world_mut()
             .query::<(Entity, &DirectionalLight, &Transform, &RenderLayers)>();
-        let (light_entity, light, transform, light_layers) =
-            lights.single(app.world()).expect("exactly one directional light");
+        let (light_entity, light, transform, light_layers) = lights
+            .single(app.world())
+            .expect("exactly one directional light");
         assert!(light_layers.intersects(&RenderLayers::layer(AVATAR_RENDER_LAYER)));
         assert!(light_layers.intersects(&RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER)));
         assert_eq!(light.color, Color::WHITE);
         assert_eq!(light.illuminance, 650.0);
         assert!(!light.shadows_enabled);
-        assert_eq!(transform.rotation, camera_transform.rotation);
+        assert_eq!(transform.rotation, camera_rotation);
         assert_eq!(app.world().resource::<GlobalAmbientLight>().brightness, 0.0);
 
         let rotation = Quat::from_euler(EulerRot::YXZ, 0.4, -0.2, 0.0);
-        app.world_mut().get_mut::<Transform>(camera_entity).unwrap().rotation = rotation;
+        app.world_mut()
+            .get_mut::<Transform>(camera_entity)
+            .unwrap()
+            .rotation = rotation;
         app.update();
         let transform = app.world().get::<Transform>(light_entity).unwrap();
         assert_eq!(transform.rotation, rotation);
@@ -380,7 +405,8 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<AvatarOutputState>()
-            .add_systems(Startup, (setup_scene, setup_output_camera));
+            .add_systems(Startup, (setup_scene, setup_output_camera))
+            .add_systems(PostStartup, setup_avatar_display);
         app.update();
 
         let mut cameras = app
@@ -393,7 +419,13 @@ mod tests {
         );
 
         let mut displays = app.world_mut().query_filtered::<
-            (&Exposure, &Tonemapping, &DebandDither, &CompositingSpace, Option<&Hdr>),
+            (
+                &Exposure,
+                &Tonemapping,
+                &DebandDither,
+                &CompositingSpace,
+                Option<&Hdr>,
+            ),
             Or<(With<AvatarViewportCamera>, With<AvatarOutputCamera>)>,
         >();
         assert_eq!(displays.iter(app.world()).count(), 2);
