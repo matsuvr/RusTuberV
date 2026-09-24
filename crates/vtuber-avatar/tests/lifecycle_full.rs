@@ -18,10 +18,9 @@
 use bevy::asset::AssetApp;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
-use bevy_vrm1::vrm::spring_bone::{
-    SpringCenterNode, SpringColliders, SpringJointState, VrmSpringBonePlugin,
-};
+use bevy_vrm1::vrm::spring_bone::{SpringCenterNode, SpringColliders, VrmSpringBonePlugin};
 
+use vtuber_avatar::ExpectedVrmGeneration;
 use vtuber_avatar::bind::BindTriggered;
 use vtuber_avatar::binding::{AvatarBinding, bind_humanoid_bones};
 use vtuber_avatar::lifecycle::{
@@ -161,9 +160,9 @@ fn count_active_markers(app: &mut App) -> usize {
         .count()
 }
 
-fn count_spring_joint_states(app: &mut App) -> usize {
+fn count_spring_roots(app: &mut App) -> usize {
     app.world_mut()
-        .query::<&SpringJointState>()
+        .query::<&SpringRoot>()
         .iter(app.world())
         .count()
 }
@@ -176,13 +175,6 @@ enum SyntheticGeneration {
 
 fn spawn_generation_avatar_root(app: &mut App, generation: SyntheticGeneration) -> Entity {
     let head = spawn_bone(app);
-    if matches!(generation, SyntheticGeneration::Vrm0) {
-        let terminal_source_transform = Transform::from_translation(Vec3::Y);
-        app.world_mut().entity_mut(head).insert((
-            terminal_source_transform,
-            GlobalTransform::from(terminal_source_transform),
-        ));
-    }
     let root = app
         .world_mut()
         .spawn((
@@ -191,81 +183,39 @@ fn spawn_generation_avatar_root(app: &mut App, generation: SyntheticGeneration) 
             Visibility::Hidden,
             Vrm,
             VrmHandle(Handle::default()),
-            VrmCoordinateBasis(match generation {
-                SyntheticGeneration::Vrm0 => CoordinateBasis::Vrm0Y180,
-                SyntheticGeneration::Vrm1 => CoordinateBasis::Vrm1Identity,
-            }),
+            ExpectedVrmGeneration::from(generation),
             HeadBoneEntity(head),
             ExpressionEntityMap(bevy::platform::collections::HashMap::new()),
         ))
         .id();
 
-    let parent = if matches!(generation, SyntheticGeneration::Vrm0) {
-        app.world_mut()
-            .spawn((
-                VrmBasisRoot,
-                VrmCoordinateBasis(CoordinateBasis::Vrm0Y180)
-                    .transform()
-                    .expect("VRM 0.x synthetic basis exists"),
-                GlobalTransform::IDENTITY,
-                ChildOf(root),
-            ))
-            .id()
-    } else {
-        root
-    };
-    app.world_mut().entity_mut(head).insert(ChildOf(parent));
+    // Converted models carry no runtime basis entity: both generations share
+    // the same initialized shape and differ only in the source record.
+    app.world_mut().entity_mut(head).insert(ChildOf(root));
     app.world_mut().entity_mut(head).insert(SpringRoot {
         joints: SpringJoints(vec![head]),
         colliders: SpringColliders::default(),
         center_node: SpringCenterNode::default(),
-        terminal_length: match generation {
-            SyntheticGeneration::Vrm0 => Some(0.07),
-            SyntheticGeneration::Vrm1 => None,
-        },
     });
     root
 }
 
+impl From<SyntheticGeneration> for ExpectedVrmGeneration {
+    fn from(generation: SyntheticGeneration) -> Self {
+        match generation {
+            SyntheticGeneration::Vrm0 => ExpectedVrmGeneration::Vrm0,
+            SyntheticGeneration::Vrm1 => ExpectedVrmGeneration::Vrm1,
+        }
+    }
+}
+
 fn assert_generation_state(app: &mut App, root: Entity, generation: SyntheticGeneration) {
-    let expected_basis = match generation {
-        SyntheticGeneration::Vrm0 => CoordinateBasis::Vrm0Y180,
-        SyntheticGeneration::Vrm1 => CoordinateBasis::Vrm1Identity,
-    };
     assert_eq!(
-        app.world().get::<VrmCoordinateBasis>(root).unwrap().0,
-        expected_basis
+        app.world().get::<ExpectedVrmGeneration>(root).copied(),
+        Some(ExpectedVrmGeneration::from(generation))
     );
     assert_eq!(count_active_markers(app), 1);
-    let basis_count = app
-        .world_mut()
-        .query_filtered::<Entity, With<VrmBasisRoot>>()
-        .iter(app.world())
-        .count();
-    assert_eq!(
-        basis_count,
-        if matches!(generation, SyntheticGeneration::Vrm0) {
-            1
-        } else {
-            0
-        }
-    );
-    assert_eq!(
-        app.world_mut()
-            .query::<&SpringRoot>()
-            .iter(app.world())
-            .count(),
-        1
-    );
-    assert_eq!(
-        count_spring_joint_states(app),
-        if matches!(generation, SyntheticGeneration::Vrm0) {
-            1
-        } else {
-            0
-        },
-        "VRM 0.x owns one finite terminal SpringJointState; VRM 1.0 has no legacy terminal"
-    );
+    assert_eq!(count_spring_roots(app), 1);
     assert_eq!(
         app.world_mut()
             .query::<&ExpressionEntityMap>()
@@ -284,34 +234,7 @@ fn assert_avatar_owned_state_empty(app: &mut App) {
     assert!(!lifecycle.has_active_generation());
     assert_eq!(count_active_markers(app), 0);
     assert_eq!(app.world_mut().query::<&Vrm>().iter(app.world()).count(), 0);
-    assert_eq!(
-        app.world_mut()
-            .query::<&VrmCoordinateBasis>()
-            .iter(app.world())
-            .count(),
-        0
-    );
-    assert_eq!(
-        app.world_mut()
-            .query::<&VrmBasisRoot>()
-            .iter(app.world())
-            .count(),
-        0
-    );
-    assert_eq!(
-        app.world_mut()
-            .query::<&SpringRoot>()
-            .iter(app.world())
-            .count(),
-        0
-    );
-    assert_eq!(
-        app.world_mut()
-            .query::<&SpringJointState>()
-            .iter(app.world())
-            .count(),
-        0
-    );
+    assert_eq!(count_spring_roots(app), 0);
     assert_eq!(
         app.world_mut()
             .query::<&ExpressionEntityMap>()
@@ -699,9 +622,9 @@ fn full_lifecycle_snapshot_reflects_state() {
 }
 
 /// Runs the revised Issue #31 transition matrix twice in one process. The
-/// synthetic roots carry the generation-specific runtime components that the
-/// real loader owns, so stale basis, expression, and SpringBone state is
-/// checked directly after every unload and replacement.
+/// synthetic roots carry the source-generation record the real import owns,
+/// so stale avatar, expression, and SpringBone state is checked directly
+/// after every unload and replacement.
 #[test]
 fn generation_transition_matrix_has_no_stale_avatar_state() {
     let sequences = vec![
@@ -740,13 +663,9 @@ fn generation_transition_matrix_has_no_stale_avatar_state() {
                         "the previous avatar root must be gone after replacement"
                     );
                     assert_eq!(
-                        count_spring_joint_states(&mut app),
-                        if matches!(generation, SyntheticGeneration::Vrm0) {
-                            1
-                        } else {
-                            0
-                        },
-                        "replacement must not retain SpringJointState from the previous avatar"
+                        count_spring_roots(&mut app),
+                        1,
+                        "replacement must not retain spring state from the previous avatar"
                     );
                 }
 

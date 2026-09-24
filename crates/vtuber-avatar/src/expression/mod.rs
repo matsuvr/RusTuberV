@@ -7,7 +7,10 @@
 pub mod blink;
 pub mod command;
 pub mod manual;
+pub mod material;
 pub mod mouth;
+pub mod source;
+pub mod status;
 pub mod system;
 
 pub use blink::{RawBlinkInput, map_blink_to_expressions, map_blink_with_fallback};
@@ -19,9 +22,16 @@ pub use manual::{
     ManualExpressionRequest, ManualExpressionSelection, apply_manual_expression_requests,
     is_tracking_selection,
 };
+pub use material::{
+    AvatarMaterialExpressionState, ExpressionMaterialBinds, GltfMaterialIndexHandler,
+    MaterialExpressionState, VrmMaterialBaseValues, VrmMaterialIndex, apply_expression_materials,
+    register_gltf_material_index_handler,
+};
 pub use mouth::{
     RawMouthInput, is_valid_mouth_preset, map_mouth_to_expressions, map_mouth_with_fallback,
 };
+pub use source::{MaterialColorTarget, SourceExpressionEntry, SourceExpressions};
+pub use status::ExpressionBindingStatus;
 pub use system::{
     DEFAULT_CHANGE_EPSILON, ExpressionStateTracker, apply_tracked_expressions, coalesce_commands,
 };

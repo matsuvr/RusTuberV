@@ -24,11 +24,7 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use bevy_vrm1::prelude::{
-    BodyTracking, BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingProfile,
-    RestGlobalTransform, RestTransform,
-};
-use bevy_vrm1::vrm::body_tracking::apply_direct_body_tracking;
+use bevy_vrm1::prelude::{BodyTracking, RestGlobalTransform, RestTransform};
 use vtuber_avatar::AvatarMotionMirror;
 use vtuber_avatar::{
     ActiveAvatar, ArmChainBinding, ArmChainCapabilities, ArmMotionGeometry, ArmPoseBlendState,
@@ -36,6 +32,10 @@ use vtuber_avatar::{
     AvatarBinding, AvatarGeneration, AvatarLifecycle, DefaultArmPose, DynamicArmTargets,
     RestSpaceBonePose, apply_default_arm_pose, update_body_tracking_pose_input,
     update_body_tracking_position_input, update_dynamic_arm_targets,
+};
+use vtuber_avatar::{
+    BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingProfile,
+    apply_direct_body_tracking,
 };
 use vtuber_core::types::AvatarControlFrame;
 use vtuber_core::types::{

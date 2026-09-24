@@ -10,7 +10,7 @@
 //!
 //! Verifies that:
 //! - The product app does not use `bevy_vrm1::LookAt` to encode face pose.
-//! - Direct-pose `bevy_vrm1::BodyTracking` is the intended humanoid writer.
+//! - The application-owned direct-pose writer drives the humanoid.
 //! - The pose and expression systems are registered in the correct schedule.
 //! - No schedule cycles exist.
 
@@ -38,11 +38,14 @@ fn avatar_schedule_has_no_synthetic_look_at_api() {
 /// 1. apply_avatar_request_events (Update, chained)
 /// 2. despawn_unloading_avatar (Update, chained)
 /// 3. bind_humanoid_bones (Update, chained)
-/// 4. direct-pose BodyTracking (PostUpdate)
-/// 5. model-adaptive default arm pose compositor (PostUpdate)
-/// 6. VrmSystemSets::Constraints (PostUpdate, bevy_vrm1 internal)
-/// 7. VrmSystemSets::Expressions (PostUpdate, bevy_vrm1 internal)
-/// 8. VrmSystemSets::SpringBone (PostUpdate, bevy_vrm1 internal)
+/// 4. application direct-pose writer (PostUpdate, before gaze and constraints)
+/// 5. application direct gaze writer (PostUpdate, in gaze control)
+/// 6. model-adaptive default arm pose compositor (PostUpdate)
+/// 7. application tracked-expression writer (PostUpdate, after gaze control,
+///    before the upstream expression set)
+///
+/// Inter-set order beyond these edges belongs to the unmodified upstream
+/// runtime and is not re-chained here.
 #[test]
 fn avatar_schedule_ordering_matches_design() {
     use bevy::app::AnimationSystems;
@@ -80,10 +83,6 @@ fn avatar_schedule_ordering_matches_design() {
     fn trace_animation() {}
     fn trace_gaze() {}
     fn trace_expressions() {}
-    fn trace_propagate_expressions() {}
-    fn trace_constraints() {}
-    fn trace_propagate_constraints() {}
-    fn trace_spring_bone() {}
 
     let mut app = App::new();
     app.add_plugins(
@@ -102,10 +101,6 @@ fn avatar_schedule_ordering_matches_design() {
             trace_animation.in_set(AnimationSystems),
             trace_gaze.in_set(VrmSystemSets::GazeControl),
             trace_expressions.in_set(VrmSystemSets::Expressions),
-            trace_propagate_expressions.in_set(VrmSystemSets::PropagateAfterExpressions),
-            trace_constraints.in_set(VrmSystemSets::Constraints),
-            trace_propagate_constraints.in_set(VrmSystemSets::PropagateAfterConstraints),
-            trace_spring_bone.in_set(VrmSystemSets::SpringBone),
         ),
     );
 
@@ -134,10 +129,6 @@ fn avatar_schedule_ordering_matches_design() {
                 ("update_direct_look_at_input", "trace_gaze"),
                 ("trace_gaze", "apply_tracked_expressions"),
                 ("apply_tracked_expressions", "trace_expressions"),
-                ("trace_expressions", "trace_propagate_expressions"),
-                ("trace_propagate_expressions", "trace_constraints"),
-                ("trace_constraints", "trace_propagate_constraints"),
-                ("trace_propagate_constraints", "trace_spring_bone"),
             ] {
                 assert_before(schedule, before, after);
             }

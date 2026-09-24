@@ -7,17 +7,16 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy_vrm1::prelude::{
-    ExpressionBindingStatus, ExpressionEntityMap, LookAtExpressionWeights, ModifyExpressions,
-    VrmExpression,
-};
+use bevy_vrm1::prelude::{ExpressionEntityMap, ModifyExpressions, VrmExpression};
 use vtuber_core::ArkitBlendshape;
 
 use crate::capabilities::SelectedGazeBackend;
+use crate::direct_look::LookAtExpressionWeights;
 use crate::expression::blink::{RawBlinkInput, map_blink_with_fallback};
 use crate::expression::command::{ExpressionCommand, build_face_commands};
 use crate::expression::manual::ManualExpressionSelection;
 use crate::expression::mouth::{RawMouthInput, map_mouth_with_fallback};
+use crate::expression::status::ExpressionBindingStatus;
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 use crate::mirror::AvatarMotionMirror;
 use crate::unload::ActiveControlFrame;
@@ -379,7 +378,7 @@ fn look_at_expression_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_vrm1::prelude::{ExpressionBindingStatus, VrmExpression};
+    use bevy_vrm1::prelude::VrmExpression;
     use vtuber_core::{
         AvatarControlFrame, ExpressionCoefficients, FrameSeq, GazeSignal, HeadPose,
         HeadTranslationSignal, MonoTimeNs, TrackingState,

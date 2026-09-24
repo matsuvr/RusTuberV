@@ -6,7 +6,6 @@
 
 use crate::capabilities::AvatarCapabilities;
 use crate::expression_catalog::AvatarExpressionCatalog;
-use crate::load::ExpectedVrmGeneration;
 use bevy::ecs::message::Message;
 use bevy::prelude::*;
 use std::time::{Duration, Instant};
@@ -170,13 +169,6 @@ pub enum AvatarLifecycleFailure {
     },
     /// The VRM asset failed to load.
     AssetLoadFailed,
-    /// Runtime generation disagreed with app-side preflight.
-    GenerationMismatch {
-        /// Generation recorded by app-side inspection.
-        expected: ExpectedVrmGeneration,
-        /// Generation discovered by the runtime boundary.
-        detected: Option<ExpectedVrmGeneration>,
-    },
 }
 
 impl std::fmt::Display for AvatarLifecycleFailure {
@@ -190,12 +182,6 @@ impl std::fmt::Display for AvatarLifecycleFailure {
                 write!(f, "humanoid bone has invalid rest orientation: {bone}")
             }
             Self::AssetLoadFailed => f.write_str("VRM asset failed to load"),
-            Self::GenerationMismatch { expected, detected } => {
-                write!(
-                    f,
-                    "VRM generation mismatch: expected {expected:?}, detected {detected:?}"
-                )
-            }
         }
     }
 }

@@ -10,6 +10,7 @@ use bevy::ecs::world::EntityRef;
 use bevy::log::warn;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::arm::{
@@ -24,11 +25,15 @@ use crate::capabilities::{
     AvatarCapabilities, BonePresence, DeclaredLookAtType, ExpressionCapabilities,
     PerfectSyncCapabilities, SelectedGazeBackend,
 };
+use crate::direct_look::DirectLookAtInput;
+use crate::direct_pose::BodyTrackingPoseInput;
+use crate::direct_position::{BodyTrackingPositionInput, BodyTrackingPositionProfile};
+use crate::expression::material::VrmMaterialIndex;
 use crate::gaze::fallback_look_at_properties;
 use crate::lifecycle::{
     ActiveAvatar, AvatarGeneration, AvatarLifecycle, AvatarLifecycleFailure, AvatarLifecycleState,
 };
-use crate::load::AvatarAssetId;
+use crate::load::{AvatarAssetId, VrmSourceExpressions};
 
 /// Maximum time to wait for transient bone components after entering `Binding`.
 const BIND_TIMEOUT: Duration = Duration::from_secs(2);
@@ -222,7 +227,12 @@ pub fn bind_humanoid_bones(
     )>,
     deadlines: Query<&BindingDeadline>,
     expression_maps: Query<Option<&ExpressionEntityMap>>,
-    expression_status: Query<Option<&ExpressionBindingStatus>>,
+    name_query: Query<(Entity, &Name)>,
+    material_query: Query<(
+        Entity,
+        &VrmMaterialIndex,
+        Option<&MeshMaterial3d<MToonMaterial>>,
+    )>,
     spring_roots: Query<Entity, With<SpringRoot>>,
     parents: Query<&ChildOf>,
     arm_pose_overrides: Option<Res<ArmPoseOverrideStore>>,
@@ -346,6 +356,26 @@ pub fn bind_humanoid_bones(
             );
 
             let expression_map = expression_maps.get(root_entity).ok().flatten();
+
+            // Bind facts are determined before anything is published: the
+            // source expression definitions travel on the root
+            // (`VrmSourceExpressions`, parsed by the app from the managed
+            // model), and they are resolved against the live scene (node
+            // names, used material indices and kinds). The same facts build
+            // the bind statuses, the catalog, and the Perfect Sync
+            // capability, and are inserted as components for later frames.
+            let source_facts = root_ref
+                .get::<VrmSourceExpressions>()
+                .map(|facts| facts.0.clone())
+                .unwrap_or_default();
+            let descendant_names = descendant_names_of(root_entity, &name_query, &parents);
+            let material_kinds = resolved_material_kinds(root_entity, &material_query, &parents);
+            let statuses = crate::expression::source::build_binding_statuses(
+                &source_facts,
+                |node_name| descendant_names.contains(node_name),
+                |material| material_kinds.get(&material).copied(),
+            );
+
             let expression_catalog = expression_map.map(|map| {
                 crate::expression_catalog::build_catalog(
                     root_ref
@@ -354,18 +384,47 @@ pub fn bind_humanoid_bones(
                         .unwrap_or_default(),
                     binding.generation.0,
                     map,
-                    |entity| expression_status.get(entity).ok().flatten().copied(),
+                    |name| statuses.get(name).copied(),
                 )
             });
             let expression_caps = ExpressionCapabilities::from_map(expression_map);
+            let mut morph_effective_by_entity: HashMap<Entity, bool> = HashMap::default();
+            let mut material_binds_by_entity: HashMap<
+                Entity,
+                crate::expression::material::ExpressionMaterialBinds,
+            > = HashMap::default();
+            if let Some(map) = expression_map {
+                for (name, &entity) in map.0.iter() {
+                    let status = statuses
+                        .get(name.as_str())
+                        .copied()
+                        .unwrap_or_else(|| {
+                            warn!(
+                                "expression `{name}` is registered by the runtime but missing from the model's source facts"
+                            );
+                            crate::expression::status::ExpressionBindingStatus::default()
+                        });
+                    morph_effective_by_entity.insert(entity, status.resolved_morph_bind_count > 0);
+                    let binds = crate::expression::material::ExpressionMaterialBinds::from_source(
+                        &source_facts,
+                        name.as_str(),
+                    );
+                    if !binds.is_empty() {
+                        material_binds_by_entity.insert(entity, binds);
+                    }
+                    commands.entity(entity).insert(status);
+                }
+                for (entity, binds) in material_binds_by_entity {
+                    commands.entity(entity).insert(binds);
+                }
+            }
             let perfect_sync = PerfectSyncCapabilities::from_map_with_effective(
                 expression_map,
                 |expression_entity| {
-                    expression_status
-                        .get(expression_entity)
-                        .is_ok_and(|status| {
-                            status.is_some_and(|status| status.resolved_morph_bind_count > 0)
-                        })
+                    morph_effective_by_entity
+                        .get(&expression_entity)
+                        .copied()
+                        .unwrap_or(false)
                 },
             );
             let has_spring_bone = spring_roots
@@ -401,13 +460,13 @@ pub fn bind_humanoid_bones(
                 );
             }
 
-            // The position input pair activates the ADR-019 position-aware
+            // The position input pair activates the application position-aware
             // upper-body solve (bounded torso lean + root/body translation
             // follow). Without it the head motion would stop at the neck:
             // the arms consume the same channels directly, so the body below
             // the neck would stay rigid while the arms follow. The writer is
             // `update_body_tracking_position_input`; this only provides the
-            // inert (inactive) component the writer and the vendor solve
+            // inert (inactive) component the writer and the application solve
             // require on the root.
             commands.entity(root_entity).insert((
                 binding,
@@ -423,6 +482,10 @@ pub fn bind_humanoid_bones(
                 arm_motion,
                 crate::arm_pipeline::DynamicArmTargets::default(),
                 Visibility::Inherited,
+                // Expression material bases are owned per concrete material
+                // asset, so the state lives with the avatar root and is
+                // dropped by the existing unload lifecycle.
+                crate::expression::material::AvatarMaterialExpressionState::default(),
             ));
             if capabilities.gaze_backend != SelectedGazeBackend::None {
                 let effective_properties =
@@ -900,7 +963,7 @@ fn resolve_optional_bone(
     Some(entity)
 }
 
-fn is_descendant(entity: Entity, ancestor: Entity, parents: &Query<&ChildOf>) -> bool {
+pub(crate) fn is_descendant(entity: Entity, ancestor: Entity, parents: &Query<&ChildOf>) -> bool {
     let mut current = entity;
     while let Ok(parent) = parents.get(current) {
         let parent_entity = parent.parent();
@@ -910,6 +973,50 @@ fn is_descendant(entity: Entity, ancestor: Entity, parents: &Query<&ChildOf>) ->
         current = parent_entity;
     }
     false
+}
+
+/// Collects the scene names of every entity under the avatar root.
+///
+/// Morph binds resolve by node name (the runtime looks entities up by
+/// name), so a bind is effective exactly when its resolved node name exists
+/// under the root.
+pub(crate) fn descendant_names_of(
+    root: Entity,
+    names: &Query<(Entity, &Name)>,
+    parents: &Query<&ChildOf>,
+) -> HashSet<String> {
+    names
+        .iter()
+        .filter(|(entity, _)| is_descendant(*entity, root, parents))
+        .map(|(_, name)| name.to_string())
+        .collect()
+}
+
+/// Maps each glTF material index used by the root's meshes to its material
+/// kind, preferring MToon when meshes of the same index were converted.
+pub(crate) fn resolved_material_kinds(
+    root: Entity,
+    materials: &Query<(Entity, &VrmMaterialIndex, Option<&MeshMaterial3d<MToonMaterial>>)>,
+    parents: &Query<&ChildOf>,
+) -> HashMap<usize, crate::expression::source::MaterialKind> {
+    use crate::expression::source::MaterialKind;
+
+    let mut kinds = HashMap::default();
+    for (entity, index, mtoon) in materials.iter() {
+        if !is_descendant(entity, root, parents) {
+            continue;
+        }
+        if matches!(kinds.get(&index.0), Some(MaterialKind::MToon)) {
+            continue;
+        }
+        let kind = if mtoon.is_some() {
+            MaterialKind::MToon
+        } else {
+            MaterialKind::Standard
+        };
+        kinds.insert(index.0, kind);
+    }
+    kinds
 }
 
 /// Resolves the dynamic arm motion rest geometry (Issue #175).

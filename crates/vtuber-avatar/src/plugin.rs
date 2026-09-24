@@ -8,7 +8,6 @@ use bevy::app::AnimationSystems;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
-use bevy_vrm1::vrm::body_tracking::apply_direct_body_tracking;
 
 use crate::arm_pose::ArmPoseOverrideStore;
 use crate::arm_pose::apply_default_arm_pose;
@@ -18,7 +17,14 @@ use crate::body_motion::{
     LossIdleState, PositionInputMetrics, reset_position_metrics_on_lifecycle_change,
     update_body_tracking_position_input,
 };
+use crate::direct_look::register_direct_look;
+use crate::direct_pose::{apply_direct_body_tracking, register_direct_pose};
+use crate::direct_position::register_direct_position;
 use crate::expression::apply_tracked_expressions;
+use crate::expression::material::{
+    apply_expression_materials, register_gltf_material_index_handler,
+    restore_expression_materials_on_unload,
+};
 use crate::expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
     apply_manual_expression_requests,
@@ -56,9 +62,16 @@ pub struct VtuberAvatarPlugin;
 
 impl Plugin for VtuberAvatarPlugin {
     fn build(&self, app: &mut App) {
+        // The glTF loader handler must be registered before the loader
+        // plugin's `finish` snapshots the handler list; it tags mesh
+        // entities with their glTF material index at load time.
+        register_gltf_material_index_handler(app);
         app.add_plugins(VrmPlugin)
-            .add_plugins(crate::compatibility::VrmCompatibilityPlugin)
-            .init_resource::<AvatarLifecycle>()
+            .add_plugins(crate::compatibility::VrmCompatibilityPlugin);
+        register_direct_pose(app);
+        register_direct_position(app);
+        register_direct_look(app);
+        app.init_resource::<AvatarLifecycle>()
             .init_resource::<AvatarCameraControl>()
             .init_resource::<CameraPointerInputGate>()
             .init_resource::<CameraPointerGesture>()
@@ -80,10 +93,7 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<crate::body_motion::BodyFollowFilter>()
             .init_resource::<crate::tracking_profile::GlobalBodyTrackingProfile>()
             .init_resource::<crate::look::AvatarLookSettings>()
-            .init_resource::<crate::look::StandardLookBases>()
             .init_resource::<crate::look::AvatarMaterialRoles>()
-            .init_resource::<crate::look::StudioLookState>()
-            .init_resource::<crate::look::PortraitFinishState>()
             .add_message::<crate::look::LookSettingsChanged>()
             .add_message::<crate::look::MaterialRoleOverridesChanged>()
             .add_systems(
@@ -91,25 +101,8 @@ impl Plugin for VtuberAvatarPlugin {
                 (
                     crate::look::apply_look_settings_changes,
                     crate::look::apply_material_role_overrides
-                        .after(crate::look::clear_look_materials_on_unload),
-                    crate::look::sync_portrait_finish
                         .after(crate::look::apply_look_settings_changes),
-                    crate::look::initialize_look_materials
-                        .after(crate::look::clear_look_materials_on_unload),
-                    crate::look::initialize_mtoon_look_materials
-                        .after(crate::look::clear_look_materials_on_unload),
-                    crate::look::clear_look_materials_on_unload.after(despawn_unloading_avatar),
-                    crate::look::setup_studio_lighting,
-                    crate::look::apply_environment_to_avatar_cameras,
                 ),
-            )
-            .add_systems(
-                PostUpdate,
-                (
-                    crate::look::apply_standard_portrait_settings,
-                    crate::look::apply_mtoon_portrait_settings,
-                )
-                    .after(TransformSystems::Propagate),
             )
             .add_message::<LoadAvatarRequest>()
             .add_message::<LoadAvatarResult>()
@@ -126,6 +119,7 @@ impl Plugin for VtuberAvatarPlugin {
                 (
                     handle_load_imported_avatar_requests,
                     apply_avatar_request_events,
+                    restore_expression_materials_on_unload,
                     despawn_unloading_avatar,
                     observe_initialized,
                     bind_humanoid_bones,
@@ -153,12 +147,6 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(
                 PostUpdate,
                 frame_avatar_camera.after(TransformSystems::Propagate),
-            )
-            .add_systems(
-                PostUpdate,
-                crate::look::sync_studio_lighting
-                    .after(TransformSystems::Propagate)
-                    .after(frame_avatar_camera),
             )
             .add_systems(
                 PostUpdate,
@@ -210,11 +198,14 @@ impl Plugin for VtuberAvatarPlugin {
                     .after(VrmSystemSets::GazeControl)
                     .before(VrmSystemSets::Expressions),
             )
+            .add_systems(
+                PostUpdate,
+                apply_expression_materials.after(VrmSystemSets::Expressions),
+            )
             .add_systems(Update, reset_pose_metrics_on_lifecycle_change)
             .add_systems(Update, reset_position_metrics_on_lifecycle_change)
             .add_systems(Update, crate::pose::debug_propagation_probe);
         register_output_systems(app);
-        crate::look::register_portrait_finish(app);
     }
 }
 

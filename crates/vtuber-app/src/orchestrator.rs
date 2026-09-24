@@ -1524,12 +1524,31 @@ fn prepare_avatar_load(
     let id = AvatarAssetId::new(&pending.model.id);
     let path = vtuber_avatar::UserAssetPath::avatar_model_path(&id)
         .map_err(|error| OrchestratorError::AvatarLoadRejected(error.to_string()))?;
+    // Managed copies stored by older versions may predate the VRM 0.x
+    // conversion or the VRM 1.0 expression adaptation. The managed copy
+    // alone is adapted in place; the user's original file is neither
+    // required nor rewritten.
+    crate::import::ensure_managed_model_ready(&pending.model.asset_path)
+        .map_err(|error| OrchestratorError::AvatarLoadRejected(error.to_string()))?;
+    // The managed copy's `VRMC_vrm.expressions` (custom-origin record and
+    // material bind entries included) is the single source of truth the
+    // bind step resolves against the live scene. An unreadable managed copy
+    // also fails the runtime asset load, so the facts are best-effort here.
+    let expressions =
+        crate::import::read_runtime_expression_facts(&pending.model.asset_path)
+            .unwrap_or_default();
     let expected_generation = match pending.model.summary.generation {
         VrmGeneration::Vrm0 => vtuber_avatar::ExpectedVrmGeneration::Vrm0,
         VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
     };
-    let imported =
-        vtuber_avatar::ImportedAvatar::new(id, path, &pending.model.name, expected_generation);
+    let imported = vtuber_avatar::ImportedAvatar::new(
+        id,
+        path,
+        &pending.model.name,
+        expected_generation,
+    )
+    .with_warnings(pending.model.summary.compatibility_warnings.clone())
+    .with_expressions(expressions);
     Ok((
         vtuber_avatar::LoadImportedAvatarRequest {
             request_id: pending.request_id,
@@ -1710,7 +1729,6 @@ mod tests {
             .init_resource::<AvatarLifecycle>()
             .init_resource::<vtuber_avatar::AvatarLookSettings>()
             .init_resource::<vtuber_avatar::AvatarMaterialRoles>()
-            .init_resource::<vtuber_avatar::StandardLookBases>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<bevy_vrm1::prelude::MToonMaterial>>()
             .insert_resource(ArmPoseSettings::empty_at(path))
@@ -1724,11 +1742,8 @@ mod tests {
                 (
                     process_ui_actions_system,
                     sync_avatar_lifecycle_system,
-                    vtuber_avatar::look::clear_look_materials_on_unload,
                     vtuber_avatar::look::apply_look_settings_changes,
                     vtuber_avatar::look::apply_material_role_overrides,
-                    vtuber_avatar::look::initialize_look_materials,
-                    vtuber_avatar::look::initialize_mtoon_look_materials,
                 )
                     .chain(),
             );

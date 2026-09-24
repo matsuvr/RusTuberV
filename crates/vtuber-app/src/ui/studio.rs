@@ -1665,39 +1665,45 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
 
 /// Rich-look switch and lighting/effect strength.
 ///
-/// The strength scales the whole look, so at 0 the scene is the standard
-/// display even while the switch is on.
-fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+/// The rich rendering pipeline is not provided yet (`#93`–`#96`); the
+/// controls are therefore shown disabled with an explicit "not available"
+/// notice. The saved settings are still kept and displayed as saved values,
+/// never as a currently active feature, and no look action is emitted.
+fn render_rich_look_controls(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    _state: &mut UiState,
+    lang: UiLanguage,
+) {
     let switch = lang.pick("リッチ表示", "Enhanced look", "增强显示", "고급 렌더링");
     section(ui, switch, |ui| {
-        let mut enabled = vm.look.enabled;
-        if ui.checkbox(&mut enabled, switch).changed() {
-            state.emit(UiAction::ChangeRichLook(
-                crate::actions::RichLookChange::Enabled(enabled),
-            ));
-            state.emit(UiAction::SaveRichLook);
-        }
+        let saved = lang.pick(
+            "保存済み",
+            "Saved setting",
+            "已保存设置",
+            "저장된 설정",
+        );
+        let mut shown_enabled = vm.look.enabled;
+        ui.add_enabled(
+            false,
+            egui::Checkbox::new(
+                &mut shown_enabled,
+                format!("{switch}（{saved}）"),
+            ),
+        );
         let mut percent = vm.look.strength * 100.0;
-        let slider = ui.add_enabled(
-            enabled,
+        ui.add_enabled(
+            false,
             egui::Slider::new(&mut percent, 0.0..=100.0)
                 .suffix("%")
                 .text(lang.pick("効果の強さ", "Effect strength", "效果强度", "효과 강도")),
         );
-        if slider.changed() {
-            state.emit(UiAction::ChangeRichLook(
-                crate::actions::RichLookChange::Strength(percent / 100.0),
-            ));
-        }
-        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-            state.emit(UiAction::SaveRichLook);
-        }
         ui.add_space(4.0);
         ui.label(lang.pick(
-            "照明と質感をまとめて調整します。VRMファイルは変更しません。",
-            "Adjust lighting and materials together. Your VRM file is not modified.",
-            "同时调整灯光和材质，不修改 VRM 文件。",
-            "조명과 재질을 함께 조정합니다. VRM 파일은 변경하지 않습니다.",
+            "リッチ表示は現在提供されていません。標準表示で描画されています。保存した設定はそのまま残ります。",
+            "The enhanced look is not available yet; rendering uses the standard display. Your saved settings are kept.",
+            "增强显示尚未提供，当前以标准显示渲染。已保存的设置会保留。",
+            "고급 렌더링은 아직 제공되지 않으며 표준 화면으로 렌더링됩니다. 저장된 설정은 유지됩니다.",
         ));
     });
 }

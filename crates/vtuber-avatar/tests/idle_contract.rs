@@ -18,11 +18,10 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use bevy_vrm1::prelude::BodyTrackingPositionInput;
 use vtuber_avatar::{
-    ActiveAvatar, AvatarAssetId, AvatarBinding, AvatarGeneration, AvatarLifecycle, DefaultArmPose,
-    IDLE_PROCEDURAL_AMPLITUDE_METERS, IdleMotionProfile, LossIdleState, PositionInputMetrics,
-    update_body_tracking_position_input,
+    ActiveAvatar, AvatarAssetId, AvatarBinding, AvatarGeneration, AvatarLifecycle,
+    BodyTrackingPositionInput, DefaultArmPose, IDLE_PROCEDURAL_AMPLITUDE_METERS, IdleMotionProfile,
+    LossIdleState, PositionInputMetrics, update_body_tracking_position_input,
 };
 use vtuber_core::types::AvatarControlFrame;
 use vtuber_core::types::{

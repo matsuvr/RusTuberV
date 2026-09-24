@@ -248,10 +248,12 @@ pub struct ImportMeta {
 /// The copied file is placed at `asset_root/avatars/<sha256>/model.vrm`.
 /// A metadata file is written at `asset_root/avatars/<sha256>/import.toml`.
 ///
-/// When the source declares more morph targets per mesh than the Bevy runtime
-/// supports, the stored copy is normalized by
-/// [`normalize_vrm_morph_targets`]; the identity hash always refers to the
-/// original source bytes.
+/// VRM 0.x sources are converted into VRM 1.0-shaped bytes by
+/// `vtuber_avatar::convert_vrm0_to_vrm1` before storing, so the unmodified
+/// upstream runtime loads the managed copy directly. When the source declares
+/// more morph targets per mesh than the Bevy runtime supports, the stored
+/// copy is additionally normalized by [`normalize_vrm_morph_targets`]; the
+/// identity hash always refers to the original source bytes.
 pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
     source: P,
     asset_root: Q,
@@ -288,10 +290,11 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let source_bytes = fs::read(source)?;
     let id = format!("{:x}", Sha256::digest(&source_bytes));
-    let stored_bytes = match normalize_vrm_morph_targets(&source_bytes) {
+    let runtime_bytes = runtime_ready_source_bytes(&source_bytes, summary.generation)?;
+    let stored_bytes = match normalize_vrm_morph_targets(&runtime_bytes) {
         Some(normalized) => normalized,
         None => {
-            if let Some(target_count) = over_limit_morph_target_count(&source_bytes) {
+            if let Some(target_count) = over_limit_morph_target_count(&runtime_bytes) {
                 return Err(ModelImportError::InvalidVrmField {
                     path: "meshes[*].primitives[*].targets".to_string(),
                     reason: format!(
@@ -300,7 +303,7 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
                     ),
                 });
             }
-            source_bytes
+            runtime_bytes
         }
     };
 
@@ -1073,6 +1076,103 @@ fn check_external_uris(document: &gltf::Document) -> Result<(), ModelImportError
         }
     }
     Ok(())
+}
+
+/// Converts a VRM 0.x source into VRM 1.0-shaped bytes for the runtime and
+/// adapts VRM 1.0 sources to the upstream expression contract.
+///
+/// `generation` is the preflight classification; the adaptation itself is
+/// selected from the root extension by
+/// `vtuber_avatar::prepare_managed_vrm_bytes`. VRM 0.x sources are
+/// normalized into the VRM 1.0 shape, and VRM 1.0 sources get the app-side
+/// expression adaptation: author-defined `custom` expressions are merged
+/// into the `preset` map the unmodified upstream runtime reads, and the
+/// optional `isBinary` / `override*` fields the upstream serde requires are
+/// filled with their specification defaults. Conversion failures become
+/// [`ModelImportError`]s; the source file itself is never modified.
+pub fn runtime_ready_source_bytes(
+    source_bytes: &[u8],
+    generation: VrmGeneration,
+) -> Result<Vec<u8>, ModelImportError> {
+    match vtuber_avatar::prepare_managed_vrm_bytes(source_bytes) {
+        Ok(Some(prepared)) => Ok(prepared),
+        Ok(None) => match generation {
+            VrmGeneration::Vrm0 => Err(ModelImportError::NotVrm {
+                reason:
+                    "preflight classified the source as VRM 0.x but it carries no VRM extension"
+                        .to_string(),
+            }),
+            VrmGeneration::Vrm1 => Ok(source_bytes.to_vec()),
+        },
+        Err(error) => Err(vrm0_convert_error(error)),
+    }
+}
+
+/// Upgrades a managed copy stored by an older application version.
+///
+/// Reads the managed copy and applies the shared format adaptation
+/// (`vtuber_avatar::prepare_managed_vrm_bytes`): an unconverted VRM 0.x copy
+/// (raw root `VRM` extension) is converted into the VRM 1.0 shape, and a
+/// VRM 1.0 copy gets the expression adaptation (custom merge and omitted
+/// spec defaults). Morph-target normalization is re-applied on top, matching
+/// the import pipeline. The managed copy alone carries everything the
+/// adaptation needs, so a moved or deleted original file does not block it,
+/// and the user's source file is never read or rewritten.
+///
+/// The managed copy is a cache. Returns `true` when the file was rewritten.
+pub fn ensure_managed_model_ready(managed_path: &Path) -> Result<bool, ModelImportError> {
+    let current = match fs::read(managed_path) {
+        Ok(current) => current,
+        // There is no managed copy to adapt; the runtime asset load surfaces
+        // the missing file as an avatar load failure.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let runtime_bytes = match vtuber_avatar::prepare_managed_vrm_bytes(&current) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => current.clone(),
+        Err(error) => return Err(vrm0_convert_error(error)),
+    };
+    let stored_bytes = normalize_vrm_morph_targets(&runtime_bytes).unwrap_or(runtime_bytes);
+    if stored_bytes != current {
+        write_atomic(managed_path, &stored_bytes)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Reads the runtime expression facts from a managed model.
+///
+/// The managed copy is VRM 1.0-shaped (VRM 0.x sources are converted at
+/// import or by [`ensure_managed_model_ready`]), so the `VRMC_vrm`
+/// expression section — including the app-retained `custom` origin record
+/// and material bind entries — is the single source of truth for binding.
+///
+/// Returns an empty fact set when the file cannot be read: such a managed
+/// copy also fails the runtime asset load, so the lifecycle surfaces the
+/// failure through [`ModelImportError`]s there.
+pub fn read_runtime_expression_facts(
+    managed_path: &Path,
+) -> Result<vtuber_avatar::SourceExpressions, ModelImportError> {
+    let bytes = fs::read(managed_path)?;
+    let (json, _) = parse_glb(&bytes).ok_or_else(|| {
+        ModelImportError::GlbParse("managed model is not a binary glTF container".into())
+    })?;
+    Ok(vtuber_avatar::parse_source_expressions(&json))
+}
+
+fn vrm0_convert_error(error: vtuber_avatar::Vrm0ConvertError) -> ModelImportError {
+    use vtuber_avatar::Vrm0ConvertError as ConvertError;
+    match error {
+        ConvertError::NotGlb => ModelImportError::GlbParse("not a binary glTF container".into()),
+        ConvertError::InvalidJson(reason) => ModelImportError::GlbParse(reason),
+        ConvertError::NotVrm0 => ModelImportError::NotVrm {
+            reason: "no VRM 0.x extension to convert".to_string(),
+        },
+        ConvertError::InvalidField { path, reason } => {
+            ModelImportError::InvalidVrmField { path, reason }
+        }
+    }
 }
 
 /// Rewrites a GLB so that no mesh carries more than [`MAX_MORPH_TARGETS`]
@@ -1896,9 +1996,12 @@ humanoid_nodes = { hips = 0, head = 1 }
             .expect("re-import should repair the cached file");
 
         assert_eq!(repaired.id, imported.id);
+        // The managed copy carries the VRM 1.0 expression adaptation (custom
+        // expressions merged into `preset`, optional fields filled), so it is
+        // the adapted runtime bytes rather than the raw source.
         assert_eq!(
             fs::read(&repaired.asset_path).unwrap(),
-            fs::read(source).unwrap()
+            runtime_ready_source_bytes(&fs::read(source).unwrap(), VrmGeneration::Vrm1).unwrap()
         );
     }
 
@@ -1954,12 +2057,16 @@ humanoid_nodes = { hips = 0, head = 1 }
             .expect("over-limit model should import");
 
         // Identity remains keyed to the original bytes; the stored copy is
-        // normalized.
+        // the VRM 1.0-shaped conversion, morph-normalized.
         let source_bytes = fs::read(&source).unwrap();
         assert_eq!(imported.id, format!("{:x}", Sha256::digest(&source_bytes)));
         assert_ne!(fs::read(&imported.asset_path).unwrap(), source_bytes);
 
         let json = stored_glb_json(&imported);
+        assert!(
+            json["extensions"].get("VRM").is_none(),
+            "managed copy is VRM 1.0-shaped"
+        );
         let mesh = &json["meshes"][0];
         let targets = mesh["primitives"][0]["targets"].as_array().unwrap();
         assert_eq!(targets.len(), 2);
@@ -1970,11 +2077,22 @@ humanoid_nodes = { hips = 0, head = 1 }
         assert_eq!(weights[0], 0.25);
         assert_eq!(weights[1], 0.75);
 
-        let groups = &json["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"];
-        let binds = groups[0]["binds"].as_array().unwrap();
-        assert_eq!(binds[0]["mesh"], 0);
-        assert_eq!(binds[0]["index"], 0);
-        assert_eq!(binds[1]["index"], 1);
+        // The legacy mesh/morph binds were converted to node binds (mesh 0 is
+        // instanced by nodes 3 and 4) and remapped to the reduced targets.
+        let binds =
+            json["extensions"]["VRMC_vrm"]["expressions"]["preset"]["aa"]["morphTargetBinds"]
+                .as_array()
+                .unwrap();
+        let pairs = binds
+            .iter()
+            .map(|bind| {
+                (
+                    bind["node"].as_u64().unwrap(),
+                    bind["index"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pairs, vec![(3, 0), (4, 0), (3, 1), (4, 1)]);
 
         // Re-import is idempotent and keeps the normalized copy.
         let reimported =
@@ -1987,15 +2105,239 @@ humanoid_nodes = { hips = 0, head = 1 }
     }
 
     #[test]
-    fn import_keeps_models_within_the_morph_limit_unchanged() {
+    fn import_converts_vrm0_within_limits_to_vrm1_shape() {
         let dir = TempDir::new().unwrap();
         let source = vrm0_fixture(&dir);
         let asset_root = dir.path().join("asset-root");
         let imported =
             import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+        // Identity stays keyed to the source bytes, but the managed copy is
+        // the converted VRM 1.0 shape with the binary chunk preserved.
+        let source_bytes = fs::read(&source).unwrap();
+        assert_eq!(imported.id, format!("{:x}", Sha256::digest(&source_bytes)));
+        let json = stored_glb_json(&imported);
+        assert!(
+            json["extensions"].get("VRM").is_none(),
+            "managed copy drops the legacy extension"
+        );
         assert_eq!(
-            fs::read(&imported.asset_path).unwrap(),
-            fs::read(&source).unwrap()
+            json["extensions"]["VRMC_vrm"]["specVersion"], "1.0",
+            "managed copy carries the normalized descriptor"
+        );
+        assert!(
+            json["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]
+                .as_object()
+                .is_some_and(|bones| !bones.is_empty()),
+            "humanoid survives conversion"
+        );
+    }
+
+    /// Builds a VRM 0.x fixture whose meta carries explicit permission
+    /// strings and whose expressions declare legacy `materialValues`, to
+    /// exercise the R2/R3/R5 managed-copy behavior end to end.
+    fn vrm0_permissions_fixture(dir: &TempDir) -> PathBuf {
+        let mut root: serde_json::Value = serde_json::from_str(VRM0_GLTF_JSON).unwrap();
+        root["extensions"]["VRM"]["meta"]["allowedUserName"] =
+            serde_json::json!("OnlyAuthor");
+        root["extensions"]["VRM"]["meta"]["violentUsageName"] =
+            serde_json::json!("Disallow");
+        root["extensions"]["VRM"]["meta"]["sexualUsageName"] = serde_json::json!("Allow");
+        root["extensions"]["VRM"]["meta"]["commercialUsageName"] =
+            serde_json::json!("Allow");
+        root["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"][0]
+            ["materialValues"] = serde_json::json!([
+                {
+                    "materialName": "Body",
+                    "propertyName": "_Color",
+                    "targetValue": [0.8, 0.2, 0.1, 1.0]
+                }
+            ]);
+        write_glb_fixture(dir, "vrm0-permissions.vrm", &root.to_string())
+    }
+
+    #[test]
+    fn import_preserves_permissions_and_material_binds_in_the_managed_copy() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm0_permissions_fixture(&dir);
+        let imported =
+            import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
+                .expect("fixture imports");
+        let json = stored_glb_json(&imported);
+        let meta = &json["extensions"]["VRMC_vrm"]["meta"];
+
+        // R5: the managed copy records what the source actually permitted —
+        // mapped strings pass through, VRM 0.x fields with no VRM 1.0
+        // counterpart record no permission instead of `true`.
+        assert_eq!(meta["allowExcessivelySexualUsage"], true);
+        assert_eq!(meta["allowExcessivelyViolentUsage"], false);
+        assert_eq!(meta["allowRedistribution"], false);
+        assert_eq!(meta["allowAntisocialOrHateUsage"], false);
+        assert_eq!(meta["allowPoliticalOrReligiousUsage"], false);
+        assert_eq!(meta["avatarPermission"], "OnlyAuthor");
+        assert_eq!(meta["commercialUsage"], "Allow");
+
+        // R3: legacy `materialValues` survive conversion as VRM 1.0 color
+        // binds, with the glTF material index of the named material.
+        let happy = &json["extensions"]["VRMC_vrm"]["expressions"]["preset"]["aa"];
+        let color_binds = happy["materialColorBinds"].as_array().unwrap();
+        assert_eq!(color_binds.len(), 1);
+        assert_eq!(color_binds[0]["material"], 0);
+        assert_eq!(color_binds[0]["type"], "color");
+        assert_eq!(
+            color_binds[0]["targetValue"],
+            serde_json::json!([0.8_f32, 0.2_f32, 0.1_f32, 1.0_f32])
+        );
+
+        // R2: the custom-origin record is retained next to the merged
+        // `preset` entry.
+        let custom = &json["extensions"]["VRMC_vrm"]["expressions"]["custom"];
+        assert!(custom.get("customSmile").is_some());
+    }
+
+    #[test]
+    fn import_adapts_vrm1_custom_expressions_and_omitted_defaults() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm1_fixture(&dir);
+        let imported =
+            import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
+                .expect("fixture imports");
+        let json = stored_glb_json(&imported);
+        let expressions = &json["extensions"]["VRMC_vrm"]["expressions"];
+        let preset = expressions["preset"].as_object().unwrap();
+
+        // Custom expressions reach the `preset` map the runtime reads, with
+        // their names exact, and keep the custom-origin record.
+        assert!(preset.contains_key("JawOpen"));
+        assert!(preset.contains_key("笑顔"));
+        assert!(expressions["custom"].get("JawOpen").is_some());
+        // Optional spec fields are filled so the upstream serde contract
+        // accepts the file.
+        assert_eq!(preset["JawOpen"]["isBinary"], false);
+        assert_eq!(preset["JawOpen"]["overrideBlink"], "none");
+
+        // The runtime facts read back from the same managed copy keep the
+        // provenance exactly.
+        let facts = read_runtime_expression_facts(&imported.asset_path).unwrap();
+        assert!(!facts.entry("JawOpen").unwrap().declared_as_preset);
+        assert!(facts.entry("happy").unwrap().declared_as_preset);
+    }
+
+    #[test]
+    fn ensure_managed_model_ready_adapts_stale_vrm1_copies_without_the_original() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm1_fixture(&dir);
+        let asset_root = dir.path().join("asset-root");
+        let imported =
+            import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+        let source_bytes = fs::read(&source).unwrap();
+        let expected = runtime_ready_source_bytes(&source_bytes, VrmGeneration::Vrm1).unwrap();
+
+        // Simulate a managed copy stored before the VRM 1.0 adaptation (the
+        // raw source passthrough) with the original moved away: the managed
+        // copy alone must still be adapted.
+        fs::write(&imported.asset_path, &source_bytes).unwrap();
+        fs::remove_file(&source).unwrap();
+        assert!(
+            ensure_managed_model_ready(&imported.asset_path).expect("adaptation succeeds"),
+            "the stale copy must be rewritten"
+        );
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), expected);
+
+        // Custom origin and omitted defaults survive the managed-copy-only
+        // adaptation.
+        let facts = read_runtime_expression_facts(&imported.asset_path).unwrap();
+        assert!(!facts.entry("JawOpen").unwrap().declared_as_preset);
+        assert!(facts.entry("happy").unwrap().declared_as_preset);
+
+        // A second run is a no-op.
+        assert!(
+            !ensure_managed_model_ready(&imported.asset_path).expect("second run succeeds"),
+            "an adapted copy must not be rewritten again"
+        );
+    }
+
+    #[test]
+    fn ensure_managed_model_ready_converts_vrm0_copies_without_the_original() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm0_fixture(&dir);
+        let asset_root = dir.path().join("asset-root");
+        let imported =
+            import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+        let source_bytes = fs::read(&source).unwrap();
+        let expected = runtime_ready_source_bytes(&source_bytes, VrmGeneration::Vrm0).unwrap();
+
+        // Simulate an unconverted VRM 0.x managed copy with no original.
+        fs::write(&imported.asset_path, &source_bytes).unwrap();
+        fs::remove_file(&source).unwrap();
+        assert!(
+            ensure_managed_model_ready(&imported.asset_path).expect("conversion succeeds"),
+            "the unconverted copy must be rewritten"
+        );
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), expected);
+
+        let json = stored_glb_json(&imported);
+        assert!(
+            json["extensions"].get("VRM").is_none(),
+            "managed copy is VRM 1.0-shaped"
+        );
+        assert!(json["extensions"].get("VRMC_vrm").is_some());
+    }
+
+    /// Builds a VRM 0.x fixture whose only `happy` expression is an author
+    /// custom (`presetName: "unknown"`); the standard Joy group is removed,
+    /// so a later adaptation could mistake the merged copy for a genuine
+    /// standard preset collision.
+    fn vrm0_custom_happy_fixture(dir: &TempDir) -> PathBuf {
+        let mut root: serde_json::Value = serde_json::from_str(VRM0_GLTF_JSON).unwrap();
+        let groups = root["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"]
+            .as_array_mut()
+            .unwrap();
+        groups.retain(|group| group["presetName"] != "Joy");
+        groups.push(serde_json::json!({"name": "happy", "presetName": "unknown"}));
+        write_glb_fixture(dir, "vrm0-custom-happy.vrm", &root.to_string())
+    }
+
+    #[test]
+    fn ensure_managed_model_ready_keeps_a_vrm0_custom_origin_and_classification() {
+        let dir = TempDir::new().unwrap();
+        let source = vrm0_custom_happy_fixture(&dir);
+        let asset_root = dir.path().join("asset-root");
+        let imported =
+            import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
+
+        // The VRM0 conversion emits the same output contract as the VRM 1.0
+        // adaptation: the custom origin record carries the merged-custom
+        // marker, while the runtime `preset` copy does not.
+        let json = stored_glb_json(&imported);
+        let expressions = &json["extensions"]["VRMC_vrm"]["expressions"];
+        assert!(expressions["preset"].get("happy").is_some());
+        assert_eq!(
+            expressions["custom"]["happy"][vtuber_avatar::vrm1::MERGED_CUSTOM_MARKER],
+            serde_json::json!(true)
+        );
+
+        // Load preparation re-runs the shared adaptation on the converted
+        // copy. The marked record must survive: origin and classification
+        // stay custom and the managed copy is not rewritten.
+        let managed_before = fs::read(&imported.asset_path).unwrap();
+        assert!(!ensure_managed_model_ready(&imported.asset_path).expect("ensure succeeds"));
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), managed_before);
+        let facts = read_runtime_expression_facts(&imported.asset_path).unwrap();
+        let happy = facts.entry("happy").expect("happy fact");
+        assert!(!happy.declared_as_preset);
+        assert_eq!(
+            vtuber_avatar::classify_expression("happy", happy.declared_as_preset),
+            vtuber_avatar::ExpressionKind::Custom
+        );
+
+        // The managed copy alone carries everything: repeated ensure and a
+        // deleted original change neither the copy nor the facts.
+        fs::remove_file(&source).unwrap();
+        assert!(!ensure_managed_model_ready(&imported.asset_path).expect("ensure succeeds"));
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), managed_before);
+        assert_eq!(
+            read_runtime_expression_facts(&imported.asset_path).unwrap(),
+            facts
         );
     }
 

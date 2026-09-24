@@ -1,40 +1,19 @@
-//! Rich-look ("リッチ表示") settings and owned look state.
+//! Look settings UI state.
 //!
-//! This module owns only the look switch/strength and the small snapshot of
-//! the material fields the look is allowed to write. Expression-owned fields
-//! (color, emission, UV) stay owned by the existing expression writer, so the
-//! two never fight over the same material values.
+//! `#91` carries no rich rendering: this module owns only the look
+//! switch/strength resource and the role-selection resource the settings UI
+//! edits. Every system that wrote materials, lights, or the finish was removed
+//! with the old rich implementation; the rendering follow-ups (`#93`–`#96`)
+//! reconnect the UI state kept here.
 
-mod finish;
-mod lighting;
 mod material;
-mod mtoon;
 mod preset;
 
-pub use finish::{
-    PORTRAIT_FINISH, PortraitFinish, PortraitFinishPass, PortraitFinishState,
-    register_portrait_finish, resolve_portrait_finish, sync_portrait_finish,
-};
-pub use lighting::{
-    StudioLight, StudioLightSlot, StudioLookState, StudioRig, apply_environment_to_avatar_cameras,
-    blend_studio_rig, setup_studio_lighting, solve_studio_rig, studio_environment_cubemap,
-    sync_studio_lighting,
-};
 pub use material::{
     AvatarMaterialRoles, MaterialRole, MaterialRoleOverride, MaterialRoleOverridesChanged,
-    StandardLookBase, StandardLookBases, apply_material_role_overrides,
-    apply_standard_portrait_settings, capture_standard_look_base, clear_look_materials_on_unload,
-    infer_material_role, initialize_look_materials, initialize_mtoon_look_materials,
-    resolve_material_role, resolve_standard_portrait, resolve_standard_role_params,
+    apply_material_role_overrides, resolve_material_role,
 };
-pub use mtoon::{
-    apply_mtoon_portrait_settings, head_world_forward, resolve_mtoon_portrait,
-    resolve_mtoon_shading_mode,
-};
-pub use preset::{
-    MTOON_PORTRAIT_PRESET, RichLookSettings, STUDIO_PRESET, StudioLightPreset, StudioPreset,
-    blend_look_scalar, effective_look_strength, face_lighting_normal, resolve_mtoon_role_params,
-};
+pub use preset::RichLookSettings;
 
 use bevy::prelude::*;
 
