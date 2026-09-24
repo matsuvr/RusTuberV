@@ -5,7 +5,8 @@
 //! re-exported from the crate facade.
 
 use bevy::app::AnimationSystems;
-use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{Exposure, visibility::RenderLayers};
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
@@ -21,13 +22,13 @@ use crate::direct_look::register_direct_look;
 use crate::direct_pose::{apply_direct_body_tracking, register_direct_pose};
 use crate::direct_position::register_direct_position;
 use crate::expression::apply_tracked_expressions;
-use crate::expression::material::{
-    apply_expression_materials, register_gltf_material_index_handler,
-    restore_expression_materials_on_unload,
-};
 use crate::expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
     apply_manual_expression_requests,
+};
+use crate::expression::material::{
+    apply_expression_materials, register_gltf_material_index_handler,
+    restore_expression_materials_on_unload,
 };
 use crate::framing::camera_control::AvatarCameraControl;
 use crate::framing::camera_control::CameraPointerInputGate;
@@ -50,7 +51,7 @@ use crate::pose::{
     PoseApplyMetrics, reset_pose_metrics_on_lifecycle_change, update_body_tracking_pose_input,
 };
 use crate::render_output::{
-    AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER, register_output_systems,
+    AVATAR_RENDER_LAYER, AvatarOutputCamera, VIEWPORT_ONLY_RENDER_LAYER, register_output_systems,
 };
 use crate::unload::{
     ActiveControlFrame, clear_control_cache_on_lifecycle_change, despawn_unloading_avatar,
@@ -114,6 +115,7 @@ impl Plugin for VtuberAvatarPlugin {
             .add_message::<LoadImportedAvatarResult>()
             .add_message::<ResetCameraRequest>()
             .add_systems(Startup, setup_scene)
+            .add_systems(PostStartup, setup_avatar_display)
             .add_systems(
                 Update,
                 (
@@ -147,6 +149,10 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(
                 PostUpdate,
                 frame_avatar_camera.after(TransformSystems::Propagate),
+            )
+            .add_systems(
+                PostUpdate,
+                align_standard_light_to_camera.after(frame_avatar_camera),
             )
             .add_systems(
                 PostUpdate,
@@ -217,11 +223,26 @@ impl Plugin for VtuberAvatarPlugin {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct StartupModelPath(pub Option<String>);
 
+/// The single, fixed-strength Native directional light; never a Look light.
+#[derive(Component)]
+struct StandardAvatarLight;
+
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // No ambient fill or environment lighting in the Native baseline.
+    // Author-supplied emission remains part of the unchanged materials.
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::WHITE,
+        brightness: 0.0,
+        affects_lightmapped_meshes: false,
+    });
+
+    let camera_transform = Transform::from_translation(Vec3::new(0.0, 0.0, 2.5))
+        .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
+
     // Ground plane for visual reference.
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(5.0, 5.0))),
@@ -233,21 +254,22 @@ fn setup_scene(
         RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER),
     ));
 
-    // Key light. The level is chosen so a fully lit white surface exposes to
-    // about 0.7 with the default camera exposure, leaving headroom for the
-    // material's own rim/emission instead of clipping to white.
+    // Light travels along the camera's forward (-Z) direction. Keep the
+    // existing illuminance rather than retuning the upstream Native look.
+    // Do not spawn zero-lux Fill/Rim lights: upstream MToon still sees them.
     commands.spawn((
         DirectionalLight {
+            color: Color::WHITE,
             illuminance: 650.0,
+            shadow_maps_enabled: false,
             ..default()
         },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.5, 0.0)),
+        Transform::from_rotation(camera_transform.rotation),
+        StandardAvatarLight,
         RenderLayers::from_layers(&[AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER]),
     ));
 
     // Camera framing the upper body.
-    let camera_transform = Transform::from_translation(Vec3::new(0.0, 0.0, 2.5))
-        .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
@@ -258,6 +280,41 @@ fn setup_scene(
         camera_transform,
         RenderLayers::from_layers(&[AVATAR_RENDER_LAYER, VIEWPORT_ONLY_RENDER_LAYER]),
     ));
+}
+
+// Both cameras exist after Startup, before the first rendered frame.
+// Apply ordinary display settings once, independently of Look: fixed EV100
+// 9.7, SDR (no Hdr component), no tone curve or dithering. Both cameras keep
+// Bevy's default sRGB target format; do not set CompositingSpace, which would
+// switch the window pass to Rgba8Unorm and conflict with the egui pipeline.
+// Keep the existing transparent BGRA output and preview alpha/sRGB conversion
+// unchanged. Later Look systems must not rewrite this policy.
+#[allow(clippy::type_complexity)]
+fn setup_avatar_display(
+    mut commands: Commands,
+    cameras: Query<Entity, Or<(With<AvatarViewportCamera>, With<AvatarOutputCamera>)>>,
+) {
+    for camera in &cameras {
+        commands.entity(camera).insert((
+            Exposure::BLENDER,
+            Tonemapping::None,
+            DebandDither::Disabled,
+        ));
+    }
+}
+
+// Framing writes the camera after transform propagation. Update the root
+// light's GlobalTransform here too, so orbit/reset affect lighting in the same
+// frame. Only the camera is read: head pose and Look strength have no authority
+// over this light's direction, color, illuminance or shadow setting.
+#[allow(clippy::type_complexity)]
+fn align_standard_light_to_camera(
+    camera: Single<&Transform, (With<AvatarViewportCamera>, Without<StandardAvatarLight>)>,
+    light: Single<(&mut Transform, &mut GlobalTransform), With<StandardAvatarLight>>,
+) {
+    let (mut transform, mut global_transform) = light.into_inner();
+    transform.rotation = camera.rotation;
+    *global_transform = GlobalTransform::from(*transform);
 }
 
 fn log_loaded_vrm(vrms: Query<Entity, Added<Vrm>>) {
@@ -275,14 +332,17 @@ fn log_head_bone(heads: Query<Entity, Added<HeadBoneEntity>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::camera::RenderTarget;
+    use crate::render_output::{AvatarOutputState, setup_output_camera};
+    use bevy::camera::{CompositingSpace, Hdr, RenderTarget};
 
     #[test]
     fn setup_scene_keeps_ground_off_the_output_layer() {
         let mut app = App::new();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
-            .add_systems(Startup, setup_scene);
+            .add_systems(Startup, setup_scene)
+            .add_systems(PostStartup, setup_avatar_display)
+            .add_systems(PostUpdate, align_standard_light_to_camera);
         app.update();
 
         let mut ground = app.world_mut().query::<(&Mesh3d, &RenderLayers)>();
@@ -299,27 +359,43 @@ mod tests {
 
         let mut cameras = app
             .world_mut()
-            .query::<(&crate::framing::AvatarViewportCamera, &RenderLayers)>();
-        let viewport_layers = cameras
-            .iter(app.world())
-            .next()
-            .expect("viewport camera")
-            .1
-            .clone();
+            .query_filtered::<(Entity, &Transform, &RenderLayers), With<AvatarViewportCamera>>();
+        let (camera_entity, camera_transform, viewport_layers) =
+            cameras.single(app.world()).expect("viewport camera");
+        let camera_rotation = camera_transform.rotation;
         assert!(viewport_layers.intersects(&RenderLayers::layer(AVATAR_RENDER_LAYER)));
         assert!(viewport_layers.intersects(&RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER)));
 
         let mut lights = app
             .world_mut()
-            .query::<(&DirectionalLight, &RenderLayers)>();
-        let light_layers = lights
-            .iter(app.world())
-            .next()
-            .expect("key light")
-            .1
-            .clone();
+            .query::<(Entity, &DirectionalLight, &Transform, &RenderLayers)>();
+        let (light_entity, light, transform, light_layers) = lights
+            .single(app.world())
+            .expect("exactly one directional light");
         assert!(light_layers.intersects(&RenderLayers::layer(AVATAR_RENDER_LAYER)));
         assert!(light_layers.intersects(&RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER)));
+        assert_eq!(light.color, Color::WHITE);
+        assert_eq!(light.illuminance, 650.0);
+        assert!(!light.shadow_maps_enabled);
+        assert_eq!(transform.rotation, camera_rotation);
+        assert_eq!(app.world().resource::<GlobalAmbientLight>().brightness, 0.0);
+
+        let rotation = Quat::from_euler(EulerRot::YXZ, 0.4, -0.2, 0.0);
+        app.world_mut()
+            .get_mut::<Transform>(camera_entity)
+            .unwrap()
+            .rotation = rotation;
+        app.update();
+        let transform = app.world().get::<Transform>(light_entity).unwrap();
+        assert_eq!(transform.rotation, rotation);
+        assert_eq!(
+            app.world().get::<GlobalTransform>(light_entity),
+            Some(&GlobalTransform::from(*transform))
+        );
+        let light = app.world().get::<DirectionalLight>(light_entity).unwrap();
+        assert_eq!(light.illuminance, 650.0);
+        assert_eq!(light.color, Color::WHITE);
+        assert!(!light.shadow_maps_enabled);
     }
 
     #[test]
@@ -327,7 +403,10 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
-            .add_systems(Startup, setup_scene);
+            .init_resource::<Assets<Image>>()
+            .init_resource::<AvatarOutputState>()
+            .add_systems(Startup, (setup_scene, setup_output_camera))
+            .add_systems(PostStartup, setup_avatar_display);
         app.update();
 
         let mut cameras = app
@@ -338,5 +417,26 @@ mod tests {
             !matches!(target, Some(RenderTarget::Image(_))),
             "egui/webcam overlay on the window must not share the offscreen image target"
         );
+
+        let mut displays =
+            app.world_mut().query_filtered::<(
+                &Exposure,
+                &Tonemapping,
+                &DebandDither,
+                Option<&CompositingSpace>,
+                Option<&Hdr>,
+            ), Or<(With<AvatarViewportCamera>, With<AvatarOutputCamera>)>>(
+            );
+        assert_eq!(displays.iter(app.world()).count(), 2);
+        for (exposure, tone, dither, compositing, hdr) in displays.iter(app.world()) {
+            assert_eq!(exposure.ev100, 9.7);
+            assert_eq!(*tone, Tonemapping::None);
+            assert_eq!(*dither, DebandDither::Disabled);
+            assert!(
+                compositing.is_none(),
+                "both cameras keep Bevy's default sRGB target format"
+            );
+            assert!(hdr.is_none(), "both cameras use the same fixed SDR policy");
+        }
     }
 }
