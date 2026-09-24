@@ -122,8 +122,9 @@ const AVATAR_ONLY_TRANSITION_SECONDS: f32 = 0.36;
 /// Corner radius shared by the avatar monitor card and the expanding preview.
 const MONITOR_CARD_RADIUS: u8 = 8;
 /// Background of the avatar-only view. `UiShellPlugin` installs the same color
-/// as Bevy's window `ClearColor`, so the preview card can dissolve into the 3D
-/// scene without a seam.
+/// as Bevy's window `ClearColor`, and the monitor card fills with it, so the
+/// small preview and the fullscreen view show the avatar on one background and
+/// their colors can be compared directly.
 pub(crate) const STUDIO_BACKGROUND: Color32 = Color32::from_rgb(43, 44, 47);
 
 /// Center of the floating settings control, and therefore the point the
@@ -372,7 +373,7 @@ fn avatar_monitor(
             let profile = texture.profile();
             let height = width * profile.height as f32 / profile.width as f32;
             Frame::new()
-                .fill(Color32::from_gray(228))
+                .fill(STUDIO_BACKGROUND)
                 .corner_radius(CornerRadius::same(MONITOR_CARD_RADIUS))
                 .show(ui, |ui| {
                     let size = vec2(width, height);
@@ -630,7 +631,12 @@ fn paint_avatar_transition(
     root.painter().rect_filled(
         card,
         CornerRadius::same(radius),
-        Color32::from_rgba_unmultiplied(228, 228, 228, background_alpha),
+        Color32::from_rgba_unmultiplied(
+            STUDIO_BACKGROUND.r(),
+            STUDIO_BACKGROUND.g(),
+            STUDIO_BACKGROUND.b(),
+            background_alpha,
+        ),
     );
     let overlay = root.new_child(
         egui::UiBuilder::new()
