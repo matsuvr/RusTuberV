@@ -4,7 +4,11 @@
 //! NDI. The UI samples the texture; it never renders into this camera.
 
 use crate::lifecycle::AvatarGeneration;
-use bevy::camera::{CameraUpdateSystems, ClearColorConfig, RenderTarget, visibility::RenderLayers};
+use bevy::camera::{
+    CameraUpdateSystems, ClearColorConfig, CompositingSpace, Exposure, RenderTarget,
+    visibility::RenderLayers,
+};
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -16,6 +20,21 @@ use vtuber_core::{FrameSeq, VideoOutputFrame, VideoOutputProfile, monotonic_now}
 pub const AVATAR_RENDER_LAYER: usize = 0;
 /// The main-window-only layer containing the ground plane.
 pub const VIEWPORT_ONLY_RENDER_LAYER: usize = 1;
+
+/// Fixed display policy shared by the window and transparent avatar camera.
+///
+/// Both cameras stay SDR (no `Hdr` component), with Bevy's fixed EV100 9.7
+/// exposure and no tone curve or dithering. Keep sRGB compositing and the
+/// existing BGRA/sRGB/alpha output conversion; Look must not change any of
+/// these settings. This is ordinary camera setup, not a Look finish pass.
+pub(crate) fn avatar_display_settings() -> (Exposure, Tonemapping, DebandDither, CompositingSpace) {
+    (
+        Exposure::BLENDER,
+        Tonemapping::None,
+        DebandDither::Disabled,
+        CompositingSpace::Srgb,
+    )
+}
 
 /// Fixed render target and profile used by both the preview and output camera.
 #[derive(Resource, Clone, Debug)]
@@ -208,6 +227,7 @@ pub fn setup_output_camera(
     commands
         .spawn((
             Camera3d::default(),
+            avatar_display_settings(),
             // preview and the NDI output share one finished image.
             camera,
             RenderTarget::Image(image_handle.into()),
@@ -473,7 +493,7 @@ mod tests {
                 .request_replace(next)
                 .expect("ready avatar can be replaced");
             lifecycle.finish_unload();
-            lifecycle.start_binding(next);
+            lifecycle.start_binding(next_root);
             lifecycle.finish_ready();
         }
         app.insert_resource(lifecycle)
