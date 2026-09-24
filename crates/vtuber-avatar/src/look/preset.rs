@@ -1,10 +1,8 @@
 //! Look switch/strength shared UI state.
 //!
-//! `#91` carries no rich rendering: this module keeps only the switch and
-//! strength the settings UI edits and persists. How the strength drives added
-//! lights and app shaders is reintroduced by the follow-up issues (`#93`–
-//! `#96`); until then the renderer always uses the unmodified upstream
-//! display.
+//! This module keeps only the switch and strength the settings UI edits and
+//! persists. `#93` drives the additional lights from these values; the
+//! app-side Rich shaders follow in later issues.
 
 use serde::{Deserialize, Serialize};
 

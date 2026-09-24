@@ -181,6 +181,15 @@ pub(crate) fn avatar_focus_point(head: Vec3, hips: Vec3) -> Option<Vec3> {
     upper_body_bounds(head, hips).map(|bounds| bounds.center())
 }
 
+/// The upper-body focus and vertical size used to place camera-relative Look
+/// lights.
+///
+/// This reuses the framing solve's upper-body bounds rather than introducing a
+/// second body-measurement path.
+pub(crate) fn avatar_focus_and_size(head: Vec3, hips: Vec3) -> Option<(Vec3, f32)> {
+    upper_body_bounds(head, hips).map(|bounds| (bounds.center(), bounds.max().y - bounds.min().y))
+}
+
 fn upper_body_bounds(head: Vec3, hips: Vec3) -> Option<WorldBounds> {
     if !head.is_finite() || !hips.is_finite() {
         return None;
@@ -386,6 +395,19 @@ mod tests {
             upper_body_camera_transform(Vec3::splat(f32::NAN), Vec3::ZERO, FIXED_VERTICAL_FOV)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn look_light_focus_and_size_reuse_the_framing_bounds() {
+        let hips = Vec3::new(0.0, 1.0, 0.0);
+        let head = Vec3::new(0.0, 1.8, 0.0);
+        let bounds = upper_body_bounds(head, hips).expect("valid upper body bounds");
+        let (focus, size) = avatar_focus_and_size(head, hips).expect("valid upper body focus");
+
+        assert_eq!(focus, bounds.center());
+        assert_eq!(size, bounds.max().y - bounds.min().y);
+        assert!(avatar_focus_and_size(Vec3::splat(f32::NAN), hips).is_none());
+        assert!(avatar_focus_and_size(head, Vec3::splat(f32::NAN)).is_none());
     }
 
     #[test]
