@@ -26,6 +26,11 @@ result without modifying the dependency's shader assets. The copies
 keep the upstream MIT OR Apache-2.0 terms; the app-side added terms are this
 repository's MIT code.
 
+`crates/vtuber-avatar/src/look/standard_rich.wgsl` copies the Bevy 0.19.0
+`bevy_pbr` Standard fragment path so the app can add a narrow Rich term to the
+unchanged PBR result. It keeps Bevy's MIT OR Apache-2.0 terms; the app-side
+additive rim is this repository's MIT code.
+
 ## NDI® runtime
 
 This application uses the NDI Standard SDK runtime for

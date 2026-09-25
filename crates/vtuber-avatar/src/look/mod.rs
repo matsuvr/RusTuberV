@@ -2,15 +2,16 @@
 //!
 //! This module owns the look switch/strength resource, the role-selection
 //! resource the settings UI edits, the fixed camera-relative additional light
-//! preset (`#93`), and the app-side Rich MToon material/shader with its thin
-//! outline connection (`#94`). The Standard Rich material and the settings-UI
-//! reconnection still follow.
+//! preset (`#93`), the app-side Rich MToon material/shader with its thin
+//! outline connection (`#94`), and the app-side Rich Standard material
+//! (`#95`). The settings-UI reconnection still follows.
 
 mod lighting;
 mod material;
 mod preset;
 mod rich_mtoon;
 mod rich_outline;
+mod rich_standard;
 
 pub(crate) use lighting::register_look_lighting;
 pub use material::{
@@ -19,6 +20,7 @@ pub use material::{
 };
 pub use preset::RichLookSettings;
 pub(crate) use rich_mtoon::{RichMtoonSwap, register_rich_mtoon};
+pub(crate) use rich_standard::{RichStandardSwap, register_rich_standard};
 
 use bevy::prelude::*;
 
