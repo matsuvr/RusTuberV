@@ -300,6 +300,7 @@ pub fn apply_expression_materials(
         Option<&MeshMaterial3d<MToonMaterial>>,
         Option<&MeshMaterial3d<StandardMaterial>>,
         Option<&crate::look::RichMtoonSwap>,
+        Option<&crate::look::RichStandardSwap>,
     )>,
     mtoon_assets: Option<ResMut<Assets<MToonMaterial>>>,
     standard_assets: Option<ResMut<Assets<StandardMaterial>>>,
@@ -377,7 +378,9 @@ pub fn apply_expression_materials(
 
     let mut visited_mtoon: HashSet<AssetId<MToonMaterial>> = HashSet::new();
     let mut visited_standard: HashSet<AssetId<StandardMaterial>> = HashSet::new();
-    for (entity, index, mtoon_handle, standard_handle, rich_swap) in meshes.iter() {
+    for (entity, index, mtoon_handle, standard_handle, rich_mtoon_swap, rich_standard_swap) in
+        meshes.iter()
+    {
         if !is_descendant(entity) {
             continue;
         }
@@ -387,7 +390,7 @@ pub fn apply_expression_materials(
         // values, so the writer follows that handle too.
         let mtoon_id = mtoon_handle
             .map(|handle| handle.id())
-            .or_else(|| rich_swap.map(|swap| swap.native.id()));
+            .or_else(|| rich_mtoon_swap.map(|swap| swap.native.id()));
         if let Some(id) = mtoon_id {
             if !visited_mtoon.insert(id) {
                 continue;
@@ -425,8 +428,13 @@ pub fn apply_expression_materials(
                 material.uv_transform = evaluated.uv_transform;
             }
             material_state.applied = evaluated;
-        } else if let Some(handle) = standard_handle {
-            let id = handle.id();
+        } else {
+            let standard_id = standard_handle
+                .map(|handle| handle.id())
+                .or_else(|| rich_standard_swap.map(|swap| swap.native.id()));
+            let Some(id) = standard_id else {
+                continue;
+            };
             if !visited_standard.insert(id) {
                 continue;
             }

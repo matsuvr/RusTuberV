@@ -213,6 +213,7 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(Update, crate::pose::debug_propagation_probe);
         crate::look::register_look_lighting(app);
         crate::look::register_rich_mtoon(app);
+        crate::look::register_rich_standard(app);
         register_output_systems(app);
     }
 }
