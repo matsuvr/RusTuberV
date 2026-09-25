@@ -1,0 +1,16 @@
+# MToon transparency and Rich shader (#94)
+
+- Upstream base: [`not-elm/bevy_vrm1@bf0ec103970fdf9091134fe0f208cf3590031c80`](https://github.com/not-elm/bevy_vrm1/commit/bf0ec103970fdf9091134fe0f208cf3590031c80) (`v0.9.3`).
+- Temporary fork: [`matsuvr/bevy_vrm1@6ee2f610d6c95b542a3317028da10aba26c9e8de`](https://github.com/matsuvr/bevy_vrm1/commit/6ee2f610d6c95b542a3317028da10aba26c9e8de). The sole fork change discards BLEND fragments with final alpha below 1/1024 in `lit_color`, before outline alpha is forced to 1.
+- Upstream proposal: [`not-elm/bevy_vrm1#68`](https://github.com/not-elm/bevy_vrm1/pull/68). The threshold follows [UniVRM MToon10 alpha handling](https://github.com/vrm-c/UniVRM/blob/9750dadc592f421c356bf0376c73e61abbe323e3/Packages/VRM10/MToon10/Shaders/vrmc_materials_mtoon_geometry_alpha.hlsl) and its [epsilon definition](https://github.com/vrm-c/UniVRM/blob/9750dadc592f421c356bf0376c73e61abbe323e3/Packages/VRM10/MToon10/Shaders/vrmc_materials_mtoon_utility.hlsl).
+- App-side remaining difference: `ExtendedMaterial<MToonMaterial, RichMtoonExtension>` keeps the upstream material data and pipeline behavior. `mtoon_rich.wgsl` copies the corrected fragment base and adds only the #93 SpotLight contribution, gloss, and a weak added rim. `mtoon_rich_vertex.wgsl` copies the unchanged upstream vertex code. `rich_outline.rs` connects Rich meshes to the outline pass without changing the dependency.
+
+The root Cargo patch is temporary. When an official `bevy_vrm1` commit or release includes the same fix, point all crates back to that official revision, remove the root patch, update `Cargo.lock`, and refresh the Rich shader copy/provenance.
+
+## Local checks (Windows 11, 2026-09-25)
+
+- Built `vtuber-desktop` with the patched dependency and checked Cargo resolved one `bevy_vrm1` source. No shader compilation errors appeared while rendering.
+- Loaded local `IrisPart1.vrm` with `-20-3sad  sad2` forced for a short source-vs-patch A/B. The saved model settings had Rich enabled, so both A/B runs explicitly forced OFF. Before the patch, the scribble layer left a dark rectangular area over the white speech bubble; after the patch, white pixels appeared around and between the dark strokes. NDI stayed stopped. Screenshots stayed in ignored `target/` because the model is not redistributed.
+- With the same model and idle pose, inspected corrected Native and Rich 0%, 50%, and 100% in separate short runs. Rich 0% visually matched corrected Native; higher strengths added illumination without replacing the face/cloth with a darker image. Rich 100% also rendered the `sad2` expression and outline. The UI was still intentionally disabled pending #96, so the Rich settings and expression were set temporarily in the local test build and the temporary code was removed afterward. This was not an interactive UI switch test.
+- Loaded the existing `inore-vrm1.vrm` in Rich 100%; hair, lashes, and outline remained visible with no shader errors. Camera tracking, NDI transmission, and macOS hardware were not exercised. No GPU image-equality gate was added.
+- After replacing the hand-copied Rust MToon bindings with `ExtendedMaterial`, repeated the Iris Rich 100% render and confirmed the avatar and outline remained visible with no shader or pipeline errors.

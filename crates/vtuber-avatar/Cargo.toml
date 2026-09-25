@@ -15,6 +15,7 @@ anyhow = "1"
 serde_json = "1"
 bevy = "=0.19.0"
 bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", tag = "v0.9.3", features = ["log"] }
+indexmap = "2"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
