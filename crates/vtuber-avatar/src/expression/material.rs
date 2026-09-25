@@ -299,6 +299,7 @@ pub fn apply_expression_materials(
         &VrmMaterialIndex,
         Option<&MeshMaterial3d<MToonMaterial>>,
         Option<&MeshMaterial3d<StandardMaterial>>,
+        Option<&crate::look::RichMtoonSwap>,
     )>,
     mtoon_assets: Option<ResMut<Assets<MToonMaterial>>>,
     standard_assets: Option<ResMut<Assets<StandardMaterial>>>,
@@ -376,12 +377,18 @@ pub fn apply_expression_materials(
 
     let mut visited_mtoon: HashSet<AssetId<MToonMaterial>> = HashSet::new();
     let mut visited_standard: HashSet<AssetId<StandardMaterial>> = HashSet::new();
-    for (entity, index, mtoon_handle, standard_handle) in meshes.iter() {
+    for (entity, index, mtoon_handle, standard_handle, rich_swap) in meshes.iter() {
         if !is_descendant(entity) {
             continue;
         }
-        if let Some(handle) = mtoon_handle {
-            let id = handle.id();
+        // While the look is ON the mesh renders the app-side Rich material,
+        // so only the swap component still carries the native handle. The
+        // native asset stays the owner of the author/current expression
+        // values, so the writer follows that handle too.
+        let mtoon_id = mtoon_handle
+            .map(|handle| handle.id())
+            .or_else(|| rich_swap.map(|swap| swap.native.id()));
+        if let Some(id) = mtoon_id {
             if !visited_mtoon.insert(id) {
                 continue;
             }
