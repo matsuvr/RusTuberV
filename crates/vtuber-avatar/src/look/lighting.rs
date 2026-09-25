@@ -5,10 +5,10 @@
 //! spots, so the rendered result returns to the Native baseline. The rig is
 //! anchored to the model's upper-body center/size and only its direction turns
 //! with the camera, so head rotation never changes the lighting. Upstream
-//! MToon ignores spot lights; the app-side Rich shader consumes this same
-//! preset in a follow-up.
+//! MToon ignores spot lights; the app-side Rich shaders (#94, #95) sum them.
 
 use bevy::camera::visibility::RenderLayers;
+use bevy::light::cluster::GlobalClusterSettings;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{HeadBoneEntity, HipsBoneEntity};
 
@@ -41,13 +41,13 @@ struct AdditionalLookLight {
 /// The fixed preset: a diagonal front key and a back rim, both shadowless.
 const ADDITIONAL_LOOK_LIGHTS: [AdditionalLookLight; 2] = [
     AdditionalLookLight {
-        nominal_lumens: 3_500.0,
+        nominal_lumens: 8_000.0,
         direction: Vec3::new(-0.55, 0.45, 0.70),
         distance_factor: 1.5,
         outer_angle: 0.6,
     },
     AdditionalLookLight {
-        nominal_lumens: 1_500.0,
+        nominal_lumens: 3_500.0,
         direction: Vec3::new(0.45, 0.60, -0.66),
         distance_factor: 1.6,
         outer_angle: 0.5,
@@ -71,11 +71,24 @@ impl AdditionalLookLight {
 /// frame cannot race the `bevy_light` system that queues a bounding `Sphere`
 /// for changed spot lights; queued commands are applied at the schedule
 /// boundary, which keeps the entity alive when that insert runs.
+///
+/// The two spot lights are clustered, and with Bevy 0.19's default GPU light
+/// clustering the avatar's clusters stay empty, so the added lights never reach
+/// any material. The CPU clustering path is selected instead: with a handful of
+/// lights its cost is negligible. Remove this once the GPU path delivers the
+/// clusters in this scene.
 pub(crate) fn register_look_lighting(app: &mut App) {
-    app.add_systems(
-        Update,
-        sync_additional_look_lights.after(crate::look::apply_look_settings_changes),
-    );
+    app.add_systems(Startup, use_cpu_light_clustering)
+        .add_systems(
+            Update,
+            sync_additional_look_lights.after(crate::look::apply_look_settings_changes),
+        );
+}
+
+fn use_cpu_light_clustering(settings: Option<ResMut<GlobalClusterSettings>>) {
+    if let Some(mut settings) = settings {
+        settings.gpu_clustering = None;
+    }
 }
 
 // Existing lights are updated in place; spawn/despawn happens only when the
