@@ -277,17 +277,6 @@ impl Default for RichLookViewModel {
     }
 }
 
-/// One loaded model's material and its role selection for the settings screen.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MaterialRoleEntryViewModel {
-    /// The glTF material index used as the persisted identity.
-    pub material_index: usize,
-    /// The material name from the model, or an empty string when unnamed.
-    pub name: String,
-    /// The user's role selection; `None` means "Auto".
-    pub selected: Option<vtuber_avatar::MaterialRole>,
-}
-
 /// Complete UI snapshot.
 #[derive(Clone, Debug, Default, Resource)]
 pub struct UiViewModel {
@@ -321,8 +310,6 @@ pub struct UiViewModel {
     pub preview_visible: bool,
     /// Rich look switch and strength.
     pub look: RichLookViewModel,
-    /// The loaded model's materials and role selections, in index order.
-    pub look_materials: Vec<MaterialRoleEntryViewModel>,
 }
 
 impl UiViewModel {

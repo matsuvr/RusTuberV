@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::expression_keys::{ExpressionBindingStore, ExpressionBindings};
 use vtuber_avatar::{
-    ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride, MaterialRoleOverride,
-    RichLookSettings,
+    ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride, RichLookSettings,
 };
 
 /// Version of the application settings document.
@@ -172,7 +171,7 @@ impl ArmPoseSettings {
         save_expression_bindings(path, store)
     }
 
-    /// Loads the selected model's look; a model without an entry starts OFF.
+    /// Returns the selected model's look; a model without an entry starts OFF.
     pub(crate) fn rich_look_for(
         &self,
         model_id: &str,
@@ -187,6 +186,8 @@ impl ArmPoseSettings {
             .unwrap_or_default())
     }
 
+    /// Saves the selected model's look, preserving every other settings
+    /// section, including the model's arm-pose and tracking entries.
     pub(crate) fn save_rich_look(
         &self,
         model_id: String,
@@ -197,34 +198,6 @@ impl ArmPoseSettings {
             .as_deref()
             .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
         save_rich_look_settings(path, model_id, settings)
-    }
-
-    /// Returns the selected model's saved material-role overrides; a model
-    /// without an entry starts fully on "Auto".
-    pub(crate) fn material_roles_for(
-        &self,
-        model_id: &str,
-    ) -> Result<Vec<MaterialRoleOverride>, ArmPoseSettingsError> {
-        let path = self
-            .path
-            .as_deref()
-            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
-        Ok(load_material_role_overrides(path)?
-            .remove(model_id)
-            .unwrap_or_default())
-    }
-
-    /// Saves material-role overrides, preserving every other settings section.
-    pub(crate) fn save_material_roles(
-        &self,
-        model_id: String,
-        overrides: Vec<MaterialRoleOverride>,
-    ) -> Result<(), ArmPoseSettingsError> {
-        let path = self
-            .path
-            .as_deref()
-            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
-        save_material_role_overrides(path, model_id, overrides)
     }
 
     /// Returns the UI language loaded at startup.
@@ -366,7 +339,6 @@ pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSet
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
             rich_look: BTreeMap::new(),
-            material_roles: BTreeMap::new(),
         }
     };
     document.language = language;
@@ -397,7 +369,6 @@ pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), ArmPo
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
             rich_look: BTreeMap::new(),
-            material_roles: BTreeMap::new(),
         }
     };
     document.arm_tracking_enabled = enabled;
@@ -448,7 +419,6 @@ pub fn save_expression_bindings(
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
             rich_look: BTreeMap::new(),
-            material_roles: BTreeMap::new(),
         }
     };
     document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
@@ -507,7 +477,6 @@ pub fn save_arm_pose_overrides(
             dynamic_arm_profiles: BTreeMap::new(),
             expression_bindings: BTreeMap::new(),
             rich_look: BTreeMap::new(),
-            material_roles: BTreeMap::new(),
         }
     };
     document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
@@ -533,15 +502,6 @@ fn merge_model_look_settings(
     settings: RichLookSettings,
 ) -> ArmPoseSettingsDocument {
     document.rich_look.insert(model_id, settings);
-    document
-}
-
-fn merge_model_material_roles(
-    mut document: ArmPoseSettingsDocument,
-    model_id: String,
-    overrides: Vec<MaterialRoleOverride>,
-) -> ArmPoseSettingsDocument {
-    document.material_roles.insert(model_id, overrides);
     document
 }
 
@@ -572,21 +532,6 @@ fn save_rich_look_settings(
     settings: RichLookSettings,
 ) -> Result<(), ArmPoseSettingsError> {
     let document = merge_model_look_settings(read_look_document(path)?, model_id, settings);
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
-}
-
-fn load_material_role_overrides(
-    path: &Path,
-) -> Result<BTreeMap<String, Vec<MaterialRoleOverride>>, ArmPoseSettingsError> {
-    Ok(read_look_document(path)?.material_roles)
-}
-
-fn save_material_role_overrides(
-    path: &Path,
-    model_id: String,
-    overrides: Vec<MaterialRoleOverride>,
-) -> Result<(), ArmPoseSettingsError> {
-    let document = merge_model_material_roles(read_look_document(path)?, model_id, overrides);
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
@@ -625,12 +570,10 @@ struct ArmPoseSettingsDocument {
     /// entry means the model still uses the initial assignment.
     #[serde(default)]
     expression_bindings: BTreeMap<String, ExpressionBindings>,
+    /// Model-specific look switch and strength. A missing entry means the
+    /// model starts OFF at full strength.
     #[serde(default)]
     rich_look: BTreeMap<String, RichLookSettings>,
-    /// Model-specific material-role selections, keyed by the glTF material
-    /// index. A missing entry means every material of the model is on "Auto".
-    #[serde(default)]
-    material_roles: BTreeMap<String, Vec<MaterialRoleOverride>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -815,63 +758,6 @@ mod tests {
     }
 
     #[test]
-    fn material_role_overrides_round_trip_and_preserve_other_sections() {
-        use vtuber_avatar::MaterialRole;
-        let directory = tempdir().unwrap();
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
-        let id = AvatarAssetId::new("sha256:first");
-        let overrides = vec![
-            MaterialRoleOverride {
-                material_index: 3,
-                selected: Some(MaterialRole::Face),
-            },
-            MaterialRoleOverride {
-                material_index: 5,
-                selected: None,
-            },
-        ];
-        save_language(&path, UiLanguage::Ko).unwrap();
-        save_rich_look_settings(
-            &path,
-            id.0.clone(),
-            RichLookSettings {
-                enabled: true,
-                strength: 0.5,
-            },
-        )
-        .unwrap();
-        save_material_role_overrides(&path, id.0.clone(), overrides.clone()).unwrap();
-        let before = load_material_role_overrides(&path).unwrap();
-        save_language(&path, UiLanguage::En).unwrap();
-        save_arm_pose_overrides(&path, &ArmPoseOverrideStore::default()).unwrap();
-        assert_eq!(load_material_role_overrides(&path).unwrap(), before);
-        let restarted = ArmPoseSettings::load(&path);
-        assert_eq!(restarted.material_roles_for(&id.0).unwrap(), overrides);
-        assert_eq!(
-            restarted.material_roles_for("sha256:missing").unwrap(),
-            Vec::new()
-        );
-        assert_eq!(
-            restarted.rich_look_for(&id.0).unwrap(),
-            RichLookSettings {
-                enabled: true,
-                strength: 0.5
-            }
-        );
-        // A later look save keeps the role overrides.
-        save_rich_look_settings(
-            &path,
-            id.0.clone(),
-            RichLookSettings {
-                enabled: false,
-                strength: 1.0,
-            },
-        )
-        .unwrap();
-        assert_eq!(load_material_role_overrides(&path).unwrap(), before);
-    }
-
-    #[test]
     fn rich_look_missing_section_defaults_but_invalid_files_return_errors() {
         let directory = tempdir().unwrap();
         let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
@@ -892,6 +778,31 @@ mod tests {
             assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
         }
         assert!(load_rich_look_settings(directory.path()).is_err());
+    }
+
+    #[test]
+    fn a_stale_material_roles_section_is_ignored() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        fs::write(
+            &path,
+            "schema_version = 1\n\
+             [[material_roles.\"sha256:first\"]]\n\
+             material_index = 0\n\
+             selected = 'face'\n\
+             [rich_look.\"sha256:first\"]\n\
+             enabled = true\n\
+             strength = 0.5\n",
+        )
+        .unwrap();
+        let restarted = ArmPoseSettings::load(&path);
+        assert_eq!(
+            restarted.rich_look_for("sha256:first").unwrap(),
+            RichLookSettings {
+                enabled: true,
+                strength: 0.5
+            }
+        );
     }
 
     #[test]

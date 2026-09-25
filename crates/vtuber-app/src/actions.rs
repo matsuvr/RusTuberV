@@ -174,13 +174,6 @@ pub enum UiAction {
     ChangeRichLook(RichLookChange),
     /// Persist the look when a checkbox or slider edit is complete.
     SaveRichLook,
-    /// Select a material's role (or "Auto" with `None`) for the loaded model.
-    SetMaterialRole {
-        /// The glTF material index the UI displayed.
-        material_index: usize,
-        /// The selected role, or `None` for "Auto".
-        selected: Option<vtuber_avatar::MaterialRole>,
-    },
 }
 
 impl UiAction {

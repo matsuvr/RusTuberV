@@ -2,9 +2,45 @@
 
 > 注記: この記録は旧リッチ表示設計 (#68-#79) の実測履歴であり、#89 で置換された。新実装の完成根拠にはしない。実測値自体は歴史として残す。
 
-This is the measurement record for the rich-look epic. It covers only what was
-actually implemented and measured; everything else is listed as not
-implemented and not measured, and is not claimed as working.
+## 現行実装（#89〜#96、2026-09-25）
+
+- 状態: OFFは #94 の透明BLEND画素破棄だけを加えた上流MToon（またはBevy Standard / Unlit）と正面の標準ライト1灯。ONは同じ透明修正を土台にしたアプリ側Richシェーダー（MToon / Standard）と、標準ライトを残したままの追加SpotLight 2灯。強度は追加分だけを0〜100%で変える。露出・HDR・トーンマッピングは全状態で共通。
+- UI: 既存のリッチ表示スイッチと0〜100%スライダーが `AvatarLookSettings` の `enabled` / `strength` に接続され、モデル別設定（`rich_look` セクション）に保存される。旧材質役割設定は今回の描画に適用せず、UIと保存項目からも削除した。古い `material_roles` セクションは通常の設定読込みで無視される。
+- 短期の例外: 追加灯はBevyのクラスタ照明を通るが、Bevy 0.19既定のGPUクラスタリングではこのシーンのクラスタが空になり追加灯が材質に届かない。`look/lighting.rs` がCPUクラスタリングへ切り替える（一時的、撤去条件はAGENTS.mdに記す）。
+- 確認: 既存の `cargo xtask -- vrm-render` が実際のUIアクション経路で OFF → ON 100% → 50% → 0% → OFF を同じモデル・ポーズ・カメラで描画する。下記の測定と目視を行った。旧設計のゲート（SSIM・全GPU・全OS・NDI全面再試験など）は新方式の完成条件にしていない。
+
+### #96 実施記録（Windows 11、Vulkan、ローカルGPU）
+
+判定モデル。VRM 0.x と VRM 1.0 の両方で MToon / Standard / Unlit を1モデルずつ含む:
+
+| モデル | 生成 | MToon | Standard | Unlit |
+|---|---|---|---|---|
+| `data/vrm_data/6208967401843641193.vrm` | VRM 0.x | 6（顔・肌・髪後・まつげ・目線・口） | 1（Tops/袖） | 1（前髪・UnlitCutout） |
+| `data/vrm_data/AvatarSample_C.vrm` | VRM 1.0 | 11（VRMC_materials_mtoon） | 1（Tops/ベスト） | 1（Bottoms/ズボン） |
+
+計測値（`cargo xtask -- vrm-render <model> <out>`、256x256、同一ポーズ・カメラ）:
+
+| モデル | OFF平均 | ON100%平均 | OFF→ON100 平均差 | ON 0% vs OFF | OFF再適用 vs OFF | 50% vs 100% |
+|---|---|---|---|---|---|---|
+| VRM 0.x | 25.03 | 26.33 | 1.305 | 0.001 | 0.001 | 別画像（差 0.585） |
+| VRM 1.0 | 28.86 | 30.26 | 1.401 | 0.000 | 0.000 | 別画像（差 0.653） |
+
+目視と画素確認:
+
+- MToon: 両モデルの顔・肌・髪・目が明るくなり、毛髪に薄い光沢が加算された。VRM 1.0 は輪郭も表示し続ける。100%で元の顔・服が暗い別画像へ置き換わらない。
+- Standard: VRM 0.x の Tops（帯の領域で平均差 最大34）、VRM 1.0 のベスト（120〜160行目の平均差 10.8 / 最大26）が追加灯の寄与を受ける。
+- Unlit: VRM 1.0 のズボン（195〜255行目の不透明 3784px）は差分 0。VRM 0.x の前髪（58〜82行目 × 106〜152列）も差分 0 で、同じ領域の肌（66行目以降）は差分 8〜31。Unlit は追加光も Rich 専用の追加効果も受けない。
+- 露出・HDR・トーンマッピング・標準ライトは全状態で同一（OFF へ戻すと差分 0.001 以下）。
+
+追加灯の係数: 3500/1500 lm では ON と OFF の平均差が 0.43〜0.52 で切替が目視できなかったため 8000/3500 lm にした。白色主体のモデル（`Sapphy.vrm`）では白飛び画素が増えるので、これ以上は上げない。
+
+未確認: GUI実クリックでの切替、macOS、NDI転送、他GPU。表情を動かしたままの切替とモデル再読込みは既存ユニットテストでのみ確認。
+
+以下は旧設計（#68-#79）の記録であり、参考資料としてのみ読む。
+
+This is the measurement record for the old rich-look epic (#68-#79). It
+covers only what was actually implemented and measured; everything else is
+listed as not implemented and not measured, and is not claimed as working.
 
 ## Environment
 

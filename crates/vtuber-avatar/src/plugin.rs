@@ -94,17 +94,8 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<crate::body_motion::BodyFollowFilter>()
             .init_resource::<crate::tracking_profile::GlobalBodyTrackingProfile>()
             .init_resource::<crate::look::AvatarLookSettings>()
-            .init_resource::<crate::look::AvatarMaterialRoles>()
             .add_message::<crate::look::LookSettingsChanged>()
-            .add_message::<crate::look::MaterialRoleOverridesChanged>()
-            .add_systems(
-                Update,
-                (
-                    crate::look::apply_look_settings_changes,
-                    crate::look::apply_material_role_overrides
-                        .after(crate::look::apply_look_settings_changes),
-                ),
-            )
+            .add_systems(Update, crate::look::apply_look_settings_changes)
             .add_message::<LoadAvatarRequest>()
             .add_message::<LoadAvatarResult>()
             .add_message::<UnloadAvatarRequest>()

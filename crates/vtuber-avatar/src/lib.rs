@@ -129,9 +129,7 @@ pub use load::{
     VrmSourceExpressions,
 };
 pub use look::{
-    AvatarLookSettings, AvatarMaterialRoles, LookSettingsChanged, MaterialRole,
-    MaterialRoleOverride, MaterialRoleOverridesChanged, RichLookSettings,
-    apply_look_settings_changes, apply_material_role_overrides, resolve_material_role,
+    AvatarLookSettings, LookSettingsChanged, RichLookSettings, apply_look_settings_changes,
 };
 pub use mirror::AvatarMotionMirror;
 pub use plugin::{StartupModelPath, VtuberAvatarPlugin};

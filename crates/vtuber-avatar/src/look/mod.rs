@@ -1,23 +1,17 @@
 //! Look settings and the additional lights and Rich material they drive.
 //!
-//! This module owns the look switch/strength resource, the role-selection
-//! resource the settings UI edits, the fixed camera-relative additional light
-//! preset (`#93`), the app-side Rich MToon material/shader with its thin
-//! outline connection (`#94`), and the app-side Rich Standard material
-//! (`#95`). The settings-UI reconnection still follows.
+//! This module owns the look switch/strength resource the settings UI edits
+//! and persists (`#96`), the fixed camera-relative additional light preset
+//! (`#93`), the app-side Rich MToon material/shader with its thin outline
+//! connection (`#94`), and the app-side Rich Standard material (`#95`).
 
 mod lighting;
-mod material;
 mod preset;
 mod rich_mtoon;
 mod rich_outline;
 mod rich_standard;
 
 pub(crate) use lighting::register_look_lighting;
-pub use material::{
-    AvatarMaterialRoles, MaterialRole, MaterialRoleOverride, MaterialRoleOverridesChanged,
-    apply_material_role_overrides, resolve_material_role,
-};
 pub use preset::RichLookSettings;
 pub(crate) use rich_mtoon::{RichMtoonSwap, register_rich_mtoon};
 pub(crate) use rich_standard::{RichStandardSwap, register_rich_standard};
