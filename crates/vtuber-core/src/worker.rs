@@ -22,9 +22,9 @@ pub enum WorkerResult<T> {
 ///
 /// The handle always owns a real thread's [`JoinHandle`]: it can only be
 /// created when the OS accepted the spawn request. Dropping the handle
-/// without calling [`WorkerHandle::join`] does **not** detach the thread; it
-/// merely leaks the handle and the thread will continue running until it
-/// completes.
+/// without calling [`WorkerHandle::join`] detaches the thread: it continues
+/// running, its result can no longer be joined, and no stop is requested.
+/// Owners must request stop and join explicitly when completion matters.
 #[derive(Debug)]
 pub struct WorkerHandle<T> {
     stop: StopToken,
@@ -201,11 +201,8 @@ mod tests {
     #[test]
     fn failed_spawn_returns_the_io_error_and_no_handle() {
         let error = std::io::Error::other("simulated OS spawn failure");
-        let result: std::io::Result<WorkerHandle<()>> = worker_handle_from_result(
-            "never-started".to_string(),
-            StopToken::new(),
-            Err(error),
-        );
+        let result: std::io::Result<WorkerHandle<()>> =
+            worker_handle_from_result("never-started".to_string(), StopToken::new(), Err(error));
         match result {
             Err(error) => assert_eq!(error.to_string(), "simulated OS spawn failure"),
             Ok(_) => panic!("expected the spawn error"),

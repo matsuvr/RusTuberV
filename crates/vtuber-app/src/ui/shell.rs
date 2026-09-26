@@ -370,6 +370,7 @@ fn sync_camera_pointer_input_gate(
 
 fn shutdown_workers_on_exit(
     mut exits: MessageReader<AppExit>,
+    mut pose: ResMut<crate::pose_runtime::PoseRuntime>,
     mut inference: ResMut<InferenceRuntime>,
     mut capture: ResMut<CaptureRuntime>,
     ndi: Option<ResMut<NdiOutputRuntime>>,
@@ -377,8 +378,15 @@ fn shutdown_workers_on_exit(
 ) {
     if exits.read().next().is_some() {
         shutdown_ndi_output(ndi, output);
-        inference.stop_model();
-        capture.shutdown();
+        if let Err(error) = pose.stop() {
+            error!("pose shutdown failed: {error}");
+        }
+        if let Err(error) = inference.stop_model() {
+            error!("inference shutdown failed: {error}");
+        }
+        if let Err(error) = capture.shutdown() {
+            error!("capture shutdown failed: {error}");
+        }
     }
 }
 

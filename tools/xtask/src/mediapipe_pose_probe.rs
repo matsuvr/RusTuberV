@@ -223,7 +223,9 @@ fn run_windows(options: Options) -> Result<(), String> {
         .start_worker(MsmfBackend::new())
         .map_err(|error| format!("capture worker start failed: {error}"))?;
     if let Err(error) = capture.select_and_start(device.clone(), CameraRequest::default()) {
-        let _ = capture.shutdown();
+        if let Err(shutdown_error) = capture.shutdown() {
+            eprintln!("capture shutdown failed: {shutdown_error}");
+        }
         return Err(format!("camera start failed: {error}"));
     }
 
@@ -252,7 +254,9 @@ fn run_windows(options: Options) -> Result<(), String> {
     if frame_slot.generation() == 0 {
         let state = capture.state();
         let metrics = capture.metrics();
-        let _ = capture.shutdown();
+        if let Err(shutdown_error) = capture.shutdown() {
+            eprintln!("capture shutdown failed: {shutdown_error}");
+        }
         return Err(format!(
             "camera produced no frames before pose probe start (state={state:?}, frames_captured={}, last_error={:?})",
             metrics.frames_captured, metrics.last_error
@@ -280,7 +284,7 @@ fn run_windows(options: Options) -> Result<(), String> {
     let capture_state = capture.state();
     let capture_metrics = capture.metrics();
     let frame_generation = frame_slot.generation();
-    let _ = capture.shutdown();
+    let capture_shutdown = capture.shutdown();
     let output = match worker_result {
         WorkerResult::Completed(output) => output,
         WorkerResult::Panicked => return Err("pose probe worker panicked".into()),
@@ -288,6 +292,7 @@ fn run_windows(options: Options) -> Result<(), String> {
     if let Some(failure) = output.failure {
         return Err(format!("MediaPipe pose probe failed: {failure}"));
     }
+    capture_shutdown.map_err(|error| error.to_string())?;
     let report = build_report(output.data, output.library_source).map_err(|error| {
         format!(
             "{error}; capture_state={capture_state:?}, capture_frames_captured={}, capture_last_error={:?}, frame_generation={frame_generation}",

@@ -80,6 +80,7 @@ impl Drop for InferenceController {
         if let Some(worker) = self.worker.take() {
             worker.stop();
             self.frame_slot.close();
+            // Best-effort Drop cannot report the join error. Use shutdown to receive it.
             let _ = worker.join();
         }
         self.output_slot.close();
@@ -144,22 +145,28 @@ impl InferenceController {
     /// Returns a snapshot of the current worker status.
     #[must_use]
     pub fn status(&self) -> crate::state::InferenceWorkerStatus {
-        if self.worker.as_ref().is_some_and(WorkerHandle::is_finished) {
-            let mut status = self
-                .status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if matches!(
-                status.state,
-                InferenceWorkerState::LoadingModel | InferenceWorkerState::Running
-            ) {
-                status.record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
-            }
-        }
         self.status
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Reaps an already-finished worker without waiting for a running worker.
+    ///
+    /// Status reads have no side effects. The application bridge calls this
+    /// explicitly so a panic is reported even from a paused or idle worker.
+    ///
+    /// # Errors
+    /// Returns WorkerPanicked if the completed join reports a panic.
+    pub fn poll_worker_exit(&mut self) -> Result<(), InferenceError> {
+        if !self.worker.as_ref().is_some_and(WorkerHandle::is_finished) {
+            return Ok(());
+        }
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        self.command_tx = None;
+        self.finish_join(worker.join()).map(|_| ())
     }
 
     /// Starts the inference worker.
@@ -314,18 +321,18 @@ impl InferenceController {
     ///
     /// This consumes the controller. After this call returns, no worker thread
     /// is running and the output slot is closed.
-    pub fn shutdown(self) -> InferenceMetrics {
+    pub fn shutdown(self) -> Result<InferenceMetrics, InferenceError> {
         self.shutdown_inner(true)
     }
 
     /// Stops and joins the worker without closing the externally-owned input
     /// frame slot. This is used when capture and inference share one slot and
     /// the application must support Stop/Start without rebuilding capture.
-    pub fn shutdown_preserving_input(self) -> InferenceMetrics {
+    pub fn shutdown_preserving_input(self) -> Result<InferenceMetrics, InferenceError> {
         self.shutdown_inner(false)
     }
 
-    fn shutdown_inner(mut self, close_input: bool) -> InferenceMetrics {
+    fn shutdown_inner(mut self, close_input: bool) -> Result<InferenceMetrics, InferenceError> {
         let result = if let Some(worker) = self.worker.take() {
             worker.stop();
             // Closing the frame slot wakes the worker if it is blocked waiting
@@ -335,22 +342,31 @@ impl InferenceController {
             }
             worker.join()
         } else {
-            WorkerResult::Completed(InferenceWorkerResult::default())
+            WorkerResult::Completed(InferenceWorkerResult {
+                final_metrics: self.status().metrics(),
+            })
         };
 
-        let final_metrics = match result {
-            WorkerResult::Completed(r) => r.final_metrics,
-            WorkerResult::Panicked => {
-                let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-                status.record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
-                status.metrics()
-            }
-        };
+        self.finish_join(result)
+    }
 
+    fn finish_join(
+        &self,
+        result: WorkerResult<InferenceWorkerResult>,
+    ) -> Result<InferenceMetrics, InferenceError> {
         self.output_slot.close();
         self.outcome_slot.close();
         self.canonical_outcome_slot.close();
-        final_metrics
+        match result {
+            WorkerResult::Completed(result) => Ok(result.final_metrics),
+            WorkerResult::Panicked => {
+                self.status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
+                Err(InferenceError::WorkerPanicked)
+            }
+        }
     }
 }
 
@@ -403,6 +419,49 @@ mod tests {
 
     fn idle_controller() -> InferenceController {
         InferenceController::new(Arc::new(LatestSlot::new()), Arc::new(LatestSlot::new()))
+    }
+
+    #[test]
+    fn preserving_input_shutdown_reports_panic_without_closing_shared_capture_slot() {
+        let input = Arc::new(LatestSlot::new());
+        let mut controller =
+            InferenceController::new(Arc::clone(&input), Arc::new(LatestSlot::new()));
+        let output = controller.output_slot();
+        controller.worker = Some(
+            WorkerHandle::spawn("inference-panic-test", |_| {
+                panic!("scripted worker panic");
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            controller.shutdown_preserving_input(),
+            Err(InferenceError::WorkerPanicked)
+        );
+        assert!(!input.is_closed());
+        assert!(input.publish(dummy_frame(1)));
+        assert!(output.is_closed());
+    }
+
+    #[test]
+    fn status_is_read_only_and_explicit_poll_reaps_an_idle_worker_panic() {
+        let mut controller = idle_controller();
+        controller.worker = Some(
+            WorkerHandle::spawn("idle-panic-test", |_| {
+                panic!("scripted worker panic");
+            })
+            .unwrap(),
+        );
+        while !controller.worker.as_ref().unwrap().is_finished() {
+            std::thread::yield_now();
+        }
+        assert_eq!(controller.status().state, InferenceWorkerState::Idle);
+        assert_eq!(
+            controller.poll_worker_exit(),
+            Err(InferenceError::WorkerPanicked)
+        );
+        assert_eq!(controller.status().state, InferenceWorkerState::Failed);
+        assert!(controller.worker.is_none());
+        assert_eq!(controller.poll_worker_exit(), Ok(()));
     }
 
     #[test]
@@ -501,7 +560,7 @@ mod tests {
             Some(FailureStage::ModelLoad)
         );
 
-        controller.shutdown();
+        controller.shutdown().unwrap();
     }
 
     #[test]
@@ -516,7 +575,7 @@ mod tests {
             controller.start_worker().unwrap_err(),
             InferenceError::AlreadyRunning
         );
-        controller.shutdown();
+        controller.shutdown().unwrap();
     }
 
     #[test]
@@ -533,7 +592,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         // Even though runtime load fails, the output slot remains closed on shutdown.
-        controller.shutdown();
+        controller.shutdown().unwrap();
         assert!(output_slot.is_closed());
     }
 
@@ -553,7 +612,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(120));
         assert_eq!(controller.status().frames_processed, 0);
 
-        controller.shutdown();
+        controller.shutdown().unwrap();
     }
 
     #[test]
@@ -567,7 +626,7 @@ mod tests {
         controller.reset().unwrap();
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(controller.status().state, InferenceWorkerState::Idle);
-        controller.shutdown();
+        controller.shutdown().unwrap();
     }
 
     #[test]
@@ -582,7 +641,7 @@ mod tests {
 
         // Leave the worker waiting on an empty frame slot and shut down. The
         // worker must unblock, join, and leave both slots closed.
-        let metrics = controller.shutdown();
+        let metrics = controller.shutdown().unwrap();
         assert!(frame_slot.is_closed());
         assert!(output_slot.is_closed());
         assert!(canonical_outcome_slot.is_closed());
@@ -608,7 +667,7 @@ mod tests {
             status.last_failure.as_ref().map(|failure| &failure.error),
             Some(InferenceError::MediaPipeLoadFailed(_))
         ));
-        controller.shutdown();
+        controller.shutdown().unwrap();
     }
 
     #[test]
@@ -631,7 +690,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
 
         let status = Arc::clone(&controller.status);
-        controller.shutdown();
+        assert_eq!(controller.shutdown(), Err(InferenceError::WorkerPanicked));
 
         let status = status.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(status.state, InferenceWorkerState::Failed);

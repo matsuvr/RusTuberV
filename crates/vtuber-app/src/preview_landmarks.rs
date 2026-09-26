@@ -235,7 +235,8 @@ mod tests {
         );
         app.world_mut()
             .resource_mut::<crate::inference_runtime::InferenceRuntime>()
-            .stop_model();
+            .stop_model()
+            .unwrap();
         app.update();
         assert!(
             app.world()

@@ -187,15 +187,25 @@ impl PoseRuntime {
     }
 
     /// Stops the Pose worker and drops its observation state.
-    pub fn stop(&mut self) {
-        if let Some(worker) = self.worker.take() {
+    pub fn stop(&mut self) -> Result<(), InferenceError> {
+        let result = if let Some(worker) = self.worker.take() {
             worker.stop();
-            let _ = worker.join();
-        }
+            worker.join()
+        } else {
+            vtuber_core::WorkerResult::Completed(InferenceWorkerResult::default())
+        };
         self.tracking.reset();
         self.output_generation = 0;
         self.held_frame = None;
         self.output_slot.clear();
+        match result {
+            vtuber_core::WorkerResult::Completed(_) => Ok(()),
+            vtuber_core::WorkerResult::Panicked => {
+                self.lock_status()
+                    .record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
+                Err(InferenceError::WorkerPanicked)
+            }
+        }
     }
 
     /// Advances the pure tracking state by one render tick.
@@ -223,6 +233,13 @@ impl PoseRuntime {
         );
         self.tracking = next;
         control
+    }
+}
+
+impl Drop for PoseRuntime {
+    fn drop(&mut self) {
+        // Best-effort cleanup; explicit stop reports errors to its caller.
+        let _ = self.stop();
     }
 }
 
@@ -398,7 +415,11 @@ pub fn pose_worker_bridge_system(
     } else if (!pose.enabled() || !capture_active) && pose.is_running() {
         // Only a deselected arm tracking or an inactive capture stops the
         // worker. Not starting this tick says nothing about a running worker.
-        pose.stop();
+        if let Err(error) = pose.stop() {
+            error!("pose worker shutdown failed: {error}");
+            orchestrator
+                .set_last_error(Some(OrchestratorError::InferenceFailed(error.to_string())));
+        }
     }
 }
 
@@ -500,6 +521,26 @@ mod tests {
     }
 
     #[test]
+    fn pose_stop_reports_panic_and_clears_observation_state() {
+        let mut pose = PoseRuntime::default();
+        pose.output_generation = 123;
+        pose.worker = Some(
+            WorkerHandle::spawn("pose-panic-test", |_| {
+                panic!("scripted worker panic");
+            })
+            .unwrap(),
+        );
+        assert_eq!(pose.stop(), Err(InferenceError::WorkerPanicked));
+        assert!(!pose.is_running());
+        assert_eq!(pose.output_generation, 0);
+        assert!(pose.held_frame.is_none());
+        assert!(matches!(
+            pose.lock_status().last_failure.as_ref().map(|f| &f.error),
+            Some(InferenceError::WorkerPanicked)
+        ));
+    }
+
+    #[test]
     fn spawn_failure_is_recorded_and_reported_without_a_worker() {
         let mut pose = PoseRuntime::new(std::path::PathBuf::from("."));
         let result: std::io::Result<WorkerHandle<InferenceWorkerResult>> =
@@ -593,7 +634,10 @@ mod tests {
         app.update();
         assert_bridge_neither_retried_nor_reported(&app);
 
-        app.world_mut().resource_mut::<CaptureRuntime>().shutdown();
+        app.world_mut()
+            .resource_mut::<CaptureRuntime>()
+            .shutdown()
+            .unwrap();
     }
 
     #[test]
@@ -629,9 +673,15 @@ mod tests {
             );
         }
 
-        app.world_mut().resource_mut::<PoseRuntime>().stop();
+        app.world_mut()
+            .resource_mut::<PoseRuntime>()
+            .stop()
+            .unwrap();
         assert!(stop_token.is_stopped());
-        app.world_mut().resource_mut::<CaptureRuntime>().shutdown();
+        app.world_mut()
+            .resource_mut::<CaptureRuntime>()
+            .shutdown()
+            .unwrap();
     }
 
     #[test]
@@ -656,7 +706,10 @@ mod tests {
         // A later tick must not start it again while it stays deselected.
         app.update();
         assert!(!app.world().resource::<PoseRuntime>().is_running());
-        app.world_mut().resource_mut::<CaptureRuntime>().shutdown();
+        app.world_mut()
+            .resource_mut::<CaptureRuntime>()
+            .shutdown()
+            .unwrap();
 
         // Arm tracking on while the capture is idle.
         let worker = test_pose_worker();
