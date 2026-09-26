@@ -100,6 +100,9 @@ pub trait AsyncTask: Send {
         timestamp_ms: i64,
     ) -> Result<()>;
 
+    /// Attempts native shutdown at most once, including after an error.
+    /// Repeated calls from explicit close and Drop must not close the same
+    /// native handle again; implementations reuse their existing close_once.
     fn close(&mut self) -> Result<()>;
 }
 
@@ -108,15 +111,15 @@ pub trait AsyncTask: Send {
 /// Results arrive on a MediaPipe worker thread, not the thread that created the
 /// stream. Timestamps must strictly increase; MediaPipe drops out-of-order frames.
 ///
-/// Dropping the stream closes the underlying task, which flushes and joins the
-/// worker before the callback slot is released — so no callback can fire after
-/// the drop returns. For that same reason, dropping a stream *from inside its
-/// own callback* deadlocks; don't.
+/// Dropping the stream attempts to close the underlying task before releasing
+/// the callback slot. Successful native close flushes and joins the worker;
+/// Drop cannot report a close error. Use [`close`](Self::close) to receive it.
+/// Close and Drop can block. Do not call either from the stream's own callback:
+/// that would wait for the callback itself and deadlock.
 pub struct Stream<T: AsyncTask> {
     task: T,
     // Held purely for its Drop, which releases the callback slot. Declared after
-    // `task` so field-drop order releases it only after `Drop::drop` has closed
-    // the task and joined its worker.
+    // `task` so it is released only after the task's close attempt and Drop.
     _slot: Slot,
 }
 
@@ -141,6 +144,19 @@ impl<T: AsyncTask> Stream<T> {
         let raw = rotation.to_raw();
         self.task.send_raw(image, Some(&raw), timestamp.as_millis())
     }
+
+    /// Consumes the stream and returns the native task's shutdown result.
+    ///
+    /// This can block while the native worker finishes. Never call it from this
+    /// stream's own callback. On success the worker has joined before the task
+    /// and then the callback slot are dropped. On error native callback shutdown
+    /// is not guaranteed; the existing best-effort Drop behavior is retained.
+    ///
+    /// # Errors
+    /// Returns the underlying task's native close error without retrying it.
+    pub fn close(mut self) -> Result<()> {
+        self.task.close()
+    }
 }
 
 impl<T: AsyncTask + std::fmt::Debug> std::fmt::Debug for Stream<T> {
@@ -154,8 +170,101 @@ impl<T: AsyncTask + std::fmt::Debug> std::fmt::Debug for Stream<T> {
 
 impl<T: AsyncTask> Drop for Stream<T> {
     fn drop(&mut self) {
-        // Close first: it joins the worker, guaranteeing no callback is running
-        // by the time the slot is cleared.
+        // Drop cannot report the result; native close is attempted before the
+        // task and callback slot are released, without retrying a prior close.
         let _ = self.task.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::error::StatusCode;
+
+    struct FakeAsyncTask {
+        closed: bool,
+        fail: bool,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl AsyncTask for FakeAsyncTask {
+        fn send_raw(
+            &mut self,
+            _image: &Image,
+            _opts: Option<&sys::MpImageProcessingOptions>,
+            _timestamp_ms: i64,
+        ) -> Result<()> {
+            panic!("shutdown tests do not send images")
+        }
+
+        fn close(&mut self) -> Result<()> {
+            if std::mem::replace(&mut self.closed, true) {
+                return Ok(());
+            }
+            self.events.lock().unwrap().push("native_close");
+            if self.fail {
+                Err(Error::Mp {
+                    code: StatusCode::Internal,
+                    message: "scripted close failure".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for FakeAsyncTask {
+        fn drop(&mut self) {
+            let _ = self.close();
+            self.events.lock().unwrap().push("task_drop");
+        }
+    }
+
+    struct SlotDropProbe(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Drop for SlotDropProbe {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("slot_drop");
+        }
+    }
+
+    fn stream(fail: bool, events: &Arc<Mutex<Vec<&'static str>>>) -> Stream<FakeAsyncTask> {
+        let probe = SlotDropProbe(Arc::clone(events));
+        let slot = Slot::claim(Box::new(move |_, _, _, _| {
+            let _ = &probe;
+        })).unwrap();
+        Stream::new(
+            FakeAsyncTask { closed: false, fail, events: Arc::clone(events) },
+            slot,
+        )
+    }
+
+    #[test]
+    fn explicit_close_runs_native_shutdown_once_before_task_and_slot_drop() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        stream(false, &events).close().unwrap();
+        assert_eq!(*events.lock().unwrap(), ["native_close", "task_drop", "slot_drop"]);
+    }
+
+    #[test]
+    fn explicit_close_returns_error_without_retrying_native_shutdown() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let error = stream(true, &events).close().unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Mp { code: StatusCode::Internal, message } if message == "scripted close failure"
+        ));
+        assert_eq!(*events.lock().unwrap(), ["native_close", "task_drop", "slot_drop"]);
+    }
+
+    #[test]
+    fn drop_only_retains_best_effort_shutdown_order() {
+        for fail in [false, true] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            drop(stream(fail, &events));
+            assert_eq!(*events.lock().unwrap(), ["native_close", "task_drop", "slot_drop"]);
+        }
     }
 }
