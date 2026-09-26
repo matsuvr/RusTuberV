@@ -4,43 +4,79 @@ on:
     branches: [workbench/source-only-20260926]
     paths: [.github/workflows/source-workbench.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  linux-validation-deps:
+  publish-source-branches:
+    if: github.repository == 'matsuvr/RusTuberV'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Resolve the Linux-only validation feature without changing product branches
-        env:
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          git clone --depth=1 --branch fix/123-reuse-user-asset-path "https://github.com/$REPOSITORY.git" source
-          cd source
-          cp Cargo.lock "$RUNNER_TEMP/original.lock"
-          sed -i 's/rfd = { version = "=0.17.2", default-features = false }/rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }/' Cargo.toml
-          cargo +1.97.1 vendor --versioned-dirs "$RUNNER_TEMP/validation-vendor" > "$RUNNER_TEMP/validation-config.toml"
-          cp Cargo.lock "$RUNNER_TEMP/validation-Cargo.lock"
-          python3 - <<'PY'
-          import pathlib, shutil, tomllib, os
-          root = pathlib.Path(os.environ['RUNNER_TEMP'])
-          old = tomllib.loads((root / 'original.lock').read_text())
-          new = tomllib.loads((root / 'validation-Cargo.lock').read_text())
-          old_items = {(p['name'], p['version'], p.get('source')) for p in old['package']}
-          new_items = {(p['name'], p['version'], p.get('source')) for p in new['package']}
-          assert not old_items - new_items, 'The validation feature must not replace pinned packages'
-          extra = root / 'extra-validation-dependencies'
-          extra.mkdir()
-          for name, version, source in sorted(new_items - old_items):
-              package = root / 'validation-vendor' / f'{name}-{version}'
-              if package.is_dir():
-                  shutil.move(package, extra / package.name)
-          PY
-          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/linux-validation-deps.tar.gz" extra-validation-dependencies validation-Cargo.lock
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: linux-validation-dependencies
-          path: ${{ runner.temp }}/linux-validation-deps.tar.gz
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
+          fetch-depth: 0
+      - name: Reconstruct and verify every source tree and commit before publication
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, subprocess
+          encoded = ''.join(pathlib.Path(f'.source-workbench/recipe-{i}.b64').read_text().strip() for i in range(3))
+          packed = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(packed).hexdigest() == 'abe53fd7ace3a0da8308a283c78b7ed091b8d37299b9e02596ec64d72f9efb03', 'Source transfer checksum mismatch'
+          recipe = json.loads(lzma.decompress(packed))
+          allowed = {
+              'docs/126-public-api-contracts',
+              'fix/107-validated-rich-look',
+              'fix/109-frame-counter-semantics',
+              'fix/111-capture-control-results',
+              'fix/112-reconnect-plan',
+              'fix/113-explicit-mock-backend',
+              'fix/114-nonblocking-inference-control',
+              'fix/115-explicit-worker-shutdown',
+              'fix/116-exclusive-inference-runtime',
+              'fix/117-validated-output-frames',
+              'fix/118-validated-tracking-signals',
+              'fix/119-startup-path-errors',
+              'fix/120-typed-cli-outcomes',
+              'fix/121-typed-ndi-runtime-errors',
+              'fix/122-error-and-debug-contracts',
+              'fix/124-scoped-api-visibility',
+              'fix/125-settings-names-and-borrowed-paths',
+              'fix/127-image-size-overflow',
+              'fix/128-stream-explicit-close',
+          }
+          assert {ref for ref, _ in recipe['refs']} == {'refs/heads/' + name for name in allowed}
+          assert len(recipe['commits']) == 19
+          def git(*args, input=None):
+              return subprocess.check_output(['git', *args], input=input)
+          for item in recipe['commits']:
+              raw = item['raw'].encode()
+              parent = next(line.split()[1] for line in item['raw'].splitlines() if line.startswith('parent '))
+              tree = next(line.split()[1] for line in item['raw'].splitlines() if line.startswith('tree '))
+              git('checkout', '--detach', '--force', parent)
+              for status, path, edits in item['changes']:
+                  target = pathlib.Path(path)
+                  assert not target.is_absolute() and '..' not in target.parts
+                  assert not path.startswith(('.git/', '.github/', '.source-workbench/'))
+                  lines = [] if status == 'A' else target.read_text().splitlines(keepends=True)
+                  for start, end, text in reversed(edits):
+                      lines[start:end] = text.splitlines(keepends=True)
+                  if status == 'D':
+                      target.unlink()
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_text(''.join(lines))
+                  git('add', '--', path)
+              assert git('write-tree').decode().strip() == tree, ('tree mismatch', item['sha'])
+              actual = git('hash-object', '-w', '-t', 'commit', '--stdin', input=raw).decode().strip()
+              assert actual == item['sha'], ('commit mismatch', item['sha'])
+              git('reset', '--hard', actual)
+              print('Verified commit', actual, flush=True)
+          refs = []
+          for ref, sha in recipe['refs']:
+              git('update-ref', ref, sha)
+              refs.append(f'{ref}:{ref}')
+              print('Publishing', ref, sha, flush=True)
+          # No force, no main update, and all branch updates succeed or fail together.
+          git('push', '--atomic', 'origin', *refs)
+          print('Published 19 verified branch tips; main and issues are unchanged.', flush=True)
+          PY
