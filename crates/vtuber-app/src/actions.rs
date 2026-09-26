@@ -18,14 +18,13 @@ pub enum RichLookChange {
 }
 
 pub(crate) fn reduce_rich_look(
-    mut current: vtuber_avatar::RichLookSettings,
+    current: vtuber_avatar::RichLookSettings,
     change: RichLookChange,
-) -> vtuber_avatar::RichLookSettings {
+) -> Result<vtuber_avatar::RichLookSettings, vtuber_avatar::RichLookSettingsError> {
     match change {
-        RichLookChange::Enabled(enabled) => current.enabled = enabled,
-        RichLookChange::Strength(strength) => current.strength = strength,
+        RichLookChange::Enabled(enabled) => Ok(current.with_enabled(enabled)),
+        RichLookChange::Strength(strength) => current.with_strength(strength),
     }
-    current
 }
 
 /// Actions that the UI can emit.
@@ -323,20 +322,17 @@ mod tests {
     fn rich_reducer_keeps_switch_and_strength_independent() {
         use vtuber_avatar::RichLookSettings;
         let initial = RichLookSettings::default();
-        assert!(!initial.enabled);
-        assert_eq!(initial.strength, 1.0);
+        assert!(!initial.enabled());
+        assert_eq!(initial.strength(), 1.0);
         for strength in [0.0, 0.5, 1.0] {
-            let tuned = reduce_rich_look(initial, RichLookChange::Strength(strength));
-            let on = reduce_rich_look(tuned, RichLookChange::Enabled(true));
-            let off = reduce_rich_look(on, RichLookChange::Enabled(false));
+            let tuned = reduce_rich_look(initial, RichLookChange::Strength(strength)).unwrap();
+            let on = reduce_rich_look(tuned, RichLookChange::Enabled(true)).unwrap();
+            let off = reduce_rich_look(on, RichLookChange::Enabled(false)).unwrap();
+            assert_eq!(off, RichLookSettings::try_new(false, strength).unwrap());
             assert_eq!(
-                off,
-                RichLookSettings {
-                    enabled: false,
-                    strength
-                }
+                reduce_rich_look(off, RichLookChange::Enabled(true)).unwrap(),
+                on
             );
-            assert_eq!(reduce_rich_look(off, RichLookChange::Enabled(true)), on);
         }
     }
 

@@ -12,7 +12,7 @@ mod rich_outline;
 mod rich_standard;
 
 pub(crate) use lighting::register_look_lighting;
-pub use preset::RichLookSettings;
+pub use preset::{RichLookSettings, RichLookSettingsError};
 pub(crate) use rich_mtoon::{RichMtoonSwap, register_rich_mtoon};
 pub(crate) use rich_standard::{RichStandardSwap, register_rich_standard};
 
@@ -52,18 +52,14 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<Messages<LookSettingsChanged>>()
-            .write(LookSettingsChanged(RichLookSettings {
-                enabled: true,
-                strength: 0.5,
-            }));
+            .write(LookSettingsChanged(
+                RichLookSettings::try_new(true, 0.5).unwrap(),
+            ));
         app.update();
 
         assert_eq!(
             app.world().resource::<AvatarLookSettings>().0,
-            RichLookSettings {
-                enabled: true,
-                strength: 0.5
-            }
+            RichLookSettings::try_new(true, 0.5).unwrap()
         );
     }
 }
