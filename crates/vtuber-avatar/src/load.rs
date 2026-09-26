@@ -102,6 +102,12 @@ impl UserAssetPath {
         &self.path
     }
 
+    /// Borrows the Bevy asset path parsed and validated at construction.
+    #[must_use]
+    pub fn as_asset_path(&self) -> &AssetPath<'static> {
+        &self.asset_path
+    }
+
     /// Converts this typed path into a Bevy [`AssetPath`].
     ///
     /// This cannot fail because the path was validated and parsed once at
@@ -279,8 +285,6 @@ pub enum LoadImportedAvatarResult {
 /// Reasons a [`LoadImportedAvatarRequest`] can be rejected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoadImportedAvatarError {
-    /// The `user://` path is invalid.
-    InvalidAssetPath(AssetPathError),
     /// The lifecycle is not in a state that can accept the request.
     Lifecycle(AvatarRequestError),
 }
@@ -288,7 +292,6 @@ pub enum LoadImportedAvatarError {
 impl fmt::Display for LoadImportedAvatarError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidAssetPath(error) => write!(f, "invalid avatar asset path: {error}"),
             Self::Lifecycle(error) => write!(f, "{error}"),
         }
     }
@@ -297,7 +300,6 @@ impl fmt::Display for LoadImportedAvatarError {
 impl std::error::Error for LoadImportedAvatarError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidAssetPath(error) => Some(error),
             Self::Lifecycle(error) => Some(error),
         }
     }
@@ -308,7 +310,6 @@ impl LoadImportedAvatarError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::InvalidAssetPath(_) => "LOAD_IMPORTED_AVATAR_INVALID_PATH",
             Self::Lifecycle(_) => "LOAD_IMPORTED_AVATAR_INVALID_LIFECYCLE",
         }
     }
@@ -341,16 +342,7 @@ pub fn handle_load_imported_avatar_requests(
     let mut latest_pending_root: Option<Entity> = None;
 
     for request in requests.read() {
-        let asset_path = match request.imported.asset_path.as_str().parse_asset_path() {
-            Ok(path) => path,
-            Err(error) => {
-                results.write(LoadImportedAvatarResult::Rejected {
-                    request_id: request.request_id,
-                    error: LoadImportedAvatarError::InvalidAssetPath(error),
-                });
-                continue;
-            }
-        };
+        let asset_path = request.imported.asset_path.as_asset_path().clone();
 
         let event = match effective_state {
             AvatarLifecycleState::NoAvatar | AvatarLifecycleState::Failed => {
@@ -428,20 +420,6 @@ enum LoadOrReplace {
     Replace,
 }
 
-/// Internal helper that parses a validated `user://` path without panicking.
-trait ParseUserAssetPath {
-    /// Parses the path and returns a typed [`AssetPathError`].
-    fn parse_asset_path(&self) -> Result<AssetPath<'static>, AssetPathError>;
-}
-
-impl ParseUserAssetPath for str {
-    fn parse_asset_path(&self) -> Result<AssetPath<'static>, AssetPathError> {
-        AssetPath::try_parse(self)
-            .map_err(|e| AssetPathError::InvalidSyntax(format!("{e}")))
-            .map(AssetPath::into_owned)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +472,14 @@ mod tests {
         let messages = app.world().resource::<Messages<LoadImportedAvatarResult>>();
         let mut cursor = messages.get_cursor();
         cursor.read(messages).cloned().collect()
+    }
+
+    #[test]
+    fn typed_path_borrows_the_asset_path_parsed_at_construction() {
+        let path = UserAssetPath::new("user://avatars/abc123/model.vrm").unwrap();
+        assert!(std::ptr::eq(path.as_asset_path(), &path.asset_path));
+        assert_eq!(path.as_asset_path().to_string(), path.as_str());
+        assert_eq!(path.as_asset_path().clone(), path.clone().into_asset_path());
     }
 
     #[test]
