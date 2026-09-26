@@ -22,7 +22,7 @@ pub mod capture;
 pub mod device;
 /// Format negotiation logic.
 pub mod format;
-/// Mock backend for tests.
+/// Explicit Mock input for development and deterministic test fixtures.
 pub mod mock;
 /// Placeholder for camera subsystem.
 pub mod placeholder;

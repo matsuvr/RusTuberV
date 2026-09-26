@@ -1,4 +1,4 @@
-//! Capture runtime — bridges the orchestrator to the real camera backend.
+//! Capture runtime — bridges the orchestrator to an explicitly selected backend.
 //!
 //! Manages the [`CaptureController`] lifecycle and provides Bevy systems for
 //! preview texture updates and diagnostics synchronisation.
@@ -17,6 +17,36 @@ use crate::diagnostics::DiagnosticsSnapshot;
 use crate::preview::PreviewState;
 use crate::privacy_preview::build_privacy_preview;
 
+/// Camera implementation used consistently for enumeration, startup and diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraBackendKind {
+    /// Windows Media Foundation. Failure never falls back to Mock.
+    Msmf,
+    /// Explicit development input, not a real camera.
+    Mock,
+}
+
+impl CameraBackendKind {
+    /// Stable diagnostic name, based on the selected backend rather than the OS.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Msmf => "MSMF",
+            Self::Mock => "Mock",
+        }
+    }
+}
+
+/// Chooses the implemented OS default; real macOS capture is not implemented.
+#[must_use]
+pub const fn default_camera_backend() -> CameraBackendKind {
+    if cfg!(target_os = "windows") {
+        CameraBackendKind::Msmf
+    } else {
+        CameraBackendKind::Mock
+    }
+}
+
 /// Resource wrapping the production [`CaptureController`].
 ///
 /// The controller is created at app startup and lives for the entire
@@ -26,6 +56,7 @@ use crate::privacy_preview::build_privacy_preview;
 pub struct CaptureRuntime {
     /// The underlying capture controller.
     controller: CaptureController,
+    backend: CameraBackendKind,
     /// Whether the worker thread has been started.
     worker_started: bool,
     /// Last-read generation for the frame slot.
@@ -34,15 +65,28 @@ pub struct CaptureRuntime {
 
 impl Default for CaptureRuntime {
     fn default() -> Self {
-        Self {
-            controller: CaptureController::new(),
-            worker_started: false,
-            last_generation: 0,
-        }
+        Self::with_backend(default_camera_backend())
     }
 }
 
 impl CaptureRuntime {
+    /// Creates an idle runtime with an explicit backend selection.
+    #[must_use]
+    pub fn with_backend(backend: CameraBackendKind) -> Self {
+        Self {
+            controller: CaptureController::new(),
+            backend,
+            worker_started: false,
+            last_generation: 0,
+        }
+    }
+
+    /// Returns the backend used by both enumeration and worker startup.
+    #[must_use]
+    pub const fn backend_kind(&self) -> CameraBackendKind {
+        self.backend
+    }
+
     /// Returns a reference to the underlying controller.
     #[must_use]
     pub fn controller(&self) -> &CaptureController {
@@ -63,20 +107,19 @@ impl CaptureRuntime {
             return Ok(());
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            let backend = vtuber_camera::backend::msmf::MsmfBackend::new();
-            self.controller
-                .start_worker(backend)
-                .map_err(|e| format!("{e}"))?;
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let backend = vtuber_camera::mock::MockBackend::default();
-            self.controller
-                .start_worker(backend)
-                .map_err(|e| format!("{e}"))?;
+        match self.backend {
+            CameraBackendKind::Mock => self
+                .controller
+                .start_worker(vtuber_camera::mock::MockBackend::default())
+                .map_err(|error| error.to_string())?,
+            CameraBackendKind::Msmf => {
+                #[cfg(target_os = "windows")]
+                self.controller
+                    .start_worker(vtuber_camera::backend::msmf::MsmfBackend::new())
+                    .map_err(|error| error.to_string())?;
+                #[cfg(not(target_os = "windows"))]
+                return Err("MSMF is unavailable on this platform".to_owned());
+            }
         }
 
         self.worker_started = true;
@@ -85,16 +128,22 @@ impl CaptureRuntime {
 
     /// Enumerates available cameras.
     pub fn enumerate_cameras(&self) -> Result<Vec<CameraDescriptor>, String> {
-        #[cfg(target_os = "windows")]
-        {
-            let backend = vtuber_camera::backend::msmf::MsmfBackend::new();
-            backend.enumerate().map_err(|error| error.to_string())
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let backend = vtuber_camera::mock::MockBackend::default();
-            backend.enumerate().map_err(|error| error.to_string())
+        match self.backend {
+            CameraBackendKind::Mock => vtuber_camera::mock::MockBackend::default()
+                .enumerate()
+                .map_err(|error| error.to_string()),
+            CameraBackendKind::Msmf => {
+                #[cfg(target_os = "windows")]
+                {
+                    vtuber_camera::backend::msmf::MsmfBackend::new()
+                        .enumerate()
+                        .map_err(|error| error.to_string())
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Err("MSMF is unavailable on this platform".to_owned())
+                }
+            }
         }
     }
 
@@ -213,28 +262,13 @@ pub fn sync_capture_diagnostics(
         *cached_state = Some(state);
     }
     diagnostics.capture_publish_rejected_frames = metrics.publish_rejected_frames;
-    let backend = camera_backend_name();
+    let backend = capture.backend_kind().name();
     if !*cached_backend || diagnostics.camera_backend.as_deref() != Some(backend) {
         diagnostics.camera_backend = Some(backend.to_string());
         *cached_backend = true;
     }
     if let Some(err) = metrics.last_error {
         diagnostics.last_error = Some(err);
-    }
-}
-
-fn camera_backend_name() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "MSMF"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "AVFoundation"
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        "Mock"
     }
 }
 
@@ -422,6 +456,32 @@ mod preview_tests {
 
     use super::*;
     use vtuber_core::{MonoTimeNs, PixelFormat};
+
+    #[test]
+    fn backend_names_follow_the_explicit_selection() {
+        assert_eq!(CameraBackendKind::Msmf.name(), "MSMF");
+        assert_eq!(CameraBackendKind::Mock.name(), "Mock");
+        let runtime = CaptureRuntime::with_backend(CameraBackendKind::Mock);
+        assert_eq!(runtime.backend_kind(), CameraBackendKind::Mock);
+        assert!(
+            runtime
+                .enumerate_cameras()
+                .unwrap()
+                .iter()
+                .all(|camera| camera.label.contains("Mock"))
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unimplemented_real_backend_never_silently_switches_to_mock() {
+        assert_eq!(default_camera_backend(), CameraBackendKind::Mock);
+        let mut runtime = CaptureRuntime::with_backend(CameraBackendKind::Msmf);
+        assert!(runtime.enumerate_cameras().is_err());
+        assert!(runtime.ensure_worker_started().is_err());
+        assert!(!runtime.worker_started);
+        assert_eq!(runtime.backend_kind(), CameraBackendKind::Msmf);
+    }
 
     fn rgb_frame() -> VideoFrame {
         VideoFrame {
