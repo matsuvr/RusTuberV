@@ -5,6 +5,7 @@
 //! When a GPU or readback completion is unavailable, the command exits 2
 //! (`NOT RUN`) instead of reporting success.
 
+use crate::task_result::{TaskOutcome, TaskResult};
 use bevy::app::AppExit;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
@@ -27,7 +28,7 @@ const MAX_WAIT: Duration = Duration::from_secs(20);
 pub const EXIT_NOT_RUN: i32 = 2;
 
 /// Run the GPU pixel-contract validator.
-pub fn run(args: &[String]) -> Result<(), String> {
+pub fn run(args: &[String]) -> TaskResult {
     let evidence = args
         .iter()
         .position(|argument| argument == "--evidence")
@@ -42,7 +43,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 write_report(&path, &report)?;
             }
             println!("NDI/avatar GPU output pixel contracts: PASS");
-            Ok(())
+            Ok(TaskOutcome::Completed)
         }
         Err(RenderValidationError::NotRun(reason)) => {
             report.result = "NOT RUN".into();
@@ -50,7 +51,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
             if let Some(path) = evidence {
                 write_report(&path, &report)?;
             }
-            Err(format!("NOT RUN: {reason}"))
+            Ok(TaskOutcome::NotRun {
+                reason,
+                exit_code: EXIT_NOT_RUN,
+            })
         }
         Err(RenderValidationError::Failed(reason)) => {
             report.result = "FAIL".into();
@@ -58,7 +62,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             if let Some(path) = evidence {
                 write_report(&path, &report)?;
             }
-            Err(reason)
+            Err(reason.into())
         }
     }
 }

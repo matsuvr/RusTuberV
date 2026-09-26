@@ -4,6 +4,7 @@
 //! binaries. The caller must provide the exact runtime DLL and license
 //! agreement obtained from the SDK package that was used for the build.
 
+use crate::task_result::{TaskOutcome, TaskResult, completed};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,51 +22,45 @@ const MODEL_TASK_FILE: &str = "assets/models/face_landmarker.task";
 const MODEL_LICENSE_FILE: &str = "assets/models/LICENSE.mediapipe.txt";
 
 /// Dispatch an NDI package command.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
-pub fn run(args: &[String]) -> Result<(), String> {
-    let Some(command) = args.first().map(String::as_str) else {
+pub fn run(args: &[String]) -> TaskResult {
+    let Some((command, args)) = args.split_first() else {
         print_help();
-        return Ok(());
+        return Ok(TaskOutcome::Help);
     };
-
-    match command {
-        "package" => package(&args[1..]),
-        "verify-package" => verify_package(
-            args.get(1)
-                .map(PathBuf::from)
-                .ok_or_else(|| "usage: cargo xtask ndi verify-package <package-dir>".to_string())?
-                .as_path(),
-        ),
-        "verify-roundtrip" => verify_roundtrip(
-            args.get(1)
-                .map(PathBuf::from)
-                .ok_or_else(|| {
-                    "usage: cargo xtask ndi verify-roundtrip <capture-manifest>".to_string()
-                })?
-                .as_path(),
-        ),
-        "validate-render" => crate::ndi_output_render::run(&args[1..]),
-        "probe-environment" => probe_environment(),
-        "zip" => zip_package(
-            args.get(1)
-                .map(PathBuf::from)
-                .ok_or_else(|| "usage: cargo xtask ndi zip <package-dir> [output.zip]".to_string())?
-                .as_path(),
-            args.get(2).map(PathBuf::from),
-        ),
+    match command.as_str() {
+        "package" => package(args),
+        "verify-package" => {
+            completed(verify_package(args.first().map(Path::new).ok_or_else(
+                || "usage: cargo xtask ndi verify-package <package-dir>".to_string(),
+            )?))
+        }
+        "verify-roundtrip" => completed(verify_roundtrip(args.first().map(Path::new).ok_or_else(
+            || "usage: cargo xtask ndi verify-roundtrip <capture-manifest>".to_string(),
+        )?)),
+        "validate-render" => crate::ndi_output_render::run(args),
+        "probe-environment" => completed(probe_environment()),
+        "zip" => completed(zip_package(
+            args.first().map(Path::new).ok_or_else(|| {
+                "usage: cargo xtask ndi zip <package-dir> [output.zip]".to_string()
+            })?,
+            args.get(1).map(PathBuf::from),
+        )),
         "help" | "--help" | "-h" => {
             print_help();
-            Ok(())
+            Ok(TaskOutcome::Help)
         }
-        other => Err(format!("unknown ndi command: {other}")),
+        other => Err(format!("unknown ndi command: {other}").into()),
     }
 }
 
-fn package(args: &[String]) -> Result<(), String> {
-    let options = PackageOptions::parse(args)?;
+fn package(args: &[String]) -> TaskResult {
+    match PackageOptions::parse(args)? {
+        Some(options) => completed(stage_package(options)),
+        None => Ok(TaskOutcome::Help),
+    }
+}
+
+fn stage_package(options: PackageOptions) -> Result<(), String> {
     let notices_path = workspace_root().join(NOTICES_FILE);
     let notices = fs::read_to_string(&notices_path)
         .map_err(|error| format!("cannot read {NOTICES_FILE}: {error}"))?;
@@ -558,11 +553,7 @@ struct PackageOptions {
 }
 
 impl PackageOptions {
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse(args: &[String]) -> Result<Option<Self>, String> {
         let mut output = None;
         let workspace_root = workspace_root();
         let mut executable = workspace_root.join("target/release/vtuber-desktop.exe");
@@ -576,8 +567,7 @@ impl PackageOptions {
         let mut zip = None;
         let mut force = false;
         let mut index = 0;
-        while index < args.len() {
-            let argument = args[index].as_str();
+        while let Some(argument) = args.get(index).map(String::as_str) {
             match argument {
                 "--output" => output = Some(next_path(args, &mut index, argument)?),
                 "--executable" => executable = next_path(args, &mut index, argument)?,
@@ -598,7 +588,7 @@ impl PackageOptions {
                 "--force" => force = true,
                 "--help" | "-h" => {
                     print_package_help();
-                    return Err("help requested".to_string());
+                    return Ok(None);
                 }
                 other => return Err(format!("unknown package option: {other}")),
             }
@@ -632,7 +622,7 @@ impl PackageOptions {
                 .unwrap_or_else(|| PathBuf::from(RUNTIME_LICENSES_FILE))
         });
 
-        Ok(Self {
+        Ok(Some(Self {
             output,
             executable,
             runtime_dll,
@@ -647,7 +637,7 @@ impl PackageOptions {
             model_task: workspace_root.join(MODEL_TASK_FILE),
             model_license: workspace_root.join(MODEL_LICENSE_FILE),
             force,
-        })
+        }))
     }
 }
 
@@ -813,7 +803,9 @@ mod tests {
             "6.3.2".into(),
             "--sdk-package-unavailable".into(),
         ]);
-        let options = result.expect("unavailable archive is allowed");
+        let options = result
+            .expect("unavailable archive is allowed")
+            .expect("package options");
         assert!(!options.package_archive_available);
         assert!(options.sdk_package_sha256.is_empty());
     }

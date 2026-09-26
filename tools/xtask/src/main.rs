@@ -25,182 +25,153 @@ mod mediapipe_face_smoke;
 mod mediapipe_pose_probe;
 mod ndi;
 mod ndi_output_render;
+mod task_result;
 mod vrm_compatibility;
 mod vrm_managed_compatibility;
 mod vrm_render;
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() {
-        println!("usage: cargo xtask <task>");
-        println!("tasks:");
-        println!("  vrm-compat [fixture-dir]  run bevy_vrm1 compatibility gate");
-        println!(
-            "  vrm-managed-compat <path-to-model.vrm>  run the managed user:// lifecycle gate"
-        );
-        println!("  acceptance <command>      Windows acceptance test support");
-        println!("  eye-closure <command>      Eye-closure data prep and threshold fitting");
-        println!("  face-image-probe <path>  Legacy research UltraFace/Peppa probe");
-        println!("  face-pipeline-smoke       Legacy research detector/crop/landmark probe");
-        println!("  mediapipe-face-smoke      Windows MSMF MediaPipe Face Landmarker gate");
-        println!("  mediapipe-pose-probe      Guided MediaPipe neutral-relative pose proof");
-        println!("  ndi <command>             Stage or verify a Windows NDI release package");
-        return;
-    }
+use task_result::{TaskError, TaskOutcome, TaskResult, completed, decode_cli_args, task_exit_code};
 
-    match args[0].as_str() {
+fn main() {
+    let result = decode_cli_args(env::args_os().skip(1)).and_then(|args| run_task(&args));
+    match &result {
+        Ok(TaskOutcome::NotRun { reason, .. }) => eprintln!("NOT RUN: {reason}"),
+        Err(error) => eprintln!("{error}"),
+        Ok(TaskOutcome::Completed | TaskOutcome::Help) => {}
+    }
+    process::exit(task_exit_code(&result));
+}
+
+fn print_help() {
+    println!("usage: cargo xtask <task>");
+    println!("tasks:");
+    println!("  vrm-compat [fixture-dir]   run bevy_vrm1 compatibility gate");
+    println!("  vrm-managed-compat <path> run the managed user:// lifecycle gate");
+    println!("  acceptance <command>     Windows acceptance test support");
+    println!("  eye-closure <command>    Eye-closure data prep and threshold fitting");
+    println!("  face-image-probe <path>  Legacy research UltraFace/Peppa probe");
+    println!("  face-pipeline-smoke      Legacy research detector/crop/landmark probe");
+    println!("  mediapipe-face-smoke     Windows MSMF MediaPipe Face Landmarker gate");
+    println!("  mediapipe-pose-probe     Guided MediaPipe neutral-relative pose proof");
+    println!("  vrm-render <path> <out>  Render the rich-look switching sequence");
+    println!("  ndi <command>           Stage or verify a Windows NDI release package");
+}
+
+fn run_task(args: &[String]) -> TaskResult {
+    let Some((task, args)) = args.split_first() else {
+        print_help();
+        return Ok(TaskOutcome::Help);
+    };
+    match task.as_str() {
         "vrm-compat" => {
             let fixture_dir = args
-                .get(1)
+                .first()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("tests/fixtures/vrm"));
-            match vrm_compatibility::run(&fixture_dir) {
-                Ok(results) => {
-                    let mut failed = 0;
-                    for result in &results {
-                        print_result(result);
-                        if result.runner_error.is_some()
-                            || result.preflight.is_err()
-                            || result.runtime.as_ref().is_some_and(|r| !r.is_mvp_capable())
-                        {
-                            failed += 1;
-                        }
-                    }
-                    if failed > 0 {
-                        eprintln!("{failed} fixture(s) failed the compatibility gate");
-                        process::exit(vrm_compatibility::EXIT_COMPAT_FAIL);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("compatibility runner failed: {e}");
-                    process::exit(1);
+            let results = vrm_compatibility::run(&fixture_dir).map_err(|error| {
+                TaskError::new(format!("compatibility runner failed: {error}"), 1)
+            })?;
+            let mut failed = 0;
+            for result in &results {
+                print_result(result);
+                if result.runner_error.is_some()
+                    || result.preflight.is_err()
+                    || result
+                        .runtime
+                        .as_ref()
+                        .is_some_and(|runtime| !runtime.is_mvp_capable())
+                {
+                    failed += 1;
                 }
             }
+            if failed > 0 {
+                return Err(TaskError::new(
+                    format!("{failed} fixture(s) failed the compatibility gate"),
+                    vrm_compatibility::EXIT_COMPAT_FAIL,
+                ));
+            }
+            Ok(TaskOutcome::Completed)
         }
         "vrm-managed-compat" => {
-            let Some(path) = args.get(1).map(PathBuf::from) else {
-                eprintln!("usage: cargo xtask -- vrm-managed-compat <path-to-model.vrm>");
-                process::exit(1);
-            };
-            if let Err(error) = vrm_managed_compatibility::run(&path) {
-                eprintln!("managed compatibility runner failed: {error}");
-                process::exit(1);
-            }
+            let path = args.first().map(PathBuf::from).ok_or_else(|| {
+                TaskError::new(
+                    "usage: cargo xtask -- vrm-managed-compat <path-to-model.vrm>",
+                    1,
+                )
+            })?;
+            completed(
+                vrm_managed_compatibility::run(&path)
+                    .map_err(|error| format!("managed compatibility runner failed: {error}")),
+            )
         }
-        "acceptance" => {
-            handle_acceptance(&args[1..]);
+        "acceptance" => handle_acceptance(args),
+        "eye-closure" => completed(eye_closure::run(args)),
+        "face-image-probe" => completed(face_image_probe::run(args)),
+        "face-pipeline-smoke" => completed(face_pipeline_smoke::run(args)),
+        "mediapipe-face-smoke" => completed(mediapipe_face_smoke::run(args)),
+        "mediapipe-pose-probe" => completed(mediapipe_pose_probe::run(args)),
+        "vrm-render" => vrm_render::run(args),
+        "ndi" => ndi::run(args),
+        other => Err(TaskError::new(format!("unknown task: {other}"), 1)),
+    }
+}
+
+fn handle_acceptance(args: &[String]) -> TaskResult {
+    let Some((command, args)) = args.split_first() else {
+        acceptance::print_help();
+        return Ok(TaskOutcome::Help);
+    };
+    match command.as_str() {
+        "env" => {
+            acceptance::print_env();
+            Ok(TaskOutcome::Completed)
         }
-        "eye-closure" => match eye_closure::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("eye-closure failed: {error}");
-                process::exit(1);
-            }
-        },
-        "face-image-probe" => match face_image_probe::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("face-image-probe failed: {error}");
-                process::exit(1);
-            }
-        },
-        "face-pipeline-smoke" => match face_pipeline_smoke::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("face-pipeline-smoke failed: {error}");
-                process::exit(1);
-            }
-        },
-        "mediapipe-face-smoke" => match mediapipe_face_smoke::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("mediapipe-face-smoke failed: {error}");
-                process::exit(1);
-            }
-        },
-        "mediapipe-pose-probe" => match mediapipe_pose_probe::run(&args[1..]) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("mediapipe-pose-probe failed: {error}");
-                std::process::exit(1);
-            }
-        },
-        "vrm-render" => {
-            if let Err(error) = vrm_render::run(&args[1..]) {
-                eprintln!("vrm-render failed: {error}");
-                if error.starts_with("NOT RUN:") {
-                    process::exit(vrm_render::EXIT_NOT_RUN);
-                }
-                process::exit(1);
-            }
+        "new" => {
+            let base_dir = args
+                .first()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("docs/acceptance/runs"));
+            let run_dir = acceptance::new_run(&base_dir)?;
+            println!("Created acceptance run: {}", run_dir.display());
+            Ok(TaskOutcome::Completed)
         }
-        "ndi" => {
-            if let Err(error) = ndi::run(&args[1..])
-                && error != "help requested"
-            {
-                eprintln!("ndi command failed: {error}");
-                if error.starts_with("NOT RUN:") {
-                    process::exit(ndi_output_render::EXIT_NOT_RUN);
-                }
-                process::exit(1);
-            }
+        "verify" => {
+            let manifest = args
+                .first()
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new("assets/models/manifest.toml"));
+            acceptance::verify_models(manifest)
+                .map_err(|error| TaskError::new(format!("verify failed: {error}"), 1))?;
+            Ok(TaskOutcome::Completed)
+        }
+        "help" | "--help" | "-h" => {
+            acceptance::print_help();
+            Ok(TaskOutcome::Help)
         }
         other => {
-            eprintln!("unknown task: {other}");
-            process::exit(1);
+            acceptance::print_help();
+            Err(TaskError::new(
+                format!("unknown acceptance command: {other}"),
+                1,
+            ))
         }
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
-fn handle_acceptance(args: &[String]) {
-    if args.is_empty() {
-        acceptance::print_help();
-        return;
-    }
-
-    match args[0].as_str() {
-        "env" => {
-            acceptance::print_env();
-        }
-        "new" => {
-            let base_dir = args
-                .get(1)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("docs/acceptance/runs"));
-            match acceptance::new_run(&base_dir) {
-                Ok(run_dir) => println!("Created acceptance run: {}", run_dir.display()),
-                Err(e) => {
-                    eprintln!("failed to create run: {e}");
-                    process::exit(1);
-                }
-            }
-        }
-        "verify" => {
-            let manifest = args
-                .get(1)
-                .map(Path::new)
-                .unwrap_or_else(|| Path::new("assets/models/manifest.toml"));
-            if let Err(e) = acceptance::verify_models(manifest) {
-                eprintln!("verify failed: {e}");
-                process::exit(1);
-            }
-        }
-        "help" | "--help" | "-h" => {
-            acceptance::print_help();
-        }
-        other => {
-            eprintln!("unknown acceptance command: {other}");
-            acceptance::print_help();
-            process::exit(1);
-        }
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn absent_missing_and_unknown_arguments_are_typed() {
+        assert_eq!(run_task(&[]).unwrap(), TaskOutcome::Help);
+        assert!(run_task(&["unknown".into()]).is_err());
+        assert!(run_task(&["vrm-managed-compat".into()]).is_err());
+        assert_eq!(handle_acceptance(&[]).unwrap(), TaskOutcome::Help);
+        assert!(handle_acceptance(&["unknown".into()]).is_err());
+        assert_eq!(
+            ndi::run(&["package".into(), "--help".into()]).unwrap(),
+            TaskOutcome::Help
+        );
     }
 }
 
