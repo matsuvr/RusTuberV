@@ -147,6 +147,16 @@ pub struct CaptureController {
     worker: Option<WorkerHandle<CaptureWorkerResult>>,
 }
 
+impl std::fmt::Debug for CaptureController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaptureController")
+            .field("state", &self.state)
+            .field("has_worker", &self.worker.is_some())
+            .field("has_command_channel", &self.command_tx.is_some())
+            .finish()
+    }
+}
+
 impl Drop for CaptureController {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
@@ -791,6 +801,18 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn debug_only_reads_the_controller_summary() {
+        let controller = CaptureController::new();
+        let text = format!("{controller:?}");
+        assert!(text.contains("CaptureController"));
+        assert!(text.contains("Idle"));
+        assert!(text.contains("has_worker: false"));
+        assert!(text.contains("has_command_channel: false"));
+        assert!(controller.worker.is_none());
+        assert!(!controller.frame_slot.is_closed());
     }
 
     #[test]

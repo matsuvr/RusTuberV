@@ -206,6 +206,8 @@ impl std::fmt::Display for OrchestratorError {
     }
 }
 
+impl std::error::Error for OrchestratorError {}
+
 impl Default for Orchestrator {
     fn default() -> Self {
         Self {
@@ -1663,6 +1665,14 @@ mod tests {
     fn look_action(app: &mut App, action: UiAction) {
         app.world_mut().resource_mut::<UiState>().emit(action);
         app.update();
+    }
+
+    #[test]
+    fn orchestrator_error_has_the_standard_error_contract() {
+        let error = OrchestratorError::ImportFailed("original detail".into());
+        let standard: &dyn std::error::Error = &error;
+        assert_eq!(standard.to_string(), "Import failed: original detail");
+        assert!(standard.source().is_none());
     }
 
     #[test]
