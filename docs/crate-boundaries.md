@@ -14,7 +14,7 @@
 | vtuber-desktop | Application entry point and platform resource setup. |
 | xtask | Repository development and validation commands. |
 
-The application also uses Bevy entities. Only core/tracking are engine-independent.
+The application also uses Bevy entities. Core and tracking remain engine-independent.
 MediaPipe calls native code: the complete inference dependency stack is not pure Rust.
 macOS currently uses an explicit development Mock; a production macOS camera backend
 is unimplemented/deferred. These changes do not claim new hardware or platform support.
@@ -38,12 +38,14 @@ shutdown policy; their Drop stops/joins and can block. Explicit shutdown is pref
 when the caller must observe errors. Inference has an explicit preserving-input
 shutdown for a shared capture slot; reaping a worker is separate from reading status.
 
-Settings load defaults only when the file is absent. Unreadable, malformed or unsupported
-files remain errors and are not silently overwritten. Saves replace the file through a
-same-directory temporary file; failed writes/replacement keep the prior bytes. Mutating
-settings setters update memory only after persistence succeeds. Save methods accepting
-a store do not change the resource's startup snapshot. This is not a crash-durability or
-multi-process read-modify-write synchronization guarantee.
+For a resolved settings path, only a missing file yields initial defaults. When the
+platform configuration directory cannot be resolved, load_default returns in-memory
+settings without a save path. Unreadable, malformed or unsupported files remain errors
+and are not silently overwritten. Saves replace the file through a same-directory
+temporary file; failed writes/replacement keep the prior bytes. Mutating settings setters
+update memory only after persistence succeeds. Save methods accepting a store do not
+change the resource's startup snapshot. This is not a crash-durability or multi-process
+read-modify-write synchronization guarantee.
 
 Rich settings validate finite strength in 0..=1 at construction/deserialization. OFF
 retains strength and selects baseline materials/front light. ON keeps that light and
