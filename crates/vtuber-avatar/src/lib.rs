@@ -129,7 +129,8 @@ pub use load::{
     VrmSourceExpressions,
 };
 pub use look::{
-    AvatarLookSettings, LookSettingsChanged, RichLookSettings, apply_look_settings_changes,
+    AvatarLookSettings, LookSettingsChanged, RichLookSettings, RichLookSettingsError,
+    apply_look_settings_changes,
 };
 pub use mirror::AvatarMotionMirror;
 pub use plugin::{StartupModelPath, VtuberAvatarPlugin};

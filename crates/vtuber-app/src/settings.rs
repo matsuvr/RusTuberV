@@ -548,9 +548,9 @@ fn write_settings_atomically(path: &Path, text: &str) -> Result<(), ArmPoseSetti
     fs::create_dir_all(directory)?;
     let mut temporary = NamedTempFile::new_in(directory)?;
     temporary.write_all(text.as_bytes())?;
-    temporary.persist(path).map_err(|persist_error| {
-        ArmPoseSettingsError::Io(persist_error.error)
-    })?;
+    temporary
+        .persist(path)
+        .map_err(|persist_error| ArmPoseSettingsError::Io(persist_error.error))?;
     Ok(())
 }
 
@@ -736,14 +736,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
         let id = AvatarAssetId::new("sha256:first");
-        let zero = RichLookSettings {
-            enabled: true,
-            strength: 0.0,
-        };
-        let half = RichLookSettings {
-            enabled: false,
-            strength: 0.5,
-        };
+        let zero = RichLookSettings::try_new(true, 0.0).unwrap();
+        let half = RichLookSettings::try_new(false, 0.5).unwrap();
         let mut arms = ArmPoseOverrideStore::default();
         arms.set(id.0.clone(), profile(0.55)).unwrap();
         arms.set_dynamic_profile(
@@ -810,6 +804,22 @@ mod tests {
     }
 
     #[test]
+    fn invalid_rich_strength_prevents_load_and_save_without_replacing_bytes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        for strength in ["-0.1", "1.1", "nan", "inf", "-inf"] {
+            let text = format!(
+                "schema_version = 1\n[rich_look.model]\nenabled = false\nstrength = {strength}\n"
+            );
+            fs::write(&path, &text).unwrap();
+            assert!(ArmPoseSettings::load(&path).is_err());
+            assert!(load_rich_look_settings(&path).is_err());
+            assert!(save_language(&path, UiLanguage::En).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        }
+    }
+
+    #[test]
     fn a_stale_material_roles_section_is_ignored() {
         let directory = tempdir().unwrap();
         let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
@@ -827,10 +837,7 @@ mod tests {
         let restarted = ArmPoseSettings::load(&path).unwrap();
         assert_eq!(
             restarted.rich_look_for("sha256:first").unwrap(),
-            RichLookSettings {
-                enabled: true,
-                strength: 0.5
-            }
+            RichLookSettings::try_new(true, 0.5).unwrap()
         );
     }
 

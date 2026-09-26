@@ -1674,12 +1674,7 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
 /// The controls edit the live [`vtuber_avatar::AvatarLookSettings`] the look
 /// systems read, so the change is visible without a reload; the save button
 /// persists the same values for the loaded model.
-fn render_rich_look_controls(
-    ui: &mut Ui,
-    vm: &UiViewModel,
-    state: &mut UiState,
-    lang: UiLanguage,
-) {
+fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
     let switch = lang.pick("リッチ表示", "Enhanced look", "增强显示", "고급 렌더링");
     section(ui, switch, |ui| {
         let mut enabled = vm.look.enabled;
@@ -1691,12 +1686,7 @@ fn render_rich_look_controls(
             .add(
                 egui::Slider::new(&mut percent, 0.0..=100.0)
                     .suffix("%")
-                    .text(lang.pick(
-                        "効果の強さ",
-                        "Effect strength",
-                        "效果强度",
-                        "효과 강도",
-                    )),
+                    .text(lang.pick("効果の強さ", "Effect strength", "效果强度", "효과 강도")),
             )
             .changed()
         {
@@ -2799,8 +2789,8 @@ mod tests {
     fn rich_look_view_model_default_matches_the_look_settings() {
         let model = crate::ui_model::RichLookViewModel::default();
         let settings = vtuber_avatar::RichLookSettings::default();
-        assert_eq!(model.enabled, settings.enabled);
-        assert_eq!(model.strength, settings.strength);
+        assert_eq!(model.enabled, settings.enabled());
+        assert_eq!(model.strength, settings.strength());
     }
 
     #[test]
