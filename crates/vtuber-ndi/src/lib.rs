@@ -213,20 +213,24 @@ impl NdiOutputConfig {
                 "source name must be non-empty UTF-8 without control characters",
             ));
         }
-        if self.profile.width == 0 || self.profile.height == 0 || self.profile.fps == 0 {
-            return Err(NdiOutputError::new(
-                NdiErrorCode::InvalidConfiguration,
-                "output width, height, and fps must be non-zero",
-            ));
-        }
-        if self.profile.pixel_format != VideoOutputPixelFormat::Bgra8StraightAlpha {
-            return Err(NdiOutputError::new(
-                NdiErrorCode::InvalidConfiguration,
-                "only BGRA8 straight-alpha output is supported",
-            ));
-        }
-        Ok(())
+        validate_output_profile(self.profile)
     }
+}
+
+fn validate_output_profile(profile: VideoOutputProfile) -> Result<(), NdiOutputError> {
+    if profile.width == 0 || profile.height == 0 || profile.fps == 0 {
+        return Err(NdiOutputError::new(
+            NdiErrorCode::InvalidConfiguration,
+            "output width, height, and fps must be non-zero",
+        ));
+    }
+    if profile.pixel_format != VideoOutputPixelFormat::Bgra8StraightAlpha {
+        return Err(NdiOutputError::new(
+            NdiErrorCode::InvalidConfiguration,
+            "only BGRA8 straight-alpha output is supported",
+        ));
+    }
+    Ok(())
 }
 
 /// Commands understood by the backend controller.
@@ -292,33 +296,37 @@ pub fn map_video_frame(
     frame: &VideoOutputFrame,
     profile: VideoOutputProfile,
 ) -> Result<NdiVideoFrameMapping, NdiOutputError> {
-    if frame.pixel_format != VideoOutputPixelFormat::Bgra8StraightAlpha {
+    validate_output_profile(profile)?;
+    if frame.pixel_format() != VideoOutputPixelFormat::Bgra8StraightAlpha {
         return Err(NdiOutputError::new(
             NdiErrorCode::InvalidFrame,
             "frame pixel format is not BGRA8 straight alpha",
         ));
     }
-    let stride = profile.packed_stride_bytes();
+    let stride = usize::try_from(profile.width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| NdiOutputError::new(NdiErrorCode::InvalidFrame, "frame stride overflow"))?;
     let expected_len = stride
         .checked_mul(profile.height as usize)
         .ok_or_else(|| NdiOutputError::new(NdiErrorCode::InvalidFrame, "frame size overflow"))?;
-    if frame.width != profile.width
-        || frame.height != profile.height
-        || frame.stride_bytes != stride
-        || frame.data.len() != expected_len
+    if frame.width() != profile.width
+        || frame.height() != profile.height
+        || frame.stride_bytes() != stride
+        || frame.data().len() != expected_len
     {
         return Err(NdiOutputError::new(
             NdiErrorCode::InvalidFrame,
             "frame dimensions, stride, or data length do not match the output profile",
         ));
     }
-    let width = i32::try_from(frame.width).map_err(|_| {
+    let width = i32::try_from(frame.width()).map_err(|_| {
         NdiOutputError::new(NdiErrorCode::InvalidFrame, "frame width exceeds NDI range")
     })?;
-    let height = i32::try_from(frame.height).map_err(|_| {
+    let height = i32::try_from(frame.height()).map_err(|_| {
         NdiOutputError::new(NdiErrorCode::InvalidFrame, "frame height exceeds NDI range")
     })?;
-    let stride_bytes = i32::try_from(frame.stride_bytes).map_err(|_| {
+    let stride_bytes = i32::try_from(frame.stride_bytes()).map_err(|_| {
         NdiOutputError::new(NdiErrorCode::InvalidFrame, "frame stride exceeds NDI range")
     })?;
     let frame_rate_n = i32::try_from(profile.fps).map_err(|_| {
@@ -1044,7 +1052,7 @@ fn run_scripted_worker(
         shared
             .metrics
             .last_frame_seq
-            .store(frame.frame_seq.0, Ordering::Relaxed);
+            .store(frame.frame_seq().0, Ordering::Relaxed);
         shared.set_status(NdiOutputStatus::Live {
             connections: backend.inner.connections.load(Ordering::Relaxed),
             source_name: config.source_name.clone(),
@@ -1145,7 +1153,7 @@ fn run_ndi_worker(
                     return WorkerExit::StartupFailed;
                 }
             };
-            if built.replace_data(frame.data.to_vec()).is_err() {
+            if built.replace_data(frame.data().to_vec()).is_err() {
                 let error = NdiOutputError::new(
                     NdiErrorCode::SendFailed,
                     "NDI frame storage rejected the validated BGRA frame",
@@ -1156,13 +1164,13 @@ fn run_ndi_worker(
             ndi_frame_dims = dims;
             ndi_frame = Some(built);
         } else if let Some(existing) = ndi_frame.as_mut()
-            && existing.data().len() == frame.data.len()
+            && existing.data().len() == frame.data().len()
         {
-            existing.data_mut().copy_from_slice(&frame.data);
+            existing.data_mut().copy_from_slice(frame.data());
         } else if let Some(existing) = ndi_frame.as_mut() {
             // Defensive length fallback: rebuild with a fresh buffer when the
             // validated frame data no longer matches the reused layout.
-            if existing.replace_data(frame.data.to_vec()).is_err() {
+            if existing.replace_data(frame.data().to_vec()).is_err() {
                 let error = NdiOutputError::new(
                     NdiErrorCode::SendFailed,
                     "NDI frame storage rejected the validated BGRA frame",
@@ -1178,7 +1186,7 @@ fn run_ndi_worker(
         shared
             .metrics
             .last_frame_seq
-            .store(frame.frame_seq.0, Ordering::Relaxed);
+            .store(frame.frame_seq().0, Ordering::Relaxed);
         if last_connection_poll.elapsed() >= std::time::Duration::from_millis(500) {
             if let Ok(connections) = sender.connection_count(std::time::Duration::from_millis(10)) {
                 shared.set_status(NdiOutputStatus::Live {
@@ -1210,6 +1218,7 @@ fn map_runtime_error(message: String) -> NdiOutputError {
 mod tests {
     use super::*;
     use std::time::Instant;
+    use vtuber_core::MonoTimeNs;
 
     fn frame(seq: u64) -> VideoOutputFrame {
         VideoOutputFrame::new_bgra8(
@@ -1236,6 +1245,49 @@ mod tests {
             source_name: "RusTuberV".to_owned(),
             profile: test_profile(),
         }
+    }
+
+    #[test]
+    fn direct_mapping_and_sender_start_both_reject_zero_profile_dimensions_or_rate() {
+        for profile in [
+            VideoOutputProfile {
+                width: 0,
+                ..test_profile()
+            },
+            VideoOutputProfile {
+                height: 0,
+                ..test_profile()
+            },
+            VideoOutputProfile {
+                fps: 0,
+                ..test_profile()
+            },
+        ] {
+            assert_eq!(
+                map_video_frame(&frame(1), profile).unwrap_err().code,
+                NdiErrorCode::InvalidConfiguration
+            );
+            let config = NdiOutputConfig {
+                profile,
+                ..test_config()
+            };
+            assert_eq!(
+                config.validate().unwrap_err().code,
+                NdiErrorCode::InvalidConfiguration
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_frame_cannot_reach_the_sender() {
+        assert!(matches!(
+            VideoOutputFrame::new_bgra8(2, 1, FrameSeq(1), MonoTimeNs(1), vec![0; 4]),
+            Err(vtuber_core::VideoOutputFrameError::DataLength { .. })
+        ));
+        assert!(matches!(
+            VideoOutputFrame::from_padded_bgra8(2, 1, 4, FrameSeq(1), MonoTimeNs(1), &[0; 4]),
+            Err(vtuber_core::VideoOutputFrameError::InvalidStride { .. })
+        ));
     }
 
     #[test]
@@ -1272,10 +1324,8 @@ mod tests {
     #[test]
     fn reaping_a_startup_failure_does_not_replace_its_cause() {
         let mut controller = NdiOutputController::new();
-        let error = NdiOutputError::new(
-            NdiErrorCode::SenderCreateFailed,
-            "scripted startup failure",
-        );
+        let error =
+            NdiOutputError::new(NdiErrorCode::SenderCreateFailed, "scripted startup failure");
         controller.shared.replace_status_error(&error);
         controller.worker = Some(
             vtuber_core::WorkerHandle::spawn("ndi-startup-failure-test", |_| {
@@ -1294,7 +1344,7 @@ mod tests {
     #[test]
     fn mapping_preserves_bgra_alpha_and_profile_fields() {
         let source = frame(7);
-        let source_bytes = source.data.clone();
+        let source_bytes = source.data().to_vec();
         let mapping = map_video_frame(&source, test_profile()).expect("valid frame maps");
         assert_eq!(mapping.width, 2);
         assert_eq!(mapping.height, 1);
@@ -1303,9 +1353,9 @@ mod tests {
         assert_eq!(mapping.frame_rate_n, 60);
         assert_eq!(mapping.frame_rate_d, 1);
         assert_eq!(mapping.picture_aspect_ratio, 2.0);
-        assert_eq!(source.data, source_bytes);
-        assert_eq!(source.data[3], 4);
-        assert_eq!(source.data[7], 8);
+        assert_eq!(source.data(), source_bytes);
+        assert_eq!(source.data()[3], 4);
+        assert_eq!(source.data()[7], 8);
     }
 
     #[cfg(test)]
@@ -1359,8 +1409,8 @@ mod tests {
 
     #[test]
     fn malformed_frame_is_rejected_before_mapping() {
-        let mut invalid = frame(1);
-        invalid.stride_bytes = 4;
+        let invalid =
+            VideoOutputFrame::new_bgra8(1, 1, FrameSeq(1), MonoTimeNs(1), vec![0; 4]).unwrap();
         let error = map_video_frame(
             &invalid,
             VideoOutputProfile {
@@ -1380,7 +1430,7 @@ mod tests {
         assert_eq!(mailbox.submit(frame(1)), NdiSubmitResult::Submitted);
         assert_eq!(mailbox.submit(frame(2)), NdiSubmitResult::Replaced);
         assert_eq!(
-            mailbox.take(|| false).expect("latest frame").frame_seq,
+            mailbox.take(|| false).expect("latest frame").frame_seq(),
             FrameSeq(2)
         );
         assert!(mailbox.take(|| true).is_none());
@@ -1404,7 +1454,7 @@ mod tests {
         }
         assert_eq!(last_result, NdiSubmitResult::Replaced);
         assert_eq!(
-            mailbox.take(|| false).expect("latest frame").frame_seq,
+            mailbox.take(|| false).expect("latest frame").frame_seq(),
             FrameSeq(999)
         );
         assert!(mailbox.take(|| true).is_none());
@@ -1612,13 +1662,13 @@ mod tests {
     }
 
     #[test]
-    fn malformed_live_frame_is_rejected_before_the_fake_sender() {
+    fn valid_frame_with_wrong_profile_is_rejected_before_the_fake_sender() {
         let backend = NdiScriptedBackend::successful();
         let mut controller = NdiOutputController::with_scripted_backend(backend.clone());
         controller.start(test_config()).expect("start");
         backend.wait_until_ready();
-        let mut invalid = frame(1);
-        invalid.stride_bytes = 4;
+        let invalid =
+            VideoOutputFrame::new_bgra8(1, 1, FrameSeq(1), MonoTimeNs(1), vec![0; 4]).unwrap();
         assert_eq!(controller.submit_frame(invalid), NdiSubmitResult::Submitted);
         let started = std::time::Instant::now();
         while backend.sent_frames() == 0

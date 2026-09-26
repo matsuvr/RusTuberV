@@ -414,7 +414,7 @@ mod tests {
         slot.publish(make(1));
         assert_eq!(slot.replaced_frames(), 1);
         assert_eq!(
-            slot.take_latest().expect("latest frame").frame_seq,
+            slot.take_latest().expect("latest frame").frame_seq(),
             FrameSeq(1)
         );
         assert!(slot.take_latest().is_none());
