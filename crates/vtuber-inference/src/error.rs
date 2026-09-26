@@ -106,6 +106,14 @@ pub enum InferenceError {
     /// The worker thread panicked.
     #[error("inference worker panicked")]
     WorkerPanicked,
+    /// The OS refused to spawn the worker thread.
+    #[error("inference worker spawn failed ({kind:?}): {message}")]
+    WorkerSpawnFailed {
+        /// OS classification of the spawn failure.
+        kind: std::io::ErrorKind,
+        /// OS-provided description without paths or handles.
+        message: String,
+    },
     /// The input channel or frame slot was closed unexpectedly.
     #[error("inference input closed")]
     InputClosed,

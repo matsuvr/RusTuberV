@@ -16,19 +16,19 @@ pub enum WorkerResult<T> {
     Completed(T),
     /// The worker thread panicked.
     Panicked,
-    /// The worker could not be spawned.
-    SpawnFailed,
 }
 
 /// Handle to a named worker thread with a cooperative stop token.
 ///
-/// The handle owns the thread's [`JoinHandle`]. Dropping the handle without
-/// calling [`WorkerHandle::join`] does **not** detach the thread; it merely
-/// leaks the handle and the thread will continue running until it completes.
+/// The handle always owns a real thread's [`JoinHandle`]: it can only be
+/// created when the OS accepted the spawn request. Dropping the handle
+/// without calling [`WorkerHandle::join`] does **not** detach the thread; it
+/// merely leaks the handle and the thread will continue running until it
+/// completes.
 #[derive(Debug)]
 pub struct WorkerHandle<T> {
     stop: StopToken,
-    join: Option<JoinHandle<T>>,
+    join: JoinHandle<T>,
     name: String,
 }
 
@@ -41,10 +41,10 @@ impl<T> WorkerHandle<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`WorkerResult::SpawnFailed`] if the OS failed to spawn the
-    /// thread. In that case the stop token is still usable but no worker is
-    /// running.
-    pub fn spawn<F>(name: impl Into<String>, f: F) -> Self
+    /// Returns the OS [`std::io::Error`] if the thread could not be spawned.
+    /// No handle exists in that case, so callers must not retain any worker
+    /// state for a failed spawn.
+    pub fn spawn<F>(name: impl Into<String>, f: F) -> std::io::Result<Self>
     where
         F: FnOnce(StopToken) -> T + Send + 'static,
         T: Send + 'static,
@@ -56,12 +56,7 @@ impl<T> WorkerHandle<T> {
         let join = thread::Builder::new()
             .name(name.clone())
             .spawn(move || f(stop_for_thread));
-
-        Self {
-            stop,
-            join: join.ok(),
-            name,
-        }
+        worker_handle_from_result(name, stop, join)
     }
 
     /// Returns the worker's thread name.
@@ -90,9 +85,7 @@ impl<T> WorkerHandle<T> {
     /// Returns whether the underlying thread has already exited.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.join
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
+        self.join.is_finished()
     }
 
     /// Joins the worker thread and returns its result.
@@ -103,15 +96,24 @@ impl<T> WorkerHandle<T> {
     /// joins.
     ///
     /// After this call returns, the handle is consumed and cannot be reused.
-    pub fn join(mut self) -> WorkerResult<T> {
-        match self.join.take() {
-            Some(handle) => match handle.join() {
-                Ok(result) => WorkerResult::Completed(result),
-                Err(_) => WorkerResult::Panicked,
-            },
-            None => WorkerResult::SpawnFailed,
+    #[must_use]
+    pub fn join(self) -> WorkerResult<T> {
+        match self.join.join() {
+            Ok(result) => WorkerResult::Completed(result),
+            Err(_) => WorkerResult::Panicked,
         }
     }
+}
+
+/// Assembles a [`WorkerHandle`] from a raw spawn result, propagating the OS
+/// error when the thread was not started.
+fn worker_handle_from_result<T>(
+    name: String,
+    stop: StopToken,
+    result: std::io::Result<JoinHandle<T>>,
+) -> std::io::Result<WorkerHandle<T>> {
+    let join = result?;
+    Ok(WorkerHandle { stop, join, name })
 }
 
 #[cfg(test)]
@@ -124,7 +126,7 @@ mod tests {
 
     #[test]
     fn worker_returns_value() {
-        let handle = WorkerHandle::spawn("returns-value", |_stop| 42);
+        let handle = WorkerHandle::spawn("returns-value", |_stop| 42).expect("spawn");
         assert_eq!(handle.join(), WorkerResult::Completed(42));
     }
 
@@ -135,7 +137,8 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
             "stopped"
-        });
+        })
+        .expect("spawn");
 
         std::thread::sleep(Duration::from_millis(10));
         handle.stop();
@@ -146,7 +149,8 @@ mod tests {
     fn worker_panic_is_detected() {
         let handle = WorkerHandle::spawn::<fn(StopToken) -> ()>("panics", |_stop| {
             panic!("expected test panic");
-        });
+        })
+        .expect("spawn");
 
         assert_eq!(handle.join(), WorkerResult::Panicked);
     }
@@ -170,7 +174,8 @@ mod tests {
                     None => {}
                 }
             }
-        });
+        })
+        .expect("spawn");
 
         std::thread::sleep(Duration::from_millis(20));
         slot.close();
@@ -184,10 +189,25 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
             "done"
-        });
+        })
+        .expect("spawn");
 
         let token = handle.stop_token();
         token.stop();
         assert_eq!(handle.join(), WorkerResult::Completed("done"));
+    }
+
+    #[test]
+    fn failed_spawn_returns_the_io_error_and_no_handle() {
+        let error = std::io::Error::other("simulated OS spawn failure");
+        let result: std::io::Result<WorkerHandle<()>> = worker_handle_from_result(
+            "never-started".to_string(),
+            StopToken::new(),
+            Err(error),
+        );
+        match result {
+            Err(error) => assert_eq!(error.to_string(), "simulated OS spawn failure"),
+            Ok(_) => panic!("expected the spawn error"),
+        }
     }
 }

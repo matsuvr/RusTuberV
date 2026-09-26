@@ -11,7 +11,9 @@ use bevy::prelude::*;
 use vtuber_avatar::{ArmSourceSelection, TrackedArmControl};
 use vtuber_core::arm_tracking::{ArmControlFrame, PoseArmFrame};
 use vtuber_core::{LatestSlot, ReadResult, VideoFrame, WorkerHandle, monotonic_now};
-use vtuber_inference::{InferenceWorkerResult, MediaPipeTaskSource, SharedStatus, run_pose_worker};
+use vtuber_inference::{
+    InferenceError, InferenceWorkerResult, MediaPipeTaskSource, SharedStatus, run_pose_worker,
+};
 use vtuber_tracking::arm_tracking::{ArmTrackingProfile, ArmTrackingState, step_arm_tracking};
 
 use crate::capture_runtime::CaptureRuntime;
@@ -101,9 +103,15 @@ impl PoseRuntime {
     }
 
     /// Starts the Pose worker, loading the task bundle inside the worker thread.
-    pub fn ensure_running(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InferenceError::WorkerSpawnFailed`] if the OS refused to
+    /// spawn the thread. No worker is retained on failure, so the caller may
+    /// try again later.
+    pub fn ensure_running(&mut self) -> Result<(), InferenceError> {
         if self.worker.is_some() {
-            return;
+            return Ok(());
         }
         let task = if self.task_path.is_file() {
             MediaPipeTaskSource::Path(self.task_path.clone())
@@ -120,8 +128,13 @@ impl PoseRuntime {
         let output_slot = Arc::clone(&self.output_slot);
         let worker = WorkerHandle::spawn("pose-worker", move |stop| {
             run_pose_worker(stop, status, frame_slot, output_slot, &task, &hand_task)
-        });
+        })
+        .map_err(|error| InferenceError::WorkerSpawnFailed {
+            kind: error.kind(),
+            message: error.to_string(),
+        })?;
         self.worker = Some(worker);
+        Ok(())
     }
 
     /// Stops the Pose worker and drops its observation state.
@@ -297,7 +310,9 @@ pub fn pose_worker_bridge_system(
         vtuber_camera::CaptureServiceState::Starting | vtuber_camera::CaptureServiceState::Running
     );
     if pose.enabled() && capture_active {
-        pose.ensure_running();
+        if let Err(error) = pose.ensure_running() {
+            error!("pose worker could not be started: {error}");
+        }
     } else if pose.is_running() {
         pose.stop();
     }

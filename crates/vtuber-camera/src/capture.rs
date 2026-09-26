@@ -220,7 +220,6 @@ impl CaptureController {
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<ControlCommand>();
-        self.command_tx = Some(tx);
 
         let state = Arc::clone(&self.state);
         let slot = Arc::clone(&self.frame_slot);
@@ -228,8 +227,10 @@ impl CaptureController {
 
         let worker = WorkerHandle::spawn("capture-worker", move |stop| {
             run_capture_worker(backend, rx, stop, state, slot, pose_slot)
-        });
+        })
+        .map_err(CameraError::WorkerSpawnFailed)?;
 
+        self.command_tx = Some(tx);
         self.worker = Some(worker);
         Ok(())
     }

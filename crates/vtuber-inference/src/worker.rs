@@ -1252,7 +1252,8 @@ mod tests {
                     buffers,
                 )
             }
-        });
+        })
+        .expect("spawn");
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -1548,7 +1549,8 @@ mod tests {
                     buffers,
                 )
             }
-        });
+        })
+        .expect("spawn");
 
         const FRAME_COUNT: u64 = 20;
         let producer_slot = Arc::clone(&frame_slot);
@@ -1689,7 +1691,8 @@ mod tests {
                     buffers,
                 )
             }
-        });
+        })
+        .expect("spawn");
 
         // Publish seq 1, wait for it to be processed, then publish seq 1 again.
         frame_slot.publish(VideoFrame {
@@ -1804,7 +1807,8 @@ mod tests {
                     buffers,
                 )
             }
-        });
+        })
+        .expect("spawn");
 
         let producer_slot = Arc::clone(&frame_slot);
         let producer = std::thread::spawn(move || {
@@ -1979,7 +1983,8 @@ mod tests {
                     buffers,
                 )
             }
-        });
+        })
+        .expect("spawn");
 
         // Publish frames one at a time so the worker processes each one.
         // Enough frames must be sent to exceed the recoverable error threshold.
@@ -2098,7 +2103,8 @@ mod tests {
                     buffers,
                 )
             }
-        });
+        })
+        .expect("spawn");
 
         const ERROR_THRESHOLD: u32 = MAX_CONSECUTIVE_RECOVERABLE_ERRORS;
         for seq in 1..=ERROR_THRESHOLD + 5 {
@@ -2242,7 +2248,8 @@ mod tests {
                     &MediaPipeTaskSource::Embedded,
                 )
             }
-        });
+        })
+        .expect("spawn");
 
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {

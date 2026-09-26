@@ -166,14 +166,16 @@ impl InferenceController {
     ///
     /// # Errors
     ///
-    /// Returns [`InferenceError::AlreadyRunning`] if the worker is already started.
+    /// Returns [`InferenceError::AlreadyRunning`] if the worker is already
+    /// started, or [`InferenceError::WorkerSpawnFailed`] if the OS refused to
+    /// spawn the thread. On failure no worker or command channel is retained,
+    /// so the caller may start again.
     pub fn start_worker(&mut self) -> Result<(), InferenceError> {
         if self.worker.is_some() {
             return Err(InferenceError::AlreadyRunning);
         }
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<ControlCommand>(CONTROL_CHANNEL_CAPACITY);
-        self.command_tx = Some(tx.clone());
 
         let status = Arc::clone(&self.status);
         let frame_slot = Arc::clone(&self.frame_slot);
@@ -191,8 +193,13 @@ impl InferenceController {
                 outcome_slot,
                 canonical_outcome_slot,
             )
-        });
+        })
+        .map_err(|error| InferenceError::WorkerSpawnFailed {
+            kind: error.kind(),
+            message: error.to_string(),
+        })?;
 
+        self.command_tx = Some(tx);
         self.worker = Some(worker);
         Ok(())
     }
@@ -364,11 +371,6 @@ impl InferenceController {
                 status.record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
                 status.metrics()
             }
-            WorkerResult::SpawnFailed => self
-                .status
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .metrics(),
         };
 
         self.output_slot.close();

@@ -185,7 +185,8 @@ fn composite_runtime_worker_reports_no_face_without_runtime_failure() {
         move |stop| {
             run_composite_inference_worker(Box::new(runtime), stop, status, frame_slot, output_slot)
         }
-    });
+    })
+    .expect("spawn");
 
     frame_slot.publish(frame(1));
     let deadline = Instant::now() + Duration::from_secs(2);

@@ -384,7 +384,8 @@ fn run_windows(options: Options) -> Result<(), String> {
                 InferenceWorkerResult { final_metrics }
             }
         }
-    });
+    })
+    .map_err(|error| format!("face-pipeline inference worker spawn failed: {error}"))?;
 
     let started = Instant::now();
     let mut guided = options.guided_protocol.then(GuidedProtocol::new);
@@ -485,9 +486,6 @@ fn run_windows(options: Options) -> Result<(), String> {
         WorkerResult::Completed(result) => result.final_metrics,
         WorkerResult::Panicked => {
             return Err("face-pipeline inference worker panicked".into());
-        }
-        WorkerResult::SpawnFailed => {
-            return Err("face-pipeline inference worker failed to spawn".into());
         }
     };
 
