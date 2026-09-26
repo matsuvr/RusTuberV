@@ -9,25 +9,23 @@ permissions:
   contents: read
 
 jobs:
-  snapshot:
+  tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Archive the pinned source for editing
-        env:
-          REPOSITORY: ${{ github.repository }}
-          SERVER_URL: ${{ github.server_url }}
+      - name: Prepare the repository-pinned Rust toolchain
         run: |
-          git init source
-          git -C source remote add origin "$SERVER_URL/$REPOSITORY.git"
-          git -C source fetch --depth=1 origin d72a65e4ebbafe41caf7ce1b2819e1f1077d45bf
-          git -C source checkout --detach FETCH_HEAD
-          cd source
-          git archive --format=tar --output=../source.tar HEAD Cargo.toml Cargo.lock AGENTS.md crates apps tools vendor docs
-      - name: Export source snapshot
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          root=$(rustup run 1.97.1 rustc --print sysroot)
+          tar -C "$root" -czf "$RUNNER_TEMP/rust-tools.tar.gz" bin/cargo bin/rustc bin/rustfmt lib
+          rustup run 1.97.1 rustc --version
+          rustup run 1.97.1 rustfmt --version
+          du -h "$RUNNER_TEMP/rust-tools.tar.gz"
+      - name: Export the tools for source editing
         uses: actions/upload-artifact@v4
         with:
-          name: pinned-source-for-editing
-          path: source.tar
+          name: pinned-rust-tools-for-editing
+          path: ${{ runner.temp }}/rust-tools.tar.gz
+          compression-level: 0
           retention-days: 1
           if-no-files-found: error
