@@ -42,6 +42,16 @@ fn main() {
         }
     };
 
+    // An unreadable, malformed, or newer settings document is reported instead
+    // of being replaced with the current defaults.
+    let settings = match ArmPoseSettings::load_default() {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("Failed to load settings: {error}");
+            return;
+        }
+    };
+
     // Import CLI model through the managed asset source so that the same
     // `user://avatars/<sha256>/model.vrm` path invariant is used.
     let startup_model = parse_model_arg().and_then(|path| {
@@ -86,7 +96,7 @@ fn main() {
             mode: ArmPoseSourceKind::VirtualHandAnchor,
             profile: tracking.arm,
         })
-        .insert_resource(ArmPoseSettings::load_default())
+        .insert_resource(settings)
         .insert_resource(InferenceProjectRoot(resource_root()))
         .add_plugins(UiShellPlugin)
         .insert_resource(Orchestrator::new(managed_root));

@@ -78,47 +78,23 @@ impl Default for ArmPoseSettings {
 }
 
 impl ArmPoseSettings {
-    /// Loads settings from an explicit path. Missing or invalid data safely
-    /// produces an empty store, which means automatic geometry-derived pose.
-    #[must_use]
-    pub fn load(path: impl Into<PathBuf>) -> Self {
+    /// Loads settings from an explicit path, reading the document once.
+    ///
+    /// A missing file yields the initial values. Every other I/O failure,
+    /// malformed TOML, or unknown schema version is an error; the file is left
+    /// untouched and the caller reports it instead of starting from replaced
+    /// settings.
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self, ArmPoseSettingsError> {
         let path = path.into();
-        let restored = match load_arm_pose_overrides(&path) {
-            Ok(store) => store,
-            Err(error) => {
-                let backup = path.with_extension("toml.invalid");
-                if path.is_file() && !backup.exists() {
-                    let _ = fs::copy(&path, &backup);
-                }
-                bevy::log::warn!("arm-pose settings ignored: {error}");
-                ArmPoseOverrideStore::default()
-            }
-        };
-        let restored_expression_bindings = match load_expression_bindings(&path) {
-            Ok(store) => store,
-            Err(error) => {
-                bevy::log::warn!("expression bindings ignored: {error}");
-                ExpressionBindingStore::default()
-            }
-        };
-        let language = load_language(&path);
-        let arm_tracking_enabled = load_arm_tracking_enabled(&path);
-        Self {
-            path: Some(path),
-            restored,
-            look_model_id: None,
-            restored_expression_bindings,
-            language,
-            arm_tracking_enabled,
-        }
+        let document = read_settings_document(&path)?;
+        restore_settings_document(document, path)
     }
 
     /// Loads settings from the platform user configuration directory.
-    #[must_use]
-    pub fn load_default() -> Self {
+    pub fn load_default() -> Result<Self, ArmPoseSettingsError> {
         match default_settings_path() {
             Some(path) => Self::load(path),
-            None => Self::default(),
+            None => Ok(Self::default()),
         }
     }
 
@@ -207,10 +183,14 @@ impl ArmPoseSettings {
     }
 
     /// Persists the UI language and applies it to this resource.
+    ///
+    /// The in-memory value changes only after the file was written.
     pub fn set_language(&mut self, language: UiLanguage) -> Result<(), ArmPoseSettingsError> {
-        if let Some(path) = &self.path {
-            save_language(path, language)?;
-        }
+        let path = self
+            .path
+            .as_deref()
+            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+        save_language(path, language)?;
         self.language = language;
         Ok(())
     }
@@ -222,10 +202,14 @@ impl ArmPoseSettings {
     }
 
     /// Persists the observed arm-tracking switch.
+    ///
+    /// The in-memory value changes only after the file was written.
     pub fn set_arm_tracking_enabled(&mut self, enabled: bool) -> Result<(), ArmPoseSettingsError> {
-        if let Some(path) = &self.path {
-            save_arm_tracking_enabled(path, enabled)?;
-        }
+        let path = self
+            .path
+            .as_deref()
+            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+        save_arm_tracking_enabled(path, enabled)?;
         self.arm_tracking_enabled = enabled;
         Ok(())
     }
@@ -281,6 +265,9 @@ pub fn default_eye_closure_profile_path() -> Option<PathBuf> {
 
 /// Loads and validates an eye-closure profile from an explicit path.
 ///
+/// Only a missing file is "no correction": a directory, an unreadable file, or
+/// invalid contents is an error.
+///
 /// # Errors
 ///
 /// Returns a message for read/parse failures, a foreign feature identity, an
@@ -289,11 +276,11 @@ pub fn default_eye_closure_profile_path() -> Option<PathBuf> {
 pub fn load_eye_closure_thresholds(
     path: &Path,
 ) -> Result<Option<vtuber_tracking::EyeGeometryThresholds>, String> {
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+    };
     let document: vtuber_tracking::EyeClosureProfileDocument = serde_json::from_str(&text)
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
     let current = vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256;
@@ -315,113 +302,74 @@ pub fn load_eye_closure_thresholds(
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
-/// Loads UI language, defaulting to Japanese when the file is missing or unreadable.
-#[must_use]
-pub fn load_language(path: &Path) -> UiLanguage {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| toml::from_str::<ArmPoseSettingsDocument>(&text).ok())
-        .map(|document| document.language)
-        .unwrap_or_default()
+/// Loads the stored UI language.
+///
+/// A missing file is the initial language; unreadable, malformed, and
+/// unknown-version documents are errors.
+///
+/// # Errors
+///
+/// Propagates every settings read, parse, and schema failure.
+pub fn load_language(path: &Path) -> Result<UiLanguage, ArmPoseSettingsError> {
+    Ok(read_settings_document(path)?.language)
 }
 
 /// Persists UI language, preserving the rest of the settings document.
+///
+/// # Errors
+///
+/// Propagates every read, schema, encode, and write failure; the previous
+/// bytes are kept.
 pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSettingsError> {
-    let mut document = if path.is_file() {
-        let text = fs::read_to_string(path)?;
-        toml::from_str::<ArmPoseSettingsDocument>(&text)?
-    } else {
-        ArmPoseSettingsDocument {
-            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
-            language,
-            arm_tracking_enabled: false,
-            arm_pose_overrides: BTreeMap::new(),
-            dynamic_arm_profiles: BTreeMap::new(),
-            expression_bindings: BTreeMap::new(),
-            rich_look: BTreeMap::new(),
-        }
-    };
+    let mut document = read_settings_document(path)?;
     document.language = language;
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
-/// Loads the observed arm-tracking switch, defaulting to off.
-#[must_use]
-pub fn load_arm_tracking_enabled(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| toml::from_str::<ArmPoseSettingsDocument>(&text).ok())
-        .map(|document| document.arm_tracking_enabled)
-        .unwrap_or(false)
+/// Loads the stored arm-tracking switch.
+///
+/// # Errors
+///
+/// Propagates every settings read, parse, and schema failure.
+pub fn load_arm_tracking_enabled(path: &Path) -> Result<bool, ArmPoseSettingsError> {
+    Ok(read_settings_document(path)?.arm_tracking_enabled)
 }
 
 /// Persists the observed arm-tracking switch, preserving other sections.
+///
+/// # Errors
+///
+/// Propagates every read, schema, encode, and write failure; the previous
+/// bytes are kept.
 pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), ArmPoseSettingsError> {
-    let mut document = if path.is_file() {
-        let text = fs::read_to_string(path)?;
-        toml::from_str::<ArmPoseSettingsDocument>(&text)?
-    } else {
-        ArmPoseSettingsDocument {
-            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
-            language: load_language(path),
-            arm_tracking_enabled: enabled,
-            arm_pose_overrides: BTreeMap::new(),
-            dynamic_arm_profiles: BTreeMap::new(),
-            expression_bindings: BTreeMap::new(),
-            rich_look: BTreeMap::new(),
-        }
-    };
+    let mut document = read_settings_document(path)?;
     document.arm_tracking_enabled = enabled;
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
 /// Loads and validates model-specific expression bindings.
+///
+/// # Errors
+///
+/// Propagates every read, parse, schema, and duplicate-assignment failure.
 pub fn load_expression_bindings(
     path: &Path,
 ) -> Result<ExpressionBindingStore, ArmPoseSettingsError> {
-    if !path.is_file() {
-        return Ok(ExpressionBindingStore::default());
-    }
-    let text = fs::read_to_string(path)?;
-    let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
-    if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
-        return Err(ArmPoseSettingsError::UnsupportedSchema {
-            version: document.schema_version,
-        });
-    }
-    for (model_id, bindings) in &document.expression_bindings {
-        if bindings.has_duplicate_expressions() {
-            return Err(ArmPoseSettingsError::InvalidExpressionBinding {
-                model_id: model_id.clone(),
-            });
-        }
-    }
-    let mut store = ExpressionBindingStore::default();
-    store.replace_entries(document.expression_bindings);
-    Ok(store)
+    expression_store(read_settings_document(path)?.expression_bindings)
 }
 
 /// Saves expression bindings, preserving language, arm pose, and every other
 /// model's assignments.
+///
+/// # Errors
+///
+/// Propagates every read, schema, encode, and write failure; the previous
+/// bytes are kept.
 pub fn save_expression_bindings(
     path: &Path,
     store: &ExpressionBindingStore,
 ) -> Result<(), ArmPoseSettingsError> {
-    let mut document = if path.is_file() {
-        let text = fs::read_to_string(path)?;
-        toml::from_str::<ArmPoseSettingsDocument>(&text)?
-    } else {
-        ArmPoseSettingsDocument {
-            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
-            language: load_language(path),
-            arm_tracking_enabled: load_arm_tracking_enabled(path),
-            arm_pose_overrides: BTreeMap::new(),
-            dynamic_arm_profiles: BTreeMap::new(),
-            expression_bindings: BTreeMap::new(),
-            rich_look: BTreeMap::new(),
-        }
-    };
-    document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
+    let mut document = read_settings_document(path)?;
     document.expression_bindings = store
         .entries()
         .map(|(model_id, bindings)| (model_id.to_owned(), bindings.clone()))
@@ -430,56 +378,27 @@ pub fn save_expression_bindings(
 }
 
 /// Loads and validates the arm-pose settings document.
+///
+/// # Errors
+///
+/// Propagates every read, parse, and schema failure, and rejects a document
+/// whose arm-pose entries cannot all be validated.
 pub fn load_arm_pose_overrides(path: &Path) -> Result<ArmPoseOverrideStore, ArmPoseSettingsError> {
-    if !path.is_file() {
-        return Ok(ArmPoseOverrideStore::default());
-    }
-    let text = fs::read_to_string(path)?;
-    let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
-    if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
-        return Err(ArmPoseSettingsError::UnsupportedSchema {
-            version: document.schema_version,
-        });
-    }
-    let expected = document.arm_pose_overrides.len();
-    let mut store = ArmPoseOverrideStore::default();
-    let entries = document
-        .arm_pose_overrides
-        .into_iter()
-        .map(|(model_id, profile)| (model_id, profile.into_runtime()));
-    let accepted = store.import_entries(entries);
-    if accepted != expected {
-        return Err(ArmPoseSettingsError::InvalidEntry);
-    }
-    // Existing settings policy: invalid dynamic entries are ignored by the store.
-    let dynamic_entries = document
-        .dynamic_arm_profiles
-        .into_iter()
-        .map(|(model_id, profile)| (model_id, profile.into_runtime()));
-    store.import_dynamic_entries(dynamic_entries);
-    Ok(store)
+    let document = read_settings_document(path)?;
+    arm_store(document.arm_pose_overrides, document.dynamic_arm_profiles)
 }
 
 /// Saves validated entries using the existing settings-file replacement policy.
+///
+/// # Errors
+///
+/// Propagates every read, schema, encode, and write failure; the previous
+/// bytes are kept.
 pub fn save_arm_pose_overrides(
     path: &Path,
     store: &ArmPoseOverrideStore,
 ) -> Result<(), ArmPoseSettingsError> {
-    let mut document = if path.is_file() {
-        let text = fs::read_to_string(path)?;
-        toml::from_str::<ArmPoseSettingsDocument>(&text)?
-    } else {
-        ArmPoseSettingsDocument {
-            schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
-            language: load_language(path),
-            arm_tracking_enabled: load_arm_tracking_enabled(path),
-            arm_pose_overrides: BTreeMap::new(),
-            dynamic_arm_profiles: BTreeMap::new(),
-            expression_bindings: BTreeMap::new(),
-            rich_look: BTreeMap::new(),
-        }
-    };
-    document.schema_version = ARM_POSE_SETTINGS_SCHEMA_VERSION;
+    let mut document = read_settings_document(path)?;
     document.arm_pose_overrides = store
         .entries()
         .map(|(model_id, profile)| (model_id.to_owned(), PersistedArmPoseProfile::from(*profile)))
@@ -496,22 +415,60 @@ pub fn save_arm_pose_overrides(
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
-fn merge_model_look_settings(
-    mut document: ArmPoseSettingsDocument,
-    model_id: String,
-    settings: RichLookSettings,
-) -> ArmPoseSettingsDocument {
-    document.rich_look.insert(model_id, settings);
-    document
+fn load_rich_look_settings(
+    path: &Path,
+) -> Result<BTreeMap<String, RichLookSettings>, ArmPoseSettingsError> {
+    Ok(read_settings_document(path)?.rich_look)
 }
 
-fn read_look_document(path: &Path) -> Result<ArmPoseSettingsDocument, ArmPoseSettingsError> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "schema_version = 1".into(),
-        Err(error) => return Err(error.into()),
-    };
-    let document: ArmPoseSettingsDocument = toml::from_str(&text)?;
+fn save_rich_look_settings(
+    path: &Path,
+    model_id: String,
+    settings: RichLookSettings,
+) -> Result<(), ArmPoseSettingsError> {
+    let mut document = read_settings_document(path)?;
+    document.rich_look.insert(model_id, settings);
+    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+}
+
+/// Builds the startup resource from one already-validated document.
+fn restore_settings_document(
+    document: ArmPoseSettingsDocument,
+    path: PathBuf,
+) -> Result<ArmPoseSettings, ArmPoseSettingsError> {
+    let language = document.language;
+    let arm_tracking_enabled = document.arm_tracking_enabled;
+    let restored_expression_bindings = expression_store(document.expression_bindings)?;
+    let restored = arm_store(document.arm_pose_overrides, document.dynamic_arm_profiles)?;
+    Ok(ArmPoseSettings {
+        path: Some(path),
+        restored,
+        look_model_id: None,
+        restored_expression_bindings,
+        language,
+        arm_tracking_enabled,
+    })
+}
+
+/// Returns the document that represents "nothing saved yet".
+fn empty_settings_document() -> ArmPoseSettingsDocument {
+    ArmPoseSettingsDocument {
+        schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
+        language: UiLanguage::default(),
+        arm_tracking_enabled: false,
+        arm_pose_overrides: BTreeMap::new(),
+        dynamic_arm_profiles: BTreeMap::new(),
+        expression_bindings: BTreeMap::new(),
+        rich_look: BTreeMap::new(),
+    }
+}
+
+/// Parses a settings document and accepts only the current schema version.
+///
+/// An unknown version is refused instead of being rewritten, so no writer can
+/// save a newer document in the older format.
+fn parse_settings_document(text: &str) -> Result<ArmPoseSettingsDocument, ArmPoseSettingsError> {
+    let document: ArmPoseSettingsDocument = toml::from_str(text)?;
     if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
         return Err(ArmPoseSettingsError::UnsupportedSchema {
             version: document.schema_version,
@@ -520,19 +477,56 @@ fn read_look_document(path: &Path) -> Result<ArmPoseSettingsDocument, ArmPoseSet
     Ok(document)
 }
 
-fn load_rich_look_settings(
-    path: &Path,
-) -> Result<BTreeMap<String, RichLookSettings>, ArmPoseSettingsError> {
-    Ok(read_look_document(path)?.rich_look)
+/// Reads and validates the settings document in a single read.
+///
+/// Only a missing file becomes the initial document; every other I/O failure
+/// and every unknown schema version is an error.
+fn read_settings_document(path: &Path) -> Result<ArmPoseSettingsDocument, ArmPoseSettingsError> {
+    match fs::read_to_string(path) {
+        Ok(text) => parse_settings_document(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(empty_settings_document()),
+        Err(error) => Err(error.into()),
+    }
 }
 
-fn save_rich_look_settings(
-    path: &Path,
-    model_id: String,
-    settings: RichLookSettings,
-) -> Result<(), ArmPoseSettingsError> {
-    let document = merge_model_look_settings(read_look_document(path)?, model_id, settings);
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+/// Validates persisted expression assignments, rejecting duplicates.
+fn expression_store(
+    bindings: BTreeMap<String, ExpressionBindings>,
+) -> Result<ExpressionBindingStore, ArmPoseSettingsError> {
+    for (model_id, bindings) in &bindings {
+        if bindings.has_duplicate_expressions() {
+            return Err(ArmPoseSettingsError::InvalidExpressionBinding {
+                model_id: model_id.clone(),
+            });
+        }
+    }
+    let mut store = ExpressionBindingStore::default();
+    store.replace_entries(bindings);
+    Ok(store)
+}
+
+/// Validates persisted arm-pose entries and their dynamic profiles.
+fn arm_store(
+    arm_pose_overrides: BTreeMap<String, PersistedArmPoseProfile>,
+    dynamic_arm_profiles: BTreeMap<String, PersistedDynamicArmProfile>,
+) -> Result<ArmPoseOverrideStore, ArmPoseSettingsError> {
+    let expected = arm_pose_overrides.len();
+    let mut store = ArmPoseOverrideStore::default();
+    let accepted = store.import_entries(
+        arm_pose_overrides
+            .into_iter()
+            .map(|(model_id, profile)| (model_id, profile.into_runtime())),
+    );
+    if accepted != expected {
+        return Err(ArmPoseSettingsError::InvalidEntry);
+    }
+    // Existing settings policy: invalid dynamic entries are ignored by the store.
+    store.import_dynamic_entries(
+        dynamic_arm_profiles
+            .into_iter()
+            .map(|(model_id, profile)| (model_id, profile.into_runtime())),
+    );
+    Ok(store)
 }
 
 /// Writes the complete settings text by replacing the target with a unique
@@ -783,7 +777,7 @@ mod tests {
         assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
         save_expression_bindings(&path, &expressions).unwrap();
         assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
-        let restarted = ArmPoseSettings::load(&path);
+        let restarted = ArmPoseSettings::load(&path).unwrap();
         assert_eq!(restarted.rich_look_for(&id.0).unwrap(), zero);
         assert_eq!(restarted.rich_look_for("sha256:second").unwrap(), half);
         assert_eq!(
@@ -830,7 +824,7 @@ mod tests {
              strength = 0.5\n",
         )
         .unwrap();
-        let restarted = ArmPoseSettings::load(&path);
+        let restarted = ArmPoseSettings::load(&path).unwrap();
         assert_eq!(
             restarted.rich_look_for("sha256:first").unwrap(),
             RichLookSettings {
@@ -881,7 +875,7 @@ mod tests {
     fn ui_language_round_trips_and_defaults_to_japanese() {
         let directory = tempdir().expect("temporary settings directory");
         let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
-        assert_eq!(load_language(&path), UiLanguage::Ja);
+        assert_eq!(load_language(&path).unwrap(), UiLanguage::Ja);
         for language in [
             UiLanguage::Ja,
             UiLanguage::En,
@@ -889,11 +883,11 @@ mod tests {
             UiLanguage::Ko,
         ] {
             save_language(&path, language).expect("language save");
-            assert_eq!(load_language(&path), language);
+            assert_eq!(load_language(&path).unwrap(), language);
             save_arm_pose_overrides(&path, &ArmPoseOverrideStore::default())
                 .expect("settings save");
-            assert_eq!(load_language(&path), language);
-            assert_eq!(ArmPoseSettings::load(&path).language(), language);
+            assert_eq!(load_language(&path).unwrap(), language);
+            assert_eq!(ArmPoseSettings::load(&path).unwrap().language(), language);
         }
     }
 
@@ -981,7 +975,7 @@ mod tests {
         // Reverse order: language last.
         save_language(&path, UiLanguage::Ko).expect("language save");
 
-        let restored = ArmPoseSettings::load(&path);
+        let restored = ArmPoseSettings::load(&path).unwrap();
         assert_eq!(restored.language(), UiLanguage::Ko);
         let restored_arm = load_arm_pose_overrides(&path).expect("arm reload");
         assert_eq!(
@@ -1023,7 +1017,7 @@ mod tests {
                 .expression_for(ExpressionKey::Digit1),
             Some("angry")
         );
-        assert_eq!(load_language(&path), UiLanguage::Zh);
+        assert_eq!(load_language(&path).unwrap(), UiLanguage::Zh);
     }
 
     #[test]
@@ -1063,20 +1057,99 @@ mod tests {
     }
 
     #[test]
-    fn unknown_malformed_and_invalid_values_fall_back_to_empty_defaults() {
+    fn unknown_schema_makes_every_writer_refuse_and_keep_the_bytes() {
         let directory = tempdir().expect("temporary settings directory");
         let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
-        fs::write(&path, "schema_version = 99\n").unwrap();
-        assert!(load_arm_pose_overrides(&path).is_err());
-        fs::write(&path, "this is not valid TOML = [").unwrap();
-        assert!(load_arm_pose_overrides(&path).is_err());
-        fs::write(&path, "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = 999\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nshoulder_follow_weight = 0.18\nfinger_curl_radians = 0.17\n").unwrap();
-        assert!(load_arm_pose_overrides(&path).is_err());
-        fs::write(&path, "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = nan\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nshoulder_follow_weight = 0.18\nfinger_curl_radians = 0.17\n").unwrap();
-        assert!(load_arm_pose_overrides(&path).is_err());
-        let loaded = ArmPoseSettings::load(&path);
+        let foreign = "schema_version = 99\nlanguage = 'en'\n";
+        fs::write(&path, foreign).unwrap();
+        let mut arms = ArmPoseOverrideStore::default();
+        arms.set(AvatarAssetId::new("sha256:first").0.clone(), profile(0.55))
+            .unwrap();
+        let mut expressions = ExpressionBindingStore::default();
+        expressions.set(
+            "sha256:first".into(),
+            bindings(&[(ExpressionKey::KeyA, "smile")]),
+        );
+        for result in [
+            save_language(&path, UiLanguage::Ko),
+            save_arm_tracking_enabled(&path, true),
+            save_arm_pose_overrides(&path, &arms),
+            save_expression_bindings(&path, &expressions),
+            save_rich_look_settings(&path, "sha256:first".into(), RichLookSettings::default()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(ArmPoseSettingsError::UnsupportedSchema { version: 99 })
+            ));
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), foreign);
+        assert!(ArmPoseSettings::load(&path).is_err());
+        assert!(!path.with_extension("toml.invalid").exists());
+    }
+
+    #[test]
+    fn unknown_malformed_and_invalid_values_are_errors_that_keep_the_file() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        for invalid in [
+            "schema_version = 99\n",
+            "this is not valid TOML = [",
+            "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = 999\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nshoulder_follow_weight = 0.18\nfinger_curl_radians = 0.17\n",
+            "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = nan\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nshoulder_follow_weight = 0.18\nfinger_curl_radians = 0.17\n",
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(load_arm_pose_overrides(&path).is_err());
+            assert!(ArmPoseSettings::load(&path).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+            assert!(!path.with_extension("toml.invalid").exists());
+        }
+        assert!(load_arm_pose_overrides(directory.path()).is_err());
+    }
+
+    #[test]
+    fn a_missing_document_starts_from_the_initial_values() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let loaded = ArmPoseSettings::load(&path).expect("missing settings are initial values");
+        assert_eq!(loaded.language(), UiLanguage::default());
+        assert!(!loaded.arm_tracking_enabled());
         assert_eq!(loaded.restored_entries().count(), 0);
-        assert!(path.with_extension("toml.invalid").is_file());
+        assert!(loaded.restored_expression_bindings().is_empty());
+        assert_eq!(load_language(&path).unwrap(), UiLanguage::default());
+        assert!(!load_arm_tracking_enabled(&path).unwrap());
+    }
+
+    #[test]
+    fn a_set_without_a_writable_destination_keeps_the_memory_value() {
+        let directory = tempdir().expect("temporary settings directory");
+        let blocked = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        fs::write(&blocked, "schema_version = 1\n").unwrap();
+        // A path nested under an existing file has no save directory, so the
+        // read reports a missing document and the write then fails.
+        let mut unwritable = ArmPoseSettings::empty_at(blocked.join(ARM_POSE_SETTINGS_FILE_NAME));
+        assert!(unwritable.set_language(UiLanguage::Ko).is_err());
+        assert!(unwritable.set_arm_tracking_enabled(true).is_err());
+        assert_eq!(unwritable.language(), UiLanguage::Ja);
+        assert!(!unwritable.arm_tracking_enabled());
+        assert_eq!(
+            fs::read_to_string(&blocked).unwrap(),
+            "schema_version = 1\n"
+        );
+
+        let mut without_directory = ArmPoseSettings {
+            path: None,
+            ..ArmPoseSettings::default()
+        };
+        assert!(matches!(
+            without_directory.set_language(UiLanguage::Ko),
+            Err(ArmPoseSettingsError::NoConfigDirectory)
+        ));
+        assert!(matches!(
+            without_directory.set_arm_tracking_enabled(true),
+            Err(ArmPoseSettingsError::NoConfigDirectory)
+        ));
+        assert_eq!(without_directory.language(), UiLanguage::Ja);
+        assert!(!without_directory.arm_tracking_enabled());
     }
 
     fn eye_closure_document() -> vtuber_tracking::EyeClosureProfileDocument {
@@ -1111,6 +1184,7 @@ mod tests {
         let directory = tempdir().expect("temporary settings directory");
         let path = directory.path().join(EYE_CLOSURE_PROFILE_FILE_NAME);
         assert!(load_eye_closure_thresholds(&path).unwrap().is_none());
+        assert!(load_eye_closure_thresholds(directory.path()).is_err());
 
         let document = eye_closure_document();
         fs::write(&path, serde_json::to_string(&document).unwrap()).unwrap();
