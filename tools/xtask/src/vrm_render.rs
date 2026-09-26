@@ -7,6 +7,7 @@
 //! When no GPU/readback is available the command exits 2 (`NOT RUN`) instead
 //! of reporting success. Look changes use the production UI action/orchestrator path.
 
+use crate::task_result::{TaskOutcome, TaskResult};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,7 @@ const MAX_LOAD_FRAMES: usize = 1_200;
 pub const EXIT_NOT_RUN: i32 = 2;
 
 /// Renders one VRM or every VRM in a directory.
-pub fn run(args: &[String]) -> Result<(), String> {
+pub fn run(args: &[String]) -> TaskResult {
     let input = args
         .first()
         .map(PathBuf::from)
@@ -61,7 +62,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         models.push(input);
     }
     if models.is_empty() {
-        return Err("no .vrm files found".to_owned());
+        return Err("no .vrm files found".to_owned().into());
     }
     std::fs::create_dir_all(&out_dir)
         .map_err(|error| format!("cannot create {}: {error}", out_dir.display()))?;
@@ -70,7 +71,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     for model in &models {
         match render_model(model, &out_dir) {
             Ok(summary) => print!("{summary}"),
-            Err(RenderError::NotRun(reason)) => return Err(format!("NOT RUN: {reason}")),
+            Err(RenderError::NotRun(reason)) => {
+                return Ok(TaskOutcome::NotRun {
+                    reason,
+                    exit_code: EXIT_NOT_RUN,
+                });
+            }
             Err(RenderError::Failed(reason)) => {
                 println!("{}: FAIL ({reason})", model.display());
                 failed.push(model.clone());
@@ -78,12 +84,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
     if failed.is_empty() {
-        Ok(())
+        Ok(TaskOutcome::Completed)
     } else {
         Err(format!(
             "{} model(s) differed from the requirement: {failed:?}",
             failed.len()
-        ))
+        )
+        .into())
     }
 }
 
