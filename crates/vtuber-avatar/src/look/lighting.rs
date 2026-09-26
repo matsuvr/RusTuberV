@@ -104,7 +104,7 @@ fn sync_additional_look_lights(
     mut lights: Query<(Entity, &AdditionalLookLight, &mut SpotLight, &mut Transform)>,
 ) {
     let look = settings.0;
-    let effective_strength = if look.enabled { look.strength } else { 0.0 };
+    let effective_strength = if look.enabled() { look.strength() } else { 0.0 };
     let framed = (effective_strength > 0.0)
         .then(|| {
             let root = lifecycle.active_root()?;
@@ -203,7 +203,7 @@ mod tests {
 
     fn set_look(app: &mut App, enabled: bool, strength: f32) {
         app.world_mut().resource_mut::<AvatarLookSettings>().0 =
-            RichLookSettings { enabled, strength };
+            RichLookSettings::try_new(enabled, strength).unwrap();
     }
 
     fn set_camera_rotation(app: &mut App, rotation: Quat) {

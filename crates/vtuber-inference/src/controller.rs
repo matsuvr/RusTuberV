@@ -211,32 +211,17 @@ impl InferenceController {
     ///
     /// # Errors
     ///
-    /// Returns an error if the worker has not been started or the command
-    /// channel has been closed.
+    /// Returns WorkerNotStarted, ControlQueueFull, or ControlChannelClosed.
+    /// Success acknowledges enqueueing, not completion of model loading.
     pub fn load_model(
         &mut self,
         descriptor: ModelDescriptor,
         settings: RuntimeSettings,
     ) -> Result<(), InferenceError> {
-        let tx = self
-            .command_tx
-            .as_ref()
-            .ok_or_else(|| InferenceError::Internal("inference worker not started".into()))?;
-
-        {
-            let mut status = self
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            status.transition_to(InferenceWorkerState::LoadingModel);
-        }
-
-        tx.send(ControlCommand::LoadModel {
+        self.enqueue_load(ControlCommand::LoadModel {
             descriptor: Box::new(descriptor),
             settings,
         })
-        .map_err(|_| InferenceError::Internal("inference worker command channel closed".into()))?;
-        Ok(())
     }
 
     /// Loads the manifest-resolved production pipeline.
@@ -249,26 +234,11 @@ impl InferenceController {
         artifact_root: std::path::PathBuf,
         settings: RuntimeSettings,
     ) -> Result<(), InferenceError> {
-        let tx = self
-            .command_tx
-            .as_ref()
-            .ok_or_else(|| InferenceError::Internal("inference worker not started".into()))?;
-
-        {
-            let mut status = self
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            status.transition_to(InferenceWorkerState::LoadingModel);
-        }
-
-        tx.send(ControlCommand::LoadPipeline {
+        self.enqueue_load(ControlCommand::LoadPipeline {
             descriptor: Box::new(descriptor),
             artifact_root,
             settings,
         })
-        .map_err(|_| InferenceError::Internal("inference worker command channel closed".into()))?;
-        Ok(())
     }
 
     /// Loads the approved MediaPipe Face Landmarker task from `task_path`.
@@ -288,52 +258,56 @@ impl InferenceController {
     }
 
     fn load_mediapipe_task(&mut self, task: MediaPipeTaskSource) -> Result<(), InferenceError> {
-        let tx = self
-            .command_tx
+        self.enqueue_load(ControlCommand::LoadMediaPipe { task })
+    }
+
+    fn try_send_control(&self, command: ControlCommand) -> Result<(), InferenceError> {
+        use std::sync::mpsc::TrySendError;
+        self.command_tx
             .as_ref()
-            .ok_or_else(|| InferenceError::Internal("inference worker not started".into()))?;
+            .ok_or(InferenceError::WorkerNotStarted)?
+            .try_send(command)
+            .map_err(|error| match error {
+                TrySendError::Full(_) => InferenceError::ControlQueueFull,
+                TrySendError::Disconnected(_) => InferenceError::ControlChannelClosed,
+            })
+    }
 
-        {
-            let mut status = self
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            status.transition_to(InferenceWorkerState::LoadingModel);
-        }
-
-        tx.send(ControlCommand::LoadMediaPipe { task })
-            .map_err(|_| {
-                InferenceError::Internal("inference worker command channel closed".into())
-            })?;
+    fn enqueue_load(&self, command: ControlCommand) -> Result<(), InferenceError> {
+        // The bounded send never waits. Hold the existing status lock until
+        // the request state is written so a fast worker cannot finish first
+        // and then have its completed state overwritten by LoadingModel.
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.try_send_control(command)?;
+        status.transition_to(InferenceWorkerState::LoadingModel);
         Ok(())
     }
 
-    /// Pauses inference without stopping the worker.
-    pub fn pause(&mut self) {
-        if let Some(tx) = self.command_tx.as_ref() {
-            let _ = tx.send(ControlCommand::Pause);
-        }
+    /// Queues a pause without waiting for the worker to complete it.
+    ///
+    /// # Errors
+    /// Returns WorkerNotStarted, ControlQueueFull, or ControlChannelClosed.
+    pub fn pause(&mut self) -> Result<(), InferenceError> {
+        self.try_send_control(ControlCommand::Pause)
     }
 
-    /// Resumes inference after a pause.
-    pub fn resume(&mut self) {
-        if let Some(tx) = self.command_tx.as_ref() {
-            let _ = tx.send(ControlCommand::Resume);
-        }
+    /// Queues a resume without waiting for the worker to complete it.
+    ///
+    /// # Errors
+    /// Returns WorkerNotStarted, ControlQueueFull, or ControlChannelClosed.
+    pub fn resume(&mut self) -> Result<(), InferenceError> {
+        self.try_send_control(ControlCommand::Resume)
     }
 
-    /// Resets the worker to idle, releasing any loaded model.
-    pub fn reset(&mut self) {
-        if let Some(tx) = self.command_tx.as_ref() {
-            let _ = tx.send(ControlCommand::Reset);
-        }
-        {
-            let mut status = self
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            status.transition_to(InferenceWorkerState::Idle);
-        }
+    /// Queues a reset. Only the worker can confirm the resulting idle state.
+    ///
+    /// # Errors
+    /// Returns WorkerNotStarted, ControlQueueFull, or ControlChannelClosed.
+    pub fn reset(&mut self) -> Result<(), InferenceError> {
+        self.try_send_control(ControlCommand::Reset)
     }
 
     /// Requests graceful shutdown and joins the worker.
@@ -427,6 +401,82 @@ mod tests {
         }
     }
 
+    fn idle_controller() -> InferenceController {
+        InferenceController::new(Arc::new(LatestSlot::new()), Arc::new(LatestSlot::new()))
+    }
+
+    #[test]
+    fn unavailable_controls_preserve_status() {
+        let mut controller = idle_controller();
+        let before = controller.status();
+        assert_eq!(controller.pause(), Err(InferenceError::WorkerNotStarted));
+        assert_eq!(controller.resume(), Err(InferenceError::WorkerNotStarted));
+        assert_eq!(controller.reset(), Err(InferenceError::WorkerNotStarted));
+        assert_eq!(
+            controller.load_mediapipe_embedded(),
+            Err(InferenceError::WorkerNotStarted)
+        );
+        assert_eq!(controller.status(), before);
+        let (tx, rx) = std::sync::mpsc::sync_channel(CONTROL_CHANNEL_CAPACITY);
+        controller.command_tx = Some(tx);
+        drop(rx);
+        assert_eq!(
+            controller.reset(),
+            Err(InferenceError::ControlChannelClosed)
+        );
+        assert_eq!(
+            controller.load_model(dummy_descriptor(), RuntimeSettings::default()),
+            Err(InferenceError::ControlChannelClosed)
+        );
+        assert_eq!(controller.status(), before);
+    }
+
+    #[test]
+    fn a_full_control_queue_fails_immediately_without_changing_state() {
+        let mut controller = idle_controller();
+        let (tx, rx) = std::sync::mpsc::sync_channel(CONTROL_CHANNEL_CAPACITY);
+        controller.command_tx = Some(tx);
+        for _ in 0..CONTROL_CHANNEL_CAPACITY {
+            controller.pause().unwrap();
+        }
+        let before = controller.status();
+        assert_eq!(
+            controller.load_mediapipe_embedded(),
+            Err(InferenceError::ControlQueueFull)
+        );
+        assert_eq!(controller.resume(), Err(InferenceError::ControlQueueFull));
+        assert_eq!(controller.reset(), Err(InferenceError::ControlQueueFull));
+        assert_eq!(controller.status(), before);
+        for _ in 0..CONTROL_CHANNEL_CAPACITY {
+            assert_eq!(rx.try_recv().unwrap(), ControlCommand::Pause);
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn accepted_commands_keep_order_and_reset_does_not_claim_completion() {
+        let mut controller = idle_controller();
+        let (tx, rx) = std::sync::mpsc::sync_channel(CONTROL_CHANNEL_CAPACITY);
+        controller.command_tx = Some(tx);
+        controller.load_mediapipe_embedded().unwrap();
+        controller.pause().unwrap();
+        controller.resume().unwrap();
+        controller.reset().unwrap();
+        assert_eq!(
+            controller.status().state,
+            InferenceWorkerState::LoadingModel
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ControlCommand::LoadMediaPipe {
+                task: MediaPipeTaskSource::Embedded
+            }
+        );
+        assert_eq!(rx.try_recv().unwrap(), ControlCommand::Pause);
+        assert_eq!(rx.try_recv().unwrap(), ControlCommand::Resume);
+        assert_eq!(rx.try_recv().unwrap(), ControlCommand::Reset);
+    }
+
     #[test]
     fn worker_state_transitions_idle_loading_failed() {
         let frame_slot: Arc<LatestSlot<VideoFrame>> = Arc::new(LatestSlot::new());
@@ -495,7 +545,7 @@ mod tests {
             InferenceController::new(Arc::clone(&frame_slot), Arc::clone(&output_slot));
 
         controller.start_worker().expect("start worker");
-        controller.pause();
+        controller.pause().unwrap();
 
         // Publish a frame while paused; it should remain unread because no
         // runtime is loaded and the worker is paused.
@@ -514,7 +564,7 @@ mod tests {
             InferenceController::new(Arc::clone(&frame_slot), Arc::clone(&output_slot));
 
         controller.start_worker().expect("start worker");
-        controller.reset();
+        controller.reset().unwrap();
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(controller.status().state, InferenceWorkerState::Idle);
         controller.shutdown();
@@ -536,7 +586,7 @@ mod tests {
         assert!(frame_slot.is_closed());
         assert!(output_slot.is_closed());
         assert!(canonical_outcome_slot.is_closed());
-        assert_eq!(metrics.drops.processed, 0);
+        assert_eq!(metrics.frames.processed, 0);
     }
 
     #[test]

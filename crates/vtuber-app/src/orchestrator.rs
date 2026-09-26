@@ -945,11 +945,15 @@ pub fn process_ui_actions_system(
                 }
             }
             UiAction::ChangeRichLook(change) => {
-                apply_rich_look_action(
+                if let Err(error) = apply_rich_look_action(
                     look.look_settings.as_deref_mut(),
                     look.look_changes.as_mut(),
                     *change,
-                );
+                ) {
+                    orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
+                        error.to_string(),
+                    )));
+                }
             }
             UiAction::SaveRichLook => {
                 if let (Some(persistent), Some(look)) =
@@ -1038,8 +1042,8 @@ pub fn process_ui_actions_system(
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
     view_model.arm_tracking_enabled = pose_runtime.as_deref().is_some_and(|pose| pose.enabled());
     if let Some(settings) = look.look_settings.as_deref() {
-        view_model.look.enabled = settings.0.enabled;
-        view_model.look.strength = settings.0.strength;
+        view_model.look.enabled = settings.0.enabled();
+        view_model.look.strength = settings.0.strength();
     }
 }
 
@@ -1051,16 +1055,17 @@ fn apply_rich_look_action(
     settings: Option<&mut vtuber_avatar::AvatarLookSettings>,
     changes: Option<&mut MessageWriter<vtuber_avatar::LookSettingsChanged>>,
     change: crate::actions::RichLookChange,
-) {
+) -> Result<(), vtuber_avatar::RichLookSettingsError> {
     let (Some(settings), Some(changes)) = (settings, changes) else {
-        return;
+        return Ok(());
     };
-    let next = crate::actions::reduce_rich_look(settings.0, change);
+    let next = crate::actions::reduce_rich_look(settings.0, change)?;
     if next == settings.0 {
-        return;
+        return Ok(());
     }
     settings.0 = next;
     changes.write(vtuber_avatar::LookSettingsChanged(next));
+    Ok(())
 }
 
 /// Returns the one catalog that expression operations may use right now.
@@ -1436,20 +1441,15 @@ fn prepare_avatar_load(
     // bind step resolves against the live scene. An unreadable managed copy
     // also fails the runtime asset load, so the facts are best-effort here.
     let expressions =
-        crate::import::read_runtime_expression_facts(&pending.model.asset_path)
-            .unwrap_or_default();
+        crate::import::read_runtime_expression_facts(&pending.model.asset_path).unwrap_or_default();
     let expected_generation = match pending.model.summary.generation {
         VrmGeneration::Vrm0 => vtuber_avatar::ExpectedVrmGeneration::Vrm0,
         VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
     };
-    let imported = vtuber_avatar::ImportedAvatar::new(
-        id,
-        path,
-        &pending.model.name,
-        expected_generation,
-    )
-    .with_warnings(pending.model.summary.compatibility_warnings.clone())
-    .with_expressions(expressions);
+    let imported =
+        vtuber_avatar::ImportedAvatar::new(id, path, &pending.model.name, expected_generation)
+            .with_warnings(pending.model.summary.compatibility_warnings.clone())
+            .with_expressions(expressions);
     Ok((
         vtuber_avatar::LoadImportedAvatarRequest {
             request_id: pending.request_id,
@@ -1593,8 +1593,8 @@ pub fn sync_avatar_lifecycle_system(
     if let Some(view_model) = view_model.as_deref_mut() {
         orchestrator.update_view_model(view_model);
         if let Some(look) = look.as_deref() {
-            view_model.look.enabled = look.0.enabled;
-            view_model.look.strength = look.0.strength;
+            view_model.look.enabled = look.0.enabled();
+            view_model.look.strength = look.0.strength();
         }
     }
 }
@@ -1688,10 +1688,7 @@ mod tests {
             );
             assert_eq!(
                 app.world().resource::<AvatarLookSettings>().0,
-                RichLookSettings {
-                    enabled: true,
-                    strength
-                }
+                RichLookSettings::try_new(true, strength).unwrap()
             );
             assert_eq!(
                 app.world().resource::<UiViewModel>().look.strength,
@@ -1700,10 +1697,7 @@ mod tests {
             assert!(!path.exists(), "live edits must not write files");
         }
         look_action(&mut app, UiAction::SaveRichLook);
-        let zero = RichLookSettings {
-            enabled: true,
-            strength: 0.0,
-        };
+        let zero = RichLookSettings::try_new(true, 0.0).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         look_action(
             &mut app,
@@ -1718,7 +1712,10 @@ mod tests {
             &mut app,
             UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
         );
-        assert_eq!(app.world().resource::<AvatarLookSettings>().0.strength, 0.5);
+        assert_eq!(
+            app.world().resource::<AvatarLookSettings>().0.strength(),
+            0.5
+        );
         assert_eq!(app.world().resource::<PreviewState>().visible, preview);
         assert!(!app.world().resource::<NdiOutputIntent>().is_requested());
         assert_eq!(
@@ -1746,10 +1743,7 @@ mod tests {
         finish_look_model(&mut app);
         assert_eq!(
             app.world().resource::<AvatarLookSettings>().0,
-            RichLookSettings {
-                enabled: false,
-                strength: 0.5
-            }
+            RichLookSettings::try_new(false, 0.5).unwrap()
         );
         look_action(&mut app, UiAction::UnloadAvatar);
         assert_eq!(
@@ -1768,6 +1762,41 @@ mod tests {
         restarted.update();
         finish_look_model(&mut restarted);
         assert_eq!(restarted.world().resource::<AvatarLookSettings>().0, zero);
+    }
+
+    #[test]
+    fn invalid_rich_look_edits_keep_live_state_and_saved_bytes() {
+        use crate::actions::RichLookChange;
+        use vtuber_avatar::AvatarLookSettings;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.toml");
+        let mut app = rich_look_app(&path);
+        select_look_model(&mut app, 'a');
+        app.update();
+        finish_look_model(&mut app);
+        look_action(
+            &mut app,
+            UiAction::ChangeRichLook(RichLookChange::Strength(0.5)),
+        );
+        look_action(&mut app, UiAction::SaveRichLook);
+        let previous = app.world().resource::<AvatarLookSettings>().0;
+        let bytes = std::fs::read(&path).unwrap();
+        for strength in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            look_action(
+                &mut app,
+                UiAction::ChangeRichLook(RichLookChange::Strength(strength)),
+            );
+            assert_eq!(app.world().resource::<AvatarLookSettings>().0, previous);
+            assert_eq!(
+                app.world().resource::<UiViewModel>().look.strength,
+                previous.strength()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert!(matches!(
+                app.world().resource::<Orchestrator>().last_error(),
+                Some(OrchestratorError::ArmPoseSettingsFailed(_))
+            ));
+        }
     }
 
     #[test]
@@ -1807,7 +1836,7 @@ mod tests {
             app.world()
                 .resource::<vtuber_avatar::AvatarLookSettings>()
                 .0
-                .enabled
+                .enabled()
         );
         assert!(matches!(
             app.world().resource::<Orchestrator>().last_error(),
@@ -1884,8 +1913,8 @@ mod tests {
             model.id,
             "UI snapshot model"
         );
-        assert_eq!(vm.look.enabled, expected.enabled);
-        assert_eq!(vm.look.strength, expected.strength);
+        assert_eq!(vm.look.enabled, expected.enabled());
+        assert_eq!(vm.look.strength, expected.strength());
     }
 
     #[test]
@@ -1914,14 +1943,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         let (a, b) = rich_models(&dir);
-        let a_look = RichLookSettings {
-            enabled: true,
-            strength: 0.25,
-        };
-        let b_look = RichLookSettings {
-            enabled: false,
-            strength: 0.75,
-        };
+        let a_look = RichLookSettings::try_new(true, 0.25).unwrap();
+        let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
         let settings = ArmPoseSettings::empty_at(&path);
         settings.save_rich_look(a.id.clone(), a_look).unwrap();
         settings.save_rich_look(b.id.clone(), b_look).unwrap();
@@ -1968,7 +1991,7 @@ mod tests {
             UiAction::ChangeRichLook(RichLookChange::Strength(0.5)),
         );
         look_action(&mut app, UiAction::SaveRichLook);
-        assert_eq!(settings.rich_look_for(&a.id).unwrap().strength, 0.5);
+        assert_eq!(settings.rich_look_for(&a.id).unwrap().strength(), 0.5);
         assert_eq!(settings.rich_look_for(&b.id).unwrap(), b_look);
     }
 
@@ -1977,14 +2000,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         let (a, b) = rich_models(&dir);
-        let a_look = RichLookSettings {
-            enabled: true,
-            strength: 0.0,
-        };
-        let b_look = RichLookSettings {
-            enabled: false,
-            strength: 0.75,
-        };
+        let a_look = RichLookSettings::try_new(true, 0.0).unwrap();
+        let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
         let settings = ArmPoseSettings::empty_at(&path);
         settings.save_rich_look(a.id.clone(), a_look).unwrap();
         settings.save_rich_look(b.id.clone(), b_look).unwrap();
@@ -2040,14 +2057,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         let (a, b) = rich_models(&dir);
-        let a_look = RichLookSettings {
-            enabled: false,
-            strength: 0.25,
-        };
-        let b_look = RichLookSettings {
-            enabled: true,
-            strength: 0.0,
-        };
+        let a_look = RichLookSettings::try_new(false, 0.25).unwrap();
+        let b_look = RichLookSettings::try_new(true, 0.0).unwrap();
         let settings = ArmPoseSettings::empty_at(&path);
         settings.save_rich_look(a.id.clone(), a_look).unwrap();
         settings.save_rich_look(b.id.clone(), b_look).unwrap();
@@ -2078,10 +2089,7 @@ mod tests {
         assert_eq!(settings.rich_look_for(&a.id).unwrap(), a_look);
         assert_eq!(
             settings.rich_look_for(&b.id).unwrap(),
-            RichLookSettings {
-                enabled: true,
-                strength: 0.5
-            }
+            RichLookSettings::try_new(true, 0.5).unwrap()
         );
     }
 

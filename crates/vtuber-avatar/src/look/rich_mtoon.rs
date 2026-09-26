@@ -104,7 +104,7 @@ fn switch_rich_mtoon_materials(
     let Some(root) = lifecycle.active_root() else {
         return;
     };
-    let enabled = settings.0.enabled;
+    let enabled = settings.0.enabled();
     let mut rich_by_native: HashMap<AssetId<MToonMaterial>, Handle<RichMtoonMaterial>> = meshes
         .iter()
         .filter_map(|(_, _, swap)| swap.map(|swap| (swap.native.id(), swap.rich.clone())))
@@ -247,7 +247,7 @@ mod tests {
 
     fn set_look(app: &mut App, enabled: bool, strength: f32) {
         app.world_mut().resource_mut::<AvatarLookSettings>().0 =
-            crate::look::RichLookSettings { enabled, strength };
+            crate::look::RichLookSettings::try_new(enabled, strength).unwrap();
     }
 
     fn rich_handle(app: &mut App, mesh: Entity) -> Option<Handle<RichMtoonMaterial>> {

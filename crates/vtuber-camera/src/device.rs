@@ -16,6 +16,9 @@ pub enum CameraError {
     /// Opening the device failed.
     #[error("CAMERA_OPEN_FAILED: {0}")]
     OpenFailed(String),
+    /// The capture worker can no longer receive control requests.
+    #[error("CAMERA_COMMAND_CHANNEL_CLOSED")]
+    CommandChannelClosed,
     /// The camera disconnected.
     #[error("CAMERA_DISCONNECTED")]
     Disconnected,

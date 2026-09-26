@@ -212,9 +212,11 @@ fn run_windows(options: Options) -> Result<(), String> {
     let mut restart_count = 0u8;
     while started.elapsed() < options.duration {
         if restart_count < 3 && started.elapsed() >= next_restart {
-            capture.stop();
-            thread::sleep(Duration::from_millis(150));
-            if let Err(error) = capture.select_and_start(device.clone(), CameraRequest::default()) {
+            let restart = capture.stop().and_then(|()| {
+                thread::sleep(Duration::from_millis(150));
+                capture.select_and_start(device.clone(), CameraRequest::default())
+            });
+            if let Err(error) = restart {
                 inference_worker.stop();
                 let inference_result = inference_worker.join();
                 let _ = capture.shutdown();
@@ -645,8 +647,8 @@ fn validate_gate(
     if restart_count != 3 {
         failures.push(format!("Stop/Start completed {restart_count}/3 cycles"));
     }
-    if capture.frames_dropped > capture.frames_captured {
-        failures.push("capture overwrite count exceeds capture count".into());
+    if capture.publish_rejected_frames > capture.frames_captured {
+        failures.push("capture publish rejection count exceeds capture count".into());
     }
     if failures.is_empty() {
         Ok(())
@@ -674,12 +676,12 @@ fn print_summary(stats: &SmokeStats, capture: &vtuber_camera::CaptureMetrics, js
             .matrix_orthogonality_error
             .map_or_else(|| "null".into(), |value| format!("{value:.6}"));
         println!(
-            "{{\"backend\":\"mediapipe-face-landmarker\",\"mediapipe_version\":\"{MEDIAPIPE_VERSION}\",\"native_library_source\":\"{source}\",\"task_bundle\":\"{TASK_BUNDLE_FILE}\",\"task_bundle_sha256\":\"{TASK_BUNDLE_SHA256}\",\"face_count\":{},\"no_face_count\":{},\"result_hz\":{result_hz:.3},\"p50_inference_ms\":{p50_ms:.3},\"p95_inference_ms\":{p95_ms:.3},\"landmarks\":{landmarks},\"blendshapes\":{blendshapes},\"matrices\":{matrices},\"determinant\":{determinant},\"orthogonality_error\":{orthogonality_error},\"contract_failures\":{},\"last_source_seq\":{last_seq},\"capture_frames\":{},\"capture_overwrites\":{},\"latest_slot_capacity\":1}}",
+            "{{\"backend\":\"mediapipe-face-landmarker\",\"mediapipe_version\":\"{MEDIAPIPE_VERSION}\",\"native_library_source\":\"{source}\",\"task_bundle\":\"{TASK_BUNDLE_FILE}\",\"task_bundle_sha256\":\"{TASK_BUNDLE_SHA256}\",\"face_count\":{},\"no_face_count\":{},\"result_hz\":{result_hz:.3},\"p50_inference_ms\":{p50_ms:.3},\"p95_inference_ms\":{p95_ms:.3},\"landmarks\":{landmarks},\"blendshapes\":{blendshapes},\"matrices\":{matrices},\"determinant\":{determinant},\"orthogonality_error\":{orthogonality_error},\"contract_failures\":{},\"last_source_seq\":{last_seq},\"capture_frames\":{},\"capture_publish_rejected_frames\":{},\"latest_slot_capacity\":1}}",
             stats.face_count,
             stats.no_face_count,
             stats.contract_failures,
             capture.frames_captured,
-            capture.frames_dropped,
+            capture.publish_rejected_frames,
         );
     } else {
         let determinant = stats
@@ -703,7 +705,10 @@ fn print_summary(stats: &SmokeStats, capture: &vtuber_camera::CaptureMetrics, js
         println!("contract_failures={}", stats.contract_failures);
         println!("last_source_seq={last_seq}");
         println!("capture_frames={}", capture.frames_captured);
-        println!("capture_overwrites={}", capture.frames_dropped);
+        println!(
+            "capture_publish_rejected_frames={}",
+            capture.publish_rejected_frames
+        );
         println!("latest_slot_capacity=1");
         println!("worker_shutdown=clean");
     }

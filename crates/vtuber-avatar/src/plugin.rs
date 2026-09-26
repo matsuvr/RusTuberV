@@ -443,10 +443,7 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<crate::look::AvatarLookSettings>()
-            .0 = crate::look::RichLookSettings {
-            enabled: true,
-            strength: 0.5,
-        };
+            .0 = crate::look::RichLookSettings::try_new(true, 0.5).unwrap();
         app.update();
         let mut spots = app.world_mut().query::<&SpotLight>();
         assert_eq!(spots.iter(app.world()).count(), 2);
@@ -454,10 +451,7 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<crate::look::AvatarLookSettings>()
-            .0 = crate::look::RichLookSettings {
-            enabled: false,
-            strength: 1.0,
-        };
+            .0 = crate::look::RichLookSettings::try_new(false, 1.0).unwrap();
         app.update();
         let mut spots = app.world_mut().query::<&SpotLight>();
         assert_eq!(spots.iter(app.world()).count(), 0);

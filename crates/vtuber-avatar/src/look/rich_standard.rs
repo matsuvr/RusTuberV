@@ -73,7 +73,7 @@ fn switch_rich_standard_materials(
     let Some(root) = lifecycle.active_root() else {
         return;
     };
-    let enabled = settings.0.enabled;
+    let enabled = settings.0.enabled();
     let mut rich_by_native: HashMap<AssetId<StandardMaterial>, Handle<RichStandardMaterial>> =
         meshes
             .iter()
@@ -97,7 +97,7 @@ fn switch_rich_standard_materials(
                     let created = rich_assets.add(RichStandardMaterial {
                         base: source.clone(),
                         extension: RichStandardExtension {
-                            strength: settings.0.strength,
+                            strength: settings.0.strength(),
                         },
                     });
                     rich_by_native.insert(native.id(), created.clone());
@@ -132,8 +132,8 @@ fn sync_rich_standard_materials(
     mut rich_assets: ResMut<Assets<RichStandardMaterial>>,
     swaps: Query<&RichStandardSwap>,
 ) {
-    let strength = if settings.0.enabled {
-        settings.0.strength
+    let strength = if settings.0.enabled() {
+        settings.0.strength()
     } else {
         0.0
     };
@@ -222,7 +222,7 @@ mod tests {
 
     fn set_look(app: &mut App, enabled: bool, strength: f32) {
         app.world_mut().resource_mut::<AvatarLookSettings>().0 =
-            crate::look::RichLookSettings { enabled, strength };
+            crate::look::RichLookSettings::try_new(enabled, strength).unwrap();
     }
 
     fn rich_handle(app: &mut App, mesh: Entity) -> Option<Handle<RichStandardMaterial>> {

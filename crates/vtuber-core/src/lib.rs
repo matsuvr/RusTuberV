@@ -48,7 +48,7 @@ pub use arkit::*;
 pub use control::{CalibrationError, CalibrationSettings};
 pub use face_tracking::*;
 pub use observation::RawExpressionObservation;
-pub use slot::{LatestSlot, ReadResult};
+pub use slot::{LatestSlot, ReadResult, skipped_generations};
 pub use stop::StopToken;
 pub use time::now as monotonic_now;
 pub use types::*;

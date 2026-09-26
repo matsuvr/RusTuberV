@@ -407,7 +407,9 @@ fn run_windows(options: Options) -> Result<(), String> {
         {
             match action {
                 GuidedAction::None => {}
-                GuidedAction::StopCapture => capture.stop(),
+                GuidedAction::StopCapture => capture
+                    .stop()
+                    .map_err(|error| format!("guided capture stop failed: {error}"))?,
                 GuidedAction::StartCapture => capture
                     .select_and_start(device.clone(), CameraRequest::default())
                     .map_err(|error| format!("guided capture restart failed: {error}"))?,

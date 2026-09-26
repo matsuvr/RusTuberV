@@ -157,7 +157,7 @@ fn golden_model_startup_frames_output_stop() {
     assert!(output_slot.is_closed());
 
     assert_eq!(
-        metrics.drops.processed, status.frames_processed,
+        metrics.frames.processed, status.frames_processed,
         "metrics processed counter should match status"
     );
 }
