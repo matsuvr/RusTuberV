@@ -116,25 +116,22 @@ pub fn shape_translation(
     if !signal.is_available() || !body_scale_meters.is_finite() || body_scale_meters <= 0.0 {
         return signal;
     }
-    let shaped = HeadTranslationSignal {
-        x_meters: soft_cap_scalar(
-            signal.x_meters,
-            profile.x_threshold_ratio * body_scale_meters,
-        ),
-        y_meters: soft_cap_scalar(
-            signal.y_meters,
-            profile.y_threshold_ratio * body_scale_meters,
-        ),
-        z_meters: soft_cap_scalar(
-            signal.z_meters,
-            profile.z_threshold_ratio * body_scale_meters,
-        ),
-        state: signal.state,
-    };
-    if shaped.x_meters.is_finite() && shaped.y_meters.is_finite() && shaped.z_meters.is_finite() {
-        shaped
-    } else {
-        HeadTranslationSignal::UNAVAILABLE
+    let x = soft_cap_scalar(
+        signal.x_meters(),
+        profile.x_threshold_ratio * body_scale_meters,
+    );
+    let y = soft_cap_scalar(
+        signal.y_meters(),
+        profile.y_threshold_ratio * body_scale_meters,
+    );
+    let z = soft_cap_scalar(
+        signal.z_meters(),
+        profile.z_threshold_ratio * body_scale_meters,
+    );
+    match signal.state() {
+        HeadTranslationState::Tracked => HeadTranslationSignal::tracked(x, y, z),
+        HeadTranslationState::Degraded => HeadTranslationSignal::degraded(x, y, z),
+        HeadTranslationState::Unavailable => HeadTranslationSignal::UNAVAILABLE,
     }
 }
 
@@ -193,9 +190,9 @@ impl TranslationFilter {
         captured_at: MonoTimeNs,
     ) -> HeadTranslationSignal {
         if !signal.is_available()
-            || !signal.x_meters.is_finite()
-            || !signal.y_meters.is_finite()
-            || !signal.z_meters.is_finite()
+            || !signal.x_meters().is_finite()
+            || !signal.y_meters().is_finite()
+            || !signal.z_meters().is_finite()
         {
             self.state = None;
             return HeadTranslationSignal::UNAVAILABLE;
@@ -209,15 +206,22 @@ impl TranslationFilter {
         let dt_ns = captured_at.0.saturating_sub(previous.captured_at.0);
         if dt_ns == 0 {
             let blended = SmoothedSample {
-                state: merge_state(previous.state, signal.state),
+                state: merge_state(previous.state, signal.state()),
                 ..previous
             };
             self.state = Some(blended);
-            return HeadTranslationSignal {
-                x_meters: previous.x_meters,
-                y_meters: previous.y_meters,
-                z_meters: previous.z_meters,
-                state: blended.state,
+            return match blended.state {
+                HeadTranslationState::Tracked => HeadTranslationSignal::tracked(
+                    previous.x_meters,
+                    previous.y_meters,
+                    previous.z_meters,
+                ),
+                HeadTranslationState::Degraded => HeadTranslationSignal::degraded(
+                    previous.x_meters,
+                    previous.y_meters,
+                    previous.z_meters,
+                ),
+                HeadTranslationState::Unavailable => HeadTranslationSignal::UNAVAILABLE,
             };
         }
 
@@ -232,10 +236,10 @@ impl TranslationFilter {
             previous_value + (next_value - previous_value) * alpha
         };
         let smoothed = SmoothedSample {
-            x_meters: lerp(previous.x_meters, signal.x_meters),
-            y_meters: lerp(previous.y_meters, signal.y_meters),
-            z_meters: lerp(previous.z_meters, signal.z_meters),
-            state: merge_state(previous.state, signal.state),
+            x_meters: lerp(previous.x_meters, signal.x_meters()),
+            y_meters: lerp(previous.y_meters, signal.y_meters()),
+            z_meters: lerp(previous.z_meters, signal.z_meters()),
+            state: merge_state(previous.state, signal.state()),
             captured_at,
         };
         if smoothed.x_meters.is_finite()
@@ -243,11 +247,18 @@ impl TranslationFilter {
             && smoothed.z_meters.is_finite()
         {
             self.state = Some(smoothed);
-            HeadTranslationSignal {
-                x_meters: smoothed.x_meters,
-                y_meters: smoothed.y_meters,
-                z_meters: smoothed.z_meters,
-                state: smoothed.state,
+            match smoothed.state {
+                HeadTranslationState::Tracked => HeadTranslationSignal::tracked(
+                    smoothed.x_meters,
+                    smoothed.y_meters,
+                    smoothed.z_meters,
+                ),
+                HeadTranslationState::Degraded => HeadTranslationSignal::degraded(
+                    smoothed.x_meters,
+                    smoothed.y_meters,
+                    smoothed.z_meters,
+                ),
+                HeadTranslationState::Unavailable => HeadTranslationSignal::UNAVAILABLE,
             }
         } else {
             self.state = None;
@@ -279,10 +290,10 @@ pub enum FilterConfigError {
 impl SmoothedSample {
     fn new(signal: HeadTranslationSignal, captured_at: MonoTimeNs) -> Self {
         Self {
-            x_meters: signal.x_meters,
-            y_meters: signal.y_meters,
-            z_meters: signal.z_meters,
-            state: signal.state,
+            x_meters: signal.x_meters(),
+            y_meters: signal.y_meters(),
+            z_meters: signal.z_meters(),
+            state: signal.state(),
             captured_at,
         }
     }
@@ -354,10 +365,10 @@ mod tests {
         let profile = TranslationShapingProfile::default();
         let signal = tracked(0.2, 0.2, 0.2);
         let shaped = shape_translation(signal, &profile, 1.0);
-        assert_relative_eq!(shaped.x_meters, 0.175, epsilon = 1e-6);
-        assert_relative_eq!(shaped.z_meters, 0.175, epsilon = 1e-6);
-        assert_relative_eq!(shaped.y_meters, 0.1125, epsilon = 1e-6);
-        assert_eq!(shaped.state, HeadTranslationState::Tracked);
+        assert_relative_eq!(shaped.x_meters(), 0.175, epsilon = 1e-6);
+        assert_relative_eq!(shaped.z_meters(), 0.175, epsilon = 1e-6);
+        assert_relative_eq!(shaped.y_meters(), 0.1125, epsilon = 1e-6);
+        assert_eq!(shaped.state(), HeadTranslationState::Tracked);
     }
 
     #[test]
@@ -369,8 +380,8 @@ mod tests {
         );
         let degraded = HeadTranslationSignal::degraded(0.2, 0.2, 0.2);
         let shaped = shape_translation(degraded, &profile, 1.0);
-        assert_eq!(shaped.state, HeadTranslationState::Degraded);
-        assert_relative_eq!(shaped.x_meters, 0.175, epsilon = 1e-6);
+        assert_eq!(shaped.state(), HeadTranslationState::Degraded);
+        assert_relative_eq!(shaped.x_meters(), 0.175, epsilon = 1e-6);
     }
 
     #[test]
@@ -408,7 +419,7 @@ mod tests {
                 output.push(
                     filter
                         .update(tracked(0.06, 0.0, 0.0), MonoTimeNs(sample * period_ns))
-                        .x_meters,
+                        .x_meters(),
                 );
             }
             output
@@ -428,11 +439,11 @@ mod tests {
     fn filter_has_no_dead_zone_and_moves_toward_small_inputs() {
         let mut filter = TranslationFilter::new(Duration::from_millis(100)).unwrap();
         let first = filter.update(tracked(0.001, -0.001, 0.0005), MonoTimeNs(0));
-        assert_relative_eq!(first.x_meters, 0.001, epsilon = 1e-12);
-        assert_relative_eq!(first.y_meters, -0.001, epsilon = 1e-12);
+        assert_relative_eq!(first.x_meters(), 0.001, epsilon = 1e-12);
+        assert_relative_eq!(first.y_meters(), -0.001, epsilon = 1e-12);
         let second = filter.update(tracked(-0.001, 0.0, 0.0), MonoTimeNs(16_666_667));
-        assert!(second.x_meters < first.x_meters);
-        assert!(second.y_meters > first.y_meters);
+        assert!(second.x_meters() < first.x_meters());
+        assert!(second.y_meters() > first.y_meters());
     }
 
     #[test]
@@ -446,7 +457,7 @@ mod tests {
         assert!(!filter.has_state());
 
         let fresh = filter.update(tracked(-0.02, 0.0, 0.0), MonoTimeNs(66_666_667));
-        assert_relative_eq!(fresh.x_meters, -0.02, epsilon = 1e-9);
+        assert_relative_eq!(fresh.x_meters(), -0.02, epsilon = 1e-9);
     }
 
     #[test]
@@ -454,7 +465,7 @@ mod tests {
         let mut filter = TranslationFilter::new(Duration::from_millis(100)).unwrap();
         let _ = filter.update(tracked(0.06, 0.06, 0.06), MonoTimeNs(0));
         let after_gap = filter.update(tracked(-0.06, -0.06, -0.06), MonoTimeNs(2_000_000_000));
-        assert_relative_eq!(after_gap.x_meters, -0.06, epsilon = 1e-9);
+        assert_relative_eq!(after_gap.x_meters(), -0.06, epsilon = 1e-9);
     }
 
     #[test]
@@ -463,7 +474,7 @@ mod tests {
         let _ = filter.update(tracked(0.03, 0.0, 0.0), MonoTimeNs(50_000_000));
         let out_of_order = filter.update(tracked(0.06, 0.0, 0.0), MonoTimeNs(16_666_667));
         assert!(out_of_order.is_available());
-        assert!(out_of_order.x_meters.is_finite());
+        assert!(out_of_order.x_meters().is_finite());
     }
 
     #[test]

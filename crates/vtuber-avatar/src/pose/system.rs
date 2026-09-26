@@ -362,7 +362,10 @@ pub fn debug_propagation_probe(
             let raw = frame.head_translation;
             format!(
                 "|htraw=({:+.3},{:+.3},{:+.3},{:?})",
-                raw.x_meters, raw.y_meters, raw.z_meters, raw.state
+                raw.x_meters(),
+                raw.y_meters(),
+                raw.z_meters(),
+                raw.state()
             )
         })
         .unwrap_or_else(|| "|htraw=<none>".to_string());

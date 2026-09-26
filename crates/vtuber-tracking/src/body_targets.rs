@@ -245,9 +245,9 @@ pub fn build_virtual_body_targets(
         return pass_through(HeadTranslationState::Unavailable);
     }
 
-    let shaped_x = shaped.x_meters;
-    let shaped_y = shaped.y_meters;
-    let shaped_z = shaped.z_meters;
+    let shaped_x = shaped.x_meters();
+    let shaped_y = shaped.y_meters();
+    let shaped_z = shaped.z_meters();
 
     let body_x = shaped_x * profile.x_root_gain;
     let head_x = shaped_x - body_x;
@@ -277,7 +277,7 @@ pub fn build_virtual_body_targets(
         head: VirtualHeadTarget {
             translation: head_translation,
             rotation: head_rotation,
-            state: shaped.state,
+            state: shaped.state(),
         },
         body_compensation: BodyTranslationCompensation {
             x: body_x,

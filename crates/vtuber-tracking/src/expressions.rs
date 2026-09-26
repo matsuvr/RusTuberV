@@ -420,9 +420,9 @@ mod tests {
         assert!(expressions.look_left.abs() < 1.0e-6);
         assert!((expressions.look_up - 0.4).abs() < 1.0e-6);
         let gaze = map_mediapipe_gaze(&values);
-        assert!((gaze.horizontal - 0.766_666_65).abs() < 1.0e-6);
-        assert!((gaze.vertical - 0.366_666_67).abs() < 1.0e-6);
-        assert_eq!(gaze.state, GazeTrackingState::Degraded);
+        assert!((gaze.horizontal() - 0.766_666_65).abs() < 1.0e-6);
+        assert!((gaze.vertical() - 0.366_666_67).abs() < 1.0e-6);
+        assert_eq!(gaze.state(), GazeTrackingState::Degraded);
     }
 
     #[test]
@@ -436,15 +436,16 @@ mod tests {
         let observation = observe_mediapipe_gaze(&right);
         assert!(observation.left.horizontal > 0.0);
         assert!(observation.right.horizontal > 0.0);
-        assert!(observation.common.horizontal > 0.0);
-        assert!(observation.common.vertical > 0.0);
+        assert!(observation.common.horizontal() > 0.0);
+        assert!(observation.common.vertical() > 0.0);
 
         let disagrees = set(&[
             (MediaPipeBlendshape::EyeLookOutLeft, 1.0),
             (MediaPipeBlendshape::EyeLookOutRight, 1.0),
         ]);
         assert!(
-            observe_mediapipe_gaze(&disagrees).common.confidence < observation.common.confidence
+            observe_mediapipe_gaze(&disagrees).common.confidence()
+                < observation.common.confidence()
         );
 
         let left_blinked = set(&[
@@ -453,8 +454,8 @@ mod tests {
             (MediaPipeBlendshape::EyeLookInRight, 0.5),
         ]);
         let blinked = observe_mediapipe_gaze(&left_blinked);
-        assert!((blinked.common.horizontal - 0.5).abs() < 1.0e-6);
-        assert_eq!(blinked.common.state, GazeTrackingState::Degraded);
+        assert!((blinked.common.horizontal() - 0.5).abs() < 1.0e-6);
+        assert_eq!(blinked.common.state(), GazeTrackingState::Degraded);
 
         let both_blinked = set(&[
             (MediaPipeBlendshape::EyeBlinkLeft, 1.0),

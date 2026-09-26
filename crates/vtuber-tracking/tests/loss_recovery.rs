@@ -842,8 +842,12 @@ fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
             MonoTimeNs(66_000_000),
         )
         .unwrap();
-    assert_eq!(held.gaze.horizontal, first.gaze.horizontal);
-    assert_relative_eq!(held.gaze.confidence, first.gaze.confidence, epsilon = 1e-6);
+    assert_eq!(held.gaze.horizontal(), first.gaze.horizontal());
+    assert_relative_eq!(
+        held.gaze.confidence(),
+        first.gaze.confidence(),
+        epsilon = 1e-6
+    );
 
     // Past the hold the gaze authority eases with the pose authority.
     let easing = recovery
@@ -855,7 +859,7 @@ fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
         )
         .unwrap();
     assert!(
-        easing.gaze.confidence < held.gaze.confidence,
+        easing.gaze.confidence() < held.gaze.confidence(),
         "the gaze authority must ease during the return"
     );
 
@@ -869,6 +873,6 @@ fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
             MonoTimeNs(266_000_000),
         )
         .unwrap();
-    assert!(recovering.gaze.horizontal > -0.8);
-    assert_eq!(recovering.gaze.state, GazeTrackingState::Tracked);
+    assert!(recovering.gaze.horizontal() > -0.8);
+    assert_eq!(recovering.gaze.state(), GazeTrackingState::Tracked);
 }

@@ -371,13 +371,13 @@ fn held_frame(
 
 /// Scales a gaze signal's confidence, keeping direction and availability.
 fn scale_gaze(gaze: GazeSignal, factor: f32) -> GazeSignal {
-    let confidence = gaze.confidence * factor;
-    match gaze.state {
+    let confidence = gaze.confidence() * factor;
+    match gaze.state() {
         GazeTrackingState::Tracked => {
-            GazeSignal::tracked(gaze.horizontal, gaze.vertical, confidence)
+            GazeSignal::tracked(gaze.horizontal(), gaze.vertical(), confidence)
         }
         GazeTrackingState::Degraded => {
-            GazeSignal::degraded(gaze.horizontal, gaze.vertical, confidence)
+            GazeSignal::degraded(gaze.horizontal(), gaze.vertical(), confidence)
         }
         GazeTrackingState::Unavailable => GazeSignal::UNAVAILABLE,
     }
@@ -443,9 +443,9 @@ fn gaze_distance(from: GazeSignal, to: GazeSignal) -> f32 {
     if !from.is_available() || !to.is_available() {
         return 0.0;
     }
-    (from.horizontal - to.horizontal)
+    (from.horizontal() - to.horizontal())
         .abs()
-        .max((from.vertical - to.vertical).abs())
+        .max((from.vertical() - to.vertical()).abs())
 }
 
 /// Linearly interpolates two scalar values.
@@ -564,13 +564,13 @@ fn finish_detailed_face(values: [f32; ARKIT52_CHANNEL_COUNT]) -> Arkit52Coeffici
 
 fn blend_gaze(from: GazeSignal, to: GazeSignal, t: f32) -> GazeSignal {
     let t = t.clamp(0.0, 1.0);
-    let horizontal = lerp(from.horizontal, to.horizontal, t);
-    let vertical = lerp(from.vertical, to.vertical, t);
-    let confidence = lerp(from.confidence, to.confidence, t);
+    let horizontal = lerp(from.horizontal(), to.horizontal(), t);
+    let vertical = lerp(from.vertical(), to.vertical(), t);
+    let confidence = lerp(from.confidence(), to.confidence(), t);
     let state = if t >= 1.0 {
-        to.state
-    } else if matches!(from.state, GazeTrackingState::Tracked)
-        && matches!(to.state, GazeTrackingState::Tracked)
+        to.state()
+    } else if matches!(from.state(), GazeTrackingState::Tracked)
+        && matches!(to.state(), GazeTrackingState::Tracked)
     {
         GazeTrackingState::Tracked
     } else {

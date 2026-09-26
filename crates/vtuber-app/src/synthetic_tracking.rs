@@ -219,7 +219,7 @@ mod tests {
         let mut src = SyntheticTrackingSource::default();
         let f = src.next_frame();
         assert!(f.gaze.is_available());
-        assert!(f.gaze.horizontal.is_finite());
-        assert!(f.gaze.vertical.is_finite());
+        assert!(f.gaze.horizontal().is_finite());
+        assert!(f.gaze.vertical().is_finite());
     }
 }

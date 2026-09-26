@@ -104,7 +104,7 @@ fn direct_look_at_input(
         .input_max_value
         .max(properties.range_map_horizontal_outer.input_max_value)
         .max(0.0);
-    let vrm_pitch_sign = -gaze.vertical;
+    let vrm_pitch_sign = -gaze.vertical();
     let vertical_scale = if vrm_pitch_sign >= 0.0 {
         properties.range_map_vertical_down.input_max_value
     } else {
@@ -115,10 +115,10 @@ fn direct_look_at_input(
     DirectLookAtInput {
         // DirectLookAt uses model-left-positive yaw, hence the opposite sign
         // from BodyTracking's semantic yaw. Mirroring reverses only this axis.
-        yaw_degrees: finite_or_zero(horizontal_sign * gaze.horizontal * horizontal_scale),
+        yaw_degrees: finite_or_zero(horizontal_sign * gaze.horizontal() * horizontal_scale),
         pitch_degrees: finite_or_zero(vrm_pitch_sign * vertical_scale),
-        weight: if gaze.confidence.is_finite() {
-            gaze.confidence.clamp(0.0, 1.0)
+        weight: if gaze.confidence().is_finite() {
+            gaze.confidence().clamp(0.0, 1.0)
         } else {
             0.0
         },
