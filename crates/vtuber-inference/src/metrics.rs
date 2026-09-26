@@ -57,9 +57,16 @@ impl InferenceStage {
 }
 
 /// Fixed-size ring buffer for stage duration samples.
+///
+/// Internal to this module: the only user is [`InferenceMetricsState`], and
+/// there is no call site that needs a different capacity. The capacity is
+/// therefore the [`RING_SIZE`] constant, and no public contract can build a
+/// ring that `record` would index out of bounds.
 #[derive(Clone, Debug, PartialEq)]
-pub struct StageTimingRing<const N: usize> {
-    samples: [Duration; N],
+struct StageTimingRing {
+    samples: [Duration; RING_SIZE],
+    /// Next write position: starts at 0 and `record` keeps it below
+    /// [`RING_SIZE`], which is also the length of `samples`.
     head: usize,
     count: u64,
     min_ns: u64,
@@ -67,10 +74,10 @@ pub struct StageTimingRing<const N: usize> {
     sum_ns: u128,
 }
 
-impl<const N: usize> Default for StageTimingRing<N> {
+impl Default for StageTimingRing {
     fn default() -> Self {
         Self {
-            samples: [Duration::default(); N],
+            samples: [Duration::default(); RING_SIZE],
             head: 0,
             count: 0,
             min_ns: 0,
@@ -80,22 +87,16 @@ impl<const N: usize> Default for StageTimingRing<N> {
     }
 }
 
-impl<const N: usize> StageTimingRing<N> {
-    /// Creates an empty ring.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+impl StageTimingRing {
     /// Records a duration sample.
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
+    // Bounds hold by construction: `samples` has RING_SIZE elements, `head`
+    // starts at 0, and the two wraparound updates below keep it below
+    // RING_SIZE. See the AGENTS.md production panic policy.
     #[allow(clippy::indexing_slicing)]
-    pub fn record(&mut self, duration: Duration) {
+    fn record(&mut self, duration: Duration) {
         let ns = duration.as_nanos() as u64;
         self.samples[self.head] = duration;
-        self.head = (self.head + 1) % N;
+        self.head = (self.head + 1) % RING_SIZE;
         self.count = self.count.saturating_add(1);
         if self.count == 1 {
             self.min_ns = ns;
@@ -109,7 +110,7 @@ impl<const N: usize> StageTimingRing<N> {
 
     /// Returns a snapshot of the recorded samples.
     #[must_use]
-    pub fn snapshot(&self) -> StageTimingSnapshot {
+    fn snapshot(&self) -> StageTimingSnapshot {
         let mut retained = self.retained_samples();
         let (p50_ns, p95_ns) = if retained.is_empty() {
             (0, 0)
@@ -131,25 +132,21 @@ impl<const N: usize> StageTimingRing<N> {
         }
     }
 
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
+    // Bounds hold by construction for the same reason as `record`.
     #[allow(clippy::indexing_slicing)]
     fn retained_samples(&self) -> Vec<u64> {
-        let retained = self.count.min(N as u64) as usize;
+        let retained = self.count.min(RING_SIZE as u64) as usize;
         if retained == 0 {
             return Vec::new();
         }
-        let first = if self.count >= N as u64 { self.head } else { 0 };
+        let first = if self.count >= RING_SIZE as u64 {
+            self.head
+        } else {
+            0
+        };
         (0..retained)
-            .map(|offset| self.samples[(first + offset) % N].as_nanos() as u64)
+            .map(|offset| self.samples[(first + offset) % RING_SIZE].as_nanos() as u64)
             .collect()
-    }
-
-    /// Returns the fixed capacity of the ring.
-    #[must_use]
-    pub const fn capacity(&self) -> usize {
-        N
     }
 }
 
@@ -218,7 +215,7 @@ impl InferenceMetrics {
 /// Mutable internal metrics state.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct InferenceMetricsState {
-    rings: [StageTimingRing<RING_SIZE>; InferenceStage::COUNT],
+    rings: [StageTimingRing; InferenceStage::COUNT],
     frames: FrameCounters,
     /// Cached snapshot, recomputed lazily after any recording mutation.
     cached: InferenceMetrics,
@@ -297,56 +294,66 @@ mod tests {
 
     #[test]
     fn empty_ring_snapshot_is_zero() {
-        let ring = StageTimingRing::<4>::new();
-        let snap = ring.snapshot();
+        let snap = StageTimingRing::default().snapshot();
         assert_eq!(snap.count, 0);
         assert_eq!(snap.min_ns, 0);
         assert_eq!(snap.max_ns, 0);
         assert_eq!(snap.mean_ns, 0);
+        assert_eq!(snap.p50_ns, 0);
+        assert_eq!(snap.p95_ns, 0);
     }
 
     #[test]
     fn ring_records_samples() {
-        let mut ring = StageTimingRing::<4>::new();
-        ring.record(Duration::from_nanos(100));
-        ring.record(Duration::from_nanos(200));
-        ring.record(Duration::from_nanos(300));
+        let mut ring = StageTimingRing::default();
+        for ns in [100, 200, 300] {
+            ring.record(Duration::from_nanos(ns));
+        }
         let snap = ring.snapshot();
         assert_eq!(snap.count, 3);
         assert_eq!(snap.min_ns, 100);
         assert_eq!(snap.max_ns, 300);
         assert_eq!(snap.mean_ns, 200);
+        // Below the fixed capacity every sample is retained.
+        assert_eq!(snap.p50_ns, 200);
+        assert_eq!(snap.p95_ns, 300);
     }
 
     #[test]
-    fn ring_overwrites_old_samples() {
-        let mut ring = StageTimingRing::<4>::new();
-        for ns in [100, 200, 300, 400, 500] {
+    fn ring_overwrites_the_oldest_samples_once_full() {
+        let mut ring = StageTimingRing::default();
+        // A distinctive first sample must be the one that gets overwritten.
+        ring.record(Duration::from_nanos(999_999));
+        for ns in 1..=RING_SIZE as u64 {
             ring.record(Duration::from_nanos(ns));
         }
         let snap = ring.snapshot();
-        assert_eq!(snap.count, 5);
-        // Min/max/mean reflect all historical samples, not just the ring contents.
-        assert_eq!(snap.min_ns, 100);
-        assert_eq!(snap.max_ns, 500);
-        assert_eq!(snap.mean_ns, 300);
+        assert_eq!(snap.count, RING_SIZE as u64 + 1);
+        // Min/max/mean reflect all historical samples, not just the ring
+        // contents, so the overwritten value is still in min and mean.
+        assert_eq!(snap.min_ns, 1);
+        assert_eq!(snap.max_ns, 999_999);
+        assert_eq!(snap.mean_ns, (999_999 + 131_328) / (RING_SIZE as u64 + 1));
+        // The percentile window holds exactly one ring of samples with the
+        // oldest dropped, so 999_999 never reaches p50 or p95.
+        assert_eq!(snap.p50_ns, 256);
+        assert_eq!(snap.p95_ns, 487);
     }
 
     #[test]
-    fn ring_capacity_is_fixed() {
-        let ring = StageTimingRing::<8>::new();
-        assert_eq!(ring.capacity(), 8);
-    }
-
-    #[test]
-    fn ring_percentiles_use_only_the_bounded_retained_window() {
-        let mut ring = StageTimingRing::<4>::new();
-        for ns in [100, 200, 300, 400, 500] {
-            ring.record(Duration::from_nanos(ns));
+    fn ring_capacity_is_the_module_constant() {
+        let mut ring = StageTimingRing::default();
+        for _ in 0..RING_SIZE {
+            ring.record(Duration::from_nanos(7));
         }
+        // Exactly full: the wraparound has not dropped anything yet and the
+        // head is back at the start of the fixed buffer.
         let snap = ring.snapshot();
-        assert_eq!(snap.p50_ns, 300);
-        assert_eq!(snap.p95_ns, 500);
+        assert_eq!(snap.count, RING_SIZE as u64);
+        assert_eq!(snap.min_ns, 7);
+        assert_eq!(snap.p50_ns, 7);
+        assert_eq!(snap.p95_ns, 7);
+        assert_eq!(ring.head, 0);
     }
 
     #[test]
