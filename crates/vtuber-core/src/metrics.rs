@@ -81,13 +81,19 @@ impl FixedStats {
 
     /// Percentile (0.0 to 1.0) of recorded values.
     /// Uses nearest-rank method.
+    ///
+    /// Recorded values are ordered by [`f64::total_cmp`], so the ordering is
+    /// total: `-0.0` sorts below `+0.0`, infinities sit outside the finite
+    /// values, and a recorded `NaN` is kept and ordered along with the rest
+    /// instead of being treated as equal to everything. A `NaN` can therefore
+    /// be the value a percentile returns.
     #[must_use]
     pub fn percentile(&self, p: f64) -> f64 {
         if self.count == 0 {
             return 0.0;
         }
         let mut sorted: Vec<f64> = self.buffer.iter().take(self.count).copied().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(f64::total_cmp);
         let rank = (p * self.count as f64).ceil() as usize;
         let index = rank.saturating_sub(1).min(self.count - 1);
         // Invariant: `index < self.count == sorted.len()` by the clamps above.
@@ -273,6 +279,36 @@ mod tests {
         stats.reset();
         assert_eq!(stats.count(), 0);
         assert_eq!(stats.mean(), 0.0);
+    }
+
+    #[test]
+    fn percentile_orders_nan_along_with_the_finite_values() {
+        let mut stats = FixedStats::new(10);
+        for value in [3.0, f64::NAN, 1.0, 2.0] {
+            stats.record(value);
+        }
+        // total_cmp places a positive NaN above every positive finite value, so
+        // the lowest three ranks are the finite ones in ascending order.
+        assert_eq!(stats.percentile(0.25), 1.0);
+        assert_eq!(stats.percentile(0.50), 2.0);
+        assert_eq!(stats.percentile(0.75), 3.0);
+        assert!(stats.percentile(1.0).is_nan());
+    }
+
+    #[test]
+    fn percentile_follows_the_standard_total_cmp_order() {
+        let mut stats = FixedStats::new(10);
+        for value in [f64::INFINITY, -0.0, 1.0, f64::NEG_INFINITY, 0.0, f64::NAN] {
+            stats.record(value);
+        }
+        // -inf, -0.0, 0.0, 1.0, +inf, NaN in total_cmp order.
+        assert_eq!(stats.percentile(1.0 / 6.0), f64::NEG_INFINITY);
+        assert!(stats.percentile(2.0 / 6.0).is_sign_negative());
+        assert_eq!(stats.percentile(2.0 / 6.0), 0.0);
+        assert!(stats.percentile(3.0 / 6.0).is_sign_positive());
+        assert_eq!(stats.percentile(4.0 / 6.0), 1.0);
+        assert_eq!(stats.percentile(5.0 / 6.0), f64::INFINITY);
+        assert!(stats.percentile(1.0).is_nan());
     }
 
     #[test]
