@@ -102,6 +102,8 @@ pub enum NdiErrorCode {
     SendFailed,
     /// A worker could not be stopped and joined cleanly.
     WorkerStopFailed,
+    /// The worker thread could not be spawned by the OS.
+    WorkerSpawnFailed,
     /// A second start was requested while the sender was active.
     AlreadyRunning,
     /// The output configuration is invalid.
@@ -123,6 +125,7 @@ impl NdiErrorCode {
             Self::SenderCreateFailed => "NDI_SENDER_CREATE_FAILED",
             Self::SendFailed => "NDI_SEND_FAILED",
             Self::WorkerStopFailed => "NDI_WORKER_STOP_FAILED",
+            Self::WorkerSpawnFailed => "NDI_WORKER_SPAWN_FAILED",
             Self::AlreadyRunning => "NDI_ALREADY_RUNNING",
             Self::InvalidConfiguration => "NDI_INVALID_CONFIGURATION",
             Self::InvalidFrame => "NDI_INVALID_FRAME",
@@ -817,20 +820,32 @@ impl NdiOutputController {
             ControllerBackend::Scripted(backend) => {
                 let shared = Arc::clone(&self.shared);
                 let backend = backend.clone();
-                self.worker = Some(vtuber_core::WorkerHandle::spawn(
+                let spawned = vtuber_core::WorkerHandle::spawn(
                     "ndi-output-sender",
                     move |stop| run_scripted_worker(shared, mailbox, config, backend, stop),
-                ));
-                Ok(())
+                );
+                match spawned {
+                    Ok(worker) => {
+                        self.worker = Some(worker);
+                        Ok(())
+                    }
+                    Err(error) => Err(self.finish_spawn_failure(error)),
+                }
             }
             #[cfg(feature = "ndi-sdk")]
             ControllerBackend::Sdk => {
                 let shared = Arc::clone(&self.shared);
-                self.worker = Some(vtuber_core::WorkerHandle::spawn(
+                let spawned = vtuber_core::WorkerHandle::spawn(
                     "ndi-output-sender",
                     move |stop| run_ndi_worker(shared, mailbox, config, stop),
-                ));
-                Ok(())
+                );
+                match spawned {
+                    Ok(worker) => {
+                        self.worker = Some(worker);
+                        Ok(())
+                    }
+                    Err(error) => Err(self.finish_spawn_failure(error)),
+                }
             }
         }
     }
@@ -857,7 +872,7 @@ impl NdiOutputController {
                 self.shared.set_status(NdiOutputStatus::Off);
                 Ok(())
             }
-            vtuber_core::WorkerResult::Panicked | vtuber_core::WorkerResult::SpawnFailed => {
+            vtuber_core::WorkerResult::Panicked => {
                 let error = NdiOutputError::new(
                     NdiErrorCode::WorkerStopFailed,
                     "NDI sender worker did not join cleanly",
@@ -902,6 +917,26 @@ impl NdiOutputController {
             NdiSubmitResult::RejectedNotRunning => {}
         }
         result
+    }
+
+    /// Rolls the controller back after the OS refused a worker spawn: the
+    /// mailbox taken from the shared slot is closed and cleared, the failure
+    /// is counted, and the Starting status is replaced by the typed error.
+    fn finish_spawn_failure(&self, spawn_error: std::io::Error) -> NdiOutputError {
+        if let Some(mailbox) = recover_lock(self.shared.mailbox.lock()).as_ref() {
+            mailbox.close();
+        }
+        *recover_lock(self.shared.mailbox.lock()) = None;
+        self.shared
+            .metrics
+            .start_failures
+            .fetch_add(1, Ordering::Relaxed);
+        let error = NdiOutputError::new(
+            NdiErrorCode::WorkerSpawnFailed,
+            format!("NDI sender worker could not be started: {spawn_error}"),
+        );
+        self.shared.replace_status_error(&error);
+        error
     }
 
     fn reap_finished_worker(&mut self) {

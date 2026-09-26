@@ -263,7 +263,8 @@ fn run_windows(options: Options) -> Result<(), String> {
         let phase = Arc::clone(&phase);
         let data = Arc::clone(&data);
         move |stop| run_worker(&task_path, frame_slot, phase, data, stop)
-    });
+    })
+    .map_err(|error| format!("pose probe worker spawn failed: {error}"))?;
 
     thread::sleep(Duration::from_secs(2));
     for (index, definition) in PHASES.iter().enumerate() {
@@ -283,7 +284,6 @@ fn run_windows(options: Options) -> Result<(), String> {
     let output = match worker_result {
         WorkerResult::Completed(output) => output,
         WorkerResult::Panicked => return Err("pose probe worker panicked".into()),
-        WorkerResult::SpawnFailed => return Err("pose probe worker failed to spawn".into()),
     };
     if let Some(failure) = output.failure {
         return Err(format!("MediaPipe pose probe failed: {failure}"));

@@ -25,6 +25,9 @@ pub enum CameraError {
     /// No suitable format was found.
     #[error("CAMERA_OPEN_FAILED: no suitable format")]
     NoSuitableFormat,
+    /// The capture worker thread could not be spawned by the OS.
+    #[error("CAMERA_WORKER_SPAWN_FAILED: {0}")]
+    WorkerSpawnFailed(#[source] std::io::Error),
 }
 
 /// Describes a camera device.

@@ -100,6 +100,8 @@ pub enum FailureStage {
     Decode,
     /// Failure because the input channel or frame slot closed unexpectedly.
     InputClosed,
+    /// Failure because the OS refused to create the worker thread.
+    WorkerSpawn,
     /// Failure because the worker thread panicked.
     WorkerPanic,
     /// Failure while shutting down.

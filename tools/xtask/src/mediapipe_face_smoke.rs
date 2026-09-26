@@ -204,7 +204,8 @@ fn run_windows(options: Options) -> Result<(), String> {
     let worker_task_path = task_path.clone();
     let inference_worker = WorkerHandle::spawn("mediapipe-face-worker", move |stop| {
         run_worker(&worker_task_path, worker_frame_slot, stop)
-    });
+    })
+    .map_err(|error| format!("MediaPipe worker spawn failed: {error}"))?;
 
     let started = Instant::now();
     let mut next_restart = restart_interval(options.duration);
@@ -239,7 +240,6 @@ fn run_windows(options: Options) -> Result<(), String> {
     let stats = match inference_result {
         WorkerResult::Completed(WorkerOutput { stats }) => stats,
         WorkerResult::Panicked => return Err("MediaPipe worker panicked".into()),
-        WorkerResult::SpawnFailed => return Err("MediaPipe worker failed to spawn".into()),
     };
     if let Some(failure) = stats.failure.as_deref() {
         return Err(format!("MediaPipe worker failed: {failure}"));
