@@ -70,6 +70,69 @@ pub struct FrameInferenceTiming {
 /// values remain private to the inference crate.
 pub trait FrameFaceInference: Send {
     /// Runs the complete detector-to-landmark pipeline for one frame.
+    ///
+    /// `frame` is borrowed for the duration of the call and is never retained:
+    /// the returned observation carries the frame's own `seq`, capture time and
+    /// source-image dimensions, never a reference to the buffer. Landmarks are
+    /// unmirrored source-image normalized coordinates.
+    ///
+    /// A frame in which no face met the validity policy is
+    /// [`FrameInferenceOutcome::NoFace`], which is a normal result and not a
+    /// failure. Callers must not treat it as evidence that a face was seen.
+    ///
+    /// This method performs the model I/O and preprocessing itself; it is not a
+    /// pure function of the frame, because the result also depends on the
+    /// runtime's retained ROI and detector cadence.
+    ///
+    /// # Errors
+    ///
+    /// The stage determines the variant. The current implementations can return
+    /// `InvalidInput` for a frame layout the model cannot accept (unsupported
+    /// input layout, stride mismatch, buffer too small), `InvalidRoi` for a
+    /// crop transform that does not fit the source frame, `ExecutionFailed` for
+    /// a tensor build or model execution failure, and the `Output*` variants for
+    /// a runtime output that leaves the manifest contract. Only the variants an
+    /// implementation actually produces are part of *its* contract, so callers
+    /// must treat the error as "this frame could not be processed" rather than
+    /// matching a specific variant across every backend.
+    ///
+    /// # Examples
+    ///
+    /// The caller owns the runtime and only observes the outcome. `NoFace` is an
+    /// ordinary result, not a failure:
+    ///
+    /// ```
+    /// use vtuber_core::types::{FrameSeq, MonoTimeNs, VideoFrame};
+    /// use vtuber_inference::runtime::{FrameFaceInference, FrameInferenceOutcome};
+    /// use vtuber_inference::Result;
+    ///
+    /// // A runtime that owns its model; the real ones are built in the worker.
+    /// struct Stub;
+    /// impl FrameFaceInference for Stub {
+    ///     fn infer_frame(&mut self, _frame: &VideoFrame) -> Result<FrameInferenceOutcome> {
+    ///         Ok(FrameInferenceOutcome::NoFace)
+    ///     }
+    /// }
+    ///
+    /// let mut runtime = Stub;
+    /// let frame = VideoFrame {
+    ///     seq: FrameSeq(1),
+    ///     captured_at: MonoTimeNs(0),
+    ///     width: 1,
+    ///     height: 1,
+    ///     stride_bytes: 4,
+    ///     format: vtuber_core::types::PixelFormat::Rgba8,
+    ///     data: vec![0, 0, 0, 0].into(),
+    /// };
+    /// match runtime.infer_frame(&frame) {
+    ///     Ok(FrameInferenceOutcome::Face(observation)) => {
+    ///         // Landmarks are unmirrored source-image normalized coordinates.
+    ///         let _ = observation.landmarks.len();
+    ///     }
+    ///     Ok(FrameInferenceOutcome::NoFace) => { /* an ordinary observation */ }
+    ///     Err(_error) => { /* this frame could not be processed */ }
+    /// }
+    /// ```
     fn infer_frame(&mut self, frame: &VideoFrame) -> Result<FrameInferenceOutcome>;
 
     /// Takes the timing for the most recent frame attempt.
@@ -88,6 +151,68 @@ pub trait FrameFaceInference: Send {
 /// [`FaceTrackingOutcome`].
 pub trait FaceTrackingInference: Send {
     /// Runs one frame through the canonical face-tracking backend.
+    ///
+    /// `frame` is borrowed for the duration of the call and is never retained.
+    /// A [`FaceTrackingOutcome::Face`] sample carries the source frame's `seq`,
+    /// capture time and image size, plus landmarks in unmirrored source-image
+    /// normalized coordinates and the validated blendshape set.
+    ///
+    /// [`FaceTrackingOutcome::NoFace`] is the normal result for a frame with no
+    /// usable face, and it is not a failure. The canonical MediaPipe
+    /// implementation also returns it when the runtime reported a face whose
+    /// landmark or blendshape output does not satisfy the contract.
+    ///
+    /// The implementation performs the I/O and inference: the sample also
+    /// depends on the runtime's own state, for example the strictly increasing
+    /// video timestamp it derives from the frame's capture time. This is not a
+    /// pure function of the frame.
+    ///
+    /// # Errors
+    ///
+    /// The stage determines the variant. The canonical MediaPipe
+    /// implementation returns `MediaPipeTimestampOutOfRange` when the capture
+    /// time cannot be represented in VIDEO mode, `MediaPipeFrameConversion`
+    /// when the frame cannot be packed into RGB pixels, `MediaPipeFrameInference`
+    /// when the runtime rejects the frame, and `MediaPipeOutputContract` when a
+    /// result leaves the canonical face contract. Those are the variants that
+    /// backend produces; another implementation may report the same stages
+    /// differently, so callers should treat an error as "this frame could not be
+    /// processed" rather than matching one variant across all backends.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use vtuber_core::types::{FrameSeq, MonoTimeNs, PixelFormat, VideoFrame};
+    /// use vtuber_core::FaceTrackingOutcome;
+    /// use vtuber_inference::FaceTrackingInference;
+    /// use vtuber_inference::Result;
+    ///
+    /// // The real runtime loads MediaPipe inside the worker thread.
+    /// struct Stub;
+    /// impl FaceTrackingInference for Stub {
+    ///     fn infer_face_tracking(&mut self, _frame: &VideoFrame) -> Result<FaceTrackingOutcome> {
+    ///         Ok(FaceTrackingOutcome::NoFace {
+    ///             source_seq: FrameSeq(0),
+    ///             captured_at: MonoTimeNs(0),
+    ///             inference_started_at: MonoTimeNs(0),
+    ///             inference_finished_at: MonoTimeNs(0),
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// let mut runtime = Stub;
+    /// let frame = VideoFrame {
+    ///     seq: FrameSeq(1),
+    ///     captured_at: MonoTimeNs(0),
+    ///     width: 1,
+    ///     height: 1,
+    ///     stride_bytes: 4,
+    ///     format: PixelFormat::Rgba8,
+    ///     data: vec![0, 0, 0, 0].into(),
+    /// };
+    /// // NoFace is a normal result; only Err means the frame was not processed.
+    /// let _is_normal = runtime.infer_face_tracking(&frame).is_ok();
+    /// ```
     fn infer_face_tracking(&mut self, frame: &VideoFrame) -> Result<FaceTrackingOutcome>;
 }
 

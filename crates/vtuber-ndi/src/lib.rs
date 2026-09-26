@@ -230,6 +230,51 @@ pub enum NdiFourCc {
 }
 
 /// Validates the #46 frame contract and maps it to standard NDI video fields.
+///
+/// `frame` is borrowed; the pixels are not copied or converted. The mapping
+/// confirms the contract the transport already expects: the frame's pixel
+/// format is BGRA8 straight alpha, and its width, height, stride
+/// (`profile.width * 4`) and data length (`stride * profile.height`) all agree
+/// with `profile`. The pixel format it produces is
+/// [`NdiFourCc::Bgra`], the frame rate is `profile.fps` over a denominator of
+/// 1, and the picture aspect ratio is the profile's width over its height.
+///
+/// This function performs no SDK call: it does not submit or send anything. An
+/// `Ok` result means the frame satisfies the mapping contract, not that any
+/// receiver got it. Delivery is the sender's separate step, and its result is
+/// reported by the output status and metrics.
+///
+/// # Errors
+///
+/// Returns `InvalidConfiguration` with [`NdiOutputError`] when `profile` has a
+/// zero width, height or fps, or a pixel format other than BGRA8 straight
+/// alpha. Returns `InvalidFrame` when the frame's pixel format is not
+/// BGRA8 straight alpha, when its width, height, stride or data length
+/// disagrees with the profile, when the profile's stride or size is not
+/// representable, or when the width, height, stride or fps does not fit the
+/// NDI `i32` fields. No transport error code is produced here.
+///
+/// # Examples
+///
+/// ```
+/// use vtuber_core::{FrameSeq, MonoTimeNs, VideoOutputFrame, VideoOutputProfile};
+/// use vtuber_ndi::map_video_frame;
+///
+/// let profile = VideoOutputProfile::DEFAULT;
+/// let bytes = (profile.width as usize * profile.height as usize * 4) as u32;
+/// let frame = VideoOutputFrame::new_bgra8(
+///     profile.width,
+///     profile.height,
+///     FrameSeq(1),
+///     MonoTimeNs(0),
+///     vec![0; bytes as usize],
+/// )
+/// .expect("the packed length matches the profile");
+///
+/// // Mapping validates the contract; it does not send the frame.
+/// let mapping = map_video_frame(&frame, profile).expect("the frame matches the profile");
+/// assert_eq!(mapping.four_cc, vtuber_ndi::NdiFourCc::Bgra);
+/// ```
 pub fn map_video_frame(
     frame: &VideoOutputFrame,
     profile: VideoOutputProfile,
