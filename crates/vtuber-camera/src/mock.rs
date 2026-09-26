@@ -1,7 +1,7 @@
-//! Mock camera backend for unit tests.
+//! Explicit black-frame input for development and deterministic test fixtures.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::device::{
     CameraBackend, CameraDescriptor, CameraError, CameraFormat, CameraRequest, CameraStream,
@@ -59,23 +59,67 @@ impl CameraBackend for MockBackend {
         if let Ok(mut opened) = self.opened_devices.lock() {
             opened.push(descriptor.id.clone());
         }
+        let format = self
+            .formats
+            .first()
+            .copied()
+            .ok_or(CameraError::NoSuitableFormat)?;
+        let frame_interval = if format.fps_numerator == 0 || format.fps_denominator == 0 {
+            return Err(CameraError::NoSuitableFormat);
+        } else {
+            Duration::from_secs_f64(
+                f64::from(format.fps_denominator) / f64::from(format.fps_numerator),
+            )
+        };
+        let stride = format.width as usize * channels(format.format);
+        let len = stride
+            .checked_mul(format.height as usize)
+            .ok_or(CameraError::NoSuitableFormat)?;
         Ok(Box::new(MockStream {
-            format: self.formats.first().copied().unwrap_or(CameraFormat {
-                width: 640,
-                height: 480,
-                fps_numerator: 30,
-                fps_denominator: 1,
-                format: PixelFormat::Rgb8,
-            }),
-            counter: Arc::new(AtomicU64::new(0)),
+            format,
+            next_seq: 0,
+            data: vec![0; len].into(),
+            next_frame_at: Instant::now(),
+            frame_interval,
             disconnect_after: self.disconnect_after,
         }))
     }
 }
 
+const fn channels(format: PixelFormat) -> usize {
+    match format {
+        PixelFormat::Rgb8 | PixelFormat::Bgr8 => 3,
+        PixelFormat::Rgba8 => 4,
+        PixelFormat::Gray8 => 1,
+    }
+}
+
+/// Builds a deterministic fixture from caller-supplied time and shared pixels.
+/// No clock, allocation or sleep is performed here.
+#[must_use]
+pub fn make_mock_frame(
+    format: CameraFormat,
+    seq: FrameSeq,
+    captured_at: MonoTimeNs,
+    data: Arc<[u8]>,
+) -> VideoFrame {
+    VideoFrame {
+        seq,
+        captured_at,
+        width: format.width,
+        height: format.height,
+        stride_bytes: format.width as usize * channels(format.format),
+        format: format.format,
+        data,
+    }
+}
+
 struct MockStream {
     format: CameraFormat,
-    counter: Arc<AtomicU64>,
+    next_seq: u64,
+    data: Arc<[u8]>,
+    next_frame_at: Instant,
+    frame_interval: Duration,
     disconnect_after: Option<u64>,
 }
 
@@ -84,20 +128,26 @@ impl CameraStream for MockStream {
         self.format
     }
 
-    fn next_frame(&mut self, _stop: &StopToken) -> Result<VideoFrame, CameraError> {
-        let count = self.counter.fetch_add(1, Ordering::SeqCst);
-        if self.disconnect_after == Some(count) {
+    fn next_frame(&mut self, stop: &StopToken) -> Result<VideoFrame, CameraError> {
+        while !stop.is_stopped() {
+            let remaining = self.next_frame_at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+        }
+        if stop.is_stopped() || self.disconnect_after == Some(self.next_seq) {
             return Err(CameraError::Disconnected);
         }
-        Ok(VideoFrame {
-            seq: FrameSeq(count),
-            captured_at: MonoTimeNs(0),
-            width: self.format.width,
-            height: self.format.height,
-            stride_bytes: (self.format.width * 3) as usize,
-            format: PixelFormat::Rgb8,
-            data: vec![0u8; (self.format.width * self.format.height * 3) as usize].into(),
-        })
+        let frame = make_mock_frame(
+            self.format,
+            FrameSeq(self.next_seq),
+            vtuber_core::monotonic_now(),
+            Arc::clone(&self.data),
+        );
+        self.next_seq += 1;
+        self.next_frame_at = Instant::now() + self.frame_interval;
+        Ok(frame)
     }
 
     fn stop(&mut self) -> Result<(), CameraError> {
@@ -108,6 +158,46 @@ impl CameraStream for MockStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_preserves_explicit_time_sequence_and_shared_pixels() {
+        let format = CameraFormat {
+            width: 2,
+            height: 1,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            format: PixelFormat::Rgb8,
+        };
+        let pixels: Arc<[u8]> = Arc::from([0; 6]);
+        let frame = make_mock_frame(format, FrameSeq(42), MonoTimeNs(123), Arc::clone(&pixels));
+        assert_eq!(frame.seq, FrameSeq(42));
+        assert_eq!(frame.captured_at, MonoTimeNs(123));
+        assert_eq!(frame.stride_bytes, 6);
+        assert!(Arc::ptr_eq(&frame.data, &pixels));
+    }
+
+    #[test]
+    fn live_mock_uses_the_process_clock_and_reuses_its_black_buffer() {
+        let backend = MockBackend::default();
+        let mut stream = backend
+            .open(&backend.descriptors[0], &CameraRequest::default())
+            .unwrap();
+        let stop = StopToken::new();
+        let before = vtuber_core::monotonic_now();
+        let first = stream.next_frame(&stop).unwrap();
+        let second = stream.next_frame(&stop).unwrap();
+        assert!(before <= first.captured_at);
+        assert!(first.captured_at < second.captured_at);
+        assert!(second.captured_at <= vtuber_core::monotonic_now());
+        assert_eq!(second.seq.0, first.seq.0 + 1);
+        assert!(Arc::ptr_eq(&first.data, &second.data));
+        assert!(second.data.iter().all(|byte| *byte == 0));
+        stop.stop();
+        assert!(matches!(
+            stream.next_frame(&stop),
+            Err(CameraError::Disconnected)
+        ));
+    }
 
     #[test]
     fn mock_enumerates_devices() {
