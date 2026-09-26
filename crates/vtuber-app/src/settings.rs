@@ -84,6 +84,19 @@ impl AppSettings {
     /// malformed TOML, or unknown schema version is an error; the file is left
     /// untouched and the caller reports it instead of starting from replaced
     /// settings.
+    ///
+    /// ```no_run
+    /// use vtuber_app::settings::AppSettings;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut settings = AppSettings::load("settings.toml")?;
+    /// settings.set_arm_tracking_enabled(false)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns a read, parse, schema or entry-validation failure without
+    /// changing the source file.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, SettingsError> {
         let path = path.into();
         let document = read_settings_document(&path)?;
@@ -91,6 +104,13 @@ impl AppSettings {
     }
 
     /// Loads settings from the platform user configuration directory.
+    ///
+    /// A missing file means initial defaults. When no configuration directory
+    /// can be resolved, returns an in-memory default without a save path.
+    ///
+    /// # Errors
+    /// Propagates read, parse, schema and entry-validation failures from
+    /// [`Self::load`]; an existing invalid file is never replaced by defaults.
     pub fn load_default() -> Result<Self, SettingsError> {
         match default_settings_path() {
             Some(path) => Self::load(path),
@@ -122,7 +142,14 @@ impl AppSettings {
         self.restored.entries()
     }
 
-    /// Saves the current validated avatar store.
+    /// Saves the current validated avatar store, preserving other sections.
+    ///
+    /// The original file is replaced only after writing a same-directory
+    /// temporary file. This does not change this resource's startup snapshot.
+    ///
+    /// # Errors
+    /// Returns `NoConfigDirectory` without a path, or the read/schema/encode/I/O
+    /// failure. On failure this resource and the previous file bytes are unchanged.
     pub fn save(&self, store: &ArmPoseOverrideStore) -> Result<(), SettingsError> {
         let Some(path) = &self.path else {
             return Err(SettingsError::NoConfigDirectory);
@@ -137,6 +164,11 @@ impl AppSettings {
     }
 
     /// Saves expression bindings, preserving every other settings section.
+    ///
+    /// # Errors
+    /// Returns `NoConfigDirectory`, or a read/schema/encode/I/O failure. The
+    /// previous file bytes and this resource's startup snapshot remain unchanged
+    /// on failure; success persists the supplied store without changing the snapshot.
     pub fn save_expression_bindings(
         &self,
         store: &ExpressionBindingStore,
@@ -182,6 +214,10 @@ impl AppSettings {
     /// Persists the UI language and applies it to this resource.
     ///
     /// The in-memory value changes only after the file was written.
+    ///
+    /// # Errors
+    /// Returns `NoConfigDirectory`, or a read/schema/encode/I/O failure. The
+    /// in-memory value and original file bytes remain unchanged on failure.
     pub fn set_language(&mut self, language: UiLanguage) -> Result<(), SettingsError> {
         let path = self
             .path
@@ -201,6 +237,10 @@ impl AppSettings {
     /// Persists the observed arm-tracking switch.
     ///
     /// The in-memory value changes only after the file was written.
+    ///
+    /// # Errors
+    /// Returns `NoConfigDirectory`, or a read/schema/encode/I/O failure. The
+    /// in-memory value and original file bytes remain unchanged on failure.
     pub fn set_arm_tracking_enabled(&mut self, enabled: bool) -> Result<(), SettingsError> {
         let path = self
             .path

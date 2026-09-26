@@ -8,9 +8,12 @@
         clippy::indexing_slicing
     )
 )]
-//! `vtuber-inference`: face model loading, preprocessing, and pure-Rust inference.
+//! `vtuber-inference`: model loading, Rust preprocessing, and inference workers.
 //!
-//! The inference runtime is constructed and owned inside the inference worker.
+//! The approved MediaPipe Tasks backend calls a native runtime through the
+//! pinned wrapper. Rust inference paths are also present; the dependency stack
+//! is not wholly pure Rust. Each worker owns its runtime and exposes only
+//! application data and typed control results to callers.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

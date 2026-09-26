@@ -245,6 +245,11 @@ impl InferenceController {
     ///
     /// Both detector and landmark runtimes are constructed in the worker
     /// thread from this runtime-free descriptor.
+    ///
+    /// # Errors
+    /// Returns `WorkerNotStarted`, `ControlQueueFull`, or `ControlChannelClosed`
+    /// without waiting for queue capacity. `Ok` means enqueued, not loaded;
+    /// the worker reports loading success or failure through its status.
     pub fn load_pipeline(
         &mut self,
         descriptor: FacePipelineDescriptor,
@@ -262,6 +267,11 @@ impl InferenceController {
     ///
     /// The task and native runtime are both constructed inside the worker;
     /// only the plain path crosses the controller boundary.
+    ///
+    /// # Errors
+    /// Returns `WorkerNotStarted`, `ControlQueueFull`, or `ControlChannelClosed`
+    /// without waiting for queue capacity. `Ok` means enqueued, not loaded;
+    /// the worker reports loading success or failure through its status.
     pub fn load_mediapipe(&mut self, task_path: std::path::PathBuf) -> Result<(), InferenceError> {
         self.load_mediapipe_task(MediaPipeTaskSource::Path(task_path))
     }
@@ -270,6 +280,11 @@ impl InferenceController {
     /// binary (`backend::mediapipe::embedded_task_bundle`).
     ///
     /// The task and native runtime are both constructed inside the worker.
+    ///
+    /// # Errors
+    /// Returns `WorkerNotStarted`, `ControlQueueFull`, or `ControlChannelClosed`
+    /// without waiting for queue capacity. `Ok` means enqueued, not loaded;
+    /// the worker reports loading success or failure through its status.
     pub fn load_mediapipe_embedded(&mut self) -> Result<(), InferenceError> {
         self.load_mediapipe_task(MediaPipeTaskSource::Embedded)
     }
@@ -330,7 +345,12 @@ impl InferenceController {
     /// Requests graceful shutdown and joins the worker.
     ///
     /// This consumes the controller. After this call returns, no worker thread
-    /// is running and the output slot is closed.
+    /// is running and the output slot is closed. Joining can block. Controller
+    /// Drop also stops and joins, but cannot return the shutdown error.
+    ///
+    /// # Errors
+    /// Returns `WorkerPanicked` after releasing worker resources and closing
+    /// output slots. Normal shutdown returns the final metrics.
     pub fn shutdown(self) -> Result<InferenceMetrics, InferenceError> {
         self.shutdown_inner(true)
     }
@@ -338,6 +358,10 @@ impl InferenceController {
     /// Stops and joins the worker without closing the externally-owned input
     /// frame slot. This is used when capture and inference share one slot and
     /// the application must support Stop/Start without rebuilding capture.
+    /// Joining can block; output slots are closed on either result.
+    ///
+    /// # Errors
+    /// Returns `WorkerPanicked` on a worker panic, without closing the input slot.
     pub fn shutdown_preserving_input(self) -> Result<InferenceMetrics, InferenceError> {
         self.shutdown_inner(false)
     }

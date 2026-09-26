@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Face model loading, preprocessing, and pure-Rust inference for RusTuberV."
+description = "Model loading, Rust preprocessing, and native MediaPipe inference boundary for RusTuberV."
 
 [dependencies]
 vtuber-core = { path = "../vtuber-core" }

@@ -111,7 +111,11 @@ impl<T> LatestSlot<T> {
         true
     }
 
-    /// Attempts to read a value newer than `last_generation`.
+    /// Clones a retained value newer than this reader's `last_generation`.
+    ///
+    /// Returns `None` when there is no newer retained value (including after
+    /// `clear`). A closed slot returns `Some(ReadResult::Closed)` regardless of
+    /// the cursor. Reading does not remove a value or advance another reader.
     #[must_use]
     pub fn try_read_after(&self, last_generation: u64) -> Option<ReadResult<T>>
     where
@@ -124,7 +128,11 @@ impl<T> LatestSlot<T> {
         Self::read_locked(&state, last_generation)
     }
 
-    /// Waits up to `timeout` for a value newer than `last_generation`.
+    /// Waits up to `timeout` for a value newer than this reader's cursor.
+    ///
+    /// Returns `None` on timeout without a newer retained value. Closing the
+    /// slot wakes the wait and returns `Some(ReadResult::Closed)`. Values are
+    /// cloned rather than consumed, as in [`Self::try_read_after`].
     pub fn wait_read_after(&self, last_generation: u64, timeout: Duration) -> Option<ReadResult<T>>
     where
         T: Clone,
@@ -150,7 +158,10 @@ impl<T> LatestSlot<T> {
         }
     }
 
-    /// Closes the slot, waking any waiters.
+    /// Permanently closes the slot, discards its value and wakes all waiters.
+    ///
+    /// Repeated calls are harmless. Subsequent publications return `false`;
+    /// `clear` does not reopen the slot.
     pub fn close(&self) {
         let mut state = self
             .inner

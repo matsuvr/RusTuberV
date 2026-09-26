@@ -10,7 +10,9 @@
 )]
 //! `vtuber-avatar`: Bevy and `bevy_vrm1` adapter.
 //!
-//! This is the only crate that interacts with Bevy entities and `bevy_vrm1` APIs.
+//! Adapts VRM scenes, materials, expressions and tracking signals to Bevy.
+//! The application crate also uses Bevy entities and systems; engine independence
+//! is a contract of the core and tracking crates, not of the application.
 //! `bevy_vrm1` types must not leak into `vtuber-core` or `vtuber-tracking`.
 
 #![forbid(unsafe_code)]

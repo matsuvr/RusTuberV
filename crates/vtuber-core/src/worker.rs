@@ -90,10 +90,9 @@ impl<T> WorkerHandle<T> {
 
     /// Joins the worker thread and returns its result.
     ///
-    /// This call blocks until the worker returns or panics. Callers that need
-    /// a timeout should arrange it externally (for example with a separate
-    /// watchdog thread) because Rust standard threads do not support timed
-    /// joins.
+    /// Blocks until the worker returns or panics. Joining does not request a
+    /// stop: call [`Self::stop`] first for a worker that waits for that request.
+    /// Returns [`WorkerResult::Panicked`] rather than resuming a worker panic.
     ///
     /// After this call returns, the handle is consumed and cannot be reused.
     #[must_use]

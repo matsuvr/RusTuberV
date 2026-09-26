@@ -1,7 +1,12 @@
 //! Validated look switch/strength shared by the UI, persistence and rendering.
 //!
-//! The switch selects the Native or Rich material. Strength affects only the
-//! additional lights and Rich Standard contribution, not the Native baseline.
+//! OFF selects the baseline MToon/Standard/unlit materials and front light.
+//! The baseline MToon includes the approved transparent-BLEND discard correction.
+//! ON keeps that front light and selects application Rich MToon/Standard paths,
+//! adding key/rim lighting. Unlit materials remain unlit.
+//! Strength scales the additional contribution, not the baseline light;
+//! at zero the additional lights and effects contribute nothing. Switching OFF
+//! preserves the stored strength for the next activation.
 
 use std::fmt;
 

@@ -10,7 +10,20 @@
 )]
 //! `vtuber-core`: platform- and engine-independent data and synchronization contracts.
 //!
-//! This crate must not depend on Bevy, `bevy_vrm1`, `nokhwa`, tract, or OS-specific APIs.
+//! This crate does not depend on Bevy, VRM loaders, inference runtimes, or OS APIs.
+//! Slots retain the latest value; each reader owns its own generation cursor.
+//!
+//! ```
+//! use vtuber_core::{LatestSlot, ReadResult};
+//! let slot = LatestSlot::new();
+//! assert!(slot.publish(42));
+//! let Some(ReadResult::New { generation, value }) = slot.try_read_after(0) else {
+//!     return;
+//! };
+//! assert_eq!(value, 42);
+//! assert!(slot.try_read_after(generation).is_none());
+//! slot.close();
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

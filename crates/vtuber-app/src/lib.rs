@@ -8,7 +8,7 @@
         clippy::indexing_slicing
     )
 )]
-//! `vtuber-app`: orchestration, UI, settings, model import, and diagnostics.
+//! `vtuber-app`: Bevy orchestration, UI, settings, model import, and diagnostics.
 //!
 //! This crate must not contain model-specific inference math or VRM runtime internals.
 
