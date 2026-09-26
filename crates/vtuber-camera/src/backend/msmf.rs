@@ -225,6 +225,9 @@ impl CameraStream for MsmfStream {
 }
 
 /// Decode a nokhwa buffer into raw pixel data.
+///
+/// A format this decoder cannot read returns an error, so a truncated or
+/// unsupported buffer is never published as a frame.
 fn decode_frame(
     buffer: &nokhwa::Buffer,
     source_format: FrameFormat,
@@ -240,8 +243,7 @@ fn decode_frame(
             Ok((rgb, PixelFormat::Rgb8, stride))
         }
         FrameFormat::YUYV => {
-            let yuyv = buffer.buffer();
-            let rgb = yuyv_to_rgb(yuyv, format.width, format.height);
+            let rgb = yuyv_to_rgb(buffer.buffer(), format.width, format.height)?;
             let stride = format.width as usize * 3;
             Ok((rgb, PixelFormat::Rgb8, stride))
         }
@@ -266,40 +268,70 @@ fn decode_frame(
     }
 }
 
-/// Convert YUYV (YUY2) packed data to interleaved RGB.
+/// The packed YUY2 row layout this decoder cannot read: two pixels share one
+/// four-byte `Y0 U Y1 V` group, so a row must be an even number of pixels wide.
+fn odd_yuyv_row(width: u32) -> CameraError {
+    CameraError::FrameDecodeFailed(format!(
+        "YUYV rows must hold whole pixel pairs, got width {width}"
+    ))
+}
+
+/// The packed YUY2 byte length for these dimensions is not representable.
+fn yuyv_length_overflow(width: u32, height: u32) -> CameraError {
+    CameraError::FrameDecodeFailed(format!(
+        "YUYV byte length is not representable for {width}x{height}"
+    ))
+}
+
+/// Convert packed YUYV (YUY2) data to interleaved RGB.
 ///
-/// Pixels whose source window would run past the end of the input buffer are
-/// skipped instead of panicking.
-fn yuyv_to_rgb(yuyv: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let pixel_count = (width * height) as usize;
-    let mut rgb = vec![0u8; pixel_count * 3];
-
-    for row in 0..height as usize {
-        for col in (0..width as usize).step_by(2) {
-            let src = (row * width as usize + col) * 2;
-            let Some(&[y0, u_byte, y1, v_byte]) = yuyv.get(src..src + 4) else {
-                break;
-            };
-            let u = f32::from(u_byte) - 128.0;
-            let v = f32::from(v_byte) - 128.0;
-
-            let dst = (row * width as usize + col) * 3;
-            if let Some(pixel) = rgb
-                .get_mut(dst..dst + 3)
-                .and_then(|slice| <&mut [u8; 3]>::try_from(slice).ok())
-            {
-                yuv_to_rgb_pixel(y0 as f32, u, v, pixel);
-            }
-            if col + 1 < width as usize
-                && let Some(pixel) = rgb
-                    .get_mut(dst + 3..dst + 6)
-                    .and_then(|slice| <&mut [u8; 3]>::try_from(slice).ok())
-            {
-                yuv_to_rgb_pixel(y1 as f32, u, v, pixel);
-            }
-        }
+/// Each row is `width / 2` four-byte pixel pairs, so the buffer must hold at
+/// least `width * 2 * height` bytes and the rows are read without ever crossing
+/// a row boundary. Bytes past that length are ignored. A short buffer, an odd
+/// width, or a byte length that is not representable is a decode error; the
+/// decoder never pads a truncated buffer into a successful black frame.
+fn yuyv_to_rgb(yuyv: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CameraError> {
+    let Ok(row_pixels) = usize::try_from(width) else {
+        return Err(yuyv_length_overflow(width, height));
+    };
+    let Ok(rows) = usize::try_from(height) else {
+        return Err(yuyv_length_overflow(width, height));
+    };
+    if row_pixels % 2 != 0 {
+        return Err(odd_yuyv_row(width));
     }
-    rgb
+    let Some(row_bytes) = row_pixels.checked_mul(2) else {
+        return Err(yuyv_length_overflow(width, height));
+    };
+    let Some(required) = row_bytes.checked_mul(rows) else {
+        return Err(yuyv_length_overflow(width, height));
+    };
+    if yuyv.len() < required {
+        return Err(CameraError::FrameDecodeFailed(format!(
+            "YUYV needs {required} bytes for {width}x{height}, got {}",
+            yuyv.len()
+        )));
+    }
+    let Some(output_len) = row_pixels.checked_mul(rows).and_then(|n| n.checked_mul(3)) else {
+        return Err(yuyv_length_overflow(width, height));
+    };
+
+    let mut rgb = vec![0u8; output_len];
+    // An even width makes every row a whole number of four-byte groups, so the
+    // flat group order and the flat RGB pixel order stay in lockstep. `zip`
+    // stops at the output side, which holds exactly `required / 4` pairs, so
+    // surplus input bytes are left unread.
+    let (groups, _) = yuyv.as_chunks::<4>();
+    let (pixels, _) = rgb.as_chunks_mut::<3>();
+    let (pixel_pairs, _) = pixels.as_chunks_mut::<2>();
+    for ([y0, u_byte, y1, v_byte], pair) in groups.iter().zip(pixel_pairs) {
+        let u = f32::from(*u_byte) - 128.0;
+        let v = f32::from(*v_byte) - 128.0;
+        let [first, second] = pair;
+        yuv_to_rgb_pixel(f32::from(*y0), u, v, first);
+        yuv_to_rgb_pixel(f32::from(*y1), u, v, second);
+    }
+    Ok(rgb)
 }
 
 fn yuv_to_rgb_pixel(y: f32, u: f32, v: f32, out: &mut [u8; 3]) {
@@ -344,8 +376,116 @@ mod tests {
     #[test]
     fn yuyv_to_rgb_produces_correct_size() {
         let yuyv = vec![128, 128, 128, 128];
-        let rgb = yuyv_to_rgb(&yuyv, 2, 1);
+        let rgb = yuyv_to_rgb(&yuyv, 2, 1).expect("one whole pixel pair decodes");
         assert_eq!(rgb.len(), 6);
+    }
+
+    #[test]
+    fn yuyv_to_rgb_decodes_every_row_of_a_multi_row_pair() {
+        // Two rows of two pixels; the second row must not be read as a
+        // continuation of the first.
+        let yuyv = [
+            10, 100, 20, 150, // row 0: luma 10 and 20
+            200, 100, 210, 150, // row 1: luma 200 and 210
+        ];
+        let rgb = yuyv_to_rgb(&yuyv, 2, 2).expect("two whole rows decode");
+        assert_eq!(rgb.len(), 12);
+
+        let expected = |y: u8| {
+            let u = 100.0 - 128.0;
+            let v = 150.0 - 128.0;
+            let y = f32::from(y);
+            [
+                (y + 1.402 * v).clamp(0.0, 255.0) as u8,
+                (y - 0.344_136 * u - 0.714_136 * v).clamp(0.0, 255.0) as u8,
+                (y + 1.772 * u).clamp(0.0, 255.0) as u8,
+            ]
+        };
+        assert_eq!(&rgb[0..3], &expected(10));
+        assert_eq!(&rgb[3..6], &expected(20));
+        assert_eq!(&rgb[6..9], &expected(200));
+        assert_eq!(&rgb[9..12], &expected(210));
+    }
+
+    #[test]
+    fn yuyv_to_rgb_accepts_a_real_black_frame() {
+        // Luma 0 with centred chroma is a genuine black frame and must succeed,
+        // unlike a truncated buffer.
+        let yuyv = [0, 128, 0, 128];
+        assert_eq!(
+            yuyv_to_rgb(&yuyv, 2, 1).expect("black is a valid frame"),
+            [0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn yuyv_to_rgb_rejects_input_shorter_than_one_row() {
+        assert!(matches!(
+            yuyv_to_rgb(&[], 2, 1),
+            Err(CameraError::FrameDecodeFailed(_))
+        ));
+    }
+
+    #[test]
+    fn yuyv_to_rgb_rejects_input_one_byte_short() {
+        let yuyv = [128, 128, 128];
+        assert!(matches!(
+            yuyv_to_rgb(&yuyv, 2, 1),
+            Err(CameraError::FrameDecodeFailed(_))
+        ));
+    }
+
+    #[test]
+    fn yuyv_to_rgb_rejects_an_unsupported_row_layout() {
+        // A single-pixel row has no YUY2 partner inside the row, and reading it
+        // as if it continued into the next row is not supported.
+        assert!(matches!(
+            yuyv_to_rgb(&[128, 128, 128, 128], 1, 2),
+            Err(CameraError::FrameDecodeFailed(_))
+        ));
+    }
+
+    #[test]
+    fn yuyv_to_rgb_ignores_bytes_past_the_required_length() {
+        let yuyv = [0, 128, 0, 128, 7, 7, 7, 7];
+        assert_eq!(
+            yuyv_to_rgb(&yuyv, 2, 1).expect("surplus bytes are not rejected"),
+            [0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn decode_frame_propagates_a_short_yuyv_buffer() {
+        let format = CameraFormat {
+            width: 2,
+            height: 1,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            format: PixelFormat::Bgr8,
+        };
+        let buffer = nokhwa::Buffer::new(Resolution::new(2, 1), &[], FrameFormat::YUYV);
+        assert!(matches!(
+            decode_frame(&buffer, FrameFormat::YUYV, &format),
+            Err(CameraError::FrameDecodeFailed(_))
+        ));
+    }
+
+    #[test]
+    fn decode_frame_decodes_a_complete_yuyv_buffer() {
+        let format = CameraFormat {
+            width: 2,
+            height: 1,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            format: PixelFormat::Bgr8,
+        };
+        let buffer =
+            nokhwa::Buffer::new(Resolution::new(2, 1), &[0, 128, 0, 128], FrameFormat::YUYV);
+        let (data, pixel_format, stride) =
+            decode_frame(&buffer, FrameFormat::YUYV, &format).expect("complete buffer decodes");
+        assert_eq!(data, vec![0, 0, 0, 0, 0, 0]);
+        assert_eq!(pixel_format, PixelFormat::Rgb8);
+        assert_eq!(stride, 6);
     }
 
     #[test]
