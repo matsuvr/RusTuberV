@@ -460,7 +460,7 @@ pub struct PositionInputMetrics {
 }
 
 /// System that resets position-input metrics when lifecycle changes.
-pub fn reset_position_metrics_on_lifecycle_change(
+pub(crate) fn reset_position_metrics_on_lifecycle_change(
     lifecycle: Res<AvatarLifecycle>,
     mut metrics: ResMut<PositionInputMetrics>,
     mut idle_state: ResMut<LossIdleState>,

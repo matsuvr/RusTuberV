@@ -44,7 +44,7 @@ enum LoadedRuntime {
 ///
 /// The worker owns the model runtime and processes frames from the input slot.
 /// It is spawned by [`crate::controller::InferenceController::start_worker`].
-pub fn run_inference_worker(
+pub(crate) fn run_inference_worker(
     command_rx: std::sync::mpsc::Receiver<ControlCommand>,
     stop: StopToken,
     status: SharedStatus,

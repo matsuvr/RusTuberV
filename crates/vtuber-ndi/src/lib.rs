@@ -514,6 +514,7 @@ impl SharedState {
 /// This backend never loads the NDI SDK or performs network I/O. Production
 /// [`NdiOutputController::new`] does not use it.
 #[derive(Clone, Debug)]
+/// Used by app integration tests without an installed native NDI SDK.
 pub struct NdiScriptedBackend {
     inner: Arc<ScriptedInner>,
 }
