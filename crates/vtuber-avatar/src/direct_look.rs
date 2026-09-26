@@ -135,8 +135,6 @@ fn sanitized_direct_input(input: DirectLookAtInput) -> (f32, f32, f32) {
     let weight = input.weight.clamp(0.0, 1.0);
     (input.yaw_degrees, input.pitch_degrees, weight)
 }
-
-#[allow(clippy::too_many_arguments)]
 fn apply_direct_eye(
     commands: &mut Commands,
     eyes: &Query<(

@@ -162,10 +162,10 @@ pub(crate) fn normalized_legacy_expressions(
     let material_indices = legacy_material_indices(root);
     let mut preset = serde_json::Map::new();
     let mut custom = serde_json::Map::new();
-    // Bounds are guaranteed by construction: every stored index comes from
-    // enumerating this same `groups` array above. See the AGENTS.md
-    // production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "every stored index was produced by enumerating the same `groups` array above, so it is below that array's length"
+    )]
     for (name, group_index, is_standard) in standards
         .into_iter()
         .map(|(name, index)| (name, index, true))

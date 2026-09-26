@@ -539,10 +539,10 @@ where
 }
 
 #[cfg(feature = "onnx")]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the input-count check above rejects every list whose length is not 1, so the first input exists"
+)]
 fn validate_ultraface_input(inputs: &[IOFact], sha256: &str) -> Result<(), OnnxProbeError> {
     if inputs.len() != 1 {
         return Err(OnnxProbeError::new(
@@ -670,6 +670,12 @@ fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn model_dir() -> std::path::PathBuf {

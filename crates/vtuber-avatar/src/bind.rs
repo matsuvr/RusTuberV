@@ -28,7 +28,10 @@ pub struct BindTriggered;
 /// Only the entity currently tracked as the active root can trigger a
 /// transition. Roots that are no longer active (for example, a replaced model
 /// whose asset finishes loading late) are ignored.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy's `Query` filter tuples for this system's declared change-detection filters, with no call site to change"
+)]
 pub(crate) fn observe_initialized(
     mut commands: Commands,
     mut lifecycle: ResMut<AvatarLifecycle>,
@@ -105,6 +108,12 @@ pub(crate) fn observe_initialized(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::load::ExpectedVrmGeneration;
     use bevy::asset::AssetApp;

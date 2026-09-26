@@ -86,7 +86,10 @@ pub(crate) struct TakePrediction {
     pub frame_seq: u64,
     /// Capture time carried with the prediction record (the interval metric
     /// reads the same capture times from the series).
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the prediction record keeps the capture time the interval metric reports"
+    )]
     pub timestamp_micros: u64,
     pub state: EyeOpenness,
 }
@@ -1168,13 +1171,18 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 }
 
 /// Label row shape retained for report cross-checking.
-#[allow(dead_code)]
 fn _label_shape(row: &LabelRow) -> (&str, Option<&str>) {
     (&row.take_id, row.tag.as_deref())
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn frame(
@@ -1429,6 +1437,12 @@ mod tests {
 
 #[cfg(test)]
 mod end_to_end {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::eye_closure::evaluate;
     use crate::eye_closure::labels::{ExtractedData, Labels, SplitFile};

@@ -996,7 +996,10 @@ pub fn resolve_side(
 /// only arm Transform writer. When lifecycle is not Ready, the selected
 /// source is not the virtual hand, or no control frame is available, targets
 /// clear so the compositor falls back to its static default pose.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and message streams, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 pub fn update_dynamic_arm_targets(
     lifecycle: Res<AvatarLifecycle>,
     selection: Res<ArmSourceSelection>,
@@ -1131,7 +1134,10 @@ impl Default for TrackedArmControl {
 /// while tracked mode is selected) and before `apply_default_arm_pose`. It only
 /// reads the current parent pose and immutable rest geometry; native handles,
 /// the camera, and the clock stay outside.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and message streams, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 pub fn update_tracked_arm_targets(
     lifecycle: Res<AvatarLifecycle>,
     selection: Res<ArmSourceSelection>,
@@ -1368,6 +1374,12 @@ fn neutral_virtual_target(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::arm::{ArmIkInput, ArmIkSolution, RestSpaceBonePose};
 

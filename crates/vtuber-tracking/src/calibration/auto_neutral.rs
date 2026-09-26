@@ -423,20 +423,20 @@ fn negate(value: UnitQuaternion<f32>) -> UnitQuaternion<f32> {
     UnitQuaternion::from_quaternion(Quaternion::new(-q.w, -q.i, -q.j, -q.k))
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`aggregate_candidates` returns `None` for an empty candidate list, so this iterator always yields at least one value"
+)]
 fn median(values: impl Iterator<Item = f32>) -> f32 {
     let mut values: Vec<f32> = values.collect();
     values.sort_by(f32::total_cmp);
     values[values.len() / 2]
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the empty case returns `None` above, so the vector is not empty here"
+)]
 fn median_nonempty(values: impl Iterator<Item = f32>) -> Option<f32> {
     let mut values: Vec<f32> = values.collect();
     if values.is_empty() {
@@ -448,6 +448,12 @@ fn median_nonempty(values: impl Iterator<Item = f32>) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use std::sync::Arc;
     use vtuber_core::{

@@ -121,9 +121,13 @@ pub fn set_active_control_frame(
 /// Applies the active control frame to the given binding if generations match.
 ///
 /// Returns the frame when it can be applied. Returns `Ok(None)` when there is
-/// no active frame. Returns an error when the binding is stale or the
-/// generations do not match.
-#[allow(clippy::missing_errors_doc)]
+/// no active frame.
+///
+/// # Errors
+/// Returns [`ControlFrameError::NotReady`] when the lifecycle has not reached
+/// `Ready`, [`ControlFrameError::StaleBinding`] when no binding is supplied, and
+/// [`ControlFrameError::StaleGeneration`] when the active frame's generation
+/// does not match the binding's.
 pub fn apply_active_control_frame<'a>(
     lifecycle: &'a AvatarLifecycle,
     active: &'a ActiveControlFrame,
@@ -210,6 +214,12 @@ pub(crate) fn clear_control_cache_on_lifecycle_change(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_core::types::{
         ExpressionCoefficients, FrameSeq, HeadPose, MonoTimeNs, TrackingState,

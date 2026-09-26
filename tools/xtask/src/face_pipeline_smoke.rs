@@ -74,10 +74,10 @@ struct Options {
 }
 
 impl Options {
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the loop condition bounds `index` by the argument length and `required_value` rejects a missing value argument"
+    )]
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
             camera: None,
@@ -168,10 +168,10 @@ struct GuidedProtocol {
 
 #[cfg(any(target_os = "windows", test))]
 impl GuidedProtocol {
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the phase vector is seeded with one phase before anything reads its first entry"
+    )]
     fn new() -> Self {
         let mut phases = vec![GuidedPhase {
             label: "顔を中央に置き、neutralで正面を向く",
@@ -253,10 +253,10 @@ impl GuidedProtocol {
         self.phases.iter().map(|phase| phase.duration).sum()
     }
 
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`phase_index` is compared against the phase count and the out-of-range case returns above"
+    )]
     fn tick(&mut self, elapsed: Duration) -> Option<GuidedAction> {
         if self.completed {
             return None;
@@ -570,10 +570,10 @@ fn save_snapshot(frame: &VideoFrame, path: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the empty device list returns above, so the first descriptor exists"
+)]
 fn choose_camera(
     devices: &[vtuber_camera::CameraDescriptor],
     requested: Option<&str>,
@@ -683,7 +683,10 @@ struct SmokeSummary {
 
 #[cfg(target_os = "windows")]
 impl SmokeSummary {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the summary aggregates one field per recorded run measurement"
+    )]
     fn from_run(
         pipeline: &vtuber_inference::FacePipelineDescriptor,
         camera: &vtuber_camera::CameraDescriptor,

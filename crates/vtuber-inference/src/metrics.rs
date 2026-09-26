@@ -88,11 +88,10 @@ impl Default for StageTimingRing {
 }
 
 impl StageTimingRing {
-    /// Records a duration sample.
-    // Bounds hold by construction: `samples` has RING_SIZE elements, `head`
-    // starts at 0, and the two wraparound updates below keep it below
-    // RING_SIZE. See the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`samples` has RING_SIZE elements, `head` starts at 0, and the wraparound update keeps `head` below RING_SIZE"
+    )]
     fn record(&mut self, duration: Duration) {
         let ns = duration.as_nanos() as u64;
         self.samples[self.head] = duration;
@@ -132,8 +131,10 @@ impl StageTimingRing {
         }
     }
 
-    // Bounds hold by construction for the same reason as `record`.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`first` is either 0 or `head` (already below RING_SIZE) and `offset` is below `retained <= RING_SIZE`"
+    )]
     fn retained_samples(&self) -> Vec<u64> {
         let retained = self.count.min(RING_SIZE as u64) as usize;
         if retained == 0 {
@@ -167,10 +168,10 @@ pub struct StageTimingSnapshot {
     pub p95_ns: u64,
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "callers pass a non-empty sorted slice and the clamp keeps the index below its length"
+)]
 fn nearest_rank(sorted: &[u64], percentile: f64) -> u64 {
     let rank = (percentile * sorted.len() as f64).ceil() as usize;
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
@@ -203,10 +204,10 @@ pub struct InferenceMetrics {
 impl InferenceMetrics {
     /// Returns the timing snapshot for `stage`.
     #[must_use]
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`InferenceStage::index()` is below `InferenceStage::COUNT`, the length of `stage_timings`"
+    )]
     pub fn stage(&self, stage: InferenceStage) -> StageTimingSnapshot {
         self.stage_timings[stage.index()]
     }
@@ -224,10 +225,10 @@ pub(crate) struct InferenceMetricsState {
 
 impl InferenceMetricsState {
     /// Records a duration sample for `stage`.
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`InferenceStage::index()` is below `InferenceStage::COUNT`, the length of `rings`"
+    )]
     pub(crate) fn record_stage_duration(&mut self, stage: InferenceStage, duration: Duration) {
         self.rings[stage.index()].record(duration);
         self.dirty = true;
@@ -268,10 +269,10 @@ impl InferenceMetricsState {
     /// The snapshot is cached and only recomputed after a recording mutation,
     /// so repeated reads between frames do not re-sort the retained samples.
     #[must_use]
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the loop enumerates `rings` and the snapshot array has `InferenceStage::COUNT` entries"
+    )]
     pub(crate) fn snapshot(&mut self) -> InferenceMetrics {
         if self.dirty {
             let mut stage_timings = [StageTimingSnapshot::default(); InferenceStage::COUNT];

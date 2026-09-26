@@ -136,10 +136,10 @@ impl LandmarkSet {
 /// - `yaw > 0`: face turns right in the unmirrored image.
 /// - `pitch > 0`: chin goes up.
 /// - `roll > 0`: head tilts clockwise as viewed in the unmirrored image.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the length and minimum-point checks above size the 3 x N matrices, so every index stays inside the loop bounds"
+)]
 pub fn solve_relative_pose(
     neutral: &LandmarkSet,
     current: &LandmarkSet,
@@ -389,6 +389,12 @@ pub fn synthetic_face_points() -> Vec<[f32; 3]> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use approx::assert_relative_eq;
 

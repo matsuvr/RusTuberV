@@ -686,7 +686,10 @@ fn record_stop_failure(metrics: &mut CaptureMetrics, error: Option<CameraError>)
 }
 
 /// Opens the requested camera and returns the stream.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the worker already owns these; the open path passes the frame slot, optional Pose slot, metrics and sequence counter it holds"
+)]
 fn open_and_stream<B>(
     backend: &B,
     device: &CameraDescriptor,

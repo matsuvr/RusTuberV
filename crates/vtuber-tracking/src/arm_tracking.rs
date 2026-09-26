@@ -916,6 +916,12 @@ fn finite_normalized(value: Vector3<f32>) -> Option<Vector3<f32>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_core::arm_tracking::{HandWorldLandmarks, PoseWorldLandmark};
 

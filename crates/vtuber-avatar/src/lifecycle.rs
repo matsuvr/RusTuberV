@@ -475,7 +475,10 @@ impl AvatarLifecycle {
 ///
 /// This system also inserts and removes the [`ActiveAvatar`] marker to keep
 /// the ECS view consistent with the resource invariant.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and messages, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 pub fn apply_avatar_request_events(
     mut commands: Commands,
     mut lifecycle: ResMut<AvatarLifecycle>,
@@ -555,6 +558,12 @@ pub fn apply_avatar_request_events(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::LookDirectionSet;
     use crate::PendingAvatarLoad;

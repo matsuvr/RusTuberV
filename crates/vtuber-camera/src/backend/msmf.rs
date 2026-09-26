@@ -67,7 +67,10 @@ impl CameraBackend for MsmfBackend {
 
         // Apply the chosen format.
         let nokhwa_fmt = to_nokhwa_format(&chosen);
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "nokhwa 0.10 deprecated this setter but still exposes no other way to apply the negotiated format"
+        )]
         camera
             .set_camera_format(nokhwa_fmt)
             .map_err(|e| map_nokhwa_error(CameraOperation::Open, e))?;

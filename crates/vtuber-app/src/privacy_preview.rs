@@ -160,9 +160,10 @@ fn output_dimensions(source_width: usize, source_height: usize) -> (usize, usize
     }
 }
 
-// Invariant: inputs derive from validated `VideoFrame` dimensions, which are
-// bounded well below `u64`, so every conversion below is lossless.
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "every operand comes from a validated `VideoFrame` dimension bounded well below `u64`, so the widening conversions are lossless"
+)]
 fn rounded_ratio(numerator: usize, scale: usize, denominator: usize) -> usize {
     // The scaled numerator is bounded by u32::MAX * 48, so u64 is sufficient
     // even on platforms where usize is wider than u32.
@@ -173,9 +174,10 @@ fn rounded_ratio(numerator: usize, scale: usize, denominator: usize) -> usize {
         .expect("rounded preview dimension fits in usize")
 }
 
-// Invariant: inputs derive from validated `VideoFrame` and preview
-// dimensions, bounded well below `u64`.
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "every operand comes from a validated `VideoFrame` or preview dimension bounded well below `u64`, so the widening conversions are lossless"
+)]
 fn block_range(index: usize, source: usize, target: usize) -> Range<usize> {
     let index = u64::try_from(index).expect("preview dimensions fit in u64");
     let source = u64::try_from(source).expect("VideoFrame dimensions fit in u64");
@@ -186,10 +188,10 @@ fn block_range(index: usize, source: usize, target: usize) -> Range<usize> {
     start..end.max(start + 1).min(source as usize)
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the pixel window comes from the `frame.data.get(..)` just above, and `sums` is the caller's fixed four-element accumulator"
+)]
 fn accumulate_pixel(
     frame: &VideoFrame,
     source_x: usize,
@@ -253,6 +255,12 @@ fn average_channel(sum: u128, sample_count: u128) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use std::sync::Arc;
 
     use super::*;

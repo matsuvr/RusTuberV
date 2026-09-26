@@ -287,10 +287,10 @@ impl FaceCropPreprocessBuffers {
     /// The supplied contract must describe the manifest's unit-float RGB
     /// NCHW input. Values outside the source frame use the normalization mean
     /// before `(value - mean) / scale`, which therefore produces zero padding.
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`rgb` and `tensor` are allocated for `output_size` at construction and both loops are bounded by that same size"
+    )]
     pub fn preprocess(
         &mut self,
         frame: &VideoFrame,
@@ -427,10 +427,10 @@ fn validate_tensor_contract(
     Ok(())
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the output is a fixed three-channel array and the channel loop is bounded by 3"
+)]
 fn bilinear_rgb(frame: &VideoFrame, x: f32, y: f32, fill: [f32; 3]) -> [f32; 3] {
     let x0 = x.floor();
     let y0 = y.floor();

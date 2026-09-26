@@ -60,7 +60,6 @@ fn load_onnx(descriptor: &ModelDescriptor) -> Result<crate::runtime::OnnxRuntime
 struct TfliteRuntime {
     /// The runnable tract model. Kept alive so that resources are dropped in
     /// the worker thread when this runtime is dropped.
-    #[allow(dead_code)]
     model: Arc<TypedRunnableModel>,
     schema: LandmarkSchemaId,
 }
@@ -85,10 +84,10 @@ impl TfliteRuntime {
 }
 
 impl FaceInference for TfliteRuntime {
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the caller supplies the four-element input shape, so the fixed NCHW reads are in bounds"
+    )]
     fn infer(&self, tensor: &[f32], input_shape: &[usize; 4]) -> Result<RawFaceObservation> {
         use tract_tflite::prelude::*;
         use vtuber_core::types::{FrameSeq, MonoTimeNs, NormalizedRect};

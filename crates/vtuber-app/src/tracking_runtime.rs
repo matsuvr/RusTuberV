@@ -110,9 +110,10 @@ pub struct TrackingRuntime {
 impl Default for TrackingRuntime {
     fn default() -> Self {
         let config = PipelineConfig::default();
-        // Invariant: `PipelineConfig::default()` produces a valid config by
-        // definition; repository tests pin this.
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "`PipelineConfig::default()` is a valid configuration by definition and the repository tests pin it"
+        )]
         let pipeline = TrackingPipeline::new(config)
             .expect("default tracking configuration is an internal invariant");
         Self {

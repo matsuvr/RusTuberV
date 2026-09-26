@@ -208,7 +208,11 @@ pub struct BindingDeadline(Instant);
 /// Runs while the lifecycle is in `Binding`. On success it inserts
 /// [`AvatarBinding`] on the root and transitions the lifecycle to `Ready`. On
 /// failure it transitions to `Failed` with a typed error.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's commands, resources and query filters, so both the parameter list and the filter tuple are the declared ECS contract"
+)]
 pub fn bind_humanoid_bones(
     mut commands: Commands,
     mut lifecycle: ResMut<AvatarLifecycle>,
@@ -574,7 +578,10 @@ impl AvatarBindError {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per humanoid bone this resolves, so a specific missing bone stays visible at the call site"
+)]
 fn resolve_binding(
     root: Entity,
     head: Option<Entity>,

@@ -82,10 +82,10 @@ struct Options {
 }
 
 impl Options {
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the loop condition bounds `index` by the argument length and `required_value` rejects a missing value argument"
+    )]
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
             camera: None,
@@ -363,10 +363,10 @@ fn run_worker(
 }
 
 #[cfg(target_os = "windows")]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the result is checked above to hold exactly one face, one blendshape set and one matrix"
+)]
 fn record_result(stats: &mut SmokeStats, result: FaceLandmarkerResult) {
     let face_count = result.landmarks.len();
     if face_count == 0 {
@@ -427,10 +427,10 @@ struct MatrixQuality {
 }
 
 #[cfg(target_os = "windows")]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the matrix is read through `get` into a fixed 4x4 array and the loops are bounded by 4 and 3"
+)]
 fn matrix_quality(result: &FaceLandmarkerResult) -> Option<MatrixQuality> {
     let matrix = result.transformation_matrixes.first()?;
     let mut values = [[0.0; 4]; 4];
@@ -486,10 +486,10 @@ fn video_timestamp_ms(
 }
 
 #[cfg(any(target_os = "windows", test))]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every row and column index is checked against the frame dimensions above, so the staging writes stay inside the resized buffer"
+)]
 fn frame_rgb<'a>(frame: &'a VideoFrame, staging: &'a mut Vec<u8>) -> Result<&'a [u8], String> {
     let width = usize::try_from(frame.width).map_err(|_| "frame width is too large".to_string())?;
     let height =
@@ -719,10 +719,10 @@ fn print_summary(stats: &SmokeStats, capture: &vtuber_camera::CaptureMetrics, js
 }
 
 #[cfg(any(target_os = "windows", test))]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the empty case returns early and the clamp keeps the index below the vector length"
+)]
 fn percentile_ms(values: &[Duration], percentile: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -735,6 +735,12 @@ fn percentile_ms(values: &[Duration], percentile: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::{determinant3, frame_rgb, percentile_ms, video_timestamp_ms};
     use std::time::Duration;
     use vtuber_core::{FrameSeq, MonoTimeNs, PixelFormat, VideoFrame};

@@ -102,6 +102,12 @@ pub fn handle_dropped_files(ctx: &bevy_egui::egui::Context, ui_state: &mut super
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     #[test]
     fn file_dialog_default_is_inactive() {

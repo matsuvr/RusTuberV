@@ -413,10 +413,10 @@ impl FrameFaceInference for CompositeFrameInference {
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the descriptor's landmark output count is checked above before the first tensor is read"
+)]
 fn validate_descriptor(
     descriptor: &FacePipelineDescriptor,
 ) -> Result<(LandmarkCoordinateEncoding, [usize; 4])> {

@@ -1,13 +1,3 @@
-// Unit tests may use unwrap/expect/panic (AGENTS.md: Production Rust panic policy).
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )
-)]
 //! `vtuber-core`: platform- and engine-independent data and synchronization contracts.
 //!
 //! This crate does not depend on Bevy, VRM loaders, inference runtimes, or OS APIs.

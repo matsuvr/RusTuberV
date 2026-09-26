@@ -303,6 +303,12 @@ pub fn is_excluded_expression(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn input<'a>(id: &'a str, preset: bool, resolved: usize) -> ExpressionCatalogInput<'a> {

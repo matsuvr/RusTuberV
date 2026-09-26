@@ -263,10 +263,10 @@ impl FaceTrackingInference for MediaPipeRuntime {
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the result is checked above to hold exactly one face, one blendshape set and one matrix before the first-element reads"
+)]
 fn decode_result(
     source_seq: FrameSeq,
     captured_at: MonoTimeNs,
@@ -389,10 +389,10 @@ fn decode_result(
     Ok(FaceTrackingOutcome::Face(sample))
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`.first()` supplies the only matrix and both loops are bounded by the fixed 4x4 transform contract"
+)]
 fn matrix_transform(result: &FaceLandmarkerResult) -> Result<(CameraFaceTransform, f32, f32)> {
     let matrix = result
         .transformation_matrixes
@@ -407,10 +407,10 @@ fn matrix_transform(result: &FaceLandmarkerResult) -> Result<(CameraFaceTransfor
     matrix_from_column_major(column_major)
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`column_major.chunks_exact(4)` yields exactly four values and the loop is bounded by 4"
+)]
 fn matrix_from_column_major(column_major: [f32; 16]) -> Result<(CameraFaceTransform, f32, f32)> {
     let mut values = [[0.0; 4]; 4];
     for (column, column_values) in column_major.chunks_exact(4).enumerate() {
@@ -558,10 +558,10 @@ fn determinant3(matrix: [[f32; 4]; 4]) -> f32 {
         + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the argument is a 4x4 array and both loops are bounded by 3, so every index is below 4"
+)]
 fn orthogonality_error(matrix: [[f32; 4]; 4]) -> f32 {
     let mut error_squared = 0.0;
     for row in 0..3 {
@@ -589,10 +589,10 @@ fn face_center(landmarks: &[FaceLandmark]) -> Result<[f32; 2]> {
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`median_index` is half the vector length, which is below the length `select_nth_unstable_by` has just partitioned"
+)]
 fn median_presence(landmarks: &[FaceLandmark]) -> Option<f32> {
     let mut values: Vec<f32> = landmarks
         .iter()
@@ -622,10 +622,10 @@ fn video_timestamp_ms(captured_at: MonoTimeNs, last_timestamp_ms: &mut Option<i6
     Ok(timestamp_ms)
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every row and column index is checked against the frame dimensions just above, so the staging writes stay inside the resized buffer"
+)]
 fn frame_rgb<'a>(frame: &'a VideoFrame, staging: &'a mut Vec<u8>) -> Result<&'a [u8]> {
     let width = usize::try_from(frame.width)
         .map_err(|_| InferenceError::MediaPipeFrameConversion("frame width is too large".into()))?;
@@ -766,6 +766,12 @@ fn contract_error(message: impl Into<String>) -> InferenceError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::{
         embedded_hand_task_bundle, embedded_pose_task_bundle, embedded_task_bundle, frame_rgb,
         matrix_from_column_major, verify_hand_task_bundle_bytes, verify_pose_task_bundle_bytes,

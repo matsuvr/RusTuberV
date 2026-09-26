@@ -283,7 +283,10 @@ fn setup_scene(
 // switch the window pass to Rgba8Unorm and conflict with the egui pipeline.
 // Keep the existing transparent BGRA output and preview alpha/sRGB conversion
 // unchanged. Later Look systems must not rewrite this policy.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy's `Query` filter tuple for the avatar display setup, with no call site to change"
+)]
 fn setup_avatar_display(
     mut commands: Commands,
     cameras: Query<Entity, Or<(With<AvatarViewportCamera>, With<AvatarOutputCamera>)>>,
@@ -301,7 +304,6 @@ fn setup_avatar_display(
 // light's GlobalTransform here too, so orbit/reset affect lighting in the same
 // frame. Only the camera is read: head pose and Look strength have no authority
 // over this light's direction, color, illuminance or shadow setting.
-#[allow(clippy::type_complexity)]
 fn align_standard_light_to_camera(
     camera: Single<&Transform, (With<AvatarViewportCamera>, Without<StandardAvatarLight>)>,
     light: Single<(&mut Transform, &mut GlobalTransform), With<StandardAvatarLight>>,
@@ -325,6 +327,12 @@ fn log_head_bone(heads: Query<Entity, Added<HeadBoneEntity>>) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::render_output::{AvatarOutputState, setup_output_camera};
     use bevy::camera::{CompositingSpace, Hdr, RenderTarget};

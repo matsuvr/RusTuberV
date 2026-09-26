@@ -116,10 +116,10 @@ struct Options {
 }
 
 impl Options {
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the loop condition bounds `index` by the argument length and `required_value` rejects a missing value argument"
+    )]
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
             camera: None,
@@ -307,10 +307,10 @@ fn run_windows(options: Options) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the loaded phase index is checked against `PHASE_COUNT`, the length of `ProbeData::phases`"
+)]
 fn run_worker(
     task_path: &Path,
     frame_slot: Arc<LatestSlot<VideoFrame>>,
@@ -407,10 +407,10 @@ struct ProbeReport {
 }
 
 #[cfg(target_os = "windows")]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`ProbeData::phases` holds `PHASE_COUNT` entries, the length of the `PHASES` table this loop enumerates"
+)]
 fn build_report(data: ProbeData, library_source: String) -> Result<ProbeReport, String> {
     let neutral = median_transform(&data.phases[0]).ok_or_else(|| {
         format!(

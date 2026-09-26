@@ -291,10 +291,10 @@ fn lerp_weights(a: BodyBoneWeights, b: BodyBoneWeights, factor: f32) -> BodyBone
     };
     let a = a.as_array();
     let b = b.as_array();
-    // Bounds are guaranteed by construction: both arrays hold exactly
-    // BONE_COUNT entries and `from_fn` visits indices below BONE_COUNT.
-    // See the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "both weight arrays hold exactly `BONE_COUNT` entries and `from_fn` visits only indices below `BONE_COUNT`"
+    )]
     BodyBoneWeights::from_array(std::array::from_fn(|index| {
         a[index] + (b[index] - a[index]) * factor
     }))
@@ -305,10 +305,10 @@ fn normalize_available_weights(
     available: [bool; BONE_COUNT],
 ) -> BodyBoneWeights {
     let mut values = weights.as_array();
-    // Bounds are guaranteed by construction: `values` and `available` both
-    // hold exactly BONE_COUNT entries and `enumerate` visits indices below
-    // BONE_COUNT. See the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`values` and `available` both hold exactly `BONE_COUNT` entries and `enumerate` visits only indices below `BONE_COUNT`"
+    )]
     for (index, value) in values.iter_mut().enumerate() {
         if !available[index] || !value.is_finite() || *value <= 0.0 {
             *value = 0.0;
@@ -575,10 +575,10 @@ pub fn apply_direct_body_tracking(
 
         let mut computed_globals = HashMap::with_capacity(BONE_COUNT * 2);
         // Bounds are guaranteed by construction: every `DirectBoneEntry`
-        // index is one of the HEAD..=HIPS constants below BONE_COUNT, and
-        // every weight/limit/half-life array holds exactly BONE_COUNT
-        // entries. See the AGENTS.md production panic policy.
-        #[allow(clippy::indexing_slicing)]
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "every `DirectBoneEntry` index is one of the `HEAD..=HIPS` constants below `BONE_COUNT`, and every weight, limit and half-life array holds exactly `BONE_COUNT` entries"
+        )]
         for bone in chain {
             let Ok((rest_tf, rest_gtf)) = rests.get(bone.entity) else {
                 continue;

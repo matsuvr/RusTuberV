@@ -73,10 +73,10 @@ pub fn map_mediapipe_expressions(values: &FaceBlendshapeSet) -> ExpressionCoeffi
 /// array position.  MediaPipe's `_neutral` category has no ARKit semantic and
 /// is dropped.  MediaPipe publishes no tongue category, so `TongueOut`, the
 /// one ARKit channel without a MediaPipe source, stays `0.0`.
-// Invariant: `FaceBlendshapeSet` rejects non-finite scores and scores outside
-// `[0, 1]`, and every slot without a MediaPipe source is a literal `0.0`, so
-// the ARKit52 validation cannot reject this vector.
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "`FaceBlendshapeSet` rejects non-finite and out-of-range scores, and every channel without a MediaPipe source is a literal zero"
+)]
 #[must_use]
 pub fn map_mediapipe_perfect_sync(values: &FaceBlendshapeSet) -> Arkit52Coefficients {
     let mut coefficients = [0.0; ARKIT52_CHANNEL_COUNT];
@@ -293,6 +293,12 @@ fn average(left: f32, right: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_core::GazeTrackingState;
 

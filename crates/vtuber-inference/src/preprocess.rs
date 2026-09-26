@@ -190,10 +190,10 @@ fn crop_rect(width: u32, height: u32) -> (u32, u32, u32) {
     (crop_size, offset_x, offset_y)
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`resized_rgb` is allocated for `target_w * target_h * 3` and the loops are bounded by that same size"
+)]
 fn resize_to_rgb(
     buffers: &mut PreprocessBuffers,
     frame: &VideoFrame,
@@ -217,10 +217,10 @@ fn resize_to_rgb(
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`x` and `y` come from the crop window this caller clamps to the frame dimensions, so the row and pixel offsets stay inside `data`"
+)]
 pub(crate) fn read_rgb_pixel(frame: &VideoFrame, x: u32, y: u32) -> [u8; 3] {
     let stride = frame.stride_bytes;
     let base = y as usize * stride
@@ -241,10 +241,10 @@ pub(crate) fn read_rgb_pixel(frame: &VideoFrame, x: u32, y: u32) -> [u8; 3] {
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`count` is `target_w * target_h`, which is the pixel count both `resized_rgb` and `tensor` are allocated for"
+)]
 fn normalize_and_layout(buffers: &mut PreprocessBuffers, params: &PreprocessParams) {
     let (mean, std) = normalization_params(params.normalization);
     let target_w = buffers.target_w;
@@ -297,6 +297,12 @@ fn reorder_channels((r, g, b): (f32, f32, f32), order: ChannelOrder) -> (f32, f3
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_core::types::{FrameSeq, MonoTimeNs};
 

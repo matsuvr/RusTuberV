@@ -52,10 +52,10 @@ pub fn intersection_over_union(first: &NormalizedRect, second: &NormalizedRect) 
 /// index. The returned vector has the same deterministic order and is capped
 /// at the production maximum of 16 detections.
 #[must_use]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`order` is built from the candidate index range, so every index is a valid candidate position"
+)]
 pub fn hard_nms(
     candidates: &[FaceDetection],
     iou_threshold: f32,
@@ -104,6 +104,12 @@ fn is_finite_rect(rect: &NormalizedRect) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn detection(

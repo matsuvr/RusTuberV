@@ -217,7 +217,10 @@ pub fn coalesce_commands(command_lists: &[Vec<ExpressionCommand>]) -> Vec<Expres
 /// The manual layer is evaluated even without a control frame, so camera-off
 /// selection and explicit clearing reach the writer. When both are absent the
 /// previous tracking state is intentionally left untouched.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and messages, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 pub fn apply_tracked_expressions(
     mut commands: Commands,
     lifecycle: Res<AvatarLifecycle>,
@@ -377,6 +380,12 @@ fn look_at_expression_commands(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use bevy_vrm1::prelude::VrmExpression;
     use vtuber_core::{
