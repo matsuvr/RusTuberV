@@ -395,7 +395,9 @@ pub fn pose_worker_bridge_system(
                 error.to_string(),
             )));
         }
-    } else if pose.is_running() {
+    } else if (!pose.enabled() || !capture_active) && pose.is_running() {
+        // Only a deselected arm tracking or an inactive capture stops the
+        // worker. Not starting this tick says nothing about a running worker.
         pose.stop();
     }
 }
@@ -449,6 +451,38 @@ mod tests {
             .expect_err("a failed spawn reports the OS error");
         assert!(matches!(error, InferenceError::WorkerSpawnFailed { .. }));
         pose
+    }
+
+    /// A capture runtime whose mock device is open, so the bridge sees an
+    /// active capture session.
+    fn active_mock_capture() -> CaptureRuntime {
+        let mut capture = CaptureRuntime::default();
+        capture
+            .controller_mut()
+            .start_worker(vtuber_camera::mock::MockBackend::default())
+            .expect("mock capture worker starts");
+        capture
+            .controller_mut()
+            .select_and_start(
+                CameraDescriptor {
+                    id: "mock-0".into(),
+                    label: "Mock Camera".into(),
+                },
+                CameraRequest::default(),
+            )
+            .expect("mock capture start");
+        capture
+    }
+
+    /// A Pose worker that runs no model and only waits for its stop token.
+    fn test_pose_worker() -> WorkerHandle<InferenceWorkerResult> {
+        WorkerHandle::spawn("test-pose-worker", |stop| {
+            while !stop.is_stopped() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            InferenceWorkerResult::default()
+        })
+        .expect("test pose worker spawns")
     }
 
     /// A tick with a retained spawn failure starts no worker and reports no
@@ -549,23 +583,8 @@ mod tests {
     #[test]
     fn the_bridge_does_not_retry_or_re_report_a_retained_spawn_failure() {
         let mut app = App::new();
-        let mut capture = CaptureRuntime::default();
-        capture
-            .controller_mut()
-            .start_worker(vtuber_camera::mock::MockBackend::default())
-            .expect("mock capture worker starts");
-        capture
-            .controller_mut()
-            .select_and_start(
-                CameraDescriptor {
-                    id: "mock-0".into(),
-                    label: "Mock Camera".into(),
-                },
-                CameraRequest::default(),
-            )
-            .expect("mock capture start");
         app.insert_resource(pose_with_spawn_failure())
-            .insert_resource(capture)
+            .insert_resource(active_mock_capture())
             .init_resource::<Orchestrator>()
             .add_systems(Update, pose_worker_bridge_system);
 
@@ -575,5 +594,87 @@ mod tests {
         assert_bridge_neither_retried_nor_reported(&app);
 
         app.world_mut().resource_mut::<CaptureRuntime>().shutdown();
+    }
+
+    #[test]
+    fn running_pose_worker_is_kept_across_active_bridge_ticks() {
+        let worker = test_pose_worker();
+        let stop_token = worker.stop_token();
+        let mut pose = PoseRuntime::new(std::path::PathBuf::from("."));
+        pose.set_enabled(true);
+        // A worker that already reached Running: the successful spawn must not
+        // overwrite the state it published.
+        pose.lock_status()
+            .transition_to(InferenceWorkerState::Running);
+        pose.finish_spawn(Ok(worker))
+            .expect("a successful spawn retains the worker");
+
+        let mut app = App::new();
+        app.insert_resource(pose)
+            .insert_resource(active_mock_capture())
+            .init_resource::<Orchestrator>()
+            .add_systems(Update, pose_worker_bridge_system);
+
+        for _ in 0..3 {
+            app.update();
+            let pose = app.world().resource::<PoseRuntime>();
+            assert!(pose.is_running());
+            assert!(!stop_token.is_stopped());
+            assert_eq!(pose.lock_status().state, InferenceWorkerState::Running);
+            assert!(
+                app.world()
+                    .resource::<Orchestrator>()
+                    .last_error()
+                    .is_none()
+            );
+        }
+
+        app.world_mut().resource_mut::<PoseRuntime>().stop();
+        assert!(stop_token.is_stopped());
+        app.world_mut().resource_mut::<CaptureRuntime>().shutdown();
+    }
+
+    #[test]
+    fn bridge_stops_pose_only_when_tracking_or_capture_is_disabled() {
+        // Arm tracking off while the capture runs.
+        let worker = test_pose_worker();
+        let stop_token = worker.stop_token();
+        let mut pose = PoseRuntime::new(std::path::PathBuf::from("."));
+        pose.set_enabled(true);
+        pose.finish_spawn(Ok(worker)).expect("spawn");
+        pose.set_enabled(false);
+        let mut app = App::new();
+        app.insert_resource(pose)
+            .insert_resource(active_mock_capture())
+            .init_resource::<Orchestrator>()
+            .add_systems(Update, pose_worker_bridge_system);
+
+        app.update();
+        let pose = app.world().resource::<PoseRuntime>();
+        assert!(!pose.is_running());
+        assert!(stop_token.is_stopped());
+        // A later tick must not start it again while it stays deselected.
+        app.update();
+        assert!(!app.world().resource::<PoseRuntime>().is_running());
+        app.world_mut().resource_mut::<CaptureRuntime>().shutdown();
+
+        // Arm tracking on while the capture is idle.
+        let worker = test_pose_worker();
+        let stop_token = worker.stop_token();
+        let mut pose = PoseRuntime::new(std::path::PathBuf::from("."));
+        pose.set_enabled(true);
+        pose.finish_spawn(Ok(worker)).expect("spawn");
+        let mut app = App::new();
+        app.insert_resource(pose)
+            .insert_resource(CaptureRuntime::default())
+            .init_resource::<Orchestrator>()
+            .add_systems(Update, pose_worker_bridge_system);
+
+        app.update();
+        let pose = app.world().resource::<PoseRuntime>();
+        assert!(!pose.is_running());
+        assert!(stop_token.is_stopped());
+        app.update();
+        assert!(!app.world().resource::<PoseRuntime>().is_running());
     }
 }
