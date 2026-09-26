@@ -1,0 +1,33 @@
+name: Source workbench (temporary, not for merge)
+
+on:
+  push:
+    branches: [workbench/source-only-20260926]
+    paths: [.github/workflows/source-workbench.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Archive the pinned source for editing
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          git init source
+          git -C source remote add origin "$SERVER_URL/$REPOSITORY.git"
+          git -C source fetch --depth=1 origin d72a65e4ebbafe41caf7ce1b2819e1f1077d45bf
+          git -C source checkout --detach FETCH_HEAD
+          cd source
+          git archive --format=tar --output=../source.tar HEAD Cargo.toml Cargo.lock AGENTS.md crates apps tools vendor docs
+      - name: Export source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinned-source-for-editing
+          path: source.tar
+          retention-days: 1
+          if-no-files-found: error
