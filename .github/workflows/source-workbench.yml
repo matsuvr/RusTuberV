@@ -6,21 +6,23 @@ on:
 permissions:
   contents: read
 jobs:
-  linux-headers:
+  model-assets:
     runs-on: ubuntu-latest
-    container: debian:trixie-slim
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - name: Download Debian 13 native development headers and dependencies
+      - name: Download only the three existing approved embedded tasks
         run: |
-          apt-get update -qq
-          apt-get install -y --download-only libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev libxcursor-dev libvulkan-dev libegl1-mesa-dev libgl1-mesa-dev libgtk-3-dev libfontconfig1-dev libdbus-1-dev
-          cd /var/cache/apt/archives
-          tar -czf /tmp/linux-dev-packages.tar.gz *.deb
+          mkdir -p models
+          curl --fail --location --output models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task
+          curl --fail --location --output models/pose_landmarker_full.task https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
+          curl --fail --location --output models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+          echo '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff  models/face_landmarker.task' | sha256sum --check
+          echo '4eaa5eb7a98365221087693fcc286334cf0858e2eb6e15b506aa4a7ecdcec4ad  models/pose_landmarker_full.task' | sha256sum --check
+          echo 'fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1  models/hand_landmarker.task' | sha256sum --check
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-dev-packages
-          path: /tmp/linux-dev-packages.tar.gz
+          name: approved-model-tasks
+          path: models/*.task
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
