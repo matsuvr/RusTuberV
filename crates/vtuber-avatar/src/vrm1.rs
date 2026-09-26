@@ -172,7 +172,10 @@ mod tests {
         let adapted = adapt_vrm1_expressions(&source).unwrap().expect("adapted");
         let expressions = expressions_of(&adapted);
         let preset = expressions["preset"].as_object().unwrap();
-        assert!(preset.contains_key("smile"), "custom must reach the preset map upstream reads");
+        assert!(
+            preset.contains_key("smile"),
+            "custom must reach the preset map upstream reads"
+        );
         let custom = expressions["custom"].as_object().unwrap();
         assert!(custom.contains_key("smile"), "custom origin record is kept");
         assert_eq!(preset["smile"]["morphTargetBinds"][0]["index"], 1);

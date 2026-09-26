@@ -781,7 +781,7 @@ fn humanoid_binding_no_repeated_lookup_after_ready() {
 fn binding_derives_expression_catalog_and_statuses_from_source_facts() {
     use vtuber_avatar::expression::material::ExpressionMaterialBinds;
     use vtuber_avatar::expression::source::{
-        MaterialColorTarget, SourceMaterialColorBind, SourceMorphBind, SourceExpressions,
+        MaterialColorTarget, SourceExpressions, SourceMaterialColorBind, SourceMorphBind,
     };
     use vtuber_avatar::{
         AvatarAssetId, ExpressionBindingStatus, SourceExpressionEntry, VrmMaterialIndex,
@@ -802,14 +802,12 @@ fn binding_derives_expression_catalog_and_statuses_from_source_facts() {
             BindTriggered,
             HeadBoneEntity(head),
             AvatarAssetId::new("facts-model"),
-            ExpressionEntityMap(
-                bevy::platform::collections::HashMap::from([
-                    (VrmExpression::from("happy"), happy),
-                    (VrmExpression::from("smile"), smile),
-                    (VrmExpression::from("hollow"), hollow),
-                    (VrmExpression::from("shadeOnly"), shade_only),
-                ]),
-            ),
+            ExpressionEntityMap(bevy::platform::collections::HashMap::from([
+                (VrmExpression::from("happy"), happy),
+                (VrmExpression::from("smile"), smile),
+                (VrmExpression::from("hollow"), hollow),
+                (VrmExpression::from("shadeOnly"), shade_only),
+            ])),
             VrmSourceExpressions(SourceExpressions {
                 entries: vec![
                     SourceExpressionEntry {
@@ -880,8 +878,7 @@ fn binding_derives_expression_catalog_and_statuses_from_source_facts() {
     // carries glTF material index 0 without an MToon material, so the
     // shadeColor bind on it is unsupported rather than resolved.
     app.world_mut().spawn((Name::new("Body"), ChildOf(root)));
-    app.world_mut()
-        .spawn((VrmMaterialIndex(0), ChildOf(root)));
+    app.world_mut().spawn((VrmMaterialIndex(0), ChildOf(root)));
 
     enter_binding(&mut app, root);
     app.update();

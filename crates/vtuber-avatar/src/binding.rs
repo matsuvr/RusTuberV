@@ -996,7 +996,11 @@ pub(crate) fn descendant_names_of(
 /// kind, preferring MToon when meshes of the same index were converted.
 pub(crate) fn resolved_material_kinds(
     root: Entity,
-    materials: &Query<(Entity, &VrmMaterialIndex, Option<&MeshMaterial3d<MToonMaterial>>)>,
+    materials: &Query<(
+        Entity,
+        &VrmMaterialIndex,
+        Option<&MeshMaterial3d<MToonMaterial>>,
+    )>,
     parents: &Query<&ChildOf>,
 ) -> HashMap<usize, crate::expression::source::MaterialKind> {
     use crate::expression::source::MaterialKind;

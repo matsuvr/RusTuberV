@@ -280,11 +280,7 @@ pub fn parse_source_expressions(document: &Value) -> SourceExpressions {
         .and_then(Value::as_object)
         .into_iter()
         .flatten()
-        .filter_map(|(name, entry)| {
-            entry
-                .as_object()
-                .map(|_| (name.clone(), entry))
-        })
+        .filter_map(|(name, entry)| entry.as_object().map(|_| (name.clone(), entry)))
         .collect();
     let mut entries: Vec<SourceExpressionEntry> = expressions
         .and_then(|value| value.get("preset"))
@@ -298,12 +294,7 @@ pub fn parse_source_expressions(document: &Value) -> SourceExpressions {
             // the `custom` section as the provenance record. Presence there
             // decides the origin; colliding names were removed at conversion
             // time, so the rule is exact.
-            parse_expression_entry(
-                name,
-                !custom.contains_key(name),
-                entry,
-                nodes,
-            )
+            parse_expression_entry(name, !custom.contains_key(name), entry, nodes)
         })
         .collect();
     entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -443,7 +434,10 @@ mod tests {
             }}}}}
         });
         let facts = parse_source_expressions(&document);
-        assert_eq!(facts.entry("blink").unwrap().morph_binds[0].node_name, "GltfNode0");
+        assert_eq!(
+            facts.entry("blink").unwrap().morph_binds[0].node_name,
+            "GltfNode0"
+        );
     }
 
     #[test]
@@ -457,7 +451,10 @@ mod tests {
         let entry = facts.entry("weird").unwrap();
         assert_eq!(entry.material_color_binds.len(), 2);
         assert_eq!(entry.material_color_binds[0].target, None);
-        assert_eq!(entry.material_color_binds[1].target, Some(MaterialColorTarget::Color));
+        assert_eq!(
+            entry.material_color_binds[1].target,
+            Some(MaterialColorTarget::Color)
+        );
     }
 
     fn status(facts: &SourceExpressions) -> ExpressionBindingStatus {
@@ -479,11 +476,8 @@ mod tests {
         })));
         assert_eq!(status(&facts).resolved_morph_bind_count, 1);
         assert!(facts.entry("unresolved").is_some());
-        let statuses = build_binding_statuses(
-            &facts,
-            |name| name == "Face",
-            |_| Some(MaterialKind::MToon),
-        );
+        let statuses =
+            build_binding_statuses(&facts, |name| name == "Face", |_| Some(MaterialKind::MToon));
         assert_eq!(statuses["unresolved"].resolved_morph_bind_count, 0);
         assert_eq!(statuses["unresolved"].declared_morph_bind_count, 1);
 

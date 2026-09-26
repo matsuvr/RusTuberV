@@ -1,8 +1,8 @@
 //! Desktop studio: navigation, settings, and an always-visible clean avatar preview.
 //! UI rendering reads snapshots and emits existing application actions.
 
-pub mod file_dialog;
 mod avatar_preview;
+pub mod file_dialog;
 mod fonts;
 mod privacy;
 pub mod shell;

@@ -2137,21 +2137,17 @@ humanoid_nodes = { hips = 0, head = 1 }
     /// exercise the R2/R3/R5 managed-copy behavior end to end.
     fn vrm0_permissions_fixture(dir: &TempDir) -> PathBuf {
         let mut root: serde_json::Value = serde_json::from_str(VRM0_GLTF_JSON).unwrap();
-        root["extensions"]["VRM"]["meta"]["allowedUserName"] =
-            serde_json::json!("OnlyAuthor");
-        root["extensions"]["VRM"]["meta"]["violentUsageName"] =
-            serde_json::json!("Disallow");
+        root["extensions"]["VRM"]["meta"]["allowedUserName"] = serde_json::json!("OnlyAuthor");
+        root["extensions"]["VRM"]["meta"]["violentUsageName"] = serde_json::json!("Disallow");
         root["extensions"]["VRM"]["meta"]["sexualUsageName"] = serde_json::json!("Allow");
-        root["extensions"]["VRM"]["meta"]["commercialUsageName"] =
-            serde_json::json!("Allow");
-        root["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"][0]
-            ["materialValues"] = serde_json::json!([
-                {
-                    "materialName": "Body",
-                    "propertyName": "_Color",
-                    "targetValue": [0.8, 0.2, 0.1, 1.0]
-                }
-            ]);
+        root["extensions"]["VRM"]["meta"]["commercialUsageName"] = serde_json::json!("Allow");
+        root["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"][0]["materialValues"] = serde_json::json!([
+            {
+                "materialName": "Body",
+                "propertyName": "_Color",
+                "targetValue": [0.8, 0.2, 0.1, 1.0]
+            }
+        ]);
         write_glb_fixture(dir, "vrm0-permissions.vrm", &root.to_string())
     }
 
@@ -2159,9 +2155,8 @@ humanoid_nodes = { hips = 0, head = 1 }
     fn import_preserves_permissions_and_material_binds_in_the_managed_copy() {
         let dir = TempDir::new().unwrap();
         let source = vrm0_permissions_fixture(&dir);
-        let imported =
-            import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
-                .expect("fixture imports");
+        let imported = import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
+            .expect("fixture imports");
         let json = stored_glb_json(&imported);
         let meta = &json["extensions"]["VRMC_vrm"]["meta"];
 
@@ -2198,9 +2193,8 @@ humanoid_nodes = { hips = 0, head = 1 }
     fn import_adapts_vrm1_custom_expressions_and_omitted_defaults() {
         let dir = TempDir::new().unwrap();
         let source = vrm1_fixture(&dir);
-        let imported =
-            import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
-                .expect("fixture imports");
+        let imported = import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
+            .expect("fixture imports");
         let json = stored_glb_json(&imported);
         let expressions = &json["extensions"]["VRMC_vrm"]["expressions"];
         let preset = expressions["preset"].as_object().unwrap();

@@ -122,7 +122,11 @@ fn inspect_initialized_vrm(
     source_facts: Query<&VrmSourceExpressions>,
     names: Query<(Entity, &Name)>,
     parents: Query<&ChildOf>,
-    materials: Query<(Entity, &VrmMaterialIndex, Option<&MeshMaterial3d<MToonMaterial>>)>,
+    materials: Query<(
+        Entity,
+        &VrmMaterialIndex,
+        Option<&MeshMaterial3d<MToonMaterial>>,
+    )>,
 ) {
     if report.root.is_some_and(|root| !all_vrms.contains(root)) {
         *report = VrmCompatibilityReport::default();
@@ -156,8 +160,8 @@ fn inspect_initialized_vrm(
         // resolution the bind step uses decide whether a morph bind is
         // effective; without facts the capability stays empty instead of
         // assuming every mapped expression works.
-        let effective_entities: Option<std::collections::HashSet<Entity>> =
-            expression_map.and_then(|map| {
+        let effective_entities: Option<std::collections::HashSet<Entity>> = expression_map
+            .and_then(|map| {
                 let facts = source_facts.get(entity).ok()?;
                 let descendant_names =
                     crate::binding::descendant_names_of(entity, &names, &parents);
@@ -180,14 +184,12 @@ fn inspect_initialized_vrm(
                         .collect(),
                 )
             });
-        report.perfect_sync = PerfectSyncCapabilities::from_map_with_effective(
-            expression_map,
-            |expression_entity| {
+        report.perfect_sync =
+            PerfectSyncCapabilities::from_map_with_effective(expression_map, |expression_entity| {
                 effective_entities
                     .as_ref()
                     .is_some_and(|effective| effective.contains(&expression_entity))
-            },
-        );
+            });
         report.warnings = source_warnings
             .map(|warnings| warnings.0.clone())
             .unwrap_or_default();

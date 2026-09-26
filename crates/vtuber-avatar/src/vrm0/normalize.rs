@@ -114,7 +114,9 @@ pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> AppRes
             modification: None,
             name: descriptor.meta.name.clone(),
             other_license_url: legacy_meta.and_then(|meta| {
-                meta.other_license_url.clone().or_else(|| meta.other_permission_url.clone())
+                meta.other_license_url
+                    .clone()
+                    .or_else(|| meta.other_permission_url.clone())
             }),
             thumbnail_image: None,
             version: None,
@@ -167,7 +169,11 @@ pub(crate) fn normalized_legacy_expressions(
     for (name, group_index, is_standard) in standards
         .into_iter()
         .map(|(name, index)| (name, index, true))
-        .chain(customs.into_iter().map(|(name, index)| (name, index, false)))
+        .chain(
+            customs
+                .into_iter()
+                .map(|(name, index)| (name, index, false)),
+        )
     {
         if preset.contains_key(&name) {
             continue;
