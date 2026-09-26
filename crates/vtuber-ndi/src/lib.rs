@@ -22,6 +22,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+
 use vtuber_core::{FrameSeq, VideoOutputFrame, VideoOutputPixelFormat, VideoOutputProfile};
 
 /// Returns whether this build includes the explicit NDI SDK backend.
@@ -29,10 +30,6 @@ use vtuber_core::{FrameSeq, VideoOutputFrame, VideoOutputPixelFormat, VideoOutpu
 pub const fn is_sdk_feature_enabled() -> bool {
     cfg!(feature = "ndi-sdk")
 }
-
-/// File names of the supported NDI Standard runtime DLLs (current and legacy).
-#[cfg(any(target_os = "windows", test))]
-const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
 
 /// Returns whether an NDI Standard runtime DLL is discoverable on this machine.
 ///
@@ -50,41 +47,6 @@ pub fn is_ndi_runtime_installed() -> bool {
     {
         true
     }
-}
-
-#[cfg(target_os = "windows")]
-fn candidate_runtime_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        dirs.push(parent.to_path_buf());
-    }
-    if let Some(sdk_dir) = std::env::var_os("NDI_SDK_DIR") {
-        let sdk_dir = std::path::PathBuf::from(sdk_dir);
-        dirs.push(sdk_dir.join("Bin").join("x64"));
-    }
-    if let Some(runtime_dir) = std::env::var_os("NDI_RUNTIME_DIR_V6") {
-        let runtime_dir = std::path::PathBuf::from(runtime_dir);
-        dirs.push(runtime_dir.join("v6"));
-        dirs.push(runtime_dir);
-    }
-    dirs.push(std::path::PathBuf::from(
-        r"C:\Program Files\NDI\NDI 6 SDK\Bin\x64",
-    ));
-    dirs.push(std::path::PathBuf::from(
-        r"C:\Program Files\NDI\NDI 6 Runtime\v6",
-    ));
-    dirs.push(std::path::PathBuf::from(
-        r"C:\Program Files\NDI\NDI 6 Runtime",
-    ));
-    dirs
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn runtime_dll_present_in(dirs: &[std::path::PathBuf], file_names: &[&str]) -> bool {
-    dirs.iter()
-        .any(|dir| file_names.iter().any(|file| dir.join(file).is_file()))
 }
 
 /// Stable error codes emitted by the optional output backend.
@@ -217,22 +179,6 @@ impl NdiOutputConfig {
     }
 }
 
-fn validate_output_profile(profile: VideoOutputProfile) -> Result<(), NdiOutputError> {
-    if profile.width == 0 || profile.height == 0 || profile.fps == 0 {
-        return Err(NdiOutputError::new(
-            NdiErrorCode::InvalidConfiguration,
-            "output width, height, and fps must be non-zero",
-        ));
-    }
-    if profile.pixel_format != VideoOutputPixelFormat::Bgra8StraightAlpha {
-        return Err(NdiOutputError::new(
-            NdiErrorCode::InvalidConfiguration,
-            "only BGRA8 straight-alpha output is supported",
-        ));
-    }
-    Ok(())
-}
-
 /// Commands understood by the backend controller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NdiOutputCommand {
@@ -362,153 +308,6 @@ pub struct NdiOutputMetrics {
     pub last_frame_seq: Option<FrameSeq>,
 }
 
-#[derive(Debug)]
-struct MetricsInner {
-    submitted_frames: AtomicU64,
-    sent_frames: AtomicU64,
-    replaced_frames: AtomicU64,
-    dropped_frames: AtomicU64,
-    rejected_frames: AtomicU64,
-    start_failures: AtomicU64,
-    last_frame_seq: AtomicU64,
-}
-
-impl Default for MetricsInner {
-    fn default() -> Self {
-        Self {
-            submitted_frames: AtomicU64::new(0),
-            sent_frames: AtomicU64::new(0),
-            replaced_frames: AtomicU64::new(0),
-            dropped_frames: AtomicU64::new(0),
-            rejected_frames: AtomicU64::new(0),
-            start_failures: AtomicU64::new(0),
-            last_frame_seq: AtomicU64::new(u64::MAX),
-        }
-    }
-}
-
-impl MetricsInner {
-    fn reset(&self) {
-        for counter in [
-            &self.submitted_frames,
-            &self.sent_frames,
-            &self.replaced_frames,
-            &self.dropped_frames,
-            &self.rejected_frames,
-            &self.start_failures,
-        ] {
-            counter.store(0, Ordering::Relaxed);
-        }
-        self.last_frame_seq.store(u64::MAX, Ordering::Relaxed);
-    }
-
-    fn snapshot(&self) -> NdiOutputMetrics {
-        let last_frame_seq = match self.last_frame_seq.load(Ordering::Relaxed) {
-            u64::MAX => None,
-            seq => Some(FrameSeq(seq)),
-        };
-        NdiOutputMetrics {
-            submitted_frames: self.submitted_frames.load(Ordering::Relaxed),
-            sent_frames: self.sent_frames.load(Ordering::Relaxed),
-            replaced_frames: self.replaced_frames.load(Ordering::Relaxed),
-            dropped_frames: self.dropped_frames.load(Ordering::Relaxed),
-            rejected_frames: self.rejected_frames.load(Ordering::Relaxed),
-            start_failures: self.start_failures.load(Ordering::Relaxed),
-            last_frame_seq,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct MailboxState {
-    latest: Option<VideoOutputFrame>,
-    closed: bool,
-}
-
-#[derive(Debug)]
-struct LatestFrameMailbox {
-    state: Mutex<MailboxState>,
-    available: Condvar,
-}
-
-impl LatestFrameMailbox {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(MailboxState {
-                latest: None,
-                closed: false,
-            }),
-            available: Condvar::new(),
-        }
-    }
-
-    fn submit(&self, frame: VideoOutputFrame) -> NdiSubmitResult {
-        let mut state = recover_lock(self.state.lock());
-        if state.closed {
-            return NdiSubmitResult::RejectedNotRunning;
-        }
-        let result = if state.latest.replace(frame).is_some() {
-            NdiSubmitResult::Replaced
-        } else {
-            NdiSubmitResult::Submitted
-        };
-        self.available.notify_one();
-        result
-    }
-
-    fn take(&self, stop_requested: impl Fn() -> bool) -> Option<VideoOutputFrame> {
-        let mut state = recover_lock(self.state.lock());
-        loop {
-            if let Some(frame) = state.latest.take() {
-                return Some(frame);
-            }
-            if state.closed || stop_requested() {
-                return None;
-            }
-            state = self
-                .available
-                .wait_timeout(state, std::time::Duration::from_millis(50))
-                .map_or_else(|poisoned| poisoned.into_inner().0, |result| result.0);
-        }
-    }
-
-    fn close(&self) -> bool {
-        let mut state = recover_lock(self.state.lock());
-        state.closed = true;
-        let discarded = state.latest.take().is_some();
-        self.available.notify_all();
-        discarded
-    }
-}
-
-fn recover_lock<T>(result: std::sync::LockResult<MutexGuard<'_, T>>) -> MutexGuard<'_, T> {
-    result.unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-#[derive(Debug)]
-struct SharedState {
-    status: Mutex<NdiOutputStatus>,
-    mailbox: Mutex<Option<Arc<LatestFrameMailbox>>>,
-    metrics: MetricsInner,
-}
-
-impl SharedState {
-    fn status(&self) -> NdiOutputStatus {
-        recover_lock(self.status.lock()).clone()
-    }
-
-    fn set_status(&self, status: NdiOutputStatus) {
-        *recover_lock(self.status.lock()) = status;
-    }
-
-    fn replace_status_error(&self, error: &NdiOutputError) {
-        self.set_status(NdiOutputStatus::Error {
-            code: error.code,
-            message: error.message.clone(),
-        });
-    }
-}
-
 /// Deterministic in-process sender used by tests and orchestration harnesses.
 ///
 /// This backend never loads the NDI SDK or performs network I/O. Production
@@ -517,23 +316,6 @@ impl SharedState {
 /// Used by app integration tests without an installed native NDI SDK.
 pub struct NdiScriptedBackend {
     inner: Arc<ScriptedInner>,
-}
-
-#[derive(Debug)]
-struct ScriptedInner {
-    init_error: Option<NdiErrorCode>,
-    create_error: Option<NdiErrorCode>,
-    startup_allowed: Mutex<bool>,
-    startup_allowed_signal: Condvar,
-    ready: Mutex<bool>,
-    ready_signal: Condvar,
-    send_allowed: Mutex<bool>,
-    send_allowed_signal: Condvar,
-    send_waiting: Mutex<bool>,
-    send_waiting_signal: Condvar,
-    connections: std::sync::atomic::AtomicU32,
-    sent_frames: AtomicU64,
-    live_senders: AtomicU64,
 }
 
 impl NdiScriptedBackend {
@@ -669,28 +451,6 @@ impl NdiScriptedBackend {
         self.inner.sent_frames.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-}
-
-struct ScriptedSenderGuard {
-    backend: NdiScriptedBackend,
-}
-
-impl Drop for ScriptedSenderGuard {
-    fn drop(&mut self) {
-        self.backend
-            .inner
-            .live_senders
-            .fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-#[derive(Clone, Debug)]
-enum ControllerBackend {
-    #[cfg(not(feature = "ndi-sdk"))]
-    FeatureDisabled,
-    Scripted(NdiScriptedBackend),
-    #[cfg(feature = "ndi-sdk")]
-    Sdk,
 }
 
 /// Owns at most one sender worker and its bounded latest-frame mailbox.
@@ -983,6 +743,247 @@ impl Drop for NdiOutputController {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+/// File names of the supported NDI Standard runtime DLLs (current and legacy).
+#[cfg(any(target_os = "windows", test))]
+const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
+
+#[cfg(target_os = "windows")]
+fn candidate_runtime_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        dirs.push(parent.to_path_buf());
+    }
+    if let Some(sdk_dir) = std::env::var_os("NDI_SDK_DIR") {
+        let sdk_dir = std::path::PathBuf::from(sdk_dir);
+        dirs.push(sdk_dir.join("Bin").join("x64"));
+    }
+    if let Some(runtime_dir) = std::env::var_os("NDI_RUNTIME_DIR_V6") {
+        let runtime_dir = std::path::PathBuf::from(runtime_dir);
+        dirs.push(runtime_dir.join("v6"));
+        dirs.push(runtime_dir);
+    }
+    dirs.push(std::path::PathBuf::from(
+        r"C:\Program Files\NDI\NDI 6 SDK\Bin\x64",
+    ));
+    dirs.push(std::path::PathBuf::from(
+        r"C:\Program Files\NDI\NDI 6 Runtime\v6",
+    ));
+    dirs.push(std::path::PathBuf::from(
+        r"C:\Program Files\NDI\NDI 6 Runtime",
+    ));
+    dirs
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn runtime_dll_present_in(dirs: &[std::path::PathBuf], file_names: &[&str]) -> bool {
+    dirs.iter()
+        .any(|dir| file_names.iter().any(|file| dir.join(file).is_file()))
+}
+
+fn validate_output_profile(profile: VideoOutputProfile) -> Result<(), NdiOutputError> {
+    if profile.width == 0 || profile.height == 0 || profile.fps == 0 {
+        return Err(NdiOutputError::new(
+            NdiErrorCode::InvalidConfiguration,
+            "output width, height, and fps must be non-zero",
+        ));
+    }
+    if profile.pixel_format != VideoOutputPixelFormat::Bgra8StraightAlpha {
+        return Err(NdiOutputError::new(
+            NdiErrorCode::InvalidConfiguration,
+            "only BGRA8 straight-alpha output is supported",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct MetricsInner {
+    submitted_frames: AtomicU64,
+    sent_frames: AtomicU64,
+    replaced_frames: AtomicU64,
+    dropped_frames: AtomicU64,
+    rejected_frames: AtomicU64,
+    start_failures: AtomicU64,
+    last_frame_seq: AtomicU64,
+}
+
+impl Default for MetricsInner {
+    fn default() -> Self {
+        Self {
+            submitted_frames: AtomicU64::new(0),
+            sent_frames: AtomicU64::new(0),
+            replaced_frames: AtomicU64::new(0),
+            dropped_frames: AtomicU64::new(0),
+            rejected_frames: AtomicU64::new(0),
+            start_failures: AtomicU64::new(0),
+            last_frame_seq: AtomicU64::new(u64::MAX),
+        }
+    }
+}
+
+impl MetricsInner {
+    fn reset(&self) {
+        for counter in [
+            &self.submitted_frames,
+            &self.sent_frames,
+            &self.replaced_frames,
+            &self.dropped_frames,
+            &self.rejected_frames,
+            &self.start_failures,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        self.last_frame_seq.store(u64::MAX, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> NdiOutputMetrics {
+        let last_frame_seq = match self.last_frame_seq.load(Ordering::Relaxed) {
+            u64::MAX => None,
+            seq => Some(FrameSeq(seq)),
+        };
+        NdiOutputMetrics {
+            submitted_frames: self.submitted_frames.load(Ordering::Relaxed),
+            sent_frames: self.sent_frames.load(Ordering::Relaxed),
+            replaced_frames: self.replaced_frames.load(Ordering::Relaxed),
+            dropped_frames: self.dropped_frames.load(Ordering::Relaxed),
+            rejected_frames: self.rejected_frames.load(Ordering::Relaxed),
+            start_failures: self.start_failures.load(Ordering::Relaxed),
+            last_frame_seq,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MailboxState {
+    latest: Option<VideoOutputFrame>,
+    closed: bool,
+}
+
+#[derive(Debug)]
+struct LatestFrameMailbox {
+    state: Mutex<MailboxState>,
+    available: Condvar,
+}
+
+impl LatestFrameMailbox {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(MailboxState {
+                latest: None,
+                closed: false,
+            }),
+            available: Condvar::new(),
+        }
+    }
+
+    fn submit(&self, frame: VideoOutputFrame) -> NdiSubmitResult {
+        let mut state = recover_lock(self.state.lock());
+        if state.closed {
+            return NdiSubmitResult::RejectedNotRunning;
+        }
+        let result = if state.latest.replace(frame).is_some() {
+            NdiSubmitResult::Replaced
+        } else {
+            NdiSubmitResult::Submitted
+        };
+        self.available.notify_one();
+        result
+    }
+
+    fn take(&self, stop_requested: impl Fn() -> bool) -> Option<VideoOutputFrame> {
+        let mut state = recover_lock(self.state.lock());
+        loop {
+            if let Some(frame) = state.latest.take() {
+                return Some(frame);
+            }
+            if state.closed || stop_requested() {
+                return None;
+            }
+            state = self
+                .available
+                .wait_timeout(state, std::time::Duration::from_millis(50))
+                .map_or_else(|poisoned| poisoned.into_inner().0, |result| result.0);
+        }
+    }
+
+    fn close(&self) -> bool {
+        let mut state = recover_lock(self.state.lock());
+        state.closed = true;
+        let discarded = state.latest.take().is_some();
+        self.available.notify_all();
+        discarded
+    }
+}
+
+fn recover_lock<T>(result: std::sync::LockResult<MutexGuard<'_, T>>) -> MutexGuard<'_, T> {
+    result.unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Debug)]
+struct SharedState {
+    status: Mutex<NdiOutputStatus>,
+    mailbox: Mutex<Option<Arc<LatestFrameMailbox>>>,
+    metrics: MetricsInner,
+}
+
+impl SharedState {
+    fn status(&self) -> NdiOutputStatus {
+        recover_lock(self.status.lock()).clone()
+    }
+
+    fn set_status(&self, status: NdiOutputStatus) {
+        *recover_lock(self.status.lock()) = status;
+    }
+
+    fn replace_status_error(&self, error: &NdiOutputError) {
+        self.set_status(NdiOutputStatus::Error {
+            code: error.code,
+            message: error.message.clone(),
+        });
+    }
+}
+
+#[derive(Debug)]
+struct ScriptedInner {
+    init_error: Option<NdiErrorCode>,
+    create_error: Option<NdiErrorCode>,
+    startup_allowed: Mutex<bool>,
+    startup_allowed_signal: Condvar,
+    ready: Mutex<bool>,
+    ready_signal: Condvar,
+    send_allowed: Mutex<bool>,
+    send_allowed_signal: Condvar,
+    send_waiting: Mutex<bool>,
+    send_waiting_signal: Condvar,
+    connections: std::sync::atomic::AtomicU32,
+    sent_frames: AtomicU64,
+    live_senders: AtomicU64,
+}
+
+struct ScriptedSenderGuard {
+    backend: NdiScriptedBackend,
+}
+
+impl Drop for ScriptedSenderGuard {
+    fn drop(&mut self) {
+        self.backend
+            .inner
+            .live_senders
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ControllerBackend {
+    #[cfg(not(feature = "ndi-sdk"))]
+    FeatureDisabled,
+    Scripted(NdiScriptedBackend),
+    #[cfg(feature = "ndi-sdk")]
+    Sdk,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

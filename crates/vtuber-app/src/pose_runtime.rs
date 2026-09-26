@@ -358,7 +358,7 @@ fn log_pose_frame(frame: &PoseArmFrame, file: &mut Option<std::fs::File>) {
 
 /// Applies the persisted arm-tracking switch at startup.
 pub fn restore_pose_settings_system(
-    settings: Res<crate::settings::ArmPoseSettings>,
+    settings: Res<crate::settings::AppSettings>,
     mut pose: ResMut<PoseRuntime>,
 ) {
     pose.set_enabled(settings.arm_tracking_enabled());

@@ -11,16 +11,16 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::{Res, ResMut, Resource};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-
-use crate::expression_keys::{ExpressionBindingStore, ExpressionBindings};
 use vtuber_avatar::{
     ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride, RichLookSettings,
 };
 
+use crate::expression_keys::{ExpressionBindingStore, ExpressionBindings};
+
 /// Version of the application settings document.
-pub const ARM_POSE_SETTINGS_SCHEMA_VERSION: u32 = 1;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
 /// File name used in the per-user application configuration directory.
-pub const ARM_POSE_SETTINGS_FILE_NAME: &str = "settings.toml";
+pub const SETTINGS_FILE_NAME: &str = "settings.toml";
 
 /// UI language. Japanese is the initial choice, independent of the OS locale.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ impl UiLanguage {
 
 /// Application resource that owns the persistent settings document location.
 #[derive(Resource, Clone, Debug, PartialEq)]
-pub struct ArmPoseSettings {
+pub struct AppSettings {
     path: Option<PathBuf>,
     restored: ArmPoseOverrideStore,
     /// Model whose look was restored, including CLI startup loads.
@@ -64,7 +64,7 @@ pub struct ArmPoseSettings {
     arm_tracking_enabled: bool,
 }
 
-impl Default for ArmPoseSettings {
+impl Default for AppSettings {
     fn default() -> Self {
         Self {
             path: default_settings_path(),
@@ -77,21 +77,21 @@ impl Default for ArmPoseSettings {
     }
 }
 
-impl ArmPoseSettings {
+impl AppSettings {
     /// Loads settings from an explicit path, reading the document once.
     ///
     /// A missing file yields the initial values. Every other I/O failure,
     /// malformed TOML, or unknown schema version is an error; the file is left
     /// untouched and the caller reports it instead of starting from replaced
     /// settings.
-    pub fn load(path: impl Into<PathBuf>) -> Result<Self, ArmPoseSettingsError> {
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self, SettingsError> {
         let path = path.into();
         let document = read_settings_document(&path)?;
         restore_settings_document(document, path)
     }
 
     /// Loads settings from the platform user configuration directory.
-    pub fn load_default() -> Result<Self, ArmPoseSettingsError> {
+    pub fn load_default() -> Result<Self, SettingsError> {
         match default_settings_path() {
             Some(path) => Self::load(path),
             None => Ok(Self::default()),
@@ -123,9 +123,9 @@ impl ArmPoseSettings {
     }
 
     /// Saves the current validated avatar store.
-    pub fn save(&self, store: &ArmPoseOverrideStore) -> Result<(), ArmPoseSettingsError> {
+    pub fn save(&self, store: &ArmPoseOverrideStore) -> Result<(), SettingsError> {
         let Some(path) = &self.path else {
-            return Err(ArmPoseSettingsError::NoConfigDirectory);
+            return Err(SettingsError::NoConfigDirectory);
         };
         save_arm_pose_overrides(path, store)
     }
@@ -140,22 +140,19 @@ impl ArmPoseSettings {
     pub fn save_expression_bindings(
         &self,
         store: &ExpressionBindingStore,
-    ) -> Result<(), ArmPoseSettingsError> {
+    ) -> Result<(), SettingsError> {
         let Some(path) = &self.path else {
-            return Err(ArmPoseSettingsError::NoConfigDirectory);
+            return Err(SettingsError::NoConfigDirectory);
         };
         save_expression_bindings(path, store)
     }
 
     /// Returns the selected model's look; a model without an entry starts OFF.
-    pub(crate) fn rich_look_for(
-        &self,
-        model_id: &str,
-    ) -> Result<RichLookSettings, ArmPoseSettingsError> {
+    pub(crate) fn rich_look_for(&self, model_id: &str) -> Result<RichLookSettings, SettingsError> {
         let path = self
             .path
             .as_deref()
-            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+            .ok_or(SettingsError::NoConfigDirectory)?;
         Ok(load_rich_look_settings(path)?
             .get(model_id)
             .copied()
@@ -168,11 +165,11 @@ impl ArmPoseSettings {
         &self,
         model_id: String,
         settings: RichLookSettings,
-    ) -> Result<(), ArmPoseSettingsError> {
+    ) -> Result<(), SettingsError> {
         let path = self
             .path
             .as_deref()
-            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+            .ok_or(SettingsError::NoConfigDirectory)?;
         save_rich_look_settings(path, model_id, settings)
     }
 
@@ -185,11 +182,11 @@ impl ArmPoseSettings {
     /// Persists the UI language and applies it to this resource.
     ///
     /// The in-memory value changes only after the file was written.
-    pub fn set_language(&mut self, language: UiLanguage) -> Result<(), ArmPoseSettingsError> {
+    pub fn set_language(&mut self, language: UiLanguage) -> Result<(), SettingsError> {
         let path = self
             .path
             .as_deref()
-            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+            .ok_or(SettingsError::NoConfigDirectory)?;
         save_language(path, language)?;
         self.language = language;
         Ok(())
@@ -204,11 +201,11 @@ impl ArmPoseSettings {
     /// Persists the observed arm-tracking switch.
     ///
     /// The in-memory value changes only after the file was written.
-    pub fn set_arm_tracking_enabled(&mut self, enabled: bool) -> Result<(), ArmPoseSettingsError> {
+    pub fn set_arm_tracking_enabled(&mut self, enabled: bool) -> Result<(), SettingsError> {
         let path = self
             .path
             .as_deref()
-            .ok_or(ArmPoseSettingsError::NoConfigDirectory)?;
+            .ok_or(SettingsError::NoConfigDirectory)?;
         save_arm_tracking_enabled(path, enabled)?;
         self.arm_tracking_enabled = enabled;
         Ok(())
@@ -217,7 +214,7 @@ impl ArmPoseSettings {
 
 /// Copies validated startup settings into the avatar resource.
 pub(crate) fn restore_arm_pose_settings_system(
-    settings: Res<ArmPoseSettings>,
+    settings: Res<AppSettings>,
     mut overrides: Option<bevy::prelude::ResMut<ArmPoseOverrideStore>>,
 ) {
     let Some(overrides) = overrides.as_deref_mut() else {
@@ -232,7 +229,7 @@ pub(crate) fn restore_arm_pose_settings_system(
 
 /// Copies startup expression bindings into the runtime store.
 pub(crate) fn restore_expression_binding_settings_system(
-    settings: Res<ArmPoseSettings>,
+    settings: Res<AppSettings>,
     mut store: ResMut<ExpressionBindingStore>,
 ) {
     store.replace_entries(
@@ -246,8 +243,7 @@ pub(crate) fn restore_expression_binding_settings_system(
 /// Returns the application settings path for the current platform.
 #[must_use]
 pub fn default_settings_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "RusTuberV")
-        .map(|dirs| dirs.config_dir().join(ARM_POSE_SETTINGS_FILE_NAME))
+    ProjectDirs::from("", "", "RusTuberV").map(|dirs| dirs.config_dir().join(SETTINGS_FILE_NAME))
 }
 
 /// File name of the optional validated eye-closure profile.
@@ -310,7 +306,7 @@ pub fn load_eye_closure_thresholds(
 /// # Errors
 ///
 /// Propagates every settings read, parse, and schema failure.
-pub fn load_language(path: &Path) -> Result<UiLanguage, ArmPoseSettingsError> {
+pub fn load_language(path: &Path) -> Result<UiLanguage, SettingsError> {
     Ok(read_settings_document(path)?.language)
 }
 
@@ -320,7 +316,7 @@ pub fn load_language(path: &Path) -> Result<UiLanguage, ArmPoseSettingsError> {
 ///
 /// Propagates every read, schema, encode, and write failure; the previous
 /// bytes are kept.
-pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSettingsError> {
+pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.language = language;
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
@@ -331,7 +327,7 @@ pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), ArmPoseSet
 /// # Errors
 ///
 /// Propagates every settings read, parse, and schema failure.
-pub fn load_arm_tracking_enabled(path: &Path) -> Result<bool, ArmPoseSettingsError> {
+pub fn load_arm_tracking_enabled(path: &Path) -> Result<bool, SettingsError> {
     Ok(read_settings_document(path)?.arm_tracking_enabled)
 }
 
@@ -341,7 +337,7 @@ pub fn load_arm_tracking_enabled(path: &Path) -> Result<bool, ArmPoseSettingsErr
 ///
 /// Propagates every read, schema, encode, and write failure; the previous
 /// bytes are kept.
-pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), ArmPoseSettingsError> {
+pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.arm_tracking_enabled = enabled;
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
@@ -352,9 +348,7 @@ pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), ArmPo
 /// # Errors
 ///
 /// Propagates every read, parse, schema, and duplicate-assignment failure.
-pub fn load_expression_bindings(
-    path: &Path,
-) -> Result<ExpressionBindingStore, ArmPoseSettingsError> {
+pub fn load_expression_bindings(path: &Path) -> Result<ExpressionBindingStore, SettingsError> {
     expression_store(read_settings_document(path)?.expression_bindings)
 }
 
@@ -368,7 +362,7 @@ pub fn load_expression_bindings(
 pub fn save_expression_bindings(
     path: &Path,
     store: &ExpressionBindingStore,
-) -> Result<(), ArmPoseSettingsError> {
+) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.expression_bindings = store
         .entries()
@@ -383,7 +377,7 @@ pub fn save_expression_bindings(
 ///
 /// Propagates every read, parse, and schema failure, and rejects a document
 /// whose arm-pose entries cannot all be validated.
-pub fn load_arm_pose_overrides(path: &Path) -> Result<ArmPoseOverrideStore, ArmPoseSettingsError> {
+pub fn load_arm_pose_overrides(path: &Path) -> Result<ArmPoseOverrideStore, SettingsError> {
     let document = read_settings_document(path)?;
     arm_store(document.arm_pose_overrides, document.dynamic_arm_profiles)
 }
@@ -397,7 +391,7 @@ pub fn load_arm_pose_overrides(path: &Path) -> Result<ArmPoseOverrideStore, ArmP
 pub fn save_arm_pose_overrides(
     path: &Path,
     store: &ArmPoseOverrideStore,
-) -> Result<(), ArmPoseSettingsError> {
+) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.arm_pose_overrides = store
         .entries()
@@ -417,7 +411,7 @@ pub fn save_arm_pose_overrides(
 
 fn load_rich_look_settings(
     path: &Path,
-) -> Result<BTreeMap<String, RichLookSettings>, ArmPoseSettingsError> {
+) -> Result<BTreeMap<String, RichLookSettings>, SettingsError> {
     Ok(read_settings_document(path)?.rich_look)
 }
 
@@ -425,7 +419,7 @@ fn save_rich_look_settings(
     path: &Path,
     model_id: String,
     settings: RichLookSettings,
-) -> Result<(), ArmPoseSettingsError> {
+) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.rich_look.insert(model_id, settings);
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
@@ -433,14 +427,14 @@ fn save_rich_look_settings(
 
 /// Builds the startup resource from one already-validated document.
 fn restore_settings_document(
-    document: ArmPoseSettingsDocument,
+    document: SettingsDocument,
     path: PathBuf,
-) -> Result<ArmPoseSettings, ArmPoseSettingsError> {
+) -> Result<AppSettings, SettingsError> {
     let language = document.language;
     let arm_tracking_enabled = document.arm_tracking_enabled;
     let restored_expression_bindings = expression_store(document.expression_bindings)?;
     let restored = arm_store(document.arm_pose_overrides, document.dynamic_arm_profiles)?;
-    Ok(ArmPoseSettings {
+    Ok(AppSettings {
         path: Some(path),
         restored,
         look_model_id: None,
@@ -451,9 +445,9 @@ fn restore_settings_document(
 }
 
 /// Returns the document that represents "nothing saved yet".
-fn empty_settings_document() -> ArmPoseSettingsDocument {
-    ArmPoseSettingsDocument {
-        schema_version: ARM_POSE_SETTINGS_SCHEMA_VERSION,
+fn empty_settings_document() -> SettingsDocument {
+    SettingsDocument {
+        schema_version: SETTINGS_SCHEMA_VERSION,
         language: UiLanguage::default(),
         arm_tracking_enabled: false,
         arm_pose_overrides: BTreeMap::new(),
@@ -467,10 +461,10 @@ fn empty_settings_document() -> ArmPoseSettingsDocument {
 ///
 /// An unknown version is refused instead of being rewritten, so no writer can
 /// save a newer document in the older format.
-fn parse_settings_document(text: &str) -> Result<ArmPoseSettingsDocument, ArmPoseSettingsError> {
-    let document: ArmPoseSettingsDocument = toml::from_str(text)?;
-    if document.schema_version != ARM_POSE_SETTINGS_SCHEMA_VERSION {
-        return Err(ArmPoseSettingsError::UnsupportedSchema {
+fn parse_settings_document(text: &str) -> Result<SettingsDocument, SettingsError> {
+    let document: SettingsDocument = toml::from_str(text)?;
+    if document.schema_version != SETTINGS_SCHEMA_VERSION {
+        return Err(SettingsError::UnsupportedSchema {
             version: document.schema_version,
         });
     }
@@ -481,7 +475,7 @@ fn parse_settings_document(text: &str) -> Result<ArmPoseSettingsDocument, ArmPos
 ///
 /// Only a missing file becomes the initial document; every other I/O failure
 /// and every unknown schema version is an error.
-fn read_settings_document(path: &Path) -> Result<ArmPoseSettingsDocument, ArmPoseSettingsError> {
+fn read_settings_document(path: &Path) -> Result<SettingsDocument, SettingsError> {
     match fs::read_to_string(path) {
         Ok(text) => parse_settings_document(&text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(empty_settings_document()),
@@ -492,10 +486,10 @@ fn read_settings_document(path: &Path) -> Result<ArmPoseSettingsDocument, ArmPos
 /// Validates persisted expression assignments, rejecting duplicates.
 fn expression_store(
     bindings: BTreeMap<String, ExpressionBindings>,
-) -> Result<ExpressionBindingStore, ArmPoseSettingsError> {
+) -> Result<ExpressionBindingStore, SettingsError> {
     for (model_id, bindings) in &bindings {
         if bindings.has_duplicate_expressions() {
-            return Err(ArmPoseSettingsError::InvalidExpressionBinding {
+            return Err(SettingsError::InvalidExpressionBinding {
                 model_id: model_id.clone(),
             });
         }
@@ -509,7 +503,7 @@ fn expression_store(
 fn arm_store(
     arm_pose_overrides: BTreeMap<String, PersistedArmPoseProfile>,
     dynamic_arm_profiles: BTreeMap<String, PersistedDynamicArmProfile>,
-) -> Result<ArmPoseOverrideStore, ArmPoseSettingsError> {
+) -> Result<ArmPoseOverrideStore, SettingsError> {
     let expected = arm_pose_overrides.len();
     let mut store = ArmPoseOverrideStore::default();
     let accepted = store.import_entries(
@@ -518,7 +512,7 @@ fn arm_store(
             .map(|(model_id, profile)| (model_id, profile.into_runtime())),
     );
     if accepted != expected {
-        return Err(ArmPoseSettingsError::InvalidEntry);
+        return Err(SettingsError::InvalidEntry);
     }
     // Existing settings policy: invalid dynamic entries are ignored by the store.
     store.import_dynamic_entries(
@@ -535,7 +529,7 @@ fn arm_store(
 /// The existing file is never deleted up front: a failed write or replacement
 /// leaves the previous bytes in place, and unique temporary names keep
 /// concurrent saves from clobbering each other's scratch file.
-fn write_settings_atomically(path: &Path, text: &str) -> Result<(), ArmPoseSettingsError> {
+fn write_settings_atomically(path: &Path, text: &str) -> Result<(), SettingsError> {
     use std::io::Write as _;
     use tempfile::NamedTempFile;
 
@@ -550,12 +544,12 @@ fn write_settings_atomically(path: &Path, text: &str) -> Result<(), ArmPoseSetti
     temporary.write_all(text.as_bytes())?;
     temporary
         .persist(path)
-        .map_err(|persist_error| ArmPoseSettingsError::Io(persist_error.error))?;
+        .map_err(|persist_error| SettingsError::Io(persist_error.error))?;
     Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ArmPoseSettingsDocument {
+struct SettingsDocument {
     schema_version: u32,
     #[serde(default)]
     language: UiLanguage,
@@ -659,7 +653,7 @@ impl PersistedArmPoseProfile {
 
 /// Errors returned by the settings boundary.
 #[derive(Debug, thiserror::Error)]
-pub enum ArmPoseSettingsError {
+pub enum SettingsError {
     /// No user config directory.
     #[error("no user configuration directory is available")]
     NoConfigDirectory,
@@ -699,7 +693,7 @@ mod tests {
     #[test]
     fn atomically_replaces_existing_file_with_the_second_content() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         write_settings_atomically(&path, "schema_version = 1\n").expect("first save");
         write_settings_atomically(&path, "schema_version = 1\nlanguage = \"en\"\n")
             .expect("second save");
@@ -712,11 +706,11 @@ mod tests {
     #[test]
     fn failed_save_keeps_the_existing_bytes() {
         let directory = tempdir().expect("temporary settings directory");
-        let original = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let original = directory.path().join(SETTINGS_FILE_NAME);
         fs::write(&original, "schema_version = 1\n").unwrap();
         // `original` is a file, so a path nested under it cannot resolve a
         // save directory and the write must fail without touching it.
-        let nested = original.join(ARM_POSE_SETTINGS_FILE_NAME);
+        let nested = original.join(SETTINGS_FILE_NAME);
         assert!(write_settings_atomically(&nested, "schema_version = 2\n").is_err());
         assert_eq!(
             fs::read_to_string(&original).expect("settings readable"),
@@ -734,7 +728,7 @@ mod tests {
     #[test]
     fn rich_look_and_every_other_writer_preserve_each_other() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         let id = AvatarAssetId::new("sha256:first");
         let zero = RichLookSettings::try_new(true, 0.0).unwrap();
         let half = RichLookSettings::try_new(false, 0.5).unwrap();
@@ -771,7 +765,7 @@ mod tests {
         assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
         save_expression_bindings(&path, &expressions).unwrap();
         assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
-        let restarted = ArmPoseSettings::load(&path).unwrap();
+        let restarted = AppSettings::load(&path).unwrap();
         assert_eq!(restarted.rich_look_for(&id.0).unwrap(), zero);
         assert_eq!(restarted.rich_look_for("sha256:second").unwrap(), half);
         assert_eq!(
@@ -783,7 +777,7 @@ mod tests {
     #[test]
     fn rich_look_missing_section_defaults_but_invalid_files_return_errors() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         assert!(load_rich_look_settings(&path).unwrap().is_empty());
         fs::write(&path, "schema_version = 1\nlanguage = 'en'\n").unwrap();
         assert!(load_rich_look_settings(&path).unwrap().is_empty());
@@ -806,13 +800,13 @@ mod tests {
     #[test]
     fn invalid_rich_strength_prevents_load_and_save_without_replacing_bytes() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         for strength in ["-0.1", "1.1", "nan", "inf", "-inf"] {
             let text = format!(
                 "schema_version = 1\n[rich_look.model]\nenabled = false\nstrength = {strength}\n"
             );
             fs::write(&path, &text).unwrap();
-            assert!(ArmPoseSettings::load(&path).is_err());
+            assert!(AppSettings::load(&path).is_err());
             assert!(load_rich_look_settings(&path).is_err());
             assert!(save_language(&path, UiLanguage::En).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), text);
@@ -822,7 +816,7 @@ mod tests {
     #[test]
     fn a_stale_material_roles_section_is_ignored() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         fs::write(
             &path,
             "schema_version = 1\n\
@@ -834,7 +828,7 @@ mod tests {
              strength = 0.5\n",
         )
         .unwrap();
-        let restarted = ArmPoseSettings::load(&path).unwrap();
+        let restarted = AppSettings::load(&path).unwrap();
         assert_eq!(
             restarted.rich_look_for("sha256:first").unwrap(),
             RichLookSettings::try_new(true, 0.5).unwrap()
@@ -844,7 +838,7 @@ mod tests {
     #[test]
     fn round_trip_and_restart_equivalent_load_restore_model_local_overrides() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         let first = AvatarAssetId::new("sha256:first");
         let second = AvatarAssetId::new("sha256:second");
         let mut store = ArmPoseOverrideStore::default();
@@ -865,7 +859,7 @@ mod tests {
     #[test]
     fn reset_persists_only_the_selected_model() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         let first = AvatarAssetId::new("first");
         let second = AvatarAssetId::new("second");
         let mut store = ArmPoseOverrideStore::default();
@@ -881,7 +875,7 @@ mod tests {
     #[test]
     fn ui_language_round_trips_and_defaults_to_japanese() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         assert_eq!(load_language(&path).unwrap(), UiLanguage::Ja);
         for language in [
             UiLanguage::Ja,
@@ -894,13 +888,13 @@ mod tests {
             save_arm_pose_overrides(&path, &ArmPoseOverrideStore::default())
                 .expect("settings save");
             assert_eq!(load_language(&path).unwrap(), language);
-            assert_eq!(ArmPoseSettings::load(&path).unwrap().language(), language);
+            assert_eq!(AppSettings::load(&path).unwrap().language(), language);
         }
     }
 
     #[test]
     fn old_settings_without_a_language_start_in_japanese() {
-        let document: ArmPoseSettingsDocument = toml::from_str("schema_version = 1\n").unwrap();
+        let document: SettingsDocument = toml::from_str("schema_version = 1\n").unwrap();
         assert_eq!(document.language, UiLanguage::Ja);
     }
 
@@ -930,7 +924,7 @@ mod tests {
     #[test]
     fn expression_bindings_round_trip_and_distinguish_saved_empty() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         let mut store = ExpressionBindingStore::default();
         store.set(
             "sha256:first".into(),
@@ -969,7 +963,7 @@ mod tests {
     #[test]
     fn every_settings_writer_preserves_expression_bindings() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         let first = AvatarAssetId::new("sha256:first");
 
         save_language(&path, UiLanguage::En).expect("language save");
@@ -982,7 +976,7 @@ mod tests {
         // Reverse order: language last.
         save_language(&path, UiLanguage::Ko).expect("language save");
 
-        let restored = ArmPoseSettings::load(&path).unwrap();
+        let restored = AppSettings::load(&path).unwrap();
         assert_eq!(restored.language(), UiLanguage::Ko);
         let restored_arm = load_arm_pose_overrides(&path).expect("arm reload");
         assert_eq!(
@@ -1002,7 +996,7 @@ mod tests {
     #[test]
     fn expression_settings_keep_other_models_and_sections() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         save_language(&path, UiLanguage::Zh).expect("language save");
         let mut store = ExpressionBindingStore::default();
         store.set("a".into(), bindings(&[(ExpressionKey::Digit1, "happy")]));
@@ -1030,7 +1024,7 @@ mod tests {
     #[test]
     fn old_settings_without_expression_section_load_defaults() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         fs::write(&path, "schema_version = 1\nlanguage = \"ja\"\n").unwrap();
         let restored = load_expression_bindings(&path).expect("old settings parse");
         assert!(restored.is_empty());
@@ -1039,7 +1033,7 @@ mod tests {
     #[test]
     fn duplicate_expression_assignments_are_rejected() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         fs::write(
             &path,
             "schema_version = 1\n[expression_bindings.\"model\".keys]\nDigit1 = \"happy\"\nDigit2 = \"happy\"\n",
@@ -1047,14 +1041,14 @@ mod tests {
         .unwrap();
         assert!(matches!(
             load_expression_bindings(&path),
-            Err(ArmPoseSettingsError::InvalidExpressionBinding { .. })
+            Err(SettingsError::InvalidExpressionBinding { .. })
         ));
     }
 
     #[test]
     fn unknown_expression_key_is_a_typed_error() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         fs::write(
             &path,
             "schema_version = 1\n[expression_bindings.\"model\".keys]\nNumpad1 = \"happy\"\n",
@@ -1066,7 +1060,7 @@ mod tests {
     #[test]
     fn unknown_schema_makes_every_writer_refuse_and_keep_the_bytes() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         let foreign = "schema_version = 99\nlanguage = 'en'\n";
         fs::write(&path, foreign).unwrap();
         let mut arms = ArmPoseOverrideStore::default();
@@ -1086,18 +1080,18 @@ mod tests {
         ] {
             assert!(matches!(
                 result,
-                Err(ArmPoseSettingsError::UnsupportedSchema { version: 99 })
+                Err(SettingsError::UnsupportedSchema { version: 99 })
             ));
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), foreign);
-        assert!(ArmPoseSettings::load(&path).is_err());
+        assert!(AppSettings::load(&path).is_err());
         assert!(!path.with_extension("toml.invalid").exists());
     }
 
     #[test]
     fn unknown_malformed_and_invalid_values_are_errors_that_keep_the_file() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         for invalid in [
             "schema_version = 99\n",
             "this is not valid TOML = [",
@@ -1106,7 +1100,7 @@ mod tests {
         ] {
             fs::write(&path, invalid).unwrap();
             assert!(load_arm_pose_overrides(&path).is_err());
-            assert!(ArmPoseSettings::load(&path).is_err());
+            assert!(AppSettings::load(&path).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
             assert!(!path.with_extension("toml.invalid").exists());
         }
@@ -1116,8 +1110,8 @@ mod tests {
     #[test]
     fn a_missing_document_starts_from_the_initial_values() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
-        let loaded = ArmPoseSettings::load(&path).expect("missing settings are initial values");
+        let path = directory.path().join(SETTINGS_FILE_NAME);
+        let loaded = AppSettings::load(&path).expect("missing settings are initial values");
         assert_eq!(loaded.language(), UiLanguage::default());
         assert!(!loaded.arm_tracking_enabled());
         assert_eq!(loaded.restored_entries().count(), 0);
@@ -1129,11 +1123,11 @@ mod tests {
     #[test]
     fn a_set_without_a_writable_destination_keeps_the_memory_value() {
         let directory = tempdir().expect("temporary settings directory");
-        let blocked = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let blocked = directory.path().join(SETTINGS_FILE_NAME);
         fs::write(&blocked, "schema_version = 1\n").unwrap();
         // A path nested under an existing file has no save directory, so the
         // read reports a missing document and the write then fails.
-        let mut unwritable = ArmPoseSettings::empty_at(blocked.join(ARM_POSE_SETTINGS_FILE_NAME));
+        let mut unwritable = AppSettings::empty_at(blocked.join(SETTINGS_FILE_NAME));
         assert!(unwritable.set_language(UiLanguage::Ko).is_err());
         assert!(unwritable.set_arm_tracking_enabled(true).is_err());
         assert_eq!(unwritable.language(), UiLanguage::Ja);
@@ -1143,17 +1137,17 @@ mod tests {
             "schema_version = 1\n"
         );
 
-        let mut without_directory = ArmPoseSettings {
+        let mut without_directory = AppSettings {
             path: None,
-            ..ArmPoseSettings::default()
+            ..AppSettings::default()
         };
         assert!(matches!(
             without_directory.set_language(UiLanguage::Ko),
-            Err(ArmPoseSettingsError::NoConfigDirectory)
+            Err(SettingsError::NoConfigDirectory)
         ));
         assert!(matches!(
             without_directory.set_arm_tracking_enabled(true),
-            Err(ArmPoseSettingsError::NoConfigDirectory)
+            Err(SettingsError::NoConfigDirectory)
         ));
         assert_eq!(without_directory.language(), UiLanguage::Ja);
         assert!(!without_directory.arm_tracking_enabled());
@@ -1232,7 +1226,7 @@ mod dynamic_profile_tests {
     #[test]
     fn dynamic_profiles_persist_and_reload_per_model() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        let path = directory.path().join(SETTINGS_FILE_NAME);
         let first = AvatarAssetId::new("sha256:first");
         let second = AvatarAssetId::new("sha256:second");
         let mut store = ArmPoseOverrideStore::default();
@@ -1270,8 +1264,8 @@ mod dynamic_profile_tests {
     #[test]
     fn corrupt_or_old_version_dynamic_entries_fall_back_to_defaults_without_panicking() {
         let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
-        fs::write(&path, format!("schema_version = {ARM_POSE_SETTINGS_SCHEMA_VERSION}\n[dynamic_arm_profiles.\"sha256:bad\"]\nschema_version = 1\nhand_anchor_ratio = [0.0, 0.0, 0.0]\ncompensation_gains = [2.5, 0.0, 0.0]\nelbow_swivel_radians = 99.0\nswivel_transition_width_ratio = 0.15\npole_influence = 0.2\ntwist_relax_weight = 0.7\ntwist_parent_child_crossfade = 0.9\nshoulder_elevation_trim_radians = 9.9\n")).expect("write corrupt settings");
+        let path = directory.path().join(SETTINGS_FILE_NAME);
+        fs::write(&path, format!("schema_version = {SETTINGS_SCHEMA_VERSION}\n[dynamic_arm_profiles.\"sha256:bad\"]\nschema_version = 1\nhand_anchor_ratio = [0.0, 0.0, 0.0]\ncompensation_gains = [2.5, 0.0, 0.0]\nelbow_swivel_radians = 99.0\nswivel_transition_width_ratio = 0.15\npole_influence = 0.2\ntwist_relax_weight = 0.7\ntwist_parent_child_crossfade = 0.9\nshoulder_elevation_trim_radians = 9.9\n")).expect("write corrupt settings");
         let store = load_arm_pose_overrides(&path).expect("settings reload");
         assert!(
             store

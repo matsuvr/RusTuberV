@@ -1,6 +1,6 @@
 //! Font I/O is separate from UI rendering. No system font is copied or distributed.
 
-use crate::settings::{ArmPoseSettings, UiLanguage};
+use crate::settings::{AppSettings, UiLanguage};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use std::{io, path::PathBuf, sync::Arc};
@@ -90,7 +90,7 @@ fn font_definitions(language: UiLanguage) -> io::Result<egui::FontDefinitions> {
 
 pub(crate) fn configure_fonts(
     mut contexts: EguiContexts,
-    settings: Res<ArmPoseSettings>,
+    settings: Res<AppSettings>,
     mut state: ResMut<UiFonts>,
 ) -> Result {
     let language = settings.language();

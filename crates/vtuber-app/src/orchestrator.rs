@@ -11,10 +11,17 @@
 //! plugin consumes.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use vtuber_avatar::{
+    ArmPoseOverrideStore, ArmPoseProfileChange, ArmPoseProfileOverride, AvatarAssetId,
+    AvatarExpressionCatalog, AvatarGeneration, AvatarLifecycle, AvatarMotionMirror,
+    ManualExpressionRequest, ManualExpressionSelection,
+};
+use vtuber_camera::device::CameraDescriptor;
 
 use crate::actions::UiAction;
 use crate::expression_keys::{
@@ -26,15 +33,9 @@ use crate::import::{self, ImportedModel, ModelImportError};
 use crate::license_review::{self, VrmLicenseReview, VrmLicenseReviewError};
 use crate::ndi_output::NdiOutputIntent;
 use crate::preview::PreviewState;
-use crate::settings::ArmPoseSettings;
+use crate::settings::AppSettings;
 use crate::ui::UiState;
 use crate::ui_model::*;
-use vtuber_avatar::{
-    ArmPoseOverrideStore, ArmPoseProfileChange, ArmPoseProfileOverride, AvatarAssetId,
-    AvatarExpressionCatalog, AvatarGeneration, AvatarLifecycle, AvatarMotionMirror,
-    ManualExpressionRequest, ManualExpressionSelection,
-};
-use vtuber_camera::device::CameraDescriptor;
 
 /// A pending avatar load request waiting to be submitted to the lifecycle.
 ///
@@ -182,8 +183,8 @@ pub enum OrchestratorError {
     PoseWorkerStartFailed(String),
 }
 
-impl std::fmt::Display for OrchestratorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for OrchestratorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ImportFailed(msg) => write!(f, "Import failed: {msg}"),
             Self::NoCameraSelected => write!(f, "No camera selected"),
@@ -349,7 +350,7 @@ impl Orchestrator {
     /// On success a [`PendingLoadRequest`] is queued while the accepted model
     /// remains selected. The sync system drains the pending request and emits a
     /// `LoadImportedAvatarRequest` that the avatar lifecycle consumes.
-    fn import_avatar(&mut self, path: &PathBuf) {
+    fn import_avatar(&mut self, path: &Path) {
         self.import_state = ImportState::InProgress;
         self.last_error = None;
 
@@ -684,7 +685,7 @@ impl Orchestrator {
 
     /// The asset root used for model imports.
     #[must_use]
-    pub fn asset_root(&self) -> &PathBuf {
+    pub fn asset_root(&self) -> &Path {
         &self.asset_root
     }
 
@@ -841,7 +842,7 @@ pub fn process_ui_actions_system(
     mut preview: ResMut<PreviewState>,
     mut avatar_motion_mirror: ResMut<AvatarMotionMirror>,
     mut arm_pose_overrides: Option<ResMut<ArmPoseOverrideStore>>,
-    mut arm_pose_settings: Option<ResMut<ArmPoseSettings>>,
+    mut arm_pose_settings: Option<ResMut<AppSettings>>,
     mut arm_pose_changes: Option<MessageWriter<ArmPoseProfileChange>>,
     lifecycle: Option<Res<vtuber_avatar::AvatarLifecycle>>,
     mut reset_camera_requests: Option<MessageWriter<vtuber_avatar::ResetCameraRequest>>,
@@ -1136,7 +1137,7 @@ fn apply_expression_binding_action(
     orchestrator: &mut Orchestrator,
     action: ExpressionBindingAction,
     store: &mut Option<ResMut<ExpressionBindingStore>>,
-    settings: Option<&ArmPoseSettings>,
+    settings: Option<&AppSettings>,
     lifecycle: Option<&AvatarLifecycle>,
     manual_requests: &mut Option<MessageWriter<ManualExpressionRequest>>,
 ) {
@@ -1337,7 +1338,7 @@ fn apply_arm_pose_profile_action(
     orchestrator: &mut Orchestrator,
     profile: ArmPoseProfileOverride,
     overrides: &mut Option<ResMut<ArmPoseOverrideStore>>,
-    settings: Option<&ArmPoseSettings>,
+    settings: Option<&AppSettings>,
     changes: &mut Option<MessageWriter<ArmPoseProfileChange>>,
     return_to_default: bool,
 ) {
@@ -1371,7 +1372,7 @@ fn apply_arm_pose_profile_action(
 fn reset_arm_pose_profile_action(
     orchestrator: &mut Orchestrator,
     overrides: &mut Option<ResMut<ArmPoseOverrideStore>>,
-    settings: Option<&ArmPoseSettings>,
+    settings: Option<&AppSettings>,
     changes: &mut Option<MessageWriter<ArmPoseProfileChange>>,
 ) {
     let Some(model_id) = orchestrator.active_model_id().map(str::to_owned) else {
@@ -1417,7 +1418,7 @@ fn sync_arm_pose_view_model(
 
 fn prepare_avatar_load(
     pending: PendingLoadRequest,
-    persistent: Option<&ArmPoseSettings>,
+    persistent: Option<&AppSettings>,
 ) -> Result<
     (
         vtuber_avatar::LoadImportedAvatarRequest,
@@ -1468,7 +1469,7 @@ fn prepare_avatar_load(
 fn restore_model_look(
     model_id: &str,
     restored: vtuber_avatar::RichLookSettings,
-    persistent: &mut ArmPoseSettings,
+    persistent: &mut AppSettings,
     look: &mut vtuber_avatar::AvatarLookSettings,
     changes: &mut MessageWriter<vtuber_avatar::LookSettingsChanged>,
 ) {
@@ -1510,7 +1511,7 @@ pub fn sync_avatar_lifecycle_system(
     mut load_requests: MessageWriter<vtuber_avatar::LoadImportedAvatarRequest>,
     mut load_results: MessageReader<vtuber_avatar::LoadImportedAvatarResult>,
     mut unload_requests: MessageWriter<vtuber_avatar::lifecycle::UnloadAvatarRequest>,
-    mut persistent: Option<ResMut<ArmPoseSettings>>,
+    mut persistent: Option<ResMut<AppSettings>>,
     mut look: Option<ResMut<vtuber_avatar::AvatarLookSettings>>,
     mut changes: Option<MessageWriter<vtuber_avatar::LookSettingsChanged>>,
     mut view_model: Option<ResMut<UiViewModel>>,
@@ -1618,7 +1619,7 @@ mod tests {
             .init_resource::<vtuber_avatar::AvatarLookSettings>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<bevy_vrm1::prelude::MToonMaterial>>()
-            .insert_resource(ArmPoseSettings::empty_at(path))
+            .insert_resource(AppSettings::empty_at(path))
             .add_message::<vtuber_avatar::LookSettingsChanged>()
             .add_message::<vtuber_avatar::LoadImportedAvatarRequest>()
             .add_message::<vtuber_avatar::LoadImportedAvatarResult>()
@@ -1762,7 +1763,7 @@ mod tests {
         );
         assert!(
             app.world()
-                .resource::<ArmPoseSettings>()
+                .resource::<AppSettings>()
                 .look_model_id
                 .is_none()
         );
@@ -1908,7 +1909,7 @@ mod tests {
             "UI model owner"
         );
         assert_eq!(
-            world.resource::<ArmPoseSettings>().look_model_id.as_deref(),
+            world.resource::<AppSettings>().look_model_id.as_deref(),
             Some(model.id.as_str()),
             "save owner"
         );
@@ -1955,7 +1956,7 @@ mod tests {
         let (a, b) = rich_models(&dir);
         let a_look = RichLookSettings::try_new(true, 0.25).unwrap();
         let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
-        let settings = ArmPoseSettings::empty_at(&path);
+        let settings = AppSettings::empty_at(&path);
         settings.save_rich_look(a.id.clone(), a_look).unwrap();
         settings.save_rich_look(b.id.clone(), b_look).unwrap();
         let mut app = rich_look_app(&path);
@@ -2012,7 +2013,7 @@ mod tests {
         let (a, b) = rich_models(&dir);
         let a_look = RichLookSettings::try_new(true, 0.0).unwrap();
         let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
-        let settings = ArmPoseSettings::empty_at(&path);
+        let settings = AppSettings::empty_at(&path);
         settings.save_rich_look(a.id.clone(), a_look).unwrap();
         settings.save_rich_look(b.id.clone(), b_look).unwrap();
         let valid = std::fs::read_to_string(&path).unwrap();
@@ -2069,7 +2070,7 @@ mod tests {
         let (a, b) = rich_models(&dir);
         let a_look = RichLookSettings::try_new(false, 0.25).unwrap();
         let b_look = RichLookSettings::try_new(true, 0.0).unwrap();
-        let settings = ArmPoseSettings::empty_at(&path);
+        let settings = AppSettings::empty_at(&path);
         settings.save_rich_look(a.id.clone(), a_look).unwrap();
         settings.save_rich_look(b.id.clone(), b_look).unwrap();
         let mut app = rich_look_app(&path);
@@ -2268,7 +2269,7 @@ mod tests {
             .init_resource::<PreviewState>()
             .init_resource::<AvatarMotionMirror>()
             .init_resource::<vtuber_avatar::ArmPoseOverrideStore>()
-            .insert_resource(ArmPoseSettings::empty_at(&path))
+            .insert_resource(AppSettings::empty_at(&path))
             .add_message::<ArmPoseProfileChange>()
             .add_systems(Update, process_ui_actions_system);
 
@@ -2318,7 +2319,7 @@ mod tests {
 
     /// Minimal app that runs the UI action processor with a real settings
     /// resource, so a save is observed through the same path the shell uses.
-    fn arm_tracking_action_app(settings: ArmPoseSettings) -> App {
+    fn arm_tracking_action_app(settings: AppSettings) -> App {
         let mut app = App::new();
         app.init_resource::<Orchestrator>()
             .init_resource::<UiState>()
@@ -2334,9 +2335,7 @@ mod tests {
     /// The persisted switch, the runtime switch, and the rendered switch.
     fn arm_tracking_switches(app: &App) -> (bool, bool, bool) {
         (
-            app.world()
-                .resource::<ArmPoseSettings>()
-                .arm_tracking_enabled(),
+            app.world().resource::<AppSettings>().arm_tracking_enabled(),
             app.world()
                 .resource::<crate::pose_runtime::PoseRuntime>()
                 .enabled(),
@@ -2362,8 +2361,7 @@ mod tests {
     fn a_successful_arm_tracking_save_switches_the_runtime_and_the_file() {
         let directory = tempfile::tempdir().expect("temporary settings directory");
         let path = directory.path().join("settings.toml");
-        let mut app =
-            arm_tracking_action_app(ArmPoseSettings::load(&path).expect("initial values"));
+        let mut app = arm_tracking_action_app(AppSettings::load(&path).expect("initial values"));
         assert_eq!(arm_tracking_switches(&app), (false, false, false));
 
         toggle_arm_tracking(&mut app, true);
@@ -2382,8 +2380,7 @@ mod tests {
         let path = directory.path().join("settings.toml");
         let current = "schema_version = 1\n";
         std::fs::write(&path, current).expect("settings seed");
-        let mut app =
-            arm_tracking_action_app(ArmPoseSettings::load(&path).expect("current schema"));
+        let mut app = arm_tracking_action_app(AppSettings::load(&path).expect("current schema"));
         assert_eq!(arm_tracking_switches(&app), (false, false, false));
 
         // A newer document on the same path refuses every later save, in both
@@ -2417,7 +2414,7 @@ mod tests {
     #[test]
     fn an_unreadable_settings_path_keeps_the_runtime_switch() {
         let directory = tempfile::tempdir().expect("temporary settings directory");
-        let mut app = arm_tracking_action_app(ArmPoseSettings::empty_at(directory.path()));
+        let mut app = arm_tracking_action_app(AppSettings::empty_at(directory.path()));
 
         toggle_arm_tracking(&mut app, true);
 
@@ -3028,7 +3025,7 @@ mod tests {
             .init_resource::<ExpressionBindingStore>()
             .init_resource::<vtuber_avatar::ManualExpressionSelection>()
             .init_resource::<crate::ndi_output::NdiOutputIntent>()
-            .insert_resource(ArmPoseSettings::empty_at(settings_path))
+            .insert_resource(AppSettings::empty_at(settings_path))
             .add_message::<vtuber_avatar::ManualExpressionRequest>()
             .add_message::<vtuber_avatar::ArmPoseProfileChange>()
             .add_message::<vtuber_avatar::ResetCameraRequest>()
