@@ -217,36 +217,70 @@ mod tests {
 
     #[test]
     fn checked_lengths_preserve_rgb_and_rgba_layouts() {
-        let size = Size { width: 640, height: 480 };
+        let size = Size {
+            width: 640,
+            height: 480,
+        };
         assert_eq!(checked_image_len(size, 3).unwrap(), 640 * 480 * 3);
         assert_eq!(checked_image_len(size, 4).unwrap(), 640 * 480 * 4);
     }
 
     #[test]
     fn overflow_is_rejected_before_buffer_validation_or_ffi() {
-        let size = Size { width: u32::MAX, height: u32::MAX };
+        let size = Size {
+            width: u32::MAX,
+            height: u32::MAX,
+        };
         assert!(matches!(
             checked_image_len(size, 4),
-            Err(Error::ImageSizeOverflow { width: u32::MAX, height: u32::MAX, channels: 4 })
+            Err(Error::ImageSizeOverflow {
+                width: u32::MAX,
+                height: u32::MAX,
+                channels: 4
+            })
         ));
-        assert!(matches!(Image::from_rgba(size, &[]), Err(Error::ImageSizeOverflow { .. })));
+        assert!(matches!(
+            Image::from_rgba(size, &[]),
+            Err(Error::ImageSizeOverflow { .. })
+        ));
     }
 
     #[test]
     fn incorrect_buffer_length_keeps_its_existing_error() {
         assert!(matches!(
-            Image::from_rgb(Size { width: 2, height: 3 }, &[0; 17]),
-            Err(Error::BufferSize { got: 17, expected: 18, width: 2, height: 3, channels: 3 })
+            Image::from_rgb(
+                Size {
+                    width: 2,
+                    height: 3
+                },
+                &[0; 17]
+            ),
+            Err(Error::BufferSize {
+                got: 17,
+                expected: 18,
+                width: 2,
+                height: 3,
+                channels: 3
+            })
         ));
     }
 
     #[test]
     fn c_dimension_overflow_is_rejected_without_allocating_or_loading_ffi() {
         for size in [
-            Size { width: u32::MAX, height: 0 },
-            Size { width: 0, height: u32::MAX },
+            Size {
+                width: u32::MAX,
+                height: 0,
+            },
+            Size {
+                width: 0,
+                height: u32::MAX,
+            },
         ] {
-            assert!(matches!(Image::from_rgb(size, &[]), Err(Error::TooLarge { .. })));
+            assert!(matches!(
+                Image::from_rgb(size, &[]),
+                Err(Error::TooLarge { .. })
+            ));
         }
     }
 }
