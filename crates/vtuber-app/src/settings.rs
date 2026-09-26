@@ -535,21 +535,28 @@ fn save_rich_look_settings(
     write_settings_atomically(path, &toml::to_string_pretty(&document)?)
 }
 
+/// Writes the complete settings text by replacing the target with a unique
+/// temporary file from the same directory.
+///
+/// The existing file is never deleted up front: a failed write or replacement
+/// leaves the previous bytes in place, and unique temporary names keep
+/// concurrent saves from clobbering each other's scratch file.
 fn write_settings_atomically(path: &Path, text: &str) -> Result<(), ArmPoseSettingsError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("toml.tmp");
-    fs::write(&temporary, text)?;
-    if let Err(rename_error) = fs::rename(&temporary, path) {
-        // Existing Windows replacement behavior, unrelated to UI language.
-        if path.exists() {
-            fs::remove_file(path)?;
-            fs::rename(&temporary, path)?;
-        } else {
-            return Err(rename_error.into());
-        }
-    }
+    use std::io::Write as _;
+    use tempfile::NamedTempFile;
+
+    // A bare file name has no meaningful parent; the save directory is then
+    // the current directory itself.
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(directory)?;
+    let mut temporary = NamedTempFile::new_in(directory)?;
+    temporary.write_all(text.as_bytes())?;
+    temporary.persist(path).map_err(|persist_error| {
+        ArmPoseSettingsError::Io(persist_error.error)
+    })?;
     Ok(())
 }
 
@@ -694,6 +701,34 @@ mod tests {
     use crate::expression_keys::ExpressionKey;
     use tempfile::tempdir;
     use vtuber_avatar::{ArmPoseProfile, AvatarAssetId};
+
+    #[test]
+    fn atomically_replaces_existing_file_with_the_second_content() {
+        let directory = tempdir().expect("temporary settings directory");
+        let path = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        write_settings_atomically(&path, "schema_version = 1\n").expect("first save");
+        write_settings_atomically(&path, "schema_version = 1\nlanguage = \"en\"\n")
+            .expect("second save");
+        assert_eq!(
+            fs::read_to_string(&path).expect("settings readable"),
+            "schema_version = 1\nlanguage = \"en\"\n"
+        );
+    }
+
+    #[test]
+    fn failed_save_keeps_the_existing_bytes() {
+        let directory = tempdir().expect("temporary settings directory");
+        let original = directory.path().join(ARM_POSE_SETTINGS_FILE_NAME);
+        fs::write(&original, "schema_version = 1\n").unwrap();
+        // `original` is a file, so a path nested under it cannot resolve a
+        // save directory and the write must fail without touching it.
+        let nested = original.join(ARM_POSE_SETTINGS_FILE_NAME);
+        assert!(write_settings_atomically(&nested, "schema_version = 2\n").is_err());
+        assert_eq!(
+            fs::read_to_string(&original).expect("settings readable"),
+            "schema_version = 1\n"
+        );
+    }
 
     fn profile(drop: f32) -> ArmPoseProfileOverride {
         ArmPoseProfileOverride::from_profile(ArmPoseProfile {
