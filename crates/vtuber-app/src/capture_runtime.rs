@@ -232,7 +232,7 @@ pub struct LatestVideoFrame {
 
 /// System that reads the latest frame from the capture slot and stores it
 /// for preview rendering.
-pub fn read_latest_frame(
+pub(crate) fn read_latest_frame(
     mut capture: ResMut<CaptureRuntime>,
     mut latest: ResMut<LatestVideoFrame>,
 ) {
@@ -242,7 +242,7 @@ pub fn read_latest_frame(
 }
 
 /// System that synchronises capture metrics into [`DiagnosticsSnapshot`].
-pub fn sync_capture_diagnostics(
+pub(crate) fn sync_capture_diagnostics(
     capture: Res<CaptureRuntime>,
     latest: Res<LatestVideoFrame>,
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
@@ -282,7 +282,7 @@ pub fn sync_capture_diagnostics(
 /// not mirror or otherwise transform the bytes used by inference. Updates are
 /// throttled by [`PreviewState::target_fps`], while capture continues when the
 /// preview is hidden.
-pub fn update_preview_texture_system(
+pub(crate) fn update_preview_texture_system(
     latest: Res<LatestVideoFrame>,
     mut preview: ResMut<PreviewState>,
     mut images: ResMut<Assets<Image>>,
@@ -315,7 +315,7 @@ pub fn update_preview_texture_system(
 }
 
 /// Registers the reusable preview image with egui once it exists.
-pub fn register_preview_texture_system(
+pub(crate) fn register_preview_texture_system(
     preview: Res<PreviewState>,
     mut textures: ResMut<EguiUserTextures>,
 ) {
@@ -353,7 +353,7 @@ fn preview_image(frame: &VideoFrame) -> Option<Image> {
 /// - Starts capture when the orchestrator transitions to `Starting`.
 /// - Stops capture when the orchestrator transitions to `Stopping`.
 /// - Updates the orchestrator's pipeline state based on capture state.
-pub fn capture_bridge_system(
+pub(crate) fn capture_bridge_system(
     mut capture: ResMut<CaptureRuntime>,
     mut orchestrator: ResMut<crate::orchestrator::Orchestrator>,
 ) {

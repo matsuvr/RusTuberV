@@ -216,7 +216,7 @@ impl ArmPoseSettings {
 }
 
 /// Copies validated startup settings into the avatar resource.
-pub fn restore_arm_pose_settings_system(
+pub(crate) fn restore_arm_pose_settings_system(
     settings: Res<ArmPoseSettings>,
     mut overrides: Option<bevy::prelude::ResMut<ArmPoseOverrideStore>>,
 ) {
@@ -231,7 +231,7 @@ pub fn restore_arm_pose_settings_system(
 }
 
 /// Copies startup expression bindings into the runtime store.
-pub fn restore_expression_binding_settings_system(
+pub(crate) fn restore_expression_binding_settings_system(
     settings: Res<ArmPoseSettings>,
     mut store: ResMut<ExpressionBindingStore>,
 ) {

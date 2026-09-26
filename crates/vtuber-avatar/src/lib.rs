@@ -78,7 +78,7 @@ pub use bind::BindTriggered;
 pub use binding::{AvatarBindError, AvatarBinding, bind_humanoid_bones};
 pub use body_motion::{
     BodyFollowFilter, BodyMotionProfiles, LossIdleState, PositionInputMetrics, position_channels,
-    reset_position_metrics_on_lifecycle_change, update_body_tracking_position_input,
+    update_body_tracking_position_input,
 };
 pub use capabilities::{
     AvatarCapabilities, BlinkMode, BonePresence, DeclaredLookAtType, EmotionSet,

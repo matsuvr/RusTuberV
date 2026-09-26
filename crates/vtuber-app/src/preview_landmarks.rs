@@ -105,7 +105,7 @@ fn is_displayable_sample(sample: &FaceTrackingSample) -> bool {
 ///
 /// `InferenceRuntime` remains an orchestration resource: the UI renderer reads
 /// only [`PreviewLandmarkState`], never the inference runtime or its worker.
-pub fn sync_preview_landmark_system(
+pub(crate) fn sync_preview_landmark_system(
     inference: Res<crate::inference_runtime::InferenceRuntime>,
     mut landmarks: ResMut<PreviewLandmarkState>,
 ) {

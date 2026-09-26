@@ -66,9 +66,7 @@ pub use composite::{
     CompositeFrameInference, CompositeRuntime, DetectorStage, LandmarkStage,
     ProductionDetectorStage, ProductionLandmarkStage,
 };
-pub use controller::{
-    ControlCommand, InferenceController, InferenceWorkerResult, MediaPipeTaskSource,
-};
+pub use controller::{InferenceController, InferenceWorkerResult, MediaPipeTaskSource};
 pub use crop::{
     CropError, FaceCropPreprocessBuffers, FaceCropTransform, LandmarkCoordinateEncoding,
 };

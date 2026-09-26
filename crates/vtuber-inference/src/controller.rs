@@ -31,7 +31,7 @@ pub enum MediaPipeTaskSource {
 
 /// Control commands sent from [`InferenceController`] to the inference worker.
 #[derive(Clone, Debug, PartialEq)]
-pub enum ControlCommand {
+pub(crate) enum ControlCommand {
     /// Load the model described by `descriptor` using `settings`.
     LoadModel {
         /// Model descriptor. Boxed to keep the enum small.

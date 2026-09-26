@@ -44,13 +44,29 @@ pub mod video_output;
 /// Deterministic worker supervision helpers.
 pub mod worker;
 
-pub use arkit::*;
+pub use arkit::{
+    ARKIT_NON_TONGUE_CHANNEL_COUNT, ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS, ARKIT52_CHANNEL_COUNT,
+    Arkit52Coefficients, Arkit52NameError, Arkit52ValueError, ArkitBlendshape,
+    arkit_non_tongue_values, arkit52_with_zero_tongue,
+};
 pub use control::{CalibrationError, CalibrationSettings};
-pub use face_tracking::*;
+pub use face_tracking::{
+    CameraFaceTransform, FaceBlendshapeSet, FaceLandmark, FaceTrackingContractError,
+    FaceTrackingOutcome, FaceTrackingQuality, FaceTrackingSample, MEDIAPIPE_FACE_BLENDSHAPE_COUNT,
+    MEDIAPIPE_FACE_LANDMARK_COUNT, MediaPipeBlendshape,
+};
 pub use observation::RawExpressionObservation;
 pub use slot::{LatestSlot, ReadResult, skipped_generations};
 pub use stop::StopToken;
 pub use time::now as monotonic_now;
-pub use types::*;
-pub use video_output::*;
+pub use types::{
+    AvatarControlFrame, ExpressionCoefficients, FrameSeq, GazeSignal, GazeTrackingState, HeadPose,
+    HeadTranslationSignal, HeadTranslationState, InferenceOutput, Landmark3, LandmarkSchemaId,
+    MonoTimeNs, NamedCoefficient, NormalizedRect, PixelFormat, RawFaceObservation, TrackingState,
+    VideoFrame,
+};
+pub use video_output::{
+    VideoOutputFrame, VideoOutputFrameError, VideoOutputPixelFormat, VideoOutputProfile,
+    unpremultiply_bgra8_in_place,
+};
 pub use worker::{WorkerHandle, WorkerResult};
