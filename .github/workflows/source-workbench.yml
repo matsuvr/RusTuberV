@@ -6,23 +6,41 @@ on:
 permissions:
   contents: read
 jobs:
-  model-assets:
+  linux-validation-deps:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Download only the three existing approved embedded tasks
+      - name: Resolve the Linux-only validation feature without changing product branches
+        env:
+          REPOSITORY: ${{ github.repository }}
         run: |
-          mkdir -p models
-          curl --fail --location --output models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task
-          curl --fail --location --output models/pose_landmarker_full.task https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
-          curl --fail --location --output models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
-          echo '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff  models/face_landmarker.task' | sha256sum --check
-          echo '4eaa5eb7a98365221087693fcc286334cf0858e2eb6e15b506aa4a7ecdcec4ad  models/pose_landmarker_full.task' | sha256sum --check
-          echo 'fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1  models/hand_landmarker.task' | sha256sum --check
+          rustup toolchain install 1.97.1 --profile minimal
+          git clone --depth=1 --branch fix/123-reuse-user-asset-path "https://github.com/$REPOSITORY.git" source
+          cd source
+          cp Cargo.lock "$RUNNER_TEMP/original.lock"
+          sed -i 's/rfd = { version = "=0.17.2", default-features = false }/rfd = { version = "=0.17.2", default-features = false, features = ["gtk3"] }/' Cargo.toml
+          cargo +1.97.1 vendor --versioned-dirs "$RUNNER_TEMP/validation-vendor" > "$RUNNER_TEMP/validation-config.toml"
+          cp Cargo.lock "$RUNNER_TEMP/validation-Cargo.lock"
+          python3 - <<'PY'
+          import pathlib, shutil, tomllib, os
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          old = tomllib.loads((root / 'original.lock').read_text())
+          new = tomllib.loads((root / 'validation-Cargo.lock').read_text())
+          old_items = {(p['name'], p['version'], p.get('source')) for p in old['package']}
+          new_items = {(p['name'], p['version'], p.get('source')) for p in new['package']}
+          assert not old_items - new_items, 'The validation feature must not replace pinned packages'
+          extra = root / 'extra-validation-dependencies'
+          extra.mkdir()
+          for name, version, source in sorted(new_items - old_items):
+              package = root / 'validation-vendor' / f'{name}-{version}'
+              if package.is_dir():
+                  shutil.move(package, extra / package.name)
+          PY
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/linux-validation-deps.tar.gz" extra-validation-dependencies validation-Cargo.lock
       - uses: actions/upload-artifact@v4
         with:
-          name: approved-model-tasks
-          path: models/*.task
+          name: linux-validation-dependencies
+          path: ${{ runner.temp }}/linux-validation-deps.tar.gz
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
