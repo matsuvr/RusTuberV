@@ -695,8 +695,8 @@ fn open_and_stream<B>(
     device: &CameraDescriptor,
     request: CameraRequest,
     stop: &StopToken,
-    state: &Arc<std::sync::Mutex<SharedState>>,
-    slot: &Arc<LatestSlot<VideoFrame>>,
+    state: &std::sync::Mutex<SharedState>,
+    slot: &LatestSlot<VideoFrame>,
     pose_slot: Option<&LatestSlot<VideoFrame>>,
     metrics: &mut CaptureMetrics,
     next_frame_seq: &mut u64,
@@ -758,7 +758,7 @@ fn reconnect_delay(attempt: u32) -> Duration {
 }
 
 /// Helper to update the shared state under the mutex.
-fn update_state<F>(state: &Arc<std::sync::Mutex<SharedState>>, f: F)
+fn update_state<F>(state: &std::sync::Mutex<SharedState>, f: F)
 where
     F: FnOnce(&mut SharedState),
 {
@@ -1613,8 +1613,10 @@ mod tests {
             probe: Arc::clone(&probe),
             opened: _tx,
         };
-        let state = Arc::new(std::sync::Mutex::new(SharedState::default()));
-        let slot = Arc::new(LatestSlot::new());
+        // The helper only borrows its state and slot, so a plain `Mutex` and a
+        // plain slot are enough; no `Arc` ownership is required to call it.
+        let state = std::sync::Mutex::new(SharedState::default());
+        let slot = LatestSlot::new();
         let stop = StopToken::new();
         let mut metrics = CaptureMetrics::default();
         let mut next_frame_seq = 0;
