@@ -1280,7 +1280,10 @@ fn features_of(
 // Shared helpers
 // -----------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "report fixture builder; each parameter is one recorded column"
+)]
 fn make_frame(
     take_id: &str,
     session_id: Option<&str>,
@@ -1536,6 +1539,12 @@ fn csv_field(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use serde_json::json;
 

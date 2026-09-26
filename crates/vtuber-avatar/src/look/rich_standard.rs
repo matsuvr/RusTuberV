@@ -53,7 +53,10 @@ pub(crate) fn register_rich_standard(app: &mut App) {
     );
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy's `Query` filter tuple for the Standard material update, with no call site to change"
+)]
 fn switch_rich_standard_materials(
     mut commands: Commands,
     lifecycle: Res<AvatarLifecycle>,
@@ -163,6 +166,12 @@ fn sync_rich_standard_materials(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use bevy::asset::AssetPlugin;
     use bevy::color::LinearRgba;

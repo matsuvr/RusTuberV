@@ -369,9 +369,12 @@ pub fn build_binding_statuses(
 
 #[cfg(test)]
 mod tests {
-    // Unit tests may use unwrap/expect (AGENTS.md: Production Rust panic policy).
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
     use super::*;
     use crate::expression::status::ExpressionBindingStatus;
 

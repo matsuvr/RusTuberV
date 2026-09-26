@@ -400,7 +400,10 @@ fn probes(data: &[u8]) -> Vec<[u8; 4]> {
     // `render_model` inserts the WIDTH×HEIGHT BGRA output profile, so the
     // frame buffer is exactly WIDTH×HEIGHT×4 bytes and every probe
     // coordinate below is inside it.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`render_model` inserts the WIDTH x HEIGHT BGRA output profile, so the frame buffer is exactly WIDTH x HEIGHT x 4 bytes and every probe coordinate is inside it"
+    )]
     let at = |x: u32, y: u32| {
         let index = ((y * WIDTH + x) * 4) as usize;
         [

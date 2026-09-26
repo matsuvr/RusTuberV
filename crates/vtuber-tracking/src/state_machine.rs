@@ -235,7 +235,6 @@ fn normalize_state(state: TrackingState) -> TrackingState {
 /// face often never reaches the enter threshold, so requiring the signal
 /// would leave the avatar frozen in neutral even though the face is visible.
 /// The confidence gate still owns the degrade path out of `Tracking`.
-#[allow(clippy::too_many_arguments)]
 fn transition_table(
     state: TrackingState,
     signal: ConfidenceSignal,
@@ -310,6 +309,12 @@ fn transition_table(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn params() -> StateMachineParams {

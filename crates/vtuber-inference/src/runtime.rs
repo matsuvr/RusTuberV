@@ -231,10 +231,10 @@ fn tensors_to_tract(
 }
 
 #[cfg(feature = "onnx")]
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the output shape was compared against the expected 98-point shape immediately above, so the flat reads cover the whole tensor"
+)]
 fn decode_landmarks(
     output: tract_core::ndarray::ArrayViewD<f32>,
 ) -> Result<Vec<vtuber_core::types::Landmark3>> {
@@ -263,6 +263,12 @@ fn decode_landmarks(
 
 #[cfg(all(test, feature = "legacy-face-stack"))]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::decode_landmarks;
 
     #[test]

@@ -419,7 +419,10 @@ fn sync_error_presenter(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 fn ui_render_system(
     mut contexts: EguiContexts,
     vm: Res<UiViewModel>,
@@ -493,6 +496,12 @@ fn ui_render_system(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     #[test]

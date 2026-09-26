@@ -152,10 +152,10 @@ impl UltraFacePreprocessBuffers {
     }
 
     /// Convert and resize one source frame into the reusable NCHW tensor.
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the stride and buffer-length checks above prove the sampled rows exist, and the tensor-length check proves the NCHW writes fit"
+    )]
     pub fn preprocess(&mut self, frame: &VideoFrame) -> Result<&[f32], DetectorPreprocessError> {
         self.validate_normalization()?;
         let bytes_per_pixel = bytes_per_pixel(frame.format)?;
@@ -252,10 +252,10 @@ impl UltraFacePreprocessBuffers {
         Ok(&self.tensor)
     }
 
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "mean and scale are fixed three-element arrays and the loop is bounded by 3"
+    )]
     fn validate_normalization(&self) -> Result<(), DetectorPreprocessError> {
         for channel in 0..3 {
             let mean = self.normalization.mean[channel];
@@ -305,10 +305,10 @@ fn axis_samples(source_len: usize, output_len: usize) -> Vec<AxisSample> {
         .collect()
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`offset` is a whole-pixel offset from `axis_samples`, which stays inside the source dimensions the caller validated"
+)]
 fn rgb_at(data: &[u8], offset: usize, format: PixelFormat) -> [f32; 3] {
     match format {
         PixelFormat::Rgb8 => [

@@ -93,7 +93,6 @@ fn use_cpu_light_clustering(settings: Option<ResMut<GlobalClusterSettings>>) {
 
 // Existing lights are updated in place; spawn/despawn happens only when the
 // look turns on/off or when the model/bones become unavailable.
-#[allow(clippy::type_complexity)]
 fn sync_additional_look_lights(
     mut commands: Commands,
     lifecycle: Res<AvatarLifecycle>,
@@ -152,6 +151,12 @@ fn sync_additional_look_lights(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::look::RichLookSettings;
 

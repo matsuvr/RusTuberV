@@ -190,6 +190,12 @@ pub fn build_arm_motion_rest_geometry(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn rest_geometry(elbow_to_wrist: Vec3, shoulder_offset: Vec3) -> ArmRestGeometry {

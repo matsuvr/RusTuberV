@@ -56,7 +56,6 @@ pub struct LossRecoveryConfigError(#[from] LossBlendConfigError);
 ///
 /// The by-value control frame intentionally includes the fixed-size validated
 /// ARKit52 payload; keeping it inline avoids a per-frame heap allocation.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 enum RecoveryState {
     /// No synthetic motion is in progress; pass tracked frames through.
@@ -555,9 +554,10 @@ fn scale_detailed_face(coefficients: Arkit52Coefficients, factor: f32) -> Arkit5
     finish_detailed_face(values)
 }
 
-// Invariant: every stored coefficient is validated to `[0, 1]` and callers
-// clamp their blend factor, so the result stays within `[0, 1]`.
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "every stored coefficient is validated to the unit range and callers clamp their blend factor, so the result stays in range"
+)]
 fn finish_detailed_face(values: [f32; ARKIT52_CHANNEL_COUNT]) -> Arkit52Coefficients {
     Arkit52Coefficients::try_from_array(values).expect("detailed blend stays within [0, 1]")
 }
@@ -611,6 +611,12 @@ fn blend_expressions(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use approx::assert_relative_eq;
     use vtuber_core::types::FrameSeq;

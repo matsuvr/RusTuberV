@@ -62,9 +62,10 @@ all = { level = "warn", priority = -1 }
 cargo_common_metadata = "allow"
 missing_panics_doc = "allow"
 # Production Rust panic policy (AGENTS.md). The workspace is now panic-free:
-# these lints are denied. Tests may opt out with module-level allows
-# (tests may panic per AGENTS.md); documented production invariants use
-# per-site #[allow] with an invariant comment.
+# these lints are denied. Only test modules and test-only code opt out, with a
+# module-level `#![allow(...)]` inside the test module; documented production
+# invariants use a per-site `#[expect(..., reason = "...")]` that states the
+# invariant itself.
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

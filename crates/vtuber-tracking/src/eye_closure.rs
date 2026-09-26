@@ -731,6 +731,12 @@ fn validate_side(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn thresholds(left: (f32, f32), right: (f32, f32)) -> EyeClosureThresholds {

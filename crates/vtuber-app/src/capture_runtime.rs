@@ -474,6 +474,12 @@ pub(crate) fn capture_bridge_system(
 
 #[cfg(test)]
 mod preview_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use std::sync::Arc;
 
     use super::*;

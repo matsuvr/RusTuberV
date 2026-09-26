@@ -1,13 +1,3 @@
-// Unit tests may use unwrap/expect/panic (AGENTS.md: Production Rust panic policy).
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )
-)]
 //! Repository automation entry point.
 
 #![forbid(unsafe_code)]
@@ -160,6 +150,12 @@ fn handle_acceptance(args: &[String]) -> TaskResult {
 
 #[cfg(test)]
 mod cli_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     #[test]
     fn absent_missing_and_unknown_arguments_are_typed() {

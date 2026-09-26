@@ -645,9 +645,10 @@ impl TrackingPipeline {
     }
 
     /// Resets filters and tracking state without changing calibration.
-    // Invariant: `self.config` was validated when `TrackingPipeline::new`
-    // built it, so re-deriving the sub-components cannot fail.
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "`self.config` was validated in `TrackingPipeline::new`, so re-deriving the sub-components cannot fail"
+    )]
     pub fn reset(&mut self) {
         self.head_filter.reset();
         self.translation_filter.reset();
@@ -812,7 +813,10 @@ impl TrackingPipeline {
         update
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per tracking signal this single-pass update consumes"
+    )]
     fn update_with_pose(
         &mut self,
         observation: Option<&RawFaceObservation>,
@@ -1012,10 +1016,10 @@ fn media_pipe_pose_frame(
     })
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the index enumerates the 52-entry blendshape array, which is the length of `MediaPipeBlendshape::ALL`"
+)]
 fn media_pipe_sample_to_observation(sample: &FaceTrackingSample) -> RawFaceObservation {
     let landmarks = sample
         .landmarks
@@ -1153,6 +1157,12 @@ fn extract_gaze(observation: &RawFaceObservation) -> GazeSignal {
 
 #[cfg(test)]
 mod neutral_relative_pose {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use approx::assert_relative_eq;
     use vtuber_core::types::{NormalizedRect, RawExpressionObservation};
@@ -1567,6 +1577,12 @@ mod neutral_relative_pose {
 
 #[cfg(test)]
 mod assembly {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use approx::assert_relative_eq;
     use std::sync::Arc;

@@ -195,7 +195,10 @@ fn deactivate_inputs(inputs: &mut Query<&mut BodyTrackingPositionInput>) {
 /// - No active control frame
 /// - Generation mismatch between frame and binding
 /// - Position input component is missing from the active root
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 pub fn update_body_tracking_position_input(
     lifecycle: Res<AvatarLifecycle>,
     control_frame: Res<ActiveControlFrame>,
@@ -477,6 +480,12 @@ pub(crate) fn reset_position_metrics_on_lifecycle_change(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_core::types::{
         ExpressionCoefficients, FrameSeq, GazeSignal, HeadPose, HeadTranslationSignal, MonoTimeNs,

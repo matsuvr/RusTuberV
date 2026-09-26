@@ -380,9 +380,10 @@ fn uv_transform_extension(value: &Value) -> Option<Value> {
     if numbers.len() < 4 || !numbers.iter().all(|value| value.is_finite()) {
         return None;
     }
-    // Bounds are guaranteed by the length check above.
-    // See the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the length check above rejects fewer than four numbers, so the four reads are in bounds"
+    )]
     let (sx, sy, ox, oy) = (numbers[0], numbers[1], numbers[2], numbers[3]);
     let mut extension = Map::new();
     extension.insert(

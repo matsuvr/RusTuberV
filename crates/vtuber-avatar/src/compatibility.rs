@@ -113,7 +113,10 @@ impl VrmCompatibilityReport {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and query filters, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 fn inspect_initialized_vrm(
     mut report: ResMut<VrmCompatibilityReport>,
     vrms: Query<InitializedVrmBones, (With<Vrm>, Added<Initialized>)>,

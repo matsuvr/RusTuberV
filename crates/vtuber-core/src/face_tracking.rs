@@ -290,10 +290,10 @@ impl FaceBlendshapeSet {
     ///
     /// Unknown names, duplicate names, missing categories, non-finite values,
     /// and values outside `[0, 1]` are rejected before the set is published.
-    // Invariant: `MediaPipeBlendshape::index()` is always
-    // `< MEDIAPIPE_FACE_BLENDSHAPE_COUNT`, so every index below is in bounds
-    // by construction.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`MediaPipeBlendshape::index()` is below `MEDIAPIPE_FACE_BLENDSHAPE_COUNT` for every variant, so the fixed-size writes are in bounds"
+    )]
     pub fn from_pairs(pairs: &[(&str, f32)]) -> Result<Self, FaceTrackingContractError> {
         if pairs.len() != MEDIAPIPE_FACE_BLENDSHAPE_COUNT {
             return Err(FaceTrackingContractError::BlendshapeCount {
@@ -333,8 +333,10 @@ impl FaceBlendshapeSet {
     }
 
     /// Returns the coefficient for one category.
-    // Invariant: `category.index() < MEDIAPIPE_FACE_BLENDSHAPE_COUNT`.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`category.index()` is below `MEDIAPIPE_FACE_BLENDSHAPE_COUNT` for every `MediaPipeBlendshape` variant"
+    )]
     #[must_use]
     pub const fn get(&self, category: MediaPipeBlendshape) -> f32 {
         self.values[category.index()]
@@ -499,7 +501,10 @@ impl FaceTrackingSample {
     }
 
     /// Constructs a sample only when the canonical contract is valid.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per validated sample field; this is the only place that can reject an internally inconsistent sample"
+    )]
     pub fn try_new(
         source_seq: FrameSeq,
         captured_at: MonoTimeNs,
@@ -530,7 +535,10 @@ impl FaceTrackingSample {
 }
 
 /// Result of one inference attempt at the canonical tracking boundary.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the `Face` variant carries the fixed-size validated sample by value so the per-frame path does not allocate"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum FaceTrackingOutcome {
     /// Exactly one valid face sample.
@@ -660,6 +668,12 @@ impl std::error::Error for FaceTrackingContractError {}
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn all_pairs() -> Vec<(&'static str, f32)> {

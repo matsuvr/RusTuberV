@@ -442,6 +442,12 @@ fn increment_bounded(count: u32, max: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn test_params() -> ConfidenceGateParams {

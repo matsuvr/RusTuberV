@@ -280,8 +280,10 @@ fn effective_expression_weight(raw_weight: f32, is_binary: bool, category_multip
 /// read here are the ones the morph pass consumed. Each concrete material
 /// asset is evaluated at most once per frame; meshes sharing one asset share
 /// one base/last-applied record.
-#[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy's `Query` filter tuple for this system's declared material components, with no call site to change"
+)]
 pub fn apply_expression_materials(
     lifecycle: Res<AvatarLifecycle>,
     mut roots: Query<(&ExpressionEntityMap, &mut AvatarMaterialExpressionState)>,
@@ -632,8 +634,13 @@ fn blend_expression_uv(
 
 #[cfg(test)]
 mod tests {
-    // Unit tests may use unwrap/expect/panic (AGENTS.md: Production Rust panic policy).
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+    #![allow(clippy::float_cmp)]
 
     use super::*;
     use crate::expression::source::SourceExpressionEntry;

@@ -133,10 +133,10 @@ impl UltraFaceDetector {
     }
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the output count is checked against the expected output names above, so every name position exists"
+)]
 fn raw_outputs(values: TVec<TValue>) -> Result<DetectorRawOutputs, DetectorRuntimeError> {
     if values.len() != OUTPUT_NAMES.len() {
         return Err(DetectorRuntimeError::OutputCountMismatch {
