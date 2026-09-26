@@ -152,7 +152,7 @@ fn golden_model_startup_frames_output_stop() {
     );
 
     // Clean shutdown must join the worker and close both slots.
-    let metrics = controller.shutdown();
+    let metrics = controller.shutdown().unwrap();
     assert!(frame_slot.is_closed());
     assert!(output_slot.is_closed());
 

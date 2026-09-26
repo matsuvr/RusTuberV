@@ -98,18 +98,24 @@ impl InferenceRuntime {
     }
 
     /// Resets inference to idle for the next capture session.
-    pub fn stop_model(&mut self) {
-        if self.worker_started {
+    pub fn stop_model(&mut self) -> Result<(), String> {
+        let result = if self.worker_started {
             let replacement =
                 InferenceController::new(Arc::clone(&self.frame_slot), Arc::new(LatestSlot::new()));
             let controller = std::mem::replace(&mut self.controller, replacement);
-            let _ = controller.shutdown_preserving_input();
             self.worker_started = false;
-        }
+            controller
+                .shutdown_preserving_input()
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        } else {
+            Ok(())
+        };
         self.model_requested = false;
         self.canonical_outcome_generation = 0;
         self.latest_face_sample = None;
         self.latest_observation = None;
+        result
     }
 
     /// Reads one latest-only canonical MediaPipe result, suppressing duplicate output.
@@ -142,10 +148,17 @@ pub fn inference_bridge_system(
     mut inference: ResMut<InferenceRuntime>,
     mut orchestrator: ResMut<Orchestrator>,
 ) {
+    if let Err(error) = inference.controller.poll_worker_exit() {
+        orchestrator.fail_inference(error.to_string());
+    }
+
     if orchestrator.take_inference_retry_request() {
         // Retain the capture session and replace only the inference worker.
         // `stop_model` joins the old worker before the new one is started.
-        inference.stop_model();
+        if let Err(error) = inference.stop_model() {
+            orchestrator.fail_inference(error);
+            return;
+        }
         if orchestrator.capture_desired() {
             orchestrator.set_pipeline_state(PipelineState::Starting);
             orchestrator.set_last_error(None);
@@ -175,7 +188,10 @@ pub fn inference_bridge_system(
             PipelineState::Stopping | PipelineState::Failed
         )
     {
-        inference.stop_model();
+        if let Err(error) = inference.stop_model() {
+            orchestrator.fail_inference(error);
+            return;
+        }
     }
 
     if orchestrator.capture_desired() {

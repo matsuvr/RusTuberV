@@ -170,11 +170,15 @@ impl CaptureRuntime {
     /// can be called from a Bevy exit system without moving the resource out
     /// of the world. Normal Stop uses [`Self::stop_capture`] and preserves the
     /// worker for a later Start.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) -> Result<(), String> {
         let controller = std::mem::replace(&mut self.controller, CaptureController::new());
-        let _ = controller.shutdown();
+        let result = controller
+            .shutdown()
+            .map(|_| ())
+            .map_err(|error| error.to_string());
         self.worker_started = false;
         self.last_generation = 0;
+        result
     }
 
     /// Returns the current service state.

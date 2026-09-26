@@ -348,7 +348,9 @@ fn run_windows(options: Options) -> Result<(), String> {
         .start_worker(MsmfBackend::new())
         .map_err(|error| format!("capture worker start failed: {error}"))?;
     if let Err(error) = capture.select_and_start(device.clone(), CameraRequest::default()) {
-        let _ = capture.shutdown();
+        if let Err(shutdown_error) = capture.shutdown() {
+            eprintln!("capture shutdown failed: {shutdown_error}");
+        }
         return Err(format!("camera start failed: {error}"));
     }
 
@@ -484,7 +486,7 @@ fn run_windows(options: Options) -> Result<(), String> {
     inference_worker.stop();
     let inference_result = inference_worker.join();
     output_slot.close();
-    let capture_metrics = capture.shutdown();
+    let capture_metrics = capture.shutdown().map_err(|error| error.to_string())?;
     let status_snapshot = status
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

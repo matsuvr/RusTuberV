@@ -1091,7 +1091,7 @@ mod tests {
             "frame slot should still contain the published frame"
         );
 
-        controller.shutdown();
+        controller.shutdown().unwrap();
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1142,7 +1142,7 @@ mod tests {
             "frame slot should still contain the published frame"
         );
 
-        controller.shutdown();
+        controller.shutdown().unwrap();
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1210,7 +1210,7 @@ mod tests {
             controller.status().last_failure
         );
 
-        controller.shutdown();
+        controller.shutdown().unwrap();
     }
 
     #[test]

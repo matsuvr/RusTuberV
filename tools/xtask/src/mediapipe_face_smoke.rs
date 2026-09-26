@@ -188,7 +188,9 @@ fn run_windows(options: Options) -> Result<(), String> {
         .start_worker(MsmfBackend::new())
         .map_err(|error| format!("capture worker start failed: {error}"))?;
     if let Err(error) = capture.select_and_start(device.clone(), CameraRequest::default()) {
-        let _ = capture.shutdown();
+        if let Err(shutdown_error) = capture.shutdown() {
+            eprintln!("capture shutdown failed: {shutdown_error}");
+        }
         return Err(format!("camera start failed: {error}"));
     }
 
@@ -219,7 +221,9 @@ fn run_windows(options: Options) -> Result<(), String> {
             if let Err(error) = restart {
                 inference_worker.stop();
                 let inference_result = inference_worker.join();
-                let _ = capture.shutdown();
+                if let Err(shutdown_error) = capture.shutdown() {
+                    eprintln!("capture shutdown failed: {shutdown_error}");
+                }
                 return Err(format!(
                     "camera Stop/Start {} failed: {error}; inference={inference_result:?}",
                     restart_count + 1
@@ -238,7 +242,7 @@ fn run_windows(options: Options) -> Result<(), String> {
     // teardown begins. The slot remains open until the worker has joined.
     inference_worker.stop();
     let inference_result = inference_worker.join();
-    let capture_metrics = capture.shutdown();
+    let capture_metrics = capture.shutdown().map_err(|error| error.to_string())?;
     let stats = match inference_result {
         WorkerResult::Completed(WorkerOutput { stats }) => stats,
         WorkerResult::Panicked => return Err("MediaPipe worker panicked".into()),

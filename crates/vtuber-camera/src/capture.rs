@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use vtuber_core::{FrameSeq, LatestSlot, StopToken, VideoFrame, WorkerHandle};
+use vtuber_core::{FrameSeq, LatestSlot, StopToken, VideoFrame, WorkerHandle, WorkerResult};
 
 use crate::device::{CameraBackend, CameraDescriptor, CameraError, CameraFormat, CameraRequest};
 
@@ -153,6 +153,7 @@ impl Drop for CaptureController {
             worker.stop();
             // Closing the slot wakes a worker waiting for its next frame.
             self.frame_slot.close();
+            // Drop cannot return a shutdown error; explicit shutdown can.
             let _ = worker.join();
         }
     }
@@ -345,20 +346,34 @@ impl CaptureController {
     ///
     /// This consumes the controller. After this call returns, no worker thread
     /// is running and the frame slot is closed.
-    pub fn shutdown(mut self) -> CaptureMetrics {
-        if let Some(worker) = self.worker.take() {
+    ///
+    /// # Errors
+    /// Returns WorkerPanicked after closing the owned frame slot. Joining can block.
+    pub fn shutdown(mut self) -> Result<CaptureMetrics, CameraError> {
+        let result = if let Some(worker) = self.worker.take() {
             worker.stop();
-            let _ = worker.join();
-        }
+            worker.join()
+        } else {
+            WorkerResult::Completed(CaptureWorkerResult {
+                final_metrics: self.metrics(),
+            })
+        };
+        // Cleanup must also run after a panicked worker.
         self.frame_slot.close();
-
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.state = CaptureServiceState::Idle;
-            state.metrics.clone()
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match result {
+            WorkerResult::Completed(result) => {
+                state.state = CaptureServiceState::Idle;
+                Ok(result.final_metrics)
+            }
+            WorkerResult::Panicked => {
+                state.state = CaptureServiceState::BackOff;
+                state.metrics.last_error = Some(CameraError::WorkerPanicked.to_string());
+                Err(CameraError::WorkerPanicked)
+            }
         }
     }
 }
@@ -779,6 +794,23 @@ mod tests {
     }
 
     #[test]
+    fn explicit_shutdown_reports_panic_and_closes_the_frame_slot() {
+        let mut controller = CaptureController::new();
+        let slot = controller.frame_slot();
+        controller.worker = Some(
+            WorkerHandle::spawn("capture-panic-test", |_| {
+                panic!("scripted worker panic");
+            })
+            .unwrap(),
+        );
+        assert!(matches!(
+            controller.shutdown(),
+            Err(CameraError::WorkerPanicked)
+        ));
+        assert!(slot.is_closed());
+    }
+
+    #[test]
     fn reconnect_decision_uses_only_the_supplied_clock_and_attempt_count() {
         let now = Instant::now();
         let mut plan = ReconnectPlan {
@@ -978,7 +1010,7 @@ mod tests {
         let result = slot.wait_read_after(0, Duration::from_secs(2));
         assert!(matches!(result, Some(vtuber_core::ReadResult::New { .. })));
 
-        let metrics = controller.shutdown();
+        let metrics = controller.shutdown().unwrap();
         assert!(metrics.frames_captured > 0);
     }
 
@@ -1053,7 +1085,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(30));
         let slot = controller.frame_slot();
-        let metrics = controller.shutdown();
+        let metrics = controller.shutdown().unwrap();
 
         assert!(slot.is_closed());
         assert!(metrics.frames_captured > 0);
@@ -1088,7 +1120,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        let metrics = controller.shutdown();
+        let metrics = controller.shutdown().unwrap();
         assert!(
             metrics.frames_captured >= 3,
             "expected reconnect to produce more frames, got {:?}",

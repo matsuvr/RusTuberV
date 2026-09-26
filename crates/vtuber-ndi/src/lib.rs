@@ -776,7 +776,7 @@ impl NdiOutputController {
     /// `ndi-sdk`, runtime initialization and sender creation occur inside the
     /// worker so no SDK handle crosses the application boundary.
     pub fn start(&mut self, config: NdiOutputConfig) -> Result<(), NdiOutputError> {
-        self.reap_finished_worker();
+        self.reap_finished_worker()?;
         if self.worker.is_some() {
             return Err(NdiOutputError::new(
                 NdiErrorCode::AlreadyRunning,
@@ -820,10 +820,9 @@ impl NdiOutputController {
             ControllerBackend::Scripted(backend) => {
                 let shared = Arc::clone(&self.shared);
                 let backend = backend.clone();
-                let spawned = vtuber_core::WorkerHandle::spawn(
-                    "ndi-output-sender",
-                    move |stop| run_scripted_worker(shared, mailbox, config, backend, stop),
-                );
+                let spawned = vtuber_core::WorkerHandle::spawn("ndi-output-sender", move |stop| {
+                    run_scripted_worker(shared, mailbox, config, backend, stop)
+                });
                 match spawned {
                     Ok(worker) => {
                         self.worker = Some(worker);
@@ -835,10 +834,9 @@ impl NdiOutputController {
             #[cfg(feature = "ndi-sdk")]
             ControllerBackend::Sdk => {
                 let shared = Arc::clone(&self.shared);
-                let spawned = vtuber_core::WorkerHandle::spawn(
-                    "ndi-output-sender",
-                    move |stop| run_ndi_worker(shared, mailbox, config, stop),
-                );
+                let spawned = vtuber_core::WorkerHandle::spawn("ndi-output-sender", move |stop| {
+                    run_ndi_worker(shared, mailbox, config, stop)
+                });
                 match spawned {
                     Ok(worker) => {
                         self.worker = Some(worker);
@@ -939,17 +937,35 @@ impl NdiOutputController {
         error
     }
 
-    fn reap_finished_worker(&mut self) {
-        let finished = self
+    fn reap_finished_worker(&mut self) -> Result<(), NdiOutputError> {
+        if !self
             .worker
             .as_ref()
-            .is_some_and(vtuber_core::WorkerHandle::is_finished);
-        if finished {
-            // Invariant: `is_finished()` returned true immediately above.
-            #[allow(clippy::expect_used)]
-            let worker = self.worker.take().expect("finished worker exists");
-            let _ = worker.join();
-            *recover_lock(self.shared.mailbox.lock()) = None;
+            .is_some_and(vtuber_core::WorkerHandle::is_finished)
+        {
+            return Ok(());
+        }
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        if let Some(mailbox) = recover_lock(self.shared.mailbox.lock()).take() {
+            mailbox.close();
+        }
+        match worker.join() {
+            vtuber_core::WorkerResult::Completed(WorkerExit::Stopped)
+            | vtuber_core::WorkerResult::Completed(WorkerExit::StartupFailed) => {
+                // StartupFailed already records its typed cause. Reaping must
+                // not replace it with a clean Off status.
+                Ok(())
+            }
+            vtuber_core::WorkerResult::Panicked => {
+                let error = NdiOutputError::new(
+                    NdiErrorCode::WorkerStopFailed,
+                    "NDI sender worker did not join cleanly",
+                );
+                self.shared.replace_status_error(&error);
+                Err(error)
+            }
         }
     }
 }
@@ -1220,6 +1236,59 @@ mod tests {
             source_name: "RusTuberV".to_owned(),
             profile: test_profile(),
         }
+    }
+
+    #[test]
+    fn reaping_a_panicked_worker_preserves_the_error_and_releases_the_mailbox() {
+        let mut controller = NdiOutputController::new();
+        let mailbox = Arc::new(LatestFrameMailbox::new());
+        *recover_lock(controller.shared.mailbox.lock()) = Some(Arc::clone(&mailbox));
+        controller.worker = Some(
+            vtuber_core::WorkerHandle::spawn("ndi-panic-test", |_| {
+                panic!("scripted worker panic");
+            })
+            .unwrap(),
+        );
+        while !controller.worker.as_ref().unwrap().is_finished() {
+            std::thread::yield_now();
+        }
+        let error = controller.reap_finished_worker().unwrap_err();
+        assert_eq!(error.code, NdiErrorCode::WorkerStopFailed);
+        assert!(matches!(
+            controller.status(),
+            NdiOutputStatus::Error {
+                code: NdiErrorCode::WorkerStopFailed,
+                ..
+            }
+        ));
+        assert!(controller.worker.is_none());
+        assert!(recover_lock(controller.shared.mailbox.lock()).is_none());
+        assert_eq!(
+            mailbox.submit(frame(1)),
+            NdiSubmitResult::RejectedNotRunning
+        );
+    }
+
+    #[test]
+    fn reaping_a_startup_failure_does_not_replace_its_cause() {
+        let mut controller = NdiOutputController::new();
+        let error = NdiOutputError::new(
+            NdiErrorCode::SenderCreateFailed,
+            "scripted startup failure",
+        );
+        controller.shared.replace_status_error(&error);
+        controller.worker = Some(
+            vtuber_core::WorkerHandle::spawn("ndi-startup-failure-test", |_| {
+                WorkerExit::StartupFailed
+            })
+            .unwrap(),
+        );
+        while !controller.worker.as_ref().unwrap().is_finished() {
+            std::thread::yield_now();
+        }
+        let before = controller.status();
+        controller.reap_finished_worker().unwrap();
+        assert_eq!(controller.status(), before);
     }
 
     #[test]

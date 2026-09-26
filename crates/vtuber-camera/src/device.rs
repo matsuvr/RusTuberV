@@ -19,6 +19,9 @@ pub enum CameraError {
     /// The capture worker can no longer receive control requests.
     #[error("CAMERA_COMMAND_CHANNEL_CLOSED")]
     CommandChannelClosed,
+    /// The capture worker panicked while running or shutting down.
+    #[error("CAMERA_WORKER_PANICKED")]
+    WorkerPanicked,
     /// The camera disconnected.
     #[error("CAMERA_DISCONNECTED")]
     Disconnected,

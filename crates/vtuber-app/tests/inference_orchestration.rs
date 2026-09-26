@@ -46,7 +46,7 @@ fn production_start_queues_mediapipe_pipeline_and_classifies_load_failure() {
         Some(FailureStage::ModelLoad)
     );
 
-    runtime.stop_model();
+    runtime.stop_model().unwrap();
 }
 
 #[test]
@@ -76,6 +76,6 @@ fn production_status_exposes_mediapipe_identity_before_task_load() {
     );
     assert_eq!(status.landmark_model_hash, None);
 
-    runtime.stop_model();
+    runtime.stop_model().unwrap();
     assert_eq!(runtime.status().state, InferenceWorkerState::Idle);
 }
