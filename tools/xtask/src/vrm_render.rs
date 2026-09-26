@@ -39,11 +39,11 @@ pub fn run(args: &[String]) -> TaskResult {
     let input = args
         .first()
         .map(PathBuf::from)
-        .ok_or_else(|| "usage: cargo xtask -- vrm-render <vrm-or-dir> <out-dir>".to_owned())?;
+        .ok_or_else(|| "usage: cargo xtask vrm-render <vrm-or-dir> <out-dir>".to_owned())?;
     let out_dir = args
         .get(1)
         .map(PathBuf::from)
-        .ok_or_else(|| "usage: cargo xtask -- vrm-render <vrm-or-dir> <out-dir>".to_owned())?;
+        .ok_or_else(|| "usage: cargo xtask vrm-render <vrm-or-dir> <out-dir>".to_owned())?;
 
     let mut models = Vec::new();
     if input.is_dir() {

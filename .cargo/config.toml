@@ -1,0 +1,9 @@
+# Repository-local Cargo configuration.
+#
+# Only the `xtask` alias is defined here so `cargo xtask <task> ...` resolves in
+# a plain checkout of this repository without a personal global alias. The
+# trailing `--` is part of the alias, so the separator must not be repeated:
+# write `cargo xtask <task>`, not `cargo xtask -- <task>`. The equivalent
+# explicit invocation is `cargo run -p xtask -- <task>`.
+[alias]
+xtask = "run -p xtask --"

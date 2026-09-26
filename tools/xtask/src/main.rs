@@ -53,6 +53,12 @@ fn run_task(args: &[String]) -> TaskResult {
         return Ok(TaskOutcome::Help);
     };
     match task.as_str() {
+        // The repository alias already supplies the `--` separator, so the
+        // top-level help names are spelled without one.
+        "help" | "--help" | "-h" => {
+            print_help();
+            Ok(TaskOutcome::Help)
+        }
         "vrm-compat" => {
             let fixture_dir = args
                 .first()
@@ -85,7 +91,7 @@ fn run_task(args: &[String]) -> TaskResult {
         "vrm-managed-compat" => {
             let path = args.first().map(PathBuf::from).ok_or_else(|| {
                 TaskError::new(
-                    "usage: cargo xtask -- vrm-managed-compat <path-to-model.vrm>",
+                    "usage: cargo xtask vrm-managed-compat <path-to-model.vrm>",
                     1,
                 )
             })?;
@@ -168,6 +174,33 @@ mod cli_tests {
             ndi::run(&["package".into(), "--help".into()]).unwrap(),
             TaskOutcome::Help
         );
+    }
+
+    #[test]
+    fn every_top_level_help_spelling_is_help_with_a_zero_exit_code() {
+        for name in ["help", "--help", "-h"] {
+            let result: TaskResult = run_task(&[name.to_owned()]);
+            assert_eq!(result, Ok(TaskOutcome::Help), "{name}");
+            assert_eq!(task_exit_code(&result), 0, "{name}");
+        }
+        // No argument is still help, unchanged.
+        let result: TaskResult = run_task(&[]);
+        assert_eq!(result, Ok(TaskOutcome::Help));
+        assert_eq!(task_exit_code(&result), 0);
+    }
+
+    #[test]
+    fn an_unknown_task_and_a_missing_required_argument_stay_errors() {
+        for args in [
+            vec!["unknown".to_owned()],
+            vec!["--".to_owned()],
+            vec!["vrm-managed-compat".to_owned()],
+            vec!["vrm-render".to_owned()],
+        ] {
+            let result: TaskResult = run_task(&args);
+            assert!(result.is_err(), "{args:?}");
+            assert_ne!(task_exit_code(&result), 0, "{args:?}");
+        }
     }
 }
 
