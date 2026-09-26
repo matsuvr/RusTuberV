@@ -5,6 +5,8 @@
 //! threads. The stream is deliberately not `Send`; it never crosses the
 //! capture worker boundary.
 
+use std::sync::Arc;
+
 use nokhwa::Camera;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{
@@ -244,7 +246,9 @@ impl CameraStream for MsmfStream {
             height: self.format.height,
             stride_bytes: stride,
             format: pixel_format,
-            data: data.into(),
+            // The decoder's `Arc` moves straight into the frame; only the
+            // frame's own reference is shared with the consumers.
+            data,
         })
     }
 
@@ -257,13 +261,15 @@ impl CameraStream for MsmfStream {
 
 /// Decode a nokhwa buffer into raw pixel data.
 ///
-/// A format this decoder cannot read returns an error, so a truncated or
-/// unsupported buffer is never published as a frame.
+/// The returned `Arc<[u8]>` shares the decoder's buffer when that decoder
+/// already produced one, so no intermediate `Vec` is created for the formats
+/// that need no conversion. A format this decoder cannot read returns an
+/// error, so a truncated or unsupported buffer is never published as a frame.
 fn decode_frame(
     buffer: &nokhwa::Buffer,
     source_format: FrameFormat,
     format: &CameraFormat,
-) -> Result<(Vec<u8>, PixelFormat, usize), CameraError> {
+) -> Result<(Arc<[u8]>, PixelFormat, usize), CameraError> {
     match source_format {
         FrameFormat::MJPEG => {
             let decoded = buffer
@@ -271,27 +277,25 @@ fn decode_frame(
                 .map_err(|e| CameraError::FrameDecodeFailed(format!("MJPEG decode: {e}")))?;
             let rgb = decoded.into_raw();
             let stride = format.width as usize * 3;
-            Ok((rgb, PixelFormat::Rgb8, stride))
+            Ok((rgb.into(), PixelFormat::Rgb8, stride))
         }
         FrameFormat::YUYV => {
             let rgb = yuyv_to_rgb(buffer.buffer(), format.width, format.height)?;
             let stride = format.width as usize * 3;
-            Ok((rgb, PixelFormat::Rgb8, stride))
+            Ok((rgb.into(), PixelFormat::Rgb8, stride))
         }
+        // These formats need no conversion, so the buffer is shared as-is.
         FrameFormat::RAWRGB => {
-            let data = buffer.buffer().to_vec();
             let stride = format.width as usize * 3;
-            Ok((data, PixelFormat::Rgb8, stride))
+            Ok((Arc::from(buffer.buffer()), PixelFormat::Rgb8, stride))
         }
         FrameFormat::RAWBGR => {
-            let data = buffer.buffer().to_vec();
             let stride = format.width as usize * 3;
-            Ok((data, PixelFormat::Bgr8, stride))
+            Ok((Arc::from(buffer.buffer()), PixelFormat::Bgr8, stride))
         }
         FrameFormat::GRAY => {
-            let data = buffer.buffer().to_vec();
             let stride = format.width as usize;
-            Ok((data, PixelFormat::Gray8, stride))
+            Ok((Arc::from(buffer.buffer()), PixelFormat::Gray8, stride))
         }
         FrameFormat::NV12 => Err(CameraError::FrameDecodeFailed(
             "NV12 not yet supported".into(),
@@ -514,9 +518,36 @@ mod tests {
             nokhwa::Buffer::new(Resolution::new(2, 1), &[0, 128, 0, 128], FrameFormat::YUYV);
         let (data, pixel_format, stride) =
             decode_frame(&buffer, FrameFormat::YUYV, &format).expect("complete buffer decodes");
-        assert_eq!(data, vec![0, 0, 0, 0, 0, 0]);
+        assert_eq!(data, Arc::from([0u8; 6]));
         assert_eq!(pixel_format, PixelFormat::Rgb8);
         assert_eq!(stride, 6);
+    }
+
+    #[test]
+    fn a_raw_frame_shares_the_buffer_without_an_intermediate_copy() {
+        // The three raw formats need no conversion, so the decoder shares the
+        // buffer as-is and the pixel order and stride stay as they were.
+        let cases = [
+            (FrameFormat::RAWRGB, PixelFormat::Rgb8, 6),
+            (FrameFormat::RAWBGR, PixelFormat::Bgr8, 6),
+            (FrameFormat::GRAY, PixelFormat::Gray8, 2),
+        ];
+        let bytes = [1u8, 2, 3, 4, 5, 6];
+        let format = CameraFormat {
+            width: 2,
+            height: 1,
+            fps_numerator: 30,
+            fps_denominator: 1,
+            format: PixelFormat::Rgb8,
+        };
+        for (source_format, pixel_format, stride) in cases {
+            let buffer = nokhwa::Buffer::new(Resolution::new(2, 1), &bytes, source_format);
+            let (data, decoded, decoded_stride) =
+                decode_frame(&buffer, source_format, &format).expect("raw format decodes");
+            assert_eq!(&*data, &bytes, "{source_format:?}");
+            assert_eq!(decoded, pixel_format, "{source_format:?}");
+            assert_eq!(decoded_stride, stride, "{source_format:?}");
+        }
     }
 
     #[test]
