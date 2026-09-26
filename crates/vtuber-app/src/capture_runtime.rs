@@ -52,7 +52,7 @@ pub const fn default_camera_backend() -> CameraBackendKind {
 /// The controller is created at app startup and lives for the entire
 /// application lifetime. Individual capture sessions are started/stopped
 /// via the controller's methods.
-#[derive(Resource)]
+#[derive(Resource, Debug)]
 pub struct CaptureRuntime {
     /// The underlying capture controller.
     controller: CaptureController,

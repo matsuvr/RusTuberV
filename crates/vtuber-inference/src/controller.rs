@@ -75,6 +75,16 @@ pub struct InferenceController {
     pub(crate) worker: Option<WorkerHandle<InferenceWorkerResult>>,
 }
 
+impl std::fmt::Debug for InferenceController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InferenceController")
+            .field("status", &self.status)
+            .field("has_worker", &self.worker.is_some())
+            .field("has_command_channel", &self.command_tx.is_some())
+            .finish()
+    }
+}
+
 impl Drop for InferenceController {
     fn drop(&mut self) {
         if let Some(worker) = self.worker.take() {
@@ -419,6 +429,18 @@ mod tests {
 
     fn idle_controller() -> InferenceController {
         InferenceController::new(Arc::new(LatestSlot::new()), Arc::new(LatestSlot::new()))
+    }
+
+    #[test]
+    fn debug_only_reads_the_controller_summary() {
+        let controller = idle_controller();
+        let text = format!("{controller:?}");
+        assert!(text.contains("InferenceController"));
+        assert!(text.contains("Idle"));
+        assert!(text.contains("has_worker: false"));
+        assert!(text.contains("has_command_channel: false"));
+        assert!(controller.worker.is_none());
+        assert!(!controller.frame_slot.is_closed());
     }
 
     #[test]

@@ -33,6 +33,27 @@ pub struct LatestSlot<T> {
     changed: Condvar,
 }
 
+impl<T> std::fmt::Debug for SlotState<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlotState")
+            .field("generation", &self.generation)
+            .field("has_value", &self.value.is_some())
+            .field("closed", &self.closed)
+            .field("replacements", &self.replacements)
+            .finish()
+    }
+}
+
+impl<T> std::fmt::Debug for LatestSlot<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Mutex's Debug uses try_lock; formatting does not wait for a reader
+        // or recursively acquire the slot lock through accessors.
+        f.debug_struct("LatestSlot")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 /// Result of reading from a [`LatestSlot`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ReadResult<T> {
@@ -217,6 +238,23 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn debug_summarizes_a_value_without_requiring_debug_or_dumping_it() {
+        struct NoDebug([u8; 1024]);
+        let slot = LatestSlot::new();
+        let value = NoDebug([187; 1024]);
+        assert_eq!(value.0.len(), 1024);
+        slot.publish(value);
+        let text = format!("{slot:?}");
+        assert!(text.contains("generation: 1"));
+        assert!(text.contains("has_value: true"));
+        assert!(!text.contains("187"));
+        assert_eq!(slot.generation(), 1);
+        assert!(!slot.is_closed());
+        let _guard = slot.inner.lock().unwrap();
+        assert!(format!("{slot:?}").contains("<locked>"));
+    }
 
     #[test]
     fn skipped_generations_are_per_reader_and_reset_with_the_session() {
