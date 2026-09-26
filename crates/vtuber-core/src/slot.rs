@@ -11,10 +11,12 @@ struct SlotState<T> {
     overwritten: u64,
 }
 
-/// A single-producer / single-consumer slot that always keeps the latest value.
+/// A capacity-one slot that always keeps the latest value.
 ///
-/// Old unpublished values are discarded; consumers always read the most recent
-/// value that is newer than the one they have already seen.
+/// Old unpublished values are discarded. Multiple readers, each keeping its
+/// own generation cursor, can read the retained latest value: a read returns
+/// the value together with the generation it was published under, so readers
+/// never mark a newer publish as consumed.
 pub struct LatestSlot<T> {
     inner: Mutex<SlotState<T>>,
     changed: Condvar,
@@ -23,8 +25,15 @@ pub struct LatestSlot<T> {
 /// Result of reading from a [`LatestSlot`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ReadResult<T> {
-    /// A value newer than the requested generation.
-    New(T),
+    /// A value newer than the requested generation, together with the
+    /// generation it was published under. Store `generation` as the next
+    /// cursor value.
+    New {
+        /// Generation the value was published under.
+        generation: u64,
+        /// The retained value.
+        value: T,
+    },
     /// The slot was closed before a new value arrived.
     Closed,
 }
@@ -92,12 +101,12 @@ impl<T> LatestSlot<T> {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let deadline = std::time::Instant::now() + timeout;
+        let started = std::time::Instant::now();
         loop {
             if let Some(result) = Self::read_locked(&state, last_generation) {
                 return Some(result);
             }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return None;
             }
@@ -173,7 +182,10 @@ impl<T> LatestSlot<T> {
             return Some(ReadResult::Closed);
         }
         if state.generation > last_generation {
-            state.value.clone().map(ReadResult::New)
+            state.value.clone().map(|value| ReadResult::New {
+                generation: state.generation,
+                value,
+            })
         } else {
             None
         }
@@ -197,21 +209,64 @@ mod tests {
     fn publish_and_read() {
         let slot = LatestSlot::new();
         assert!(slot.publish(42));
-        assert_eq!(slot.try_read_after(0), Some(ReadResult::New(42)));
+        assert_eq!(
+            slot.try_read_after(0),
+            Some(ReadResult::New {
+                generation: 1,
+                value: 42
+            })
+        );
     }
 
     #[test]
-    fn old_generation_not_returned() {
+    fn read_returns_the_newer_publish_after_the_cursor() {
         let slot = LatestSlot::new();
         slot.publish(1);
-        let first_generation = slot.generation();
+        assert_eq!(
+            slot.try_read_after(0),
+            Some(ReadResult::New {
+                generation: 1,
+                value: 1
+            })
+        );
         slot.publish(2);
         assert_eq!(
-            slot.try_read_after(first_generation),
-            Some(ReadResult::New(2))
+            slot.try_read_after(1),
+            Some(ReadResult::New {
+                generation: 2,
+                value: 2
+            })
         );
-        let second_generation = slot.generation();
-        assert_eq!(slot.try_read_after(second_generation), None);
+        assert_eq!(slot.try_read_after(2), None);
+    }
+
+    #[test]
+    fn two_readers_with_independent_cursors_read_the_same_value() {
+        let slot = LatestSlot::new();
+        slot.publish(5);
+        assert_eq!(
+            slot.try_read_after(0),
+            Some(ReadResult::New {
+                generation: 1,
+                value: 5
+            })
+        );
+        assert_eq!(
+            slot.try_read_after(0),
+            Some(ReadResult::New {
+                generation: 1,
+                value: 5
+            })
+        );
+        slot.publish(6);
+        slot.publish(7);
+        assert_eq!(
+            slot.try_read_after(1),
+            Some(ReadResult::New {
+                generation: 3,
+                value: 7
+            })
+        );
     }
 
     #[test]
@@ -253,7 +308,13 @@ mod tests {
         assert_eq!(slot.generation(), generation);
         assert_eq!(slot.try_read_after(0), None);
         assert!(slot.publish(43));
-        assert_eq!(slot.try_read_after(generation), Some(ReadResult::New(43)));
+        assert_eq!(
+            slot.try_read_after(generation),
+            Some(ReadResult::New {
+                generation: generation + 1,
+                value: 43
+            })
+        );
     }
 
     #[test]
@@ -264,7 +325,13 @@ mod tests {
             assert!(slot.publish(value));
         }
         let result = slot.try_read_after(0);
-        assert_eq!(result, Some(ReadResult::New(N - 1)));
+        assert_eq!(
+            result,
+            Some(ReadResult::New {
+                generation: N as u64,
+                value: N - 1
+            })
+        );
         assert_eq!(slot.overwritten_count(), (N - 1) as u64);
     }
 
@@ -283,10 +350,12 @@ mod tests {
         let mut last_seen = 0;
         let mut consumed = 0;
         while last_seen < 999 {
-            if let Some(ReadResult::New(value)) =
-                slot.wait_read_after(last_seen, Duration::from_secs(1))
+            if let Some(ReadResult::New {
+                generation,
+                value,
+            }) = slot.wait_read_after(last_seen, Duration::from_secs(1))
             {
-                last_seen = slot.generation();
+                last_seen = generation;
                 consumed += 1;
                 assert!(value <= 999);
             } else {
@@ -309,5 +378,20 @@ mod tests {
         slot.close();
         assert!(slot.is_closed());
         assert_eq!(slot.try_read_after(0), Some(ReadResult::Closed));
+    }
+
+    #[test]
+    fn wait_with_max_duration_returns_immediately_when_ready_or_closed() {
+        let slot = LatestSlot::new();
+        slot.publish(7);
+        assert_eq!(
+            slot.wait_read_after(0, Duration::MAX),
+            Some(ReadResult::New {
+                generation: 1,
+                value: 7
+            })
+        );
+        slot.close();
+        assert_eq!(slot.wait_read_after(1, Duration::MAX), Some(ReadResult::Closed));
     }
 }

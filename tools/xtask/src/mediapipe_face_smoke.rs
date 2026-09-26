@@ -295,11 +295,14 @@ fn run_worker(
         let Some(read) = frame_slot.wait_read_after(last_generation, FRAME_WAIT) else {
             continue;
         };
-        let frame = match read {
-            ReadResult::New(frame) => frame,
+        let (frame, read_generation) = match read {
+            ReadResult::New {
+                generation,
+                value: frame,
+            } => (frame, generation),
             ReadResult::Closed => break,
         };
-        last_generation = frame_slot.generation();
+        last_generation = read_generation;
         stats.last_source_seq = Some(frame.seq);
         let timestamp_ms = match video_timestamp_ms(frame.captured_at, &mut last_timestamp_ms) {
             Ok(timestamp_ms) => timestamp_ms,

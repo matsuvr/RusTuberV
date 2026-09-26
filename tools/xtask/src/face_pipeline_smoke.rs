@@ -417,8 +417,11 @@ fn run_windows(options: Options) -> Result<(), String> {
             && !snapshot_written
         {
             match frame_slot.try_read_after(frame_generation) {
-                Some(ReadResult::New(frame)) => {
-                    frame_generation = frame_slot.generation();
+                Some(ReadResult::New {
+                    generation,
+                    value: frame,
+                }) => {
+                    frame_generation = generation;
                     save_snapshot(&frame, snapshot_path)?;
                     println!("Saved snapshot: {}", snapshot_path.display());
                     snapshot_written = true;
@@ -428,8 +431,11 @@ fn run_windows(options: Options) -> Result<(), String> {
         }
 
         match output_slot.try_read_after(output_generation) {
-            Some(ReadResult::New(observation)) => {
-                output_generation = output_slot.generation();
+            Some(ReadResult::New {
+                generation,
+                value: observation,
+            }) => {
+                output_generation = generation;
                 if neutral_observation.is_none() {
                     neutral_observation = Some(observation.clone());
                 }

@@ -203,9 +203,12 @@ pub fn run_inference_worker(
 
         let wait_start = Instant::now();
         match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
-            Some(ReadResult::New(frame)) => {
+            Some(ReadResult::New {
+                generation,
+                value: frame,
+            }) => {
                 let wait_duration = wait_start.elapsed();
-                last_gen = frame_slot.generation();
+                last_gen = generation;
                 let overwritten = frame_slot.overwritten_count();
                 let overwrite_delta = overwritten.saturating_sub(last_overwritten);
                 update_status(&status, |s| s.record_overwritten(overwrite_delta));
@@ -584,9 +587,12 @@ pub fn run_composite_inference_worker(
     while !stop.is_stopped() {
         let wait_started = Instant::now();
         match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
-            Some(ReadResult::New(frame)) => {
+            Some(ReadResult::New {
+                generation,
+                value: frame,
+            }) => {
                 let wait_duration = wait_started.elapsed();
-                last_gen = frame_slot.generation();
+                last_gen = generation;
                 let overwritten = frame_slot.overwritten_count();
                 let overwrite_delta = overwritten.saturating_sub(last_overwritten);
                 update_status(&status, |s| s.record_overwritten(overwrite_delta));
@@ -811,8 +817,11 @@ pub fn run_pose_worker(
     'worker: while !stop.is_stopped() {
         let started = Instant::now();
         match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
-            Some(ReadResult::New(frame)) => {
-                last_gen = frame_slot.generation();
+            Some(ReadResult::New {
+                generation,
+                value: frame,
+            }) => {
+                last_gen = generation;
                 if let Some(last_seq) = last_processed_seq
                     && frame.seq <= last_seq
                 {
@@ -1079,7 +1088,7 @@ mod tests {
         assert_eq!(status.frames_processed, 0);
         assert_eq!(frame_slot.generation(), 1);
         assert!(
-            matches!(frame_slot.try_read_after(0), Some(ReadResult::New(_))),
+            matches!(frame_slot.try_read_after(0), Some(ReadResult::New { .. })),
             "frame slot should still contain the published frame"
         );
 
@@ -1130,7 +1139,7 @@ mod tests {
         assert_eq!(status.frames_processed, 0);
         assert_eq!(frame_slot.generation(), 1);
         assert!(
-            matches!(frame_slot.try_read_after(0), Some(ReadResult::New(_))),
+            matches!(frame_slot.try_read_after(0), Some(ReadResult::New { .. })),
             "frame slot should still contain the published frame"
         );
 
@@ -1325,9 +1334,12 @@ mod tests {
         while !stop.is_stopped() {
             let wait_start = Instant::now();
             match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
-                Some(ReadResult::New(frame)) => {
+                Some(ReadResult::New {
+                    generation,
+                    value: frame,
+                }) => {
                     let wait_duration = wait_start.elapsed();
-                    last_gen = frame_slot.generation();
+                    last_gen = generation;
                     let overwritten = frame_slot.overwritten_count();
                     let overwrite_delta = overwritten.saturating_sub(last_overwritten);
                     update_status(&status, |s| s.record_overwritten(overwrite_delta));
@@ -1864,7 +1876,10 @@ mod tests {
         );
 
         // The capture timestamp must be carried through to the observation.
-        if let Some(ReadResult::New(observation)) = output_slot.try_read_after(0) {
+        if let Some(ReadResult::New {
+            value: observation, ..
+        }) = output_slot.try_read_after(0)
+        {
             let expected_captured_at = status_final
                 .last_source_seq
                 .map(|s| MonoTimeNs(s.0 * 1_000_000))
@@ -2260,7 +2275,7 @@ mod tests {
         frame_slot.publish(dummy_video_frame(1));
         let output = output_slot.wait_read_after(0, Duration::from_secs(30));
         assert!(
-            matches!(output, Some(ReadResult::New(_))),
+            matches!(output, Some(ReadResult::New { .. })),
             "pose worker should publish one completed frame"
         );
 
