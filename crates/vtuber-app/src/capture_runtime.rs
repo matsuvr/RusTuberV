@@ -154,11 +154,15 @@ impl CaptureRuntime {
     pub fn try_read_frame(&mut self) -> Option<VideoFrame> {
         let slot = self.controller.frame_slot();
         match slot.try_read_after(self.last_generation) {
-            Some(vtuber_core::ReadResult::New(frame)) => {
+            Some(vtuber_core::ReadResult::New {
+                generation,
+                value: frame,
+            }) => {
                 // The slot generation may advance by more than one when the
-                // producer overwrites unread frames. Track the actual
-                // generation so the consumer never re-reads an old value.
-                self.last_generation = slot.generation();
+                // producer overwrites unread frames. The read's own generation
+                // is the cursor, so the consumer never re-reads an old value
+                // nor skips an unread newer one.
+                self.last_generation = generation;
                 Some(frame)
             }
             Some(vtuber_core::ReadResult::Closed) | None => None,

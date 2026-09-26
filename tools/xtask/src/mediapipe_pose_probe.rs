@@ -331,11 +331,14 @@ fn run_worker(
         let Some(read) = frame_slot.wait_read_after(generation, FRAME_WAIT) else {
             continue;
         };
-        let frame = match read {
-            ReadResult::New(frame) => frame,
+        let (frame, read_generation) = match read {
+            ReadResult::New {
+                generation,
+                value: frame,
+            } => (frame, generation),
             ReadResult::Closed => break,
         };
-        generation = frame_slot.generation();
+        generation = read_generation;
         let phase_index = phase.load(std::sync::atomic::Ordering::Acquire);
         if phase_index < 0 {
             continue;

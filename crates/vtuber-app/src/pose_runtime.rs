@@ -142,10 +142,12 @@ impl PoseRuntime {
     /// re-fed while no new result exists, so the arm smoother advances on the
     /// render clock and the hands move continuously between camera frames.
     fn read_latest(&mut self) -> Option<ArmControlFrame> {
-        if let Some(ReadResult::New(frame)) =
-            self.output_slot.try_read_after(self.output_generation)
+        if let Some(ReadResult::New {
+            generation,
+            value: frame,
+        }) = self.output_slot.try_read_after(self.output_generation)
         {
-            self.output_generation = self.output_slot.generation();
+            self.output_generation = generation;
             #[cfg(debug_assertions)]
             log_pose_frame(&frame, &mut self.debug_log);
             self.held_frame = Some(frame);
