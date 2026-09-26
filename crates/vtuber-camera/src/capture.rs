@@ -70,7 +70,7 @@ enum ControlCommand {
 
 /// Shared mutable state guarded by a mutex so the controller and any UI can
 /// read it without message passing.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct SharedState {
     state: CaptureServiceState,
     selected_device: Option<CameraDescriptor>,
@@ -238,7 +238,12 @@ impl CaptureController {
     /// Selects a device and starts capture.
     ///
     /// If a device is already running, it is stopped first. If no worker has
-    /// been started, this method returns an error.
+    /// been started, this method returns an error. Success means enqueued, not
+    /// that the camera has opened. The worker owns the completed state.
+    ///
+    /// # Errors
+    /// Returns an error if no worker is started or its command channel is
+    /// closed. The selected device, request and state stay unchanged.
     pub fn select_and_start(
         &mut self,
         device: CameraDescriptor,
@@ -249,53 +254,67 @@ impl CaptureController {
             .as_ref()
             .ok_or_else(|| CameraError::OpenFailed("capture worker not started".into()))?;
 
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.selected_device = Some(device.clone());
-            state.requested_format = Some(request);
-            state.state = CaptureServiceState::Starting;
-        }
-
+        // Clone before locking. The unbounded send does not wait for a reader;
+        // holding the state lock prevents the worker's completion from racing
+        // ahead of the accepted-request state written below.
+        let selected_device = device.clone();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tx.send(ControlCommand::Start(device, request))
-            .map_err(|_| CameraError::OpenFailed("capture worker command channel closed".into()))?;
+            .map_err(|_| CameraError::CommandChannelClosed)?;
+        state.selected_device = Some(selected_device);
+        state.requested_format = Some(request);
+        state.state = CaptureServiceState::Starting;
         Ok(())
     }
 
-    /// Stops capture but keeps the selected device.
-    pub fn stop(&mut self) {
-        if let Some(tx) = self.command_tx.as_ref() {
-            let _ = tx.send(ControlCommand::Stop);
-        }
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.state != CaptureServiceState::Idle
-                && state.state != CaptureServiceState::Selected
-            {
-                state.state = CaptureServiceState::Stopping;
-            }
-        }
+    /// Requests capture stop, keeping the selected device.
+    ///
+    /// `Ok(())` means accepted, not completed. The worker changes Stopping to
+    /// Selected (or Idle without a selection). Before startup this is a no-op.
+    ///
+    /// # Errors
+    /// Returns [`CameraError::CommandChannelClosed`] without changing state if
+    /// the worker can no longer receive the request.
+    pub fn stop(&mut self) -> Result<(), CameraError> {
+        let Some(tx) = self.command_tx.as_ref() else {
+            return Ok(());
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tx.send(ControlCommand::Stop)
+            .map_err(|_| CameraError::CommandChannelClosed)?;
+        state.state = CaptureServiceState::Stopping;
+        Ok(())
     }
 
-    /// Stops capture and clears the selected device.
-    pub fn reset(&mut self) {
-        if let Some(tx) = self.command_tx.as_ref() {
-            let _ = tx.send(ControlCommand::Reset);
-        }
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+    /// Requests capture stop and selection reset.
+    ///
+    /// `Ok(())` means accepted, not completed. The worker clears selection and
+    /// returns to Idle. With no worker, selection is cleared immediately.
+    ///
+    /// # Errors
+    /// Returns [`CameraError::CommandChannelClosed`] without changing state if
+    /// the worker can no longer receive the request.
+    pub fn reset(&mut self) -> Result<(), CameraError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(tx) = self.command_tx.as_ref() else {
             state.selected_device = None;
             state.requested_format = None;
-            state.state = CaptureServiceState::Stopping;
-        }
+            state.state = CaptureServiceState::Idle;
+            return Ok(());
+        };
+        tx.send(ControlCommand::Reset)
+            .map_err(|_| CameraError::CommandChannelClosed)?;
+        state.state = CaptureServiceState::Stopping;
+        Ok(())
     }
 
     /// Requests graceful shutdown and joins the worker.
@@ -402,7 +421,11 @@ where
                     }
                     clear_frame_slots(&slot, pose_slot.as_deref());
                     update_state(&state, |s| {
-                        s.state = CaptureServiceState::Selected;
+                        s.state = if selected_device.is_some() {
+                            CaptureServiceState::Selected
+                        } else {
+                            CaptureServiceState::Idle
+                        };
                     });
                 }
                 Ok(ControlCommand::Reset) => {
@@ -607,6 +630,92 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn commands_before_worker_start_do_not_leave_stopping_state() {
+        let mut controller = CaptureController::new();
+        controller.stop().unwrap();
+        assert_eq!(controller.state(), CaptureServiceState::Idle);
+        controller.reset().unwrap();
+        assert_eq!(controller.state(), CaptureServiceState::Idle);
+        assert_eq!(controller.selected_device(), None);
+    }
+
+    #[test]
+    fn failed_control_send_preserves_the_entire_snapshot() {
+        let mut controller = CaptureController::new();
+        let device = CameraDescriptor {
+            id: "original".into(),
+            label: "Original".into(),
+        };
+        update_state(&controller.state, |s| {
+            s.state = CaptureServiceState::Running;
+            s.selected_device = Some(device.clone());
+            s.requested_format = Some(CameraRequest::default());
+            s.metrics.frames_captured = 7;
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        controller.command_tx = Some(tx);
+        drop(rx);
+        let before = controller.state.lock().unwrap().clone();
+        assert!(matches!(
+            controller.stop(),
+            Err(CameraError::CommandChannelClosed)
+        ));
+        assert_eq!(*controller.state.lock().unwrap(), before);
+        assert!(matches!(
+            controller.reset(),
+            Err(CameraError::CommandChannelClosed)
+        ));
+        assert_eq!(*controller.state.lock().unwrap(), before);
+        assert!(matches!(
+            controller.select_and_start(
+                CameraDescriptor {
+                    id: "replacement".into(),
+                    label: "Replacement".into()
+                },
+                CameraRequest::default()
+            ),
+            Err(CameraError::CommandChannelClosed)
+        ));
+        assert_eq!(*controller.state.lock().unwrap(), before);
+    }
+
+    #[test]
+    fn accepted_commands_expose_requested_state_before_completion() {
+        let mut controller = CaptureController::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        controller.command_tx = Some(tx);
+        let device = CameraDescriptor {
+            id: "mock-0".into(),
+            label: "Mock".into(),
+        };
+        controller
+            .select_and_start(device.clone(), CameraRequest::default())
+            .unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Start(..)));
+        assert_eq!(controller.state(), CaptureServiceState::Starting);
+        update_state(&controller.state, |s| {
+            s.state = CaptureServiceState::Running
+        });
+        controller.stop().unwrap();
+        assert_eq!(rx.try_recv().unwrap(), ControlCommand::Stop);
+        assert_eq!(controller.state(), CaptureServiceState::Stopping);
+        update_state(&controller.state, |s| {
+            s.state = CaptureServiceState::Selected
+        });
+        assert_eq!(controller.state(), CaptureServiceState::Selected);
+        controller.reset().unwrap();
+        assert_eq!(rx.try_recv().unwrap(), ControlCommand::Reset);
+        assert_eq!(controller.selected_device(), Some(device));
+        update_state(&controller.state, |s| {
+            s.state = CaptureServiceState::Idle;
+            s.selected_device = None;
+            s.requested_format = None;
+        });
+        assert_eq!(controller.state(), CaptureServiceState::Idle);
+        assert_eq!(controller.selected_device(), None);
+    }
+
+    #[test]
     fn controller_starts_and_stops() {
         let mut controller = CaptureController::new();
         controller.start_worker(MockBackend::default()).unwrap();
@@ -644,11 +753,17 @@ mod tests {
         let slot = controller.frame_slot();
         let _ = slot.wait_read_after(0, Duration::from_secs(2));
 
-        controller.stop();
-        std::thread::sleep(Duration::from_millis(50));
-
+        controller.stop().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while controller.state() != CaptureServiceState::Selected {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not complete Stop"
+            );
+            std::thread::yield_now();
+        }
         assert_eq!(controller.selected_device(), Some(device));
-        assert_eq!(slot.try_read_after(0), None);
+        assert!(slot.try_read_after(0).is_none());
         let _ = controller.shutdown();
     }
 
@@ -665,9 +780,15 @@ mod tests {
             .select_and_start(device, CameraRequest::default())
             .unwrap();
 
-        controller.reset();
-        std::thread::sleep(Duration::from_millis(50));
-
+        controller.reset().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while controller.state() != CaptureServiceState::Idle {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not complete Reset"
+            );
+            std::thread::yield_now();
+        }
         assert_eq!(controller.selected_device(), None);
         let _ = controller.shutdown();
     }
