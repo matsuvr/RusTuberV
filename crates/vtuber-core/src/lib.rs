@@ -46,7 +46,7 @@ pub mod arkit;
 pub mod face_tracking;
 /// Raw observation contract between inference and tracking.
 pub mod observation;
-/// Latest-value slot for single-producer / single-consumer communication.
+/// Latest-value communication with an independent generation cursor per reader.
 pub mod slot;
 /// Worker stop token.
 pub mod stop;
