@@ -238,9 +238,9 @@ fn assert_frames_eq(a: &AvatarControlFrame, b: &AvatarControlFrame) {
         epsilon = 1e-5
     );
     assert_relative_eq!(a.expressions.aa, b.expressions.aa, epsilon = 1e-5);
-    assert_eq!(a.gaze.state, b.gaze.state);
-    assert_relative_eq!(a.gaze.horizontal, b.gaze.horizontal, epsilon = 1e-5);
-    assert_relative_eq!(a.gaze.vertical, b.gaze.vertical, epsilon = 1e-5);
+    assert_eq!(a.gaze.state(), b.gaze.state());
+    assert_relative_eq!(a.gaze.horizontal(), b.gaze.horizontal(), epsilon = 1e-5);
+    assert_relative_eq!(a.gaze.vertical(), b.gaze.vertical(), epsilon = 1e-5);
 }
 
 #[test]
@@ -544,6 +544,6 @@ fn replay_gaze_appears_when_blendshapes_present() {
 
     let outputs = replay(&stream, &mut pipeline);
     let frame = outputs.first().expect("should emit frame");
-    assert!(frame.gaze.horizontal > 0.0, "right gaze must be positive");
-    assert!(frame.gaze.vertical < 0.0, "down gaze must be negative");
+    assert!(frame.gaze.horizontal() > 0.0, "right gaze must be positive");
+    assert!(frame.gaze.vertical() < 0.0, "down gaze must be negative");
 }

@@ -164,13 +164,13 @@ pub enum HeadTranslationState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeadTranslationSignal {
     /// Neutral-relative X in meters; positive toward unmirrored image right.
-    pub x_meters: f32,
+    x_meters: f32,
     /// Neutral-relative Y in meters; positive up.
-    pub y_meters: f32,
+    y_meters: f32,
     /// Neutral-relative Z in meters; positive away from the camera.
-    pub z_meters: f32,
+    z_meters: f32,
     /// Whether this translation is tracked, degraded, or unavailable.
-    pub state: HeadTranslationState,
+    state: HeadTranslationState,
 }
 
 impl Default for HeadTranslationSignal {
@@ -180,6 +180,30 @@ impl Default for HeadTranslationSignal {
 }
 
 impl HeadTranslationSignal {
+    /// Returns the validated `x_meters` value.
+    #[must_use]
+    pub const fn x_meters(self) -> f32 {
+        self.x_meters
+    }
+
+    /// Returns the validated `y_meters` value.
+    #[must_use]
+    pub const fn y_meters(self) -> f32 {
+        self.y_meters
+    }
+
+    /// Returns the validated `z_meters` value.
+    #[must_use]
+    pub const fn z_meters(self) -> f32 {
+        self.z_meters
+    }
+
+    /// Returns the validated `state` value.
+    #[must_use]
+    pub const fn state(self) -> HeadTranslationState {
+        self.state
+    }
+
     /// Explicit unavailable signal. Unlike a zero tracked movement, it carries no observation.
     pub const UNAVAILABLE: Self = Self {
         x_meters: 0.0,
@@ -200,7 +224,12 @@ impl HeadTranslationSignal {
         Self::available(x_meters, y_meters, z_meters, HeadTranslationState::Degraded)
     }
 
-    fn available(x_meters: f32, y_meters: f32, z_meters: f32, state: HeadTranslationState) -> Self {
+    const fn available(
+        x_meters: f32,
+        y_meters: f32,
+        z_meters: f32,
+        state: HeadTranslationState,
+    ) -> Self {
         if !x_meters.is_finite() || !y_meters.is_finite() || !z_meters.is_finite() {
             return Self::UNAVAILABLE;
         }
@@ -226,12 +255,7 @@ impl HeadTranslationSignal {
     pub const fn mirrored(self) -> Self {
         match self.state {
             HeadTranslationState::Unavailable => Self::UNAVAILABLE,
-            _ => Self {
-                x_meters: -self.x_meters,
-                y_meters: self.y_meters,
-                z_meters: self.z_meters,
-                state: self.state,
-            },
+            _ => Self::available(-self.x_meters, self.y_meters, self.z_meters, self.state),
         }
     }
 
@@ -260,12 +284,12 @@ impl HeadTranslationSignal {
         } else {
             HeadTranslationState::Degraded
         };
-        Self {
-            x_meters: lerp(from.x_meters, to.x_meters),
-            y_meters: lerp(from.y_meters, to.y_meters),
-            z_meters: lerp(from.z_meters, to.z_meters),
+        Self::available(
+            lerp(from.x_meters, to.x_meters),
+            lerp(from.y_meters, to.y_meters),
+            lerp(from.z_meters, to.z_meters),
             state,
-        }
+        )
     }
 }
 
@@ -288,16 +312,40 @@ pub enum GazeTrackingState {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GazeSignal {
     /// Horizontal eye-in-head signal in `[-1, 1]`; image right is positive.
-    pub horizontal: f32,
+    horizontal: f32,
     /// Vertical eye-in-head signal in `[-1, 1]`; up is positive.
-    pub vertical: f32,
+    vertical: f32,
     /// Reliability in `[0, 1]`.
-    pub confidence: f32,
+    confidence: f32,
     /// Whether this value is tracked, degraded, or unavailable.
-    pub state: GazeTrackingState,
+    state: GazeTrackingState,
 }
 
 impl GazeSignal {
+    /// Returns the validated `horizontal` value.
+    #[must_use]
+    pub const fn horizontal(self) -> f32 {
+        self.horizontal
+    }
+
+    /// Returns the validated `vertical` value.
+    #[must_use]
+    pub const fn vertical(self) -> f32 {
+        self.vertical
+    }
+
+    /// Returns the validated `confidence` value.
+    #[must_use]
+    pub const fn confidence(self) -> f32 {
+        self.confidence
+    }
+
+    /// Returns the validated `state` value.
+    #[must_use]
+    pub const fn state(self) -> GazeTrackingState {
+        self.state
+    }
+
     /// Explicit unavailable signal. Unlike centered tracked gaze, it carries no observation.
     pub const UNAVAILABLE: Self = Self {
         horizontal: 0.0,
@@ -476,6 +524,16 @@ mod head_translation_contract_tests {
     }
 
     #[test]
+    fn computed_non_finite_translation_cannot_escape_validation() {
+        let a = HeadTranslationSignal::tracked(-f32::MAX, 0.0, 0.0);
+        let b = HeadTranslationSignal::tracked(f32::MAX, 0.0, 0.0);
+        assert_eq!(
+            HeadTranslationSignal::blend(a, b, 0.5),
+            HeadTranslationSignal::UNAVAILABLE
+        );
+    }
+
+    #[test]
     fn zero_tracked_translation_is_distinct_from_unavailable() {
         let centered = HeadTranslationSignal::tracked(0.0, 0.0, 0.0);
         assert!(centered.is_available());
@@ -537,10 +595,8 @@ mod head_translation_contract_tests {
         assert_close(mid.z_meters, 0.05);
         assert_eq!(mid.state, HeadTranslationState::Tracked);
 
-        let degraded_target = HeadTranslationSignal {
-            state: HeadTranslationState::Degraded,
-            ..b
-        };
+        let degraded_target =
+            HeadTranslationSignal::degraded(b.x_meters(), b.y_meters(), b.z_meters());
         let degraded = HeadTranslationSignal::blend(a, degraded_target, 0.5);
         assert_eq!(degraded.state, HeadTranslationState::Degraded);
         assert_close(degraded.x_meters, 0.01);

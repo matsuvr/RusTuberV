@@ -192,10 +192,10 @@ mod tests {
             .expect("aligned clouds should solve");
         let signal = signal_from_alignment(&alignment, 1.0);
 
-        assert_eq!(signal.state, HeadTranslationState::Tracked);
-        assert_close(signal.x_meters, 0.0);
-        assert_close(signal.y_meters, 0.0);
-        assert_close(signal.z_meters, 0.0);
+        assert_eq!(signal.state(), HeadTranslationState::Tracked);
+        assert_close(signal.x_meters(), 0.0);
+        assert_close(signal.y_meters(), 0.0);
+        assert_close(signal.z_meters(), 0.0);
     }
 
     #[test]
@@ -206,24 +206,24 @@ mod tests {
         let right = solve_relative_pose(&neutral, &synthetic_cloud([0.55, 0.4, 0.0], 0.02))
             .expect("translated cloud should solve");
         let signal = signal_from_alignment(&right, 1.0);
-        assert!(signal.x_meters > 0.01, "image-right motion is positive X");
-        assert!(signal.y_meters.abs() < 1.0e-4);
-        assert!(signal.z_meters.abs() < 1.0e-4);
+        assert!(signal.x_meters() > 0.01, "image-right motion is positive X");
+        assert!(signal.y_meters().abs() < 1.0e-4);
+        assert!(signal.z_meters().abs() < 1.0e-4);
 
         // Move left: negative X.
         let left = solve_relative_pose(&neutral, &synthetic_cloud([0.45, 0.4, 0.0], 0.02))
             .expect("translated cloud should solve");
-        assert!(signal_from_alignment(&left, 1.0).x_meters < -0.01);
+        assert!(signal_from_alignment(&left, 1.0).x_meters() < -0.01);
 
         // Image y decreases upward, so moving up yields positive Y meters.
         let up = solve_relative_pose(&neutral, &synthetic_cloud([0.5, 0.35, 0.0], 0.02))
             .expect("translated cloud should solve");
-        assert!(signal_from_alignment(&up, 1.0).y_meters > 0.01);
+        assert!(signal_from_alignment(&up, 1.0).y_meters() > 0.01);
 
         // Moving down yields negative Y meters.
         let down = solve_relative_pose(&neutral, &synthetic_cloud([0.5, 0.45, 0.0], 0.02))
             .expect("translated cloud should solve");
-        assert!(signal_from_alignment(&down, 1.0).y_meters < -0.01);
+        assert!(signal_from_alignment(&down, 1.0).y_meters() < -0.01);
     }
 
     #[test]
@@ -234,23 +234,26 @@ mod tests {
         let near = solve_relative_pose(&neutral, &synthetic_cloud([0.5, 0.4, 0.0], 0.024))
             .expect("scaled cloud should solve");
         let near_signal = signal_from_alignment(&near, 1.0);
-        assert!(near_signal.z_meters < -0.01, "approach must be negative Z");
+        assert!(
+            near_signal.z_meters() < -0.01,
+            "approach must be negative Z"
+        );
 
         // Retreat: smaller apparent size -> positive Z (away from camera).
         let far = solve_relative_pose(&neutral, &synthetic_cloud([0.5, 0.4, 0.0], 0.016))
             .expect("scaled cloud should solve");
         let far_signal = signal_from_alignment(&far, 1.0);
-        assert!(far_signal.z_meters > 0.01, "retreat must be positive Z");
+        assert!(far_signal.z_meters() > 0.01, "retreat must be positive Z");
 
         // Mirror flips only X; near/far Z evidence is mirror-invariant.
         assert_relative_eq!(
-            near_signal.mirrored().z_meters,
-            near_signal.z_meters,
+            near_signal.mirrored().z_meters(),
+            near_signal.z_meters(),
             epsilon = 1.0e-6
         );
         assert_relative_eq!(
-            near_signal.mirrored().y_meters,
-            near_signal.y_meters,
+            near_signal.mirrored().y_meters(),
+            near_signal.y_meters(),
             epsilon = 1.0e-6
         );
     }
@@ -293,7 +296,7 @@ mod tests {
         // X/Y: a pure head rotation about its own centre does not move the
         // centroid, so first-order cross-talk is zero (float noise only).
         assert!(
-            signal.x_meters.abs() < 1.0e-3 && signal.y_meters.abs() < 1.0e-3,
+            signal.x_meters().abs() < 1.0e-3 && signal.y_meters().abs() < 1.0e-3,
             "rotation-only X/Y cross-talk must stay bounded: {signal:?}"
         );
         // Z: rotation foreshortens the projected face size, so the scale
@@ -301,7 +304,7 @@ mod tests {
         // angle theta this stays below REFERENCE_DISTANCE * (1 - cos theta);
         // with the fixture's ~0.31 rad combined tilt that is < 0.03 m.
         assert!(
-            signal.z_meters.abs() < 0.03,
+            signal.z_meters().abs() < 0.03,
             "rotation-only Z cross-talk must stay bounded: {signal:?}"
         );
     }
@@ -339,26 +342,26 @@ mod tests {
 
         let tracked = signal_from_alignment(&alignment, 1.0);
         let degraded = signal_from_alignment(&alignment, 0.2);
-        assert_eq!(tracked.state, HeadTranslationState::Tracked);
-        assert_eq!(degraded.state, HeadTranslationState::Degraded);
-        assert_close(degraded.x_meters, tracked.x_meters);
-        assert_close(degraded.y_meters, tracked.y_meters);
-        assert_close(degraded.z_meters, tracked.z_meters);
+        assert_eq!(tracked.state(), HeadTranslationState::Tracked);
+        assert_eq!(degraded.state(), HeadTranslationState::Degraded);
+        assert_close(degraded.x_meters(), tracked.x_meters());
+        assert_close(degraded.y_meters(), tracked.y_meters());
+        assert_close(degraded.z_meters(), tracked.z_meters());
     }
 
     #[test]
     fn face_transform_signal_converts_units_deterministically() {
         let signal = signal_from_face_transform([12.0, -8.0, 25.0], 1.0);
-        assert_eq!(signal.state, HeadTranslationState::Tracked);
-        assert_close(signal.x_meters, 0.12);
-        assert_close(signal.y_meters, -0.08);
-        assert_close(signal.z_meters, 0.25);
+        assert_eq!(signal.state(), HeadTranslationState::Tracked);
+        assert_close(signal.x_meters(), 0.12);
+        assert_close(signal.y_meters(), -0.08);
+        assert_close(signal.z_meters(), 0.25);
 
         // Mirror flips only X (semantic contract check at this adapter).
         let mirrored = signal.mirrored();
-        assert_close(mirrored.x_meters, -0.12);
-        assert_close(mirrored.y_meters, -0.08);
-        assert_close(mirrored.z_meters, 0.25);
+        assert_close(mirrored.x_meters(), -0.12);
+        assert_close(mirrored.y_meters(), -0.08);
+        assert_close(mirrored.z_meters(), 0.25);
 
         assert_eq!(
             signal_from_face_transform([f32::INFINITY, 0.0, 0.0], 1.0),

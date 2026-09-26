@@ -70,7 +70,7 @@ impl GazeFilter {
                 self.initialized = true;
             }
             let alpha = smoothing_alpha(dt, self.params.tracked_half_life);
-            self.current = blend(self.current, input, alpha, input.state);
+            self.current = blend(self.current, input, alpha, input.state());
             return self.current;
         }
 
@@ -79,7 +79,11 @@ impl GazeFilter {
         }
         self.unavailable_elapsed = self.unavailable_elapsed.saturating_add(dt);
         if self.unavailable_elapsed < self.params.unavailable_hold {
-            self.current.state = GazeTrackingState::Degraded;
+            self.current = GazeSignal::degraded(
+                self.current.horizontal(),
+                self.current.vertical(),
+                self.current.confidence(),
+            );
             return self.current;
         }
 
@@ -90,9 +94,9 @@ impl GazeFilter {
             alpha,
             GazeTrackingState::Degraded,
         );
-        if self.current.horizontal.abs() < 1.0e-4
-            && self.current.vertical.abs() < 1.0e-4
-            && self.current.confidence < 1.0e-4
+        if self.current.horizontal().abs() < 1.0e-4
+            && self.current.vertical().abs() < 1.0e-4
+            && self.current.confidence() < 1.0e-4
         {
             self.current = GazeSignal::UNAVAILABLE;
             self.initialized = false;
@@ -111,9 +115,9 @@ fn smoothing_alpha(dt: Duration, half_life: Duration) -> f32 {
 }
 
 fn blend(from: GazeSignal, to: GazeSignal, t: f32, state: GazeTrackingState) -> GazeSignal {
-    let horizontal = from.horizontal + (to.horizontal - from.horizontal) * t;
-    let vertical = from.vertical + (to.vertical - from.vertical) * t;
-    let confidence = from.confidence + (to.confidence - from.confidence) * t;
+    let horizontal = from.horizontal() + (to.horizontal() - from.horizontal()) * t;
+    let vertical = from.vertical() + (to.vertical() - from.vertical()) * t;
+    let confidence = from.confidence() + (to.confidence() - from.confidence()) * t;
     match state {
         GazeTrackingState::Tracked => GazeSignal::tracked(horizontal, vertical, confidence),
         GazeTrackingState::Degraded | GazeTrackingState::Unavailable => {
@@ -133,7 +137,7 @@ mod tests {
         for _ in 0..fps {
             value = filter.update(GazeSignal::tracked(1.0, 0.0, 1.0), dt);
         }
-        value.horizontal
+        value.horizontal()
     }
 
     #[test]
@@ -151,15 +155,15 @@ mod tests {
         let dt = Duration::from_millis(20);
         let tracked = filter.update(GazeSignal::tracked(1.0, 0.0, 1.0), dt);
         let held = filter.update(GazeSignal::UNAVAILABLE, dt);
-        assert_eq!(tracked.horizontal, held.horizontal);
+        assert_eq!(tracked.horizontal(), held.horizontal());
         for _ in 0..6 {
             let _ = filter.update(GazeSignal::UNAVAILABLE, dt);
         }
         let returning = filter.update(GazeSignal::UNAVAILABLE, dt);
-        assert!(returning.horizontal < held.horizontal);
+        assert!(returning.horizontal() < held.horizontal());
         let reacquired = filter.update(GazeSignal::tracked(-1.0, 0.0, 1.0), dt);
-        assert!(reacquired.horizontal > -1.0);
-        assert!(reacquired.horizontal < returning.horizontal);
+        assert!(reacquired.horizontal() > -1.0);
+        assert!(reacquired.horizontal() < returning.horizontal());
     }
 
     #[test]

@@ -1269,12 +1269,12 @@ mod neutral_relative_pose {
 
         assert!(frame.translation.is_available());
         assert_eq!(
-            frame.translation.state,
+            frame.translation.state(),
             vtuber_core::HeadTranslationState::Tracked
         );
-        assert_relative_eq!(frame.translation.x_meters, 0.0, epsilon = 1e-4);
-        assert_relative_eq!(frame.translation.y_meters, 0.0, epsilon = 1e-4);
-        assert_relative_eq!(frame.translation.z_meters, 0.0, epsilon = 1e-4);
+        assert_relative_eq!(frame.translation.x_meters(), 0.0, epsilon = 1e-4);
+        assert_relative_eq!(frame.translation.y_meters(), 0.0, epsilon = 1e-4);
+        assert_relative_eq!(frame.translation.z_meters(), 0.0, epsilon = 1e-4);
     }
 
     #[test]
@@ -1293,9 +1293,9 @@ mod neutral_relative_pose {
             produced,
         )
         .expect("translated observation should solve");
-        assert!(right.translation.x_meters > 0.01);
-        assert!(right.translation.y_meters.abs() < 1.0e-3);
-        assert!(right.translation.z_meters.abs() < 1.0e-3);
+        assert!(right.translation.x_meters() > 0.01);
+        assert!(right.translation.y_meters().abs() < 1.0e-3);
+        assert!(right.translation.z_meters().abs() < 1.0e-3);
 
         // Image y decreases upward: dy < 0 must yield positive Y meters.
         let up = compute_neutral_relative_pose(
@@ -1308,7 +1308,7 @@ mod neutral_relative_pose {
             produced,
         )
         .expect("translated observation should solve");
-        assert!(up.translation.y_meters > 0.01);
+        assert!(up.translation.y_meters() > 0.01);
 
         // Apparent growth means approaching the camera: negative Z meters.
         let near = compute_neutral_relative_pose(
@@ -1317,7 +1317,7 @@ mod neutral_relative_pose {
             produced,
         )
         .expect("scaled observation should solve");
-        assert!(near.translation.z_meters < -0.01);
+        assert!(near.translation.z_meters() < -0.01);
 
         // Apparent shrink means moving away: positive Z meters.
         let far = compute_neutral_relative_pose(
@@ -1326,23 +1326,23 @@ mod neutral_relative_pose {
             produced,
         )
         .expect("scaled observation should solve");
-        assert!(far.translation.z_meters > 0.01);
+        assert!(far.translation.z_meters() > 0.01);
 
         // Mirror flips only X; Z evidence and pitch semantics are unchanged.
         let mirrored_near = near.translation.mirrored();
         assert_relative_eq!(
-            mirrored_near.x_meters,
-            -near.translation.x_meters,
+            mirrored_near.x_meters(),
+            -near.translation.x_meters(),
             epsilon = 1e-6
         );
         assert_relative_eq!(
-            mirrored_near.y_meters,
-            near.translation.y_meters,
+            mirrored_near.y_meters(),
+            near.translation.y_meters(),
             epsilon = 1e-6
         );
         assert_relative_eq!(
-            mirrored_near.z_meters,
-            near.translation.z_meters,
+            mirrored_near.z_meters(),
+            near.translation.z_meters(),
             epsilon = 1e-6
         );
     }
@@ -1375,7 +1375,8 @@ mod neutral_relative_pose {
             )
             .unwrap_or_else(|e| panic!("failed for {pose:?}: {e}"));
             assert!(
-                frame.translation.x_meters.abs() < 0.03 && frame.translation.y_meters.abs() < 0.03,
+                frame.translation.x_meters().abs() < 0.03
+                    && frame.translation.y_meters().abs() < 0.03,
                 "rotation-only X/Y cross-talk unbounded for {pose:?}: {:?}",
                 frame.translation
             );
@@ -1396,7 +1397,7 @@ mod neutral_relative_pose {
             compute_neutral_relative_pose(&neutral, &observation(7, dimmed, 0.9), MonoTimeNs(0))
                 .expect("dimmed observation should still solve");
         assert_eq!(
-            frame.translation.state,
+            frame.translation.state(),
             vtuber_core::HeadTranslationState::Degraded
         );
     }
@@ -1872,10 +1873,10 @@ mod assembly {
         );
         let frame = update.frame.expect("should emit frame");
         assert!(
-            frame.gaze.horizontal > 0.0,
+            frame.gaze.horizontal() > 0.0,
             "looking right should be positive"
         );
-        assert!(frame.gaze.vertical > 0.0, "looking up should be positive");
+        assert!(frame.gaze.vertical() > 0.0, "looking up should be positive");
     }
 
     #[test]
@@ -1925,7 +1926,7 @@ mod assembly {
             )
             .frame
             .expect("right frame");
-        assert!(right_frame.gaze.horizontal > 0.0);
+        assert!(right_frame.gaze.horizontal() > 0.0);
 
         let mut center = right;
         center.source_seq = FrameSeq(2);
@@ -1935,8 +1936,8 @@ mod assembly {
         }
         let raw_center = extract_gaze(&center);
         assert!(raw_center.is_available());
-        assert_eq!(raw_center.horizontal, 0.0);
-        assert_eq!(raw_center.vertical, 0.0);
+        assert_eq!(raw_center.horizontal(), 0.0);
+        assert_eq!(raw_center.vertical(), 0.0);
         let center_frame = pipeline
             .update(
                 Some(&center),
@@ -1946,8 +1947,8 @@ mod assembly {
             .frame
             .expect("center frame");
         assert!(center_frame.gaze.is_available());
-        assert!(center_frame.gaze.horizontal < right_frame.gaze.horizontal);
-        assert_eq!(center_frame.gaze.vertical, 0.0);
+        assert!(center_frame.gaze.horizontal() < right_frame.gaze.horizontal());
+        assert_eq!(center_frame.gaze.vertical(), 0.0);
     }
 
     fn track_mediapipe(
@@ -2100,14 +2101,14 @@ mod assembly {
 
         assert!(first.head_translation.is_available());
         assert!(
-            second.head_translation.z_meters > first.head_translation.z_meters,
+            second.head_translation.z_meters() > first.head_translation.z_meters(),
             "held re-feed must keep converging toward the translation target: \
              first={:?} second={:?}",
             first.head_translation,
             second.head_translation
         );
         assert!(
-            third.head_translation.z_meters > second.head_translation.z_meters,
+            third.head_translation.z_meters() > second.head_translation.z_meters(),
             "held re-feed must keep converging: second={:?} third={:?}",
             second.head_translation,
             third.head_translation
@@ -2191,8 +2192,8 @@ mod assembly {
             right_vertical: 0.0,
         };
         let gaze = calibrated_mediapipe_gaze(&sample, Some(baseline));
-        assert_relative_eq!(gaze.horizontal, 0.2, epsilon = 1.0e-6);
-        assert_relative_eq!(gaze.vertical, 0.2, epsilon = 1.0e-6);
+        assert_relative_eq!(gaze.horizontal(), 0.2, epsilon = 1.0e-6);
+        assert_relative_eq!(gaze.vertical(), 0.2, epsilon = 1.0e-6);
         assert!(gaze.is_available());
     }
 }

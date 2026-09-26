@@ -66,9 +66,9 @@ struct FilterState {
 
 /// Euclidean distance between two translation observations, in meters.
 fn departure_distance(from: HeadTranslationSignal, to: HeadTranslationSignal) -> f32 {
-    (to.x_meters - from.x_meters)
-        .hypot(to.y_meters - from.y_meters)
-        .hypot(to.z_meters - from.z_meters)
+    (to.x_meters() - from.x_meters())
+        .hypot(to.y_meters() - from.y_meters())
+        .hypot(to.z_meters() - from.z_meters())
 }
 
 /// Exponential smoothing filter for the head translation signal.
@@ -151,11 +151,19 @@ impl TranslationFilter {
 
         let alpha = 1.0 - (-dt_sec / tau).exp();
         let blend_axis = |current: f32, goal: f32| current + (goal - current) * alpha;
-        let smoothed = HeadTranslationSignal {
-            x_meters: blend_axis(state.translation.x_meters, target.x_meters),
-            y_meters: blend_axis(state.translation.y_meters, target.y_meters),
-            z_meters: blend_axis(state.translation.z_meters, target.z_meters),
-            state: target.state,
+        let coordinates = (
+            blend_axis(state.translation.x_meters(), target.x_meters()),
+            blend_axis(state.translation.y_meters(), target.y_meters()),
+            blend_axis(state.translation.z_meters(), target.z_meters()),
+        );
+        let smoothed = match target.state() {
+            vtuber_core::HeadTranslationState::Tracked => {
+                HeadTranslationSignal::tracked(coordinates.0, coordinates.1, coordinates.2)
+            }
+            vtuber_core::HeadTranslationState::Degraded => {
+                HeadTranslationSignal::degraded(coordinates.0, coordinates.1, coordinates.2)
+            }
+            vtuber_core::HeadTranslationState::Unavailable => HeadTranslationSignal::UNAVAILABLE,
         };
         self.state = Some(FilterState {
             translation: smoothed,
@@ -203,7 +211,7 @@ mod tests {
         let run = |target: HeadTranslationSignal| {
             let mut filter = TranslationFilter::new(TranslationFilterParams::default());
             let _ = filter.update(step(0.0), MonoTimeNs(0));
-            filter.update(target, MonoTimeNs(16_666_667)).x_meters
+            filter.update(target, MonoTimeNs(16_666_667)).x_meters()
         };
 
         // A millimeter-scale wobble is normal; a 30 cm one-observation change
@@ -237,11 +245,11 @@ mod tests {
         let second = filter.update(target, MonoTimeNs(33_333_333));
         let third = filter.update(target, MonoTimeNs(50_000_000));
 
-        let distance = |value: HeadTranslationSignal| (value.x_meters - 0.1).abs();
+        let distance = |value: HeadTranslationSignal| (value.x_meters() - 0.1).abs();
         assert!(distance(first) > 0.0);
         assert!(distance(first) > distance(second));
         assert!(distance(second) > distance(third));
-        assert_eq!(second.state, HeadTranslationState::Tracked);
+        assert_eq!(second.state(), HeadTranslationState::Tracked);
     }
 
     #[test]
@@ -258,9 +266,9 @@ mod tests {
         let target = HeadTranslationSignal::tracked(0.1, 0.0, 0.0);
         let resumed = filter.update(target, MonoTimeNs(33_333_333));
         assert!(
-            resumed.x_meters > 0.0 && resumed.x_meters < 0.1,
+            resumed.x_meters() > 0.0 && resumed.x_meters() < 0.1,
             "resume must continue from the stored value, got {}",
-            resumed.x_meters
+            resumed.x_meters()
         );
     }
 
@@ -272,7 +280,7 @@ mod tests {
 
         let degraded = HeadTranslationSignal::degraded(0.1, 0.0, 0.0);
         let output = filter.update(degraded, MonoTimeNs(16_666_667));
-        assert_eq!(output.state, HeadTranslationState::Degraded);
+        assert_eq!(output.state(), HeadTranslationState::Degraded);
     }
 
     #[test]
