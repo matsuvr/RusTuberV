@@ -33,6 +33,13 @@ struct InferenceContext {
     pipeline: Pipeline,
 }
 
+/// Exactly one model family is owned by the worker at a time.
+enum LoadedRuntime {
+    Legacy(InferenceContext),
+    Composite(Box<dyn FrameFaceInference>),
+    MediaPipe(Box<dyn FaceTrackingInference>),
+}
+
 /// Runs the inference worker loop.
 ///
 /// The worker owns the model runtime and processes frames from the input slot.
@@ -46,9 +53,7 @@ pub fn run_inference_worker(
     outcome_slot: Arc<LatestSlot<InferenceOutcome>>,
     canonical_outcome_slot: Arc<LatestSlot<FaceTrackingOutcome>>,
 ) -> InferenceWorkerResult {
-    let mut context: Option<InferenceContext> = None;
-    let mut composite_runtime: Option<Box<dyn FrameFaceInference>> = None;
-    let mut mediapipe_runtime: Option<Box<dyn FaceTrackingInference>> = None;
+    let mut loaded: Option<LoadedRuntime> = None;
     let mut last_gen = None;
 
     let mut last_processed_seq: Option<FrameSeq> = None;
@@ -76,11 +81,11 @@ pub fn run_inference_worker(
                         s.transition_to(InferenceWorkerState::LoadingModel);
                     });
 
+                    // A failed replacement must not retain the previous model.
+                    loaded = None;
                     match load_inference_context(&descriptor, &settings) {
                         Ok(ctx) => {
-                            context = Some(ctx);
-                            composite_runtime = None;
-                            mediapipe_runtime = None;
+                            loaded = Some(LoadedRuntime::Legacy(ctx));
                             failed = false;
                             update_status(&status, |s| {
                                 s.transition_to(InferenceWorkerState::Running);
@@ -109,11 +114,11 @@ pub fn run_inference_worker(
                         s.transition_to(InferenceWorkerState::LoadingModel);
                     });
 
+                    // A failed replacement must not retain the previous model.
+                    loaded = None;
                     match load_composite_runtime(&descriptor, &artifact_root, &settings) {
                         Ok(runtime) => {
-                            context = None;
-                            composite_runtime = Some(runtime);
-                            mediapipe_runtime = None;
+                            loaded = Some(LoadedRuntime::Composite(runtime));
                             failed = false;
                             update_status(&status, |s| {
                                 s.transition_to(InferenceWorkerState::Running);
@@ -138,11 +143,11 @@ pub fn run_inference_worker(
                         s.transition_to(InferenceWorkerState::LoadingModel);
                     });
 
+                    // A failed replacement must not retain the previous model.
+                    loaded = None;
                     match load_mediapipe_runtime(&task) {
                         Ok(runtime) => {
-                            context = None;
-                            composite_runtime = None;
-                            mediapipe_runtime = Some(runtime);
+                            loaded = Some(LoadedRuntime::MediaPipe(runtime));
                             failed = false;
                             update_status(&status, |s| {
                                 s.transition_to(InferenceWorkerState::Running);
@@ -164,9 +169,7 @@ pub fn run_inference_worker(
                     paused = false;
                 }
                 Ok(ControlCommand::Reset) => {
-                    context = None;
-                    composite_runtime = None;
-                    mediapipe_runtime = None;
+                    loaded = None;
                     failed = false;
                     last_gen = None;
                     last_processed_seq = None;
@@ -192,10 +195,7 @@ pub fn run_inference_worker(
             }
         }
 
-        if paused
-            || (context.is_none() && composite_runtime.is_none() && mediapipe_runtime.is_none())
-            || failed
-        {
+        if paused || loaded.is_none() || failed {
             // Wait briefly before polling again so the loop remains responsive.
             std::thread::sleep(Duration::from_millis(10));
             continue;
@@ -220,43 +220,40 @@ pub fn run_inference_worker(
                 }
                 last_processed_seq = Some(frame.seq);
 
-                if let Some(runtime) = composite_runtime.as_mut() {
-                    if process_composite_frame(
-                        runtime,
-                        &frame,
-                        wait_duration,
-                        &status,
-                        &output_slot,
-                        &outcome_slot,
-                    ) {
-                        failed = true;
-                    }
-                    continue;
-                }
-
-                if let Some(runtime) = mediapipe_runtime.as_mut() {
-                    if process_mediapipe_frame(
-                        runtime,
-                        &frame,
-                        wait_duration,
-                        &status,
-                        &canonical_outcome_slot,
-                    ) {
-                        failed = true;
-                    }
-                    continue;
-                }
-
-                // Invariant: the composite and MediaPipe branches above
-                // `continue`d, and the pause guard ensured `context` is
-                // `Some` whenever neither runtime is active.
-                #[allow(clippy::expect_used)]
                 let InferenceContext {
                     runtime,
                     params,
                     buffers,
                     pipeline,
-                } = context.as_mut().expect("context present when not paused");
+                } = match loaded.as_mut() {
+                    Some(LoadedRuntime::Composite(runtime)) => {
+                        if process_composite_frame(
+                            runtime,
+                            &frame,
+                            wait_duration,
+                            &status,
+                            &output_slot,
+                            &outcome_slot,
+                        ) {
+                            failed = true;
+                        }
+                        continue;
+                    }
+                    Some(LoadedRuntime::MediaPipe(runtime)) => {
+                        if process_mediapipe_frame(
+                            runtime,
+                            &frame,
+                            wait_duration,
+                            &status,
+                            &canonical_outcome_slot,
+                        ) {
+                            failed = true;
+                        }
+                        continue;
+                    }
+                    Some(LoadedRuntime::Legacy(context)) => context,
+                    None => continue,
+                };
 
                 // The legacy runtime is a combined model and has no separate
                 // landmark stage. Do not use detector cadence to skip the
@@ -975,6 +972,47 @@ mod tests {
     use crate::state::{FailureStage, InferenceWorkerState, InferenceWorkerStatus, SharedStatus};
     use vtuber_core::types::NormalizedRect;
     use vtuber_core::{StopToken, WorkerHandle, WorkerResult};
+
+    #[test]
+    fn changing_or_resetting_the_active_family_drops_its_previous_owner() {
+        struct Probe(&'static str, Arc<std::sync::Mutex<Vec<&'static str>>>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+        impl crate::runtime::FaceTrackingInference for Probe {
+            fn infer_face_tracking(
+                &mut self,
+                _: &VideoFrame,
+            ) -> crate::error::Result<vtuber_core::FaceTrackingOutcome> {
+                panic!("ownership test does not infer")
+            }
+        }
+        impl crate::runtime::FrameFaceInference for Probe {
+            fn infer_frame(
+                &mut self,
+                _: &VideoFrame,
+            ) -> crate::error::Result<crate::runtime::FrameInferenceOutcome> {
+                panic!("ownership test does not infer")
+            }
+        }
+        let dropped = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut loaded = Some(super::LoadedRuntime::MediaPipe(Box::new(Probe(
+            "mediapipe",
+            Arc::clone(&dropped),
+        ))));
+        assert!(matches!(loaded, Some(super::LoadedRuntime::MediaPipe(_))));
+        loaded = Some(super::LoadedRuntime::Composite(Box::new(Probe(
+            "composite",
+            Arc::clone(&dropped),
+        ))));
+        assert!(matches!(loaded, Some(super::LoadedRuntime::Composite(_))));
+        assert_eq!(*dropped.lock().unwrap(), ["mediapipe"]);
+        loaded = None;
+        assert!(loaded.is_none());
+        assert_eq!(*dropped.lock().unwrap(), ["mediapipe", "composite"]);
+    }
 
     fn sha256_hex(data: &[u8]) -> String {
         use sha2::{Digest, Sha256};
