@@ -111,8 +111,8 @@ impl CaptureRuntime {
     }
 
     /// Stops capture.
-    pub fn stop_capture(&mut self) {
-        self.controller.stop();
+    pub fn stop_capture(&mut self) -> Result<(), String> {
+        self.controller.stop().map_err(|error| error.to_string())
     }
 
     /// Stops and joins the capture worker for application shutdown.
@@ -394,8 +394,15 @@ pub fn capture_bridge_system(
         && orchestrator.pipeline_state() == PipelineState::Stopping
         && !orchestrator.capture_ack()
     {
-        capture.stop_capture();
-        orchestrator.set_capture_ack(true);
+        match capture.stop_capture() {
+            Ok(()) => orchestrator.set_capture_ack(true),
+            Err(error) => {
+                orchestrator.set_pipeline_state(PipelineState::Failed);
+                orchestrator.set_last_error(Some(
+                    crate::orchestrator::OrchestratorError::CameraFailed(error),
+                ));
+            }
+        }
     }
 
     if !orchestrator.capture_desired()

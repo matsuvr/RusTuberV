@@ -212,9 +212,11 @@ fn run_windows(options: Options) -> Result<(), String> {
     let mut restart_count = 0u8;
     while started.elapsed() < options.duration {
         if restart_count < 3 && started.elapsed() >= next_restart {
-            capture.stop();
-            thread::sleep(Duration::from_millis(150));
-            if let Err(error) = capture.select_and_start(device.clone(), CameraRequest::default()) {
+            let restart = capture.stop().and_then(|()| {
+                thread::sleep(Duration::from_millis(150));
+                capture.select_and_start(device.clone(), CameraRequest::default())
+            });
+            if let Err(error) = restart {
                 inference_worker.stop();
                 let inference_result = inference_worker.join();
                 let _ = capture.shutdown();
