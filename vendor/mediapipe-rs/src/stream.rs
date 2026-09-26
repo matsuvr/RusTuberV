@@ -234,9 +234,14 @@ mod tests {
         let probe = SlotDropProbe(Arc::clone(events));
         let slot = Slot::claim(Box::new(move |_, _, _, _| {
             let _ = &probe;
-        })).unwrap();
+        }))
+        .unwrap();
         Stream::new(
-            FakeAsyncTask { closed: false, fail, events: Arc::clone(events) },
+            FakeAsyncTask {
+                closed: false,
+                fail,
+                events: Arc::clone(events),
+            },
             slot,
         )
     }
@@ -245,7 +250,10 @@ mod tests {
     fn explicit_close_runs_native_shutdown_once_before_task_and_slot_drop() {
         let events = Arc::new(Mutex::new(Vec::new()));
         stream(false, &events).close().unwrap();
-        assert_eq!(*events.lock().unwrap(), ["native_close", "task_drop", "slot_drop"]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["native_close", "task_drop", "slot_drop"]
+        );
     }
 
     #[test]
@@ -256,7 +264,10 @@ mod tests {
             error,
             Error::Mp { code: StatusCode::Internal, message } if message == "scripted close failure"
         ));
-        assert_eq!(*events.lock().unwrap(), ["native_close", "task_drop", "slot_drop"]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["native_close", "task_drop", "slot_drop"]
+        );
     }
 
     #[test]
@@ -264,7 +275,10 @@ mod tests {
         for fail in [false, true] {
             let events = Arc::new(Mutex::new(Vec::new()));
             drop(stream(fail, &events));
-            assert_eq!(*events.lock().unwrap(), ["native_close", "task_drop", "slot_drop"]);
+            assert_eq!(
+                *events.lock().unwrap(),
+                ["native_close", "task_drop", "slot_drop"]
+            );
         }
     }
 }
