@@ -6,21 +6,6 @@ on:
 permissions:
   contents: read
 jobs:
-  documentation-tools:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Prepare pinned documentation and lint tools
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal --component clippy
-          root=$(rustup run 1.97.1 rustc --print sysroot)
-          tar -C "$root" -czf "$RUNNER_TEMP/rust-extra-tools.tar.gz" bin/rustdoc bin/cargo-clippy bin/clippy-driver
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rust-extra-tools
-          path: ${{ runner.temp }}/rust-extra-tools.tar.gz
-          retention-days: 1
-          if-no-files-found: error
   linux-headers:
     runs-on: ubuntu-latest
     container: debian:trixie-slim
@@ -30,7 +15,8 @@ jobs:
         run: |
           apt-get update -qq
           apt-get install -y --download-only libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev libxcursor-dev libvulkan-dev libegl1-mesa-dev libgl1-mesa-dev libgtk-3-dev libfontconfig1-dev libdbus-1-dev
-          tar -C /var/cache/apt/archives -czf /tmp/linux-dev-packages.tar.gz --wildcards '*.deb'
+          cd /var/cache/apt/archives
+          tar -czf /tmp/linux-dev-packages.tar.gz *.deb
       - uses: actions/upload-artifact@v4
         with:
           name: linux-dev-packages
