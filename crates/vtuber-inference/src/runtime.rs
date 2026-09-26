@@ -183,16 +183,11 @@ impl FaceInference for OnnxRuntime {
         use vtuber_core::types::{FrameSeq, MonoTimeNs, NormalizedRect};
 
         let landmarks = self.infer_landmarks(tensor, input_shape)?;
-        let expressions = crate::decode::expressions::decode_expressions(
-            None,
-            None,
-            Some(&landmarks),
-            self.schema,
-            1.0,
-        )
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+        // This backend produces no named blendshapes, so the expression decoder
+        // reports "unsupported" and the observation keeps its zero-confidence
+        // default rather than guessing from the 98-point landmarks.
+        let expressions =
+            crate::decode::expressions::decode_expressions(None, None, 1.0).unwrap_or_default();
 
         Ok(RawFaceObservation {
             source_seq: FrameSeq(0),
