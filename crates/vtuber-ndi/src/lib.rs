@@ -1088,7 +1088,7 @@ fn run_ndi_worker(
     let ndi = match NDI::new() {
         Ok(ndi) => ndi,
         Err(error) => {
-            let mapped = map_runtime_error(error.to_string());
+            let mapped = map_runtime_error(&error);
             shared
                 .metrics
                 .start_failures
@@ -1103,10 +1103,10 @@ fn run_ndi_worker(
         .build();
     let sender = match Sender::new(&ndi, &options) {
         Ok(sender) => sender,
-        Err(_error) => {
+        Err(error) => {
             let mapped = NdiOutputError::new(
                 NdiErrorCode::SenderCreateFailed,
-                "could not create NDI sender",
+                format!("could not create NDI sender: {error}"),
             );
             shared
                 .metrics
@@ -1144,19 +1144,19 @@ fn run_ndi_worker(
         if ndi_frame.is_none() || ndi_frame_dims != dims {
             let mut built = match build_ndi_video_frame(&mapping) {
                 Ok(frame) => frame,
-                Err(_error) => {
+                Err(error) => {
                     let mapped = NdiOutputError::new(
                         NdiErrorCode::SendFailed,
-                        "NDI rejected the validated BGRA frame",
+                        format!("NDI rejected the validated BGRA frame: {error}"),
                     );
                     shared.replace_status_error(&mapped);
                     return WorkerExit::StartupFailed;
                 }
             };
-            if built.replace_data(frame.data().to_vec()).is_err() {
+            if let Err(cause) = built.replace_data(frame.data().to_vec()) {
                 let error = NdiOutputError::new(
                     NdiErrorCode::SendFailed,
-                    "NDI frame storage rejected the validated BGRA frame",
+                    format!("NDI frame storage rejected the validated BGRA frame: {cause}"),
                 );
                 shared.replace_status_error(&error);
                 return WorkerExit::StartupFailed;
@@ -1170,10 +1170,10 @@ fn run_ndi_worker(
         } else if let Some(existing) = ndi_frame.as_mut() {
             // Defensive length fallback: rebuild with a fresh buffer when the
             // validated frame data no longer matches the reused layout.
-            if existing.replace_data(frame.data().to_vec()).is_err() {
+            if let Err(cause) = existing.replace_data(frame.data().to_vec()) {
                 let error = NdiOutputError::new(
                     NdiErrorCode::SendFailed,
-                    "NDI frame storage rejected the validated BGRA frame",
+                    format!("NDI frame storage rejected the validated BGRA frame: {cause}"),
                 );
                 shared.replace_status_error(&error);
                 return WorkerExit::StartupFailed;
@@ -1200,18 +1200,15 @@ fn run_ndi_worker(
 }
 
 #[cfg(feature = "ndi-sdk")]
-fn map_runtime_error(message: String) -> NdiOutputError {
-    let lower = message.to_ascii_lowercase();
-    let code = if lower.contains("not found")
-        || lower.contains("load")
-        || lower.contains("library")
-        || lower.contains("dll")
-    {
-        NdiErrorCode::RuntimeNotFound
-    } else {
-        NdiErrorCode::RuntimeInitFailed
-    };
-    NdiOutputError::new(code, "NDI runtime could not be initialized")
+fn map_runtime_error(error: &grafton_ndi::Error) -> NdiOutputError {
+    // grafton-ndi 1.0.0 has InitializationFailed(String), but no variant that
+    // proves the NDI runtime is absent. Even Io(NotFound) does not identify
+    // which file failed. Classify at the known initialization stage instead
+    // of guessing from words such as "library", "load", or "dll".
+    NdiOutputError::new(
+        NdiErrorCode::RuntimeInitFailed,
+        format!("NDI runtime could not be initialized: {error}"),
+    )
 }
 
 #[cfg(test)]
@@ -1219,6 +1216,38 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use vtuber_core::MonoTimeNs;
+
+    #[cfg(feature = "ndi-sdk")]
+    #[test]
+    fn runtime_error_words_do_not_imply_missing_runtime() {
+        for detail in [
+            "not found",
+            "load failed",
+            "library failure",
+            "dll mismatch",
+            "different explanation",
+        ] {
+            let native = grafton_ndi::Error::InitializationFailed(detail.into());
+            let mapped = map_runtime_error(&native);
+            assert_eq!(mapped.code, NdiErrorCode::RuntimeInitFailed);
+            assert!(mapped.message.contains(detail));
+        }
+    }
+
+    #[cfg(feature = "ndi-sdk")]
+    #[test]
+    fn unclassified_native_error_keeps_its_stage_and_detail() {
+        let native = grafton_ndi::Error::InvalidConfiguration("specific setting".into());
+        let mapped = map_runtime_error(&native);
+        assert_eq!(mapped.code, NdiErrorCode::RuntimeInitFailed);
+        assert!(mapped.message.contains("specific setting"));
+        let missing_file =
+            grafton_ndi::Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(
+            map_runtime_error(&missing_file).code,
+            NdiErrorCode::RuntimeInitFailed
+        );
+    }
 
     fn frame(seq: u64) -> VideoOutputFrame {
         VideoOutputFrame::new_bgra8(
