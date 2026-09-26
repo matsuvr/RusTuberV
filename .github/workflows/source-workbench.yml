@@ -1,45 +1,40 @@
 name: Source workbench (temporary, not for merge)
-
 on:
   push:
     branches: [workbench/source-only-20260926]
     paths: [.github/workflows/source-workbench.yml]
-
 permissions:
   contents: read
-
 jobs:
-  dependencies:
+  documentation-tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - name: Fetch the actual reviewed branches and offline dependencies
-        env:
-          REPOSITORY: ${{ github.repository }}
-          SERVER_URL: ${{ github.server_url }}
+      - name: Prepare pinned documentation and lint tools
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          git clone --no-tags --single-branch --branch fix/123-reuse-user-asset-path "$SERVER_URL/$REPOSITORY.git" source
-          cd source
-          git fetch origin fix/127-image-size-overflow:refs/heads/fix/127-image-size-overflow fix/128-stream-explicit-close:refs/heads/fix/128-stream-explicit-close
-          git bundle create "$RUNNER_TEMP/repository.bundle" --branches
-          cargo +1.97.1 vendor --locked --versioned-dirs --sync vendor/mediapipe-rs/Cargo.toml "$RUNNER_TEMP/cargo-vendor" > "$RUNNER_TEMP/vendor-config.toml"
-          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/offline-dependencies.tar.gz" cargo-vendor vendor-config.toml
-          du -h "$RUNNER_TEMP/repository.bundle" "$RUNNER_TEMP/offline-dependencies.tar.gz"
-      - name: Export repository history
-        if: always()
-        uses: actions/upload-artifact@v4
+          rustup toolchain install 1.97.1 --profile minimal --component clippy
+          root=$(rustup run 1.97.1 rustc --print sysroot)
+          tar -C "$root" -czf "$RUNNER_TEMP/rust-extra-tools.tar.gz" bin/rustdoc bin/cargo-clippy bin/clippy-driver
+      - uses: actions/upload-artifact@v4
         with:
-          name: repository-history-for-editing
-          path: ${{ runner.temp }}/repository.bundle
-          compression-level: 0
+          name: rust-extra-tools
+          path: ${{ runner.temp }}/rust-extra-tools.tar.gz
           retention-days: 1
-          if-no-files-found: warn
-      - name: Export offline dependencies
-        uses: actions/upload-artifact@v4
+          if-no-files-found: error
+  linux-headers:
+    runs-on: ubuntu-latest
+    container: debian:trixie-slim
+    timeout-minutes: 10
+    steps:
+      - name: Download Debian 13 native development headers and dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --download-only libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev libxcursor-dev libvulkan-dev libegl1-mesa-dev libgl1-mesa-dev libgtk-3-dev libfontconfig1-dev libdbus-1-dev
+          tar -C /var/cache/apt/archives -czf /tmp/linux-dev-packages.tar.gz --wildcards '*.deb'
+      - uses: actions/upload-artifact@v4
         with:
-          name: offline-dependencies-for-editing
-          path: ${{ runner.temp }}/offline-dependencies.tar.gz
+          name: linux-dev-packages
+          path: /tmp/linux-dev-packages.tar.gz
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
