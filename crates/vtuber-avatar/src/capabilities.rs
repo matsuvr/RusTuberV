@@ -270,10 +270,10 @@ impl PerfectSyncCapabilities {
     /// bitsets. Duplicate aliases are deterministic: presence is retained and
     /// effectiveness is true only when at least one occurrence is effective.
     #[must_use]
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`ArkitBlendshape::index()` is below `ARKIT52_CHANNEL_COUNT` for every variant, which is the length of both bitsets"
+    )]
     pub fn from_named_statuses<I, S>(statuses: I) -> Self
     where
         I: IntoIterator<Item = (S, bool)>,
@@ -317,20 +317,20 @@ impl PerfectSyncCapabilities {
 
     /// Returns whether a channel name is present.
     #[must_use]
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`ArkitBlendshape::index()` is below `ARKIT52_CHANNEL_COUNT`, the length of `present_channels`"
+    )]
     pub const fn is_present(&self, channel: ArkitBlendshape) -> bool {
         self.present_channels[channel.index()]
     }
 
     /// Returns whether a channel has an effective morph binding.
     #[must_use]
-    // Bounds are guaranteed by construction in this numeric kernel
-    // (loop ranges bounded by buffer lengths / fixed-size dimensions);
-    // see the AGENTS.md production panic policy.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`ArkitBlendshape::index()` is below `ARKIT52_CHANNEL_COUNT`, the length of `effective_channels`"
+    )]
     pub const fn is_effective(&self, channel: ArkitBlendshape) -> bool {
         self.effective_channels[channel.index()]
     }
@@ -652,6 +652,12 @@ fn classify_known(name: &str, caps: &mut ExpressionCapabilities) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use bevy_vrm1::prelude::VrmExpression;
 

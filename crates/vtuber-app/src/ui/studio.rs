@@ -412,7 +412,10 @@ fn avatar_monitor(
     preview_rect
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pane draws from one argument per widget input, so each widget reads exactly the state it is given"
+)]
 pub(crate) fn render_studio(
     ctx: &egui::Context,
     vm: &UiViewModel,

@@ -1,13 +1,3 @@
-// Unit tests may use unwrap/expect/panic (AGENTS.md: Production Rust panic policy).
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )
-)]
 //! `vtuber-inference`: model loading, Rust preprocessing, and inference workers.
 //!
 //! The approved MediaPipe Tasks backend calls a native runtime through the

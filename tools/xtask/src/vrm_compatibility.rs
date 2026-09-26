@@ -112,10 +112,10 @@ pub fn run_single(path: &Path) -> Result<CompatibilityResult, String> {
     })
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`read` is the count `File::read` just wrote into `buffer`, so the range is inside it"
+)]
 fn fingerprint(path: &Path) -> Result<(u64, String), String> {
     let file_size = std::fs::metadata(path)
         .map_err(|error| format!("failed to stat {}: {error}", path.display()))?

@@ -428,7 +428,10 @@ pub(crate) fn csv_field(value: &str) -> String {
 }
 
 /// Returns every (take_id, frame_seq) present, for cross-checking labels.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "cross-checks the recorded frame identities against the label rows"
+)]
 pub(crate) fn frame_identities(frames: &[FrameRow]) -> BTreeSet<(String, u64)> {
     frames
         .iter()
@@ -438,6 +441,12 @@ pub(crate) fn frame_identities(frames: &[FrameRow]) -> BTreeSet<(String, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     #[test]

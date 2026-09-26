@@ -95,10 +95,10 @@ pub enum DetectorDecodeOutcome {
 /// normalized detector-image coordinates. Because preprocessing uses direct
 /// resize (not letterboxing), those normalized coordinates are also normalized
 /// source-image coordinates. The returned rectangles are never mirrored.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`validate_output_shapes` above proves both tensors hold `anchor_count * components` values before the flat reads"
+)]
 pub fn decode_detections(
     outputs: &DetectorRawOutputs,
     config: DetectorPostprocessConfig,
@@ -207,10 +207,10 @@ fn validate_config(config: DetectorPostprocessConfig) -> Result<(), DetectorDeco
     Ok(())
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the tensor count is checked against the two expected output names above, so both positions exist"
+)]
 fn resolve_outputs(
     outputs: &DetectorRawOutputs,
 ) -> Result<(&DetectorRawTensor, &DetectorRawTensor), DetectorDecodeError> {
@@ -266,10 +266,10 @@ fn validate_output_shapes(
     Ok(score_count)
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the rank check above rejects anything but three dimensions, so the three reads exist"
+)]
 fn validate_tensor_shape(
     tensor: &DetectorRawTensor,
     name: &'static str,
@@ -356,10 +356,10 @@ fn normalized_box(
     })
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the worst index comes from `enumerate` over `candidates`, so it is a valid position"
+)]
 fn insert_top_candidate(
     candidates: &mut Vec<FaceDetection>,
     candidate: FaceDetection,
@@ -398,6 +398,12 @@ fn area(rect: &NormalizedRect) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn config() -> DetectorPostprocessConfig {

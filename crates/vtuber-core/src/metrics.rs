@@ -96,8 +96,10 @@ impl FixedStats {
         sorted.sort_by(f64::total_cmp);
         let rank = (p * self.count as f64).ceil() as usize;
         let index = rank.saturating_sub(1).min(self.count - 1);
-        // Invariant: `index < self.count == sorted.len()` by the clamps above.
-        #[allow(clippy::indexing_slicing)]
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "`index` is clamped to `self.count - 1` and `sorted` holds exactly the first `self.count` values"
+        )]
         sorted[index]
     }
 

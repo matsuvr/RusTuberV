@@ -159,7 +159,10 @@ struct AvatarOutputReadbackInFlight;
 
 #[derive(SystemParam)]
 struct OutputCameraQuery<'w, 's> {
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "Bevy's `SystemParam` query for the output camera, with no call site to change"
+    )]
     cameras: Query<
         'w,
         's,
@@ -226,7 +229,10 @@ pub fn setup_output_camera(
 
 /// Mirror main framing into the output target. Only transport activation
 /// schedules a readback; preview-only rendering remains entirely on the GPU.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy injects this system's resources and query filters, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 fn sync_output_camera(
     lifecycle: Res<crate::lifecycle::AvatarLifecycle>,
     state: Res<AvatarOutputState>,
@@ -351,6 +357,12 @@ pub fn register_output_systems(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use bevy::render::render_resource::Extent3d;
 

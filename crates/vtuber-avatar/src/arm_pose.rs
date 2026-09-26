@@ -837,7 +837,10 @@ impl Default for DefaultArmPoseBoneState {
 /// frames while still allowing an animation system to provide a new base pose.
 /// The affected subtree is then propagated through its actual `ChildOf` path,
 /// including intermediate nodes, before VRM gaze and constraints execute.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy's `Query` filter tuple for this system's declared components, with no call site to change"
+)]
 pub fn apply_default_arm_pose(
     mut roots: Query<
         (

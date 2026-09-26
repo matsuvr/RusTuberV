@@ -84,7 +84,10 @@ pub(crate) fn register_rich_mtoon(app: &mut App) {
 
 // A Rich asset is created only when a mesh turns ON; slider changes never
 // touch the material assets.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy's `Query` filter tuple for the MToon material update, with no call site to change"
+)]
 fn switch_rich_mtoon_materials(
     mut commands: Commands,
     lifecycle: Res<AvatarLifecycle>,

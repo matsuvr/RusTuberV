@@ -299,7 +299,10 @@ fn extract_rich_outline_materials(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and query filters, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 fn queue_rich_outlines(
     mut pipelines: ResMut<SpecializedMeshPipelines<RichOutlinePipeline>>,
     mut outline_phases: ResMut<ViewSortedRenderPhases<RichOutlinePhaseItem>>,

@@ -135,10 +135,10 @@ pub const CANONICAL_FACE_TEMPLATE: [CanonicalFacePoint; 8] = [
 
 /// Fits head rotation and similarity projection from neutral/current image
 /// correspondences.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the correspondence checks above run first, and the parameter layout is the fixed six-component projection vector"
+)]
 pub fn solve_planar_pose(
     correspondences: &[PlanarCorrespondence],
 ) -> Result<PlanarPoseAlignment, PlanarPoseError> {
@@ -260,10 +260,10 @@ fn initial_projection(
     SVector::from_row_slice(&[0.0, 0.0, 0.0, scale.ln(), cx, cy])
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the column loop is bounded by 6, which is the length of the parameter vector and the width of the Jacobian"
+)]
 fn normal_equations(
     correspondences: &[PlanarCorrespondence],
     parameters: &SVector<f32, 6>,
@@ -300,10 +300,10 @@ fn residual_cost(correspondences: &[PlanarCorrespondence], parameters: &SVector<
         .sum()
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`project` returns the fixed six-component vector and `parameters` is the fixed six-component projection vector"
+)]
 fn residual(
     correspondence: &PlanarCorrespondence,
     parameters: &SVector<f32, 6>,
@@ -336,6 +336,12 @@ fn project(point: CanonicalFacePoint, parameters: &SVector<f32, 6>) -> SVector<f
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn synthetic_correspondences(yaw: f32, pitch: f32, roll: f32) -> Vec<PlanarCorrespondence> {

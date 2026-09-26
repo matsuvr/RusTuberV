@@ -141,10 +141,10 @@ impl LandmarkOutputContract {
 ///
 /// Returns a typed [`InferenceError`] if the tensor shape, dtype, element
 /// count, or numeric values do not match the contract.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`validate_output_tensor` above proves the element count matches the contract before the flat reads"
+)]
 pub fn decode_landmarks(
     tensor: &OutputTensor,
     contract: &LandmarkOutputContract,
@@ -201,10 +201,10 @@ pub fn decode_landmarks(
     Ok(landmarks)
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the `rank < 2` check above makes `rank - 1` a valid index"
+)]
 fn validate_output_tensor(tensor: &OutputTensor, contract: &LandmarkOutputContract) -> Result<()> {
     if tensor.dtype != contract.expected_dtype {
         return Err(InferenceError::OutputDtypeMismatch {
@@ -380,6 +380,12 @@ pub fn canonical_to_roi_local(x_canon: f32, y_canon: f32, canonical_size: u32) -
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn peppa_contract() -> LandmarkOutputContract {

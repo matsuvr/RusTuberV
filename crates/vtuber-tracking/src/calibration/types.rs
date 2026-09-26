@@ -226,6 +226,12 @@ impl CalibrationSession {
 
 #[cfg(test)]
 mod calibration_types {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_core::control::CalibrationSettings;
 

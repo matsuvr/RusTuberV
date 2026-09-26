@@ -179,10 +179,10 @@ impl VideoOutputFrame {
 
         let packed_len = checked_len(packed_stride, height)?;
         let mut data = vec![0; packed_len];
-        // Invariant: row windows are fully validated above (`source_stride_bytes
-        // >= packed_stride`, `readback.len() == expected_readback_len`, and
-        // `data.len() == packed_len`), so every range below is in bounds.
-        #[allow(clippy::indexing_slicing)]
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "the row windows are validated above: `source_stride_bytes >= packed_stride`, `readback.len() == expected_readback_len` and `data.len() == packed_len`"
+        )]
         for row in 0..height as usize {
             let source_start = row * source_stride_bytes;
             let destination_start = row * packed_stride;
@@ -246,9 +246,10 @@ impl std::error::Error for VideoOutputFrameError {}
 /// `A == 0` clears RGB, `A == 255` is unchanged, and intermediate values use
 /// nearest-integer rounding with a bounded result. This function is safe to
 /// apply to a complete packed frame exactly once.
-// Invariant: `chunks_exact_mut(4)` yields exactly four-element slices, so all
-// pixel indexing below is in bounds by construction.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`chunks_exact_mut(4)` yields exactly four-element slices, so every per-pixel read and write is in bounds"
+)]
 pub fn unpremultiply_bgra8_in_place(data: &mut [u8]) -> Result<(), VideoOutputFrameError> {
     if !data.len().is_multiple_of(4) {
         return Err(VideoOutputFrameError::PixelDataNotAligned);
@@ -289,6 +290,12 @@ fn checked_len(stride: usize, height: u32) -> Result<usize, VideoOutputFrameErro
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn timestamp() -> MonoTimeNs {
