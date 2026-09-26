@@ -18,7 +18,7 @@ pub const SAMPLE_INTERVAL_SECONDS: f64 = 60.0;
 /// Start plus 30 one-minute intervals, covering 0 through 1,800 seconds.
 pub const MAX_SAMPLES: usize = 31;
 
-const HEADER: &str = "sample,measurement_elapsed_s,render_fps,process_cpu_pct,process_memory_gib,capture_hz,inference_hz,detector_hz,landmark_hz,tracking_hz,capture_to_apply_p50_ms,capture_to_apply_p95_ms,slot_overwrites,inference_input_overwrites,no_face_frames,avatar_frames_applied,avatar_frames_skipped,capture_worker,inference_worker,tracking_state,stage_percentiles";
+const HEADER: &str = "sample,measurement_elapsed_s,render_fps,process_cpu_pct,process_memory_gib,capture_hz,inference_hz,detector_hz,landmark_hz,tracking_hz,capture_to_apply_p50_ms,capture_to_apply_p95_ms,capture_publish_rejected_frames,inference_input_skipped_frames,no_face_frames,avatar_frames_applied,avatar_frames_skipped,capture_worker,inference_worker,tracking_state,stage_percentiles";
 
 /// Runtime state for the opt-in bounded metrics exporter.
 #[derive(Resource, Debug)]
@@ -143,8 +143,8 @@ impl MetricsExportState {
             snapshot.tracking_rate,
             option_number(snapshot.capture_to_apply_p50_ms),
             option_number(snapshot.capture_to_apply_p95_ms),
-            snapshot.slot_overwrites,
-            snapshot.inference_input_overwrites,
+            snapshot.capture_publish_rejected_frames,
+            snapshot.inference_input_skipped_frames,
             snapshot.inference_no_face_frames,
             snapshot.avatar_frames_applied,
             snapshot.avatar_frames_skipped,
@@ -293,6 +293,12 @@ mod tests {
             capture_to_apply_p95_ms: Some(48.0),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn csv_names_distinguish_publish_rejections_from_reader_skips() {
+        assert!(HEADER.contains("capture_publish_rejected_frames,inference_input_skipped_frames"));
+        assert!(!HEADER.contains("overwrites"));
     }
 
     #[test]

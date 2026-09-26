@@ -40,8 +40,8 @@ pub struct DiagnosticsSnapshot {
     pub inference_no_face_frames: u64,
     /// Number of duplicate inference frames suppressed.
     pub inference_duplicates_suppressed: u64,
-    /// Number of input-slot overwrites observed by inference.
-    pub inference_input_overwrites: u64,
+    /// Input publications skipped by the inference reader.
+    pub inference_input_skipped_frames: u64,
     /// Last inference duration in milliseconds.
     pub last_inference_ms: Option<f32>,
     /// Last source-image ROI reported by the composite runtime.
@@ -68,8 +68,8 @@ pub struct DiagnosticsSnapshot {
     pub face_tracking_latest_residual: Option<f32>,
     /// Additional end-to-end latency added by the non-Direct backend, if any.
     pub face_tracking_added_latency_ms: Option<f32>,
-    /// Slot overwrite count.
-    pub slot_overwrites: u64,
+    /// Capture publications rejected because the input slot was closed.
+    pub capture_publish_rejected_frames: u64,
     /// Stage timings (name, duration_ms).
     pub stage_timings: Vec<(String, f32)>,
     /// Bounded stage timing percentiles (name, p50_ms, p95_ms).

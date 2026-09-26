@@ -79,7 +79,7 @@ pub use descriptor::{
     RuntimeSettings, TensorContract, TensorLayout,
 };
 pub use error::{InferenceError, Result};
-pub use metrics::{DropCounters, InferenceMetrics, InferenceStage, StageTimingSnapshot};
+pub use metrics::{FrameCounters, InferenceMetrics, InferenceStage, StageTimingSnapshot};
 pub use runtime::FrameInferenceTiming;
 #[cfg(feature = "onnx")]
 pub use runtime::OnnxRuntime;

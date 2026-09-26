@@ -49,8 +49,8 @@ pub fn run_inference_worker(
     let mut context: Option<InferenceContext> = None;
     let mut composite_runtime: Option<Box<dyn FrameFaceInference>> = None;
     let mut mediapipe_runtime: Option<Box<dyn FaceTrackingInference>> = None;
-    let mut last_gen = 0u64;
-    let mut last_overwritten = 0u64;
+    let mut last_gen = None;
+
     let mut last_processed_seq: Option<FrameSeq> = None;
     let mut paused = false;
     let mut failed = false;
@@ -168,7 +168,7 @@ pub fn run_inference_worker(
                     composite_runtime = None;
                     mediapipe_runtime = None;
                     failed = false;
-                    last_gen = 0;
+                    last_gen = None;
                     last_processed_seq = None;
                     update_status(&status, |s| {
                         s.transition_to(InferenceWorkerState::Idle);
@@ -202,17 +202,15 @@ pub fn run_inference_worker(
         }
 
         let wait_start = Instant::now();
-        match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
+        match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
             Some(ReadResult::New {
                 generation,
                 value: frame,
             }) => {
                 let wait_duration = wait_start.elapsed();
-                last_gen = generation;
-                let overwritten = frame_slot.overwritten_count();
-                let overwrite_delta = overwritten.saturating_sub(last_overwritten);
-                update_status(&status, |s| s.record_overwritten(overwrite_delta));
-                last_overwritten = overwritten;
+                let skipped = vtuber_core::skipped_generations(last_gen, generation);
+                update_status(&status, |s| s.record_input_skipped(skipped));
+                last_gen = Some(generation);
 
                 if let Some(last_seq) = last_processed_seq
                     && frame.seq <= last_seq
@@ -310,16 +308,17 @@ pub fn run_inference_worker(
                                         ..observation
                                     };
 
-                                    let output_overwritten_before = output_slot.overwritten_count();
+                                    let output_replacements_before =
+                                        output_slot.replacement_count();
                                     let observation_roi = observation.roi;
                                     let outcome = InferenceOutcome::Face(observation.clone());
                                     if !output_slot.publish(observation) {
-                                        update_status(&status, |s| s.record_dropped());
+                                        update_status(&status, |s| s.record_publish_rejected());
                                     }
                                     let _ = outcome_slot.publish(outcome);
-                                    let output_overwritten_delta = output_slot
-                                        .overwritten_count()
-                                        .saturating_sub(output_overwritten_before);
+                                    let output_replacements_delta = output_slot
+                                        .replacement_count()
+                                        .saturating_sub(output_replacements_before);
 
                                     update_status(&status, |s| {
                                         s.record_stage_duration(
@@ -342,7 +341,7 @@ pub fn run_inference_worker(
                                             decode_duration,
                                         );
                                         s.record_stage_duration(InferenceStage::Total, elapsed);
-                                        s.record_output_overwritten(output_overwritten_delta);
+                                        s.record_output_replacements(output_replacements_delta);
                                         s.record_processed(frame.seq, finished_at, elapsed);
                                         s.set_last_roi(Some(observation_roi));
                                     });
@@ -440,17 +439,17 @@ fn process_composite_frame(
                 });
             }
 
-            let output_overwritten_before = output_slot.overwritten_count();
+            let output_replacements_before = output_slot.replacement_count();
             let observation_roi = observation.roi;
             let _ = outcome_slot.publish(InferenceOutcome::Face(observation.clone()));
             if !output_slot.publish(observation) {
-                update_status(status, |s| s.record_dropped());
+                update_status(status, |s| s.record_publish_rejected());
             }
-            let output_overwritten_delta = output_slot
-                .overwritten_count()
-                .saturating_sub(output_overwritten_before);
+            let output_replacements_delta = output_slot
+                .replacement_count()
+                .saturating_sub(output_replacements_before);
             update_status(status, |s| {
-                s.record_output_overwritten(output_overwritten_delta);
+                s.record_output_replacements(output_replacements_delta);
                 s.record_processed(frame.seq, finished_at, elapsed);
                 s.set_last_roi(Some(observation_roi));
                 s.clear_consecutive_errors();
@@ -503,15 +502,15 @@ fn process_mediapipe_frame(
                     ..
                 } => *inference_finished_at,
             };
-            let overwritten_before = canonical_outcome_slot.overwritten_count();
+            let replacements_before = canonical_outcome_slot.replacement_count();
             if !canonical_outcome_slot.publish(outcome.clone()) {
-                update_status(status, |s| s.record_dropped());
+                update_status(status, |s| s.record_publish_rejected());
             }
-            let overwritten_delta = canonical_outcome_slot
-                .overwritten_count()
-                .saturating_sub(overwritten_before);
+            let replacements_delta = canonical_outcome_slot
+                .replacement_count()
+                .saturating_sub(replacements_before);
             update_status(status, |s| {
-                s.record_output_overwritten(overwritten_delta);
+                s.record_output_replacements(replacements_delta);
                 s.set_last_roi(None);
                 s.clear_consecutive_errors();
                 match outcome {
@@ -578,25 +577,23 @@ pub fn run_composite_inference_worker(
     frame_slot: Arc<LatestSlot<VideoFrame>>,
     output_slot: Arc<LatestSlot<RawFaceObservation>>,
 ) -> InferenceWorkerResult {
-    let mut last_gen = 0u64;
-    let mut last_overwritten = 0u64;
+    let mut last_gen = None;
+
     let mut last_processed_seq: Option<FrameSeq> = None;
 
     update_status(&status, |s| s.transition_to(InferenceWorkerState::Running));
 
     while !stop.is_stopped() {
         let wait_started = Instant::now();
-        match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
+        match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
             Some(ReadResult::New {
                 generation,
                 value: frame,
             }) => {
                 let wait_duration = wait_started.elapsed();
-                last_gen = generation;
-                let overwritten = frame_slot.overwritten_count();
-                let overwrite_delta = overwritten.saturating_sub(last_overwritten);
-                update_status(&status, |s| s.record_overwritten(overwrite_delta));
-                last_overwritten = overwritten;
+                let skipped = vtuber_core::skipped_generations(last_gen, generation);
+                update_status(&status, |s| s.record_input_skipped(skipped));
+                last_gen = Some(generation);
 
                 if let Some(last_seq) = last_processed_seq
                     && frame.seq <= last_seq
@@ -629,15 +626,15 @@ pub fn run_composite_inference_worker(
                             continue;
                         }
 
-                        let output_overwritten_before = output_slot.overwritten_count();
+                        let output_replacements_before = output_slot.replacement_count();
                         if !output_slot.publish(observation.clone()) {
-                            update_status(&status, |s| s.record_dropped());
+                            update_status(&status, |s| s.record_publish_rejected());
                         }
-                        let output_overwritten_delta = output_slot
-                            .overwritten_count()
-                            .saturating_sub(output_overwritten_before);
+                        let output_replacements_delta = output_slot
+                            .replacement_count()
+                            .saturating_sub(output_replacements_before);
                         update_status(&status, |s| {
-                            s.record_output_overwritten(output_overwritten_delta);
+                            s.record_output_replacements(output_replacements_delta);
                             s.record_processed(frame.seq, finished_at, elapsed);
                             s.set_last_roi(Some(observation.roi));
                             s.clear_consecutive_errors();
@@ -811,17 +808,19 @@ pub fn run_pose_worker(
         s.clear_consecutive_errors();
     });
 
-    let mut last_gen = 0u64;
+    let mut last_gen = None;
     let mut last_processed_seq: Option<FrameSeq> = None;
 
     'worker: while !stop.is_stopped() {
         let started = Instant::now();
-        match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
+        match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
             Some(ReadResult::New {
                 generation,
                 value: frame,
             }) => {
-                last_gen = generation;
+                let skipped = vtuber_core::skipped_generations(last_gen, generation);
+                update_status(&status, |s| s.record_input_skipped(skipped));
+                last_gen = Some(generation);
                 if let Some(last_seq) = last_processed_seq
                     && frame.seq <= last_seq
                 {
@@ -833,16 +832,16 @@ pub fn run_pose_worker(
                 match runtime.infer(&frame) {
                     Ok(pose) => {
                         let elapsed = started.elapsed();
-                        let overwritten_before = output_slot.overwritten_count();
+                        let replacements_before = output_slot.replacement_count();
                         if !output_slot.publish(pose) {
-                            update_status(&status, |s| s.record_dropped());
+                            update_status(&status, |s| s.record_publish_rejected());
                         }
-                        let overwritten_delta = output_slot
-                            .overwritten_count()
-                            .saturating_sub(overwritten_before);
+                        let replacements_delta = output_slot
+                            .replacement_count()
+                            .saturating_sub(replacements_before);
                         let finished_at = vtuber_core::monotonic_now();
                         update_status(&status, |s| {
-                            s.record_output_overwritten(overwritten_delta);
+                            s.record_output_replacements(replacements_delta);
                             s.record_stage_duration(InferenceStage::Total, elapsed);
                             s.record_processed(frame.seq, finished_at, elapsed);
                             s.clear_consecutive_errors();
@@ -1324,8 +1323,8 @@ mod tests {
                 detector_interval_frames: 1,
             }),
         };
-        let mut last_gen = 0u64;
-        let mut last_overwritten = 0u64;
+        let mut last_gen = None;
+
         let mut last_processed_seq: Option<FrameSeq> = None;
 
         update_status(&status, |s| {
@@ -1334,17 +1333,15 @@ mod tests {
 
         while !stop.is_stopped() {
             let wait_start = Instant::now();
-            match frame_slot.wait_read_after(last_gen, Duration::from_millis(50)) {
+            match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
                 Some(ReadResult::New {
                     generation,
                     value: frame,
                 }) => {
                     let wait_duration = wait_start.elapsed();
-                    last_gen = generation;
-                    let overwritten = frame_slot.overwritten_count();
-                    let overwrite_delta = overwritten.saturating_sub(last_overwritten);
-                    update_status(&status, |s| s.record_overwritten(overwrite_delta));
-                    last_overwritten = overwritten;
+                    let skipped = vtuber_core::skipped_generations(last_gen, generation);
+                    update_status(&status, |s| s.record_input_skipped(skipped));
+                    last_gen = Some(generation);
 
                     if let Some(last_seq) = last_processed_seq
                         && frame.seq <= last_seq
@@ -1394,13 +1391,14 @@ mod tests {
                                         ..observation
                                     };
 
-                                    let output_overwritten_before = output_slot.overwritten_count();
+                                    let output_replacements_before =
+                                        output_slot.replacement_count();
                                     if !output_slot.publish(observation) {
-                                        update_status(&status, |s| s.record_dropped());
+                                        update_status(&status, |s| s.record_publish_rejected());
                                     }
-                                    let output_overwritten_delta = output_slot
-                                        .overwritten_count()
-                                        .saturating_sub(output_overwritten_before);
+                                    let output_replacements_delta = output_slot
+                                        .replacement_count()
+                                        .saturating_sub(output_replacements_before);
 
                                     update_status(&status, |s| {
                                         s.record_stage_duration(
@@ -1420,7 +1418,7 @@ mod tests {
                                             Duration::ZERO,
                                         );
                                         s.record_stage_duration(InferenceStage::Total, elapsed);
-                                        s.record_output_overwritten(output_overwritten_delta);
+                                        s.record_output_replacements(output_replacements_delta);
                                         s.record_processed(frame.seq, finished_at, elapsed);
                                     });
                                     update_status(&status, |s| s.clear_consecutive_errors());
@@ -1599,9 +1597,9 @@ mod tests {
         let status_final = status.lock().unwrap();
 
         println!(
-            "latest_frame_consumption: produced={FRAME_COUNT}, processed={}, overwritten={}, suppressed={}",
+            "latest_frame_consumption: produced={FRAME_COUNT}, processed={}, input_skipped={}, suppressed={}",
             status_final.frames_processed,
-            status_final.frames_overwritten,
+            status_final.input_skipped_frames,
             status_final.duplicate_frames_suppressed
         );
 
@@ -1614,15 +1612,15 @@ mod tests {
             "worker should skip frames when inference is slower than the camera"
         );
         assert!(
-            status_final.frames_overwritten > 0,
-            "input slot should overwrite unread frames"
+            status_final.input_skipped_frames > 0,
+            "inference reader should skip input generations"
         );
         assert_eq!(
             status_final.duplicate_frames_suppressed, 0,
             "no duplicate sequence should be inferred"
         );
         assert_eq!(
-            metrics.drops.skipped_sequence, 0,
+            metrics.frames.skipped_sequence, 0,
             "metrics should report zero skipped sequences"
         );
         assert_eq!(
@@ -1856,11 +1854,11 @@ mod tests {
         let status_final = status.lock().unwrap();
 
         println!(
-            "inference_metrics: produced={FRAME_COUNT}, processed={}, input_overwritten={}, output_overwritten={}, skipped={}",
+            "inference_metrics: produced={FRAME_COUNT}, processed={}, input_skipped={}, output_replacements={}, skipped={}",
             status_final.frames_processed,
-            metrics.drops.input_overwritten,
-            metrics.drops.output_overwritten,
-            metrics.drops.skipped_sequence,
+            metrics.frames.input_skipped,
+            metrics.frames.output_replacements,
+            metrics.frames.skipped_sequence,
         );
 
         assert!(
@@ -1932,19 +1930,19 @@ mod tests {
 
         // Drop accounting.
         assert!(
-            metrics.drops.input_overwritten > 0,
-            "input slot should overwrite unread frames"
+            metrics.frames.input_skipped > 0,
+            "inference reader should skip input generations"
         );
         assert!(
-            metrics.drops.output_overwritten > 0 || status_final.frames_processed <= 1,
-            "output slot should overwrite unread observations"
+            metrics.frames.output_replacements > 0 || status_final.frames_processed <= 1,
+            "output slot should replace retained observations"
         );
         assert_eq!(
-            metrics.drops.processed, status_final.frames_processed,
+            metrics.frames.processed, status_final.frames_processed,
             "processed counter should match status"
         );
         assert_eq!(
-            metrics.drops.skipped_sequence, 0,
+            metrics.frames.skipped_sequence, 0,
             "no sequence should be skipped in this scenario"
         );
     }

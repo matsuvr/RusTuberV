@@ -244,7 +244,7 @@ pub(crate) fn read_inference_output_system(
     diagnostics.inference_frames_processed = status.frames_processed;
     diagnostics.inference_no_face_frames = status.no_face_frames;
     diagnostics.inference_duplicates_suppressed = status.duplicate_frames_suppressed;
-    diagnostics.inference_input_overwrites = status.frames_overwritten;
+    diagnostics.inference_input_skipped_frames = status.input_skipped_frames;
     diagnostics.last_inference_ms = status
         .last_inference_duration
         .map(|duration| duration.as_secs_f32() * 1_000.0);

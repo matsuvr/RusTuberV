@@ -43,10 +43,10 @@ pub struct InferenceWorkerStatus {
     pub frames_processed: u64,
     /// Total frames completed with the ordinary no-face result.
     pub no_face_frames: u64,
-    /// Total frames dropped because the output slot could not accept them.
-    pub frames_dropped: u64,
-    /// Frames overwritten in the input slot before being read.
-    pub frames_overwritten: u64,
+    /// Output publications rejected because the slot was closed.
+    pub publish_rejected_frames: u64,
+    /// Input publications skipped by this inference reader between observed generations.
+    pub input_skipped_frames: u64,
     /// Frames suppressed because their source sequence was already processed.
     pub duplicate_frames_suppressed: u64,
     /// Last failure, separated by lifecycle stage.
@@ -155,15 +155,15 @@ impl InferenceWorkerStatus {
         self.metrics_state.record_no_face();
     }
 
-    /// Records a dropped frame.
-    pub fn record_dropped(&mut self) {
-        self.frames_dropped += 1;
+    /// Records an output publication rejected because the slot was closed.
+    pub fn record_publish_rejected(&mut self) {
+        self.publish_rejected_frames += 1;
     }
 
-    /// Records an input slot overwrite.
-    pub fn record_overwritten(&mut self, count: u64) {
-        self.frames_overwritten += count;
-        self.metrics_state.record_input_overwritten(count);
+    /// Records input generations skipped by this reader.
+    pub fn record_input_skipped(&mut self, count: u64) {
+        self.input_skipped_frames += count;
+        self.metrics_state.record_input_skipped(count);
     }
 
     /// Records a frame that was skipped before inference.
@@ -177,9 +177,9 @@ impl InferenceWorkerStatus {
         self.metrics_state.record_skipped_sequence();
     }
 
-    /// Records frames overwritten in the output slot.
-    pub fn record_output_overwritten(&mut self, count: u64) {
-        self.metrics_state.record_output_overwritten(count);
+    /// Records retained output replacements, not reader losses.
+    pub fn record_output_replacements(&mut self, count: u64) {
+        self.metrics_state.record_output_replacements(count);
     }
 
     /// Records a failure and transitions to [`InferenceWorkerState::Failed`].
@@ -287,7 +287,7 @@ mod tests {
         status.record_no_face(FrameSeq(8), MonoTimeNs(2000), Duration::from_millis(4));
         assert_eq!(status.no_face_frames, 1);
         assert_eq!(status.state, InferenceWorkerState::Running);
-        assert_eq!(status.metrics().drops.no_face, 1);
+        assert_eq!(status.metrics().frames.no_face, 1);
         assert_eq!(status.last_source_seq, Some(FrameSeq(8)));
     }
 

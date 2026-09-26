@@ -212,7 +212,7 @@ pub fn sync_capture_diagnostics(
         diagnostics.capture_state = format!("{state:?}");
         *cached_state = Some(state);
     }
-    diagnostics.slot_overwrites = metrics.frames_dropped;
+    diagnostics.capture_publish_rejected_frames = metrics.publish_rejected_frames;
     let backend = camera_backend_name();
     if !*cached_backend || diagnostics.camera_backend.as_deref() != Some(backend) {
         diagnostics.camera_backend = Some(backend.to_string());
