@@ -220,7 +220,9 @@ impl CameraStream for MsmfStream {
     }
 
     fn stop(&mut self) -> Result<(), CameraError> {
-        self.camera.stop_stream().map_err(map_nokhwa_error)
+        self.camera
+            .stop_stream()
+            .map_err(|e| CameraError::StopFailed(format!("{e}")))
     }
 }
 
