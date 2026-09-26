@@ -536,7 +536,7 @@ mod tests {
         assert!(frame_slot.is_closed());
         assert!(output_slot.is_closed());
         assert!(canonical_outcome_slot.is_closed());
-        assert_eq!(metrics.drops.processed, 0);
+        assert_eq!(metrics.frames.processed, 0);
     }
 
     #[test]

@@ -179,19 +179,19 @@ fn nearest_rank(sorted: &[u64], percentile: f64) -> u64 {
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
-/// Drop and skip counters for the inference pipeline.
+/// Publication, per-reader skip and processed-frame counters for inference.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct DropCounters {
-    /// Frames overwritten in the input slot before being read.
-    pub input_overwritten: u64,
+pub struct FrameCounters {
+    /// Input publications skipped by this inference reader between observed generations.
+    pub input_skipped: u64,
     /// Frames read but skipped before inference (duplicates or detector cadence).
     pub skipped_sequence: u64,
     /// Frames that completed inference.
     pub processed: u64,
     /// Frames for which the detector or landmark validity policy found no face.
     pub no_face: u64,
-    /// Frames overwritten in the output slot before being consumed.
-    pub output_overwritten: u64,
+    /// Retained output values replaced by publication, regardless of reader activity.
+    pub output_replacements: u64,
 }
 
 /// Public snapshot of inference metrics.
@@ -199,8 +199,8 @@ pub struct DropCounters {
 pub struct InferenceMetrics {
     /// Timing snapshots for each pipeline stage, indexed by [`InferenceStage`].
     pub stage_timings: [StageTimingSnapshot; InferenceStage::COUNT],
-    /// Drop and skip counters.
-    pub drops: DropCounters,
+    /// Publication, per-reader skip and processed-frame counters.
+    pub frames: FrameCounters,
 }
 
 impl InferenceMetrics {
@@ -219,7 +219,7 @@ impl InferenceMetrics {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct InferenceMetricsState {
     rings: [StageTimingRing<RING_SIZE>; InferenceStage::COUNT],
-    drops: DropCounters,
+    frames: FrameCounters,
     /// Cached snapshot, recomputed lazily after any recording mutation.
     cached: InferenceMetrics,
     dirty: bool,
@@ -236,33 +236,33 @@ impl InferenceMetricsState {
         self.dirty = true;
     }
 
-    /// Records frames overwritten in the input slot.
-    pub(crate) fn record_input_overwritten(&mut self, count: u64) {
-        self.drops.input_overwritten = self.drops.input_overwritten.saturating_add(count);
+    /// Records input generations skipped by this reader.
+    pub(crate) fn record_input_skipped(&mut self, count: u64) {
+        self.frames.input_skipped = self.frames.input_skipped.saturating_add(count);
         self.dirty = true;
     }
 
     /// Records a frame that was skipped before inference.
     pub(crate) fn record_skipped_sequence(&mut self) {
-        self.drops.skipped_sequence = self.drops.skipped_sequence.saturating_add(1);
+        self.frames.skipped_sequence = self.frames.skipped_sequence.saturating_add(1);
         self.dirty = true;
     }
 
     /// Records a frame that completed inference.
     pub(crate) fn record_processed(&mut self) {
-        self.drops.processed = self.drops.processed.saturating_add(1);
+        self.frames.processed = self.frames.processed.saturating_add(1);
         self.dirty = true;
     }
 
     /// Records an ordinary no-face frame.
     pub(crate) fn record_no_face(&mut self) {
-        self.drops.no_face = self.drops.no_face.saturating_add(1);
+        self.frames.no_face = self.frames.no_face.saturating_add(1);
         self.dirty = true;
     }
 
-    /// Records frames overwritten in the output slot.
-    pub(crate) fn record_output_overwritten(&mut self, count: u64) {
-        self.drops.output_overwritten = self.drops.output_overwritten.saturating_add(count);
+    /// Records retained output replacements, not reader losses.
+    pub(crate) fn record_output_replacements(&mut self, count: u64) {
+        self.frames.output_replacements = self.frames.output_replacements.saturating_add(count);
         self.dirty = true;
     }
 
@@ -283,7 +283,7 @@ impl InferenceMetricsState {
             }
             self.cached = InferenceMetrics {
                 stage_timings,
-                drops: self.drops,
+                frames: self.frames,
             };
             self.dirty = false;
         }
@@ -355,30 +355,30 @@ mod tests {
         state.record_stage_duration(InferenceStage::Wait, Duration::from_millis(5));
         state.record_stage_duration(InferenceStage::Preprocess, Duration::from_millis(2));
         state.record_stage_duration(InferenceStage::Detector, Duration::from_millis(8));
-        state.record_input_overwritten(3);
+        state.record_input_skipped(3);
         state.record_skipped_sequence();
         state.record_skipped_sequence();
         state.record_processed();
         state.record_no_face();
-        state.record_output_overwritten(1);
+        state.record_output_replacements(1);
 
         let snap = state.snapshot();
         assert_eq!(snap.stage(InferenceStage::Wait).count, 1);
         assert_eq!(snap.stage(InferenceStage::Preprocess).mean_ns, 2_000_000);
         assert_eq!(snap.stage(InferenceStage::Landmark).count, 0);
-        assert_eq!(snap.drops.input_overwritten, 3);
-        assert_eq!(snap.drops.skipped_sequence, 2);
-        assert_eq!(snap.drops.processed, 1);
-        assert_eq!(snap.drops.no_face, 1);
-        assert_eq!(snap.drops.output_overwritten, 1);
+        assert_eq!(snap.frames.input_skipped, 3);
+        assert_eq!(snap.frames.skipped_sequence, 2);
+        assert_eq!(snap.frames.processed, 1);
+        assert_eq!(snap.frames.no_face, 1);
+        assert_eq!(snap.frames.output_replacements, 1);
     }
 
     #[test]
     fn drop_counters_saturate() {
         let mut state = InferenceMetricsState::default();
-        state.drops.input_overwritten = u64::MAX;
-        state.record_input_overwritten(1);
-        assert_eq!(state.drops.input_overwritten, u64::MAX);
+        state.frames.input_skipped = u64::MAX;
+        state.record_input_skipped(1);
+        assert_eq!(state.frames.input_skipped, u64::MAX);
     }
 
     #[test]

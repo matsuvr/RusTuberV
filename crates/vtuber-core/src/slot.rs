@@ -3,17 +3,28 @@
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
+/// Counts publications skipped by one reader between two observed generations.
+///
+/// `None` marks a new reader/session and never counts older publications as
+/// missed. Readers keep their own cursor; no consumption state is shared.
+#[must_use]
+pub fn skipped_generations(previous: Option<u64>, current: u64) -> u64 {
+    previous.map_or(0, |previous| {
+        current.saturating_sub(previous).saturating_sub(1)
+    })
+}
+
 /// Internal state of a [`LatestSlot`].
 struct SlotState<T> {
     generation: u64,
     value: Option<T>,
     closed: bool,
-    overwritten: u64,
+    replacements: u64,
 }
 
 /// A capacity-one slot that always keeps the latest value.
 ///
-/// Old unpublished values are discarded. Multiple readers, each keeping its
+/// Previously retained values are replaced on publication. Multiple readers, each keeping its
 /// own generation cursor, can read the retained latest value: a read returns
 /// the value together with the generation it was published under, so readers
 /// never mark a newer publish as consumed.
@@ -53,13 +64,13 @@ impl<T> LatestSlot<T> {
                 generation: 0,
                 value: None,
                 closed: false,
-                overwritten: 0,
+                replacements: 0,
             }),
             changed: Condvar::new(),
         }
     }
 
-    /// Publishes a value, replacing any unread value.
+    /// Publishes a value, replacing any retained value, even if it was read.
     ///
     /// Returns `false` if the slot has been closed.
     pub fn publish(&self, value: T) -> bool {
@@ -71,7 +82,7 @@ impl<T> LatestSlot<T> {
             return false;
         }
         if state.value.is_some() {
-            state.overwritten += 1;
+            state.replacements += 1;
         }
         state.generation += 1;
         state.value = Some(value);
@@ -144,14 +155,16 @@ impl<T> LatestSlot<T> {
         self.changed.notify_all();
     }
 
-    /// Returns the number of values that were overwritten before being read.
+    /// Returns the number of retained values replaced by successful publications.
+    ///
+    /// This is not a reader loss count: reads do not remove the retained value.
     #[must_use]
-    pub fn overwritten_count(&self) -> u64 {
+    pub fn replacement_count(&self) -> u64 {
         let state = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.overwritten
+        state.replacements
     }
 
     /// Returns the current generation.
@@ -204,6 +217,36 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn skipped_generations_are_per_reader_and_reset_with_the_session() {
+        let slot = LatestSlot::new();
+        let mut frequent = None;
+        let mut slow = None;
+        for generation in 1..=4 {
+            slot.publish(generation);
+            let Some(ReadResult::New {
+                generation: current,
+                ..
+            }) = slot.try_read_after(frequent.unwrap_or(0))
+            else {
+                panic!("new publication")
+            };
+            assert_eq!(skipped_generations(frequent, current), 0);
+            frequent = Some(current);
+            if generation == 1 {
+                slow = Some(current);
+            }
+        }
+        let Some(ReadResult::New { generation, .. }) = slot.try_read_after(slow.unwrap_or(0))
+        else {
+            panic!("slow reader's latest publication")
+        };
+        assert_eq!(skipped_generations(slow, generation), 2);
+        assert_eq!(skipped_generations(None, generation), 0);
+        assert_eq!(skipped_generations(Some(generation), generation), 0);
+        assert_eq!(skipped_generations(Some(u64::MAX), 1), 0);
+    }
 
     #[test]
     fn publish_and_read() {
@@ -270,12 +313,14 @@ mod tests {
     }
 
     #[test]
-    fn overwritten_count_increases() {
+    fn replacement_count_increases_even_after_reads() {
         let slot = LatestSlot::<i32>::new();
         slot.publish(1);
+        let _ = slot.try_read_after(0);
         slot.publish(2);
+        let _ = slot.try_read_after(1);
         slot.publish(3);
-        assert_eq!(slot.overwritten_count(), 2);
+        assert_eq!(slot.replacement_count(), 2);
     }
 
     #[test]
@@ -332,7 +377,7 @@ mod tests {
                 value: N - 1
             })
         );
-        assert_eq!(slot.overwritten_count(), (N - 1) as u64);
+        assert_eq!(slot.replacement_count(), (N - 1) as u64);
     }
 
     #[test]
@@ -350,10 +395,8 @@ mod tests {
         let mut last_seen = 0;
         let mut consumed = 0;
         while last_seen < 999 {
-            if let Some(ReadResult::New {
-                generation,
-                value,
-            }) = slot.wait_read_after(last_seen, Duration::from_secs(1))
+            if let Some(ReadResult::New { generation, value }) =
+                slot.wait_read_after(last_seen, Duration::from_secs(1))
             {
                 last_seen = generation;
                 consumed += 1;
@@ -392,6 +435,9 @@ mod tests {
             })
         );
         slot.close();
-        assert_eq!(slot.wait_read_after(1, Duration::MAX), Some(ReadResult::Closed));
+        assert_eq!(
+            slot.wait_read_after(1, Duration::MAX),
+            Some(ReadResult::Closed)
+        );
     }
 }

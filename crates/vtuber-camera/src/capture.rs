@@ -46,9 +46,9 @@ pub enum CaptureServiceState {
 pub struct CaptureMetrics {
     /// Number of frames produced by the backend.
     pub frames_captured: u64,
-    /// Number of frames dropped because the consumer had not read the previous
-    /// value (the capacity-one slot was overwritten).
-    pub frames_dropped: u64,
+    /// Number of face-frame publications rejected because the slot was closed.
+    /// Reader skips and decode failures are not included.
+    pub publish_rejected_frames: u64,
     /// Number of reconnect attempts made.
     pub reconnect_attempts: u32,
     /// Negotiated format, if known.
@@ -436,11 +436,12 @@ where
                     let frame = stamp_frame_sequence(frame, &mut next_frame_seq);
                     metrics.frames_captured = metrics.frames_captured.saturating_add(1);
                     if !publish_tracking_frame(frame, &slot, pose_slot.as_deref()) {
-                        metrics.frames_dropped = metrics.frames_dropped.saturating_add(1);
+                        metrics.publish_rejected_frames =
+                            metrics.publish_rejected_frames.saturating_add(1);
                     }
                     update_state(&state, |s| {
                         s.metrics.frames_captured = metrics.frames_captured;
-                        s.metrics.frames_dropped = metrics.frames_dropped;
+                        s.metrics.publish_rejected_frames = metrics.publish_rejected_frames;
                         s.metrics.format = metrics.format;
                         s.state = CaptureServiceState::Running;
                     });
@@ -545,11 +546,11 @@ where
             let frame = stamp_frame_sequence(frame, next_frame_seq);
             metrics.frames_captured = metrics.frames_captured.saturating_add(1);
             if !publish_tracking_frame(frame, slot, pose_slot) {
-                metrics.frames_dropped = metrics.frames_dropped.saturating_add(1);
+                metrics.publish_rejected_frames = metrics.publish_rejected_frames.saturating_add(1);
             }
             update_state(state, |s| {
                 s.metrics.frames_captured = metrics.frames_captured;
-                s.metrics.frames_dropped = metrics.frames_dropped;
+                s.metrics.publish_rejected_frames = metrics.publish_rejected_frames;
                 s.metrics.format = metrics.format;
             });
             Ok(stream)
@@ -621,10 +622,7 @@ mod tests {
         // Wait briefly for the worker to produce at least one frame.
         let slot = controller.frame_slot();
         let result = slot.wait_read_after(0, Duration::from_secs(2));
-        assert!(matches!(
-            result,
-            Some(vtuber_core::ReadResult::New { .. })
-        ));
+        assert!(matches!(result, Some(vtuber_core::ReadResult::New { .. })));
 
         let metrics = controller.shutdown();
         assert!(metrics.frames_captured > 0);
@@ -781,6 +779,28 @@ mod tests {
         };
         assert_eq!(Arc::as_ptr(&face_frame.data), pointer);
         assert!(Arc::ptr_eq(&face_frame.data, &pose_frame.data));
+    }
+
+    #[test]
+    fn only_a_closed_slot_rejects_a_face_frame_publication() {
+        let face = LatestSlot::new();
+        let frame = VideoFrame {
+            seq: FrameSeq(1),
+            captured_at: vtuber_core::MonoTimeNs(0),
+            width: 1,
+            height: 1,
+            stride_bytes: 1,
+            format: vtuber_core::PixelFormat::Gray8,
+            data: vec![0_u8].into(),
+        };
+        let mut rejected = 0;
+        for _ in 0..3 {
+            rejected += u64::from(!publish_tracking_frame(frame.clone(), &face, None));
+        }
+        assert_eq!(rejected, 0);
+        face.close();
+        rejected += u64::from(!publish_tracking_frame(frame, &face, None));
+        assert_eq!(rejected, 1);
     }
 
     #[test]
