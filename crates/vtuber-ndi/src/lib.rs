@@ -14,7 +14,9 @@
 //! metrics, and [`vtuber_core::VideoOutputFrame`]. NDI SDK types and the
 //! binding feature remain private to this crate. The default build is a
 //! deterministic feature-disabled stub so the rest of the workspace does not
-//! require an installed NDI SDK.
+//! require an installed NDI SDK. Submission acknowledges the bounded mailbox,
+//! not network delivery. Explicit stop and controller Drop join the worker and
+//! can block; explicit stop reports a worker panic instead of hiding it.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -543,7 +545,13 @@ impl NdiOutputController {
     /// With the default feature set this transitions to a typed
     /// `NDI_FEATURE_DISABLED` error without spawning a thread. With
     /// `ndi-sdk`, runtime initialization and sender creation occur inside the
-    /// worker so no SDK handle crosses the application boundary.
+    /// worker so no SDK handle crosses the application boundary. `Ok` means the
+    /// thread started, not that NDI is live; inspect status for the worker result.
+    ///
+    /// # Errors
+    /// Reports an already-running sender, invalid configuration, disabled SDK,
+    /// thread-spawn failure, or a panic reaped from the preceding worker. Native
+    /// initialization/sender-creation failures are reported in worker status.
     pub fn start(&mut self, config: NdiOutputConfig) -> Result<(), NdiOutputError> {
         self.reap_finished_worker()?;
         if self.worker.is_some() {
@@ -618,6 +626,13 @@ impl NdiOutputController {
     }
 
     /// Stops and joins the sender worker. The operation is idempotent.
+    ///
+    /// Blocks until the worker exits, closes the mailbox and discards its pending
+    /// frame. Drop also stops and joins, but cannot return this method's error.
+    ///
+    /// # Errors
+    /// Returns `WorkerStopFailed` for a worker panic; mailbox/worker resources are
+    /// released even on that error.
     pub fn stop(&mut self) -> Result<(), NdiOutputError> {
         let mailbox = recover_lock(self.shared.mailbox.lock()).take();
         if let Some(mailbox) = mailbox
@@ -651,6 +666,11 @@ impl NdiOutputController {
     }
 
     /// Submits a frame without waiting for the network sender.
+    ///
+    /// Returns `Submitted` for a new pending frame, `Replaced` when replacing
+    /// one, or `RejectedNotRunning` when no accepting mailbox is available.
+    /// Acceptance is not delivery: the worker validates the frame's output
+    /// profile and performs the send later.
     pub fn submit_frame(&self, frame: VideoOutputFrame) -> NdiSubmitResult {
         let status = self.status();
         if !matches!(

@@ -113,7 +113,11 @@ impl VideoOutputFrame {
         &self.data
     }
 
-    /// Creates a validated packed BGRA8 frame.
+    /// Creates a validated packed BGRA8 frame, taking ownership of its bytes.
+    ///
+    /// # Errors
+    /// Rejects zero dimensions, an unrepresentable stride/buffer length, or a
+    /// byte length different from exactly `width * height * 4`.
     pub fn new_bgra8(
         width: u32,
         height: u32,
@@ -145,6 +149,11 @@ impl VideoOutputFrame {
     /// The readback buffer is copied row-by-row because wgpu requires the
     /// source stride to be aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`. The
     /// resulting frame has no padding and is normalized to straight alpha.
+    ///
+    /// # Errors
+    /// Rejects zero dimensions, arithmetic overflow, a source stride smaller
+    /// than a packed row, or a buffer length different from stride times height.
+    /// Source alignment is the readback producer's contract, not checked here.
     pub fn from_padded_bgra8(
         width: u32,
         height: u32,

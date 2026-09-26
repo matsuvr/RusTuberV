@@ -243,7 +243,11 @@ impl CaptureController {
     /// Starts the capture worker.
     ///
     /// The worker owns the backend and must be started before any device command
-    /// is accepted. Calling start when already started returns an error.
+    /// is accepted. `Ok` acknowledges thread creation, not device opening.
+    ///
+    /// # Errors
+    /// Returns `OpenFailed` when a worker already exists, or `WorkerSpawnFailed`
+    /// when the OS cannot create the thread. No worker is retained on spawn failure.
     pub fn start_worker<B>(&mut self, backend: B) -> Result<(), CameraError>
     where
         B: CameraBackend + Send + 'static,
@@ -358,7 +362,9 @@ impl CaptureController {
     /// is running and the frame slot is closed.
     ///
     /// # Errors
-    /// Returns WorkerPanicked after closing the owned frame slot. Joining can block.
+    /// Returns `WorkerPanicked` after closing the owned frame slot. Joining can
+    /// block. Dropping a live controller also stops and joins, but cannot report
+    /// that error; use explicit shutdown when its result matters.
     pub fn shutdown(mut self) -> Result<CaptureMetrics, CameraError> {
         let result = if let Some(worker) = self.worker.take() {
             worker.stop();

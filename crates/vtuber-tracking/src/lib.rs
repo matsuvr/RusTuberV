@@ -10,7 +10,8 @@
 )]
 //! `vtuber-tracking`: calibration, pose solving, filtering, and tracking state.
 //!
-//! This crate must not depend on Bevy or `bevy_vrm1`.
+//! Engine-independent calculations consume core observations and produce core
+//! control signals. This crate does not depend on Bevy or `bevy_vrm1`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

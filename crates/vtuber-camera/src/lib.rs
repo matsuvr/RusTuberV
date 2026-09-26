@@ -12,6 +12,20 @@
 //!
 //! Native camera objects are constructed, opened, used, stopped, and dropped
 //! inside the capture worker. Backend buffers and OS handles are never exposed.
+//! Windows uses the Media Foundation backend. Other desktop targets, including
+//! macOS, currently select an explicit development mock, not a real camera.
+//! A failed real-camera request never silently changes into a mock request.
+//!
+//! ```no_run
+//! use vtuber_camera::{CaptureController, mock::MockBackend};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut capture = CaptureController::new();
+//! capture.start_worker(MockBackend::default())?;
+//! // Starting the worker does not yet select or open a device.
+//! let _metrics = capture.shutdown()?;
+//! # Ok(())
+//! # }
+//! ```
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
