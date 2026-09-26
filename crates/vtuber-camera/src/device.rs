@@ -31,6 +31,12 @@ pub enum CameraError {
     /// The camera disconnected.
     #[error("CAMERA_DISCONNECTED")]
     Disconnected,
+    /// The backend could not hand over the next frame.
+    ///
+    /// Distinct from [`CameraError::FrameDecodeFailed`]: the bytes never
+    /// arrived, so no decoder ran.
+    #[error("CAMERA_FRAME_READ_FAILED: {0}")]
+    FrameReadFailed(String),
     /// Frame decode failed.
     #[error("CAMERA_FRAME_DECODE_FAILED: {0}")]
     FrameDecodeFailed(String),
