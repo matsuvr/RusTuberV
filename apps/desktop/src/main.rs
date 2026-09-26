@@ -26,7 +26,7 @@ use bevy_egui::EguiPlugin;
 use vtuber_app::import;
 use vtuber_app::inference_runtime::InferenceProjectRoot;
 use vtuber_app::orchestrator::Orchestrator;
-use vtuber_app::settings::ArmPoseSettings;
+use vtuber_app::settings::AppSettings;
 use vtuber_app::tracking_file::{TRACKING_PROFILE_FILE_NAME, load_tracking_profile};
 use vtuber_app::ui::UiShellPlugin;
 use vtuber_avatar::{ArmPoseSourceKind, ArmSourceSelection, StartupModelPath, VtuberAvatarPlugin};
@@ -47,7 +47,7 @@ enum StartupError {
     NonUnicodeAssetRoot(PathBuf),
     CreateManagedRoot(std::io::Error),
     Tracking(vtuber_app::tracking_file::TrackingProfileFileError),
-    Settings(vtuber_app::settings::ArmPoseSettingsError),
+    Settings(vtuber_app::settings::SettingsError),
     Import(import::ModelImportError),
 }
 
@@ -92,7 +92,7 @@ fn run() -> Result<(), StartupError> {
 
     // An unreadable, malformed, or newer settings document is reported instead
     // of being replaced with the current defaults.
-    let settings = ArmPoseSettings::load_default().map_err(StartupError::Settings)?;
+    let settings = AppSettings::load_default().map_err(StartupError::Settings)?;
 
     // Import CLI model through the managed asset source so that the same
     // `user://avatars/<sha256>/model.vrm` path invariant is used.

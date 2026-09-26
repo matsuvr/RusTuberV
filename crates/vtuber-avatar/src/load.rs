@@ -8,19 +8,19 @@
 //! the application. Absolute filesystem paths are never passed directly to
 //! [`AssetServer`].
 
+use std::fmt;
+
 use bevy::asset::AssetPath;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::VrmHandle;
 
 use crate::compatibility::VrmSourceWarnings;
 use crate::expression::source::SourceExpressions;
-use crate::vrm0::VrmCompatibilityWarning;
-use std::fmt;
-
 use crate::lifecycle::{
     AvatarLifecycle, AvatarLifecycleState, AvatarRequestError, LoadAvatarRequest,
     ReplaceAvatarRequest,
 };
+use crate::vrm0::VrmCompatibilityWarning;
 
 /// Stable identifier for an imported avatar asset (typically a SHA-256 hex digest).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Component)]

@@ -5,20 +5,22 @@
 //! When a GPU or readback completion is unavailable, the command exits 2
 //! (`NOT RUN`) instead of reporting success.
 
-use crate::task_result::{TaskOutcome, TaskResult};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
 use bevy::app::AppExit;
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::winit::WinitPlugin;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
 use vtuber_avatar::{
     AVATAR_RENDER_LAYER, AvatarOutputCamera, AvatarOutputFrameSlot, AvatarOutputState,
     AvatarViewportCamera, VIEWPORT_ONLY_RENDER_LAYER, register_output_systems,
 };
 use vtuber_core::{VideoOutputFrame, VideoOutputProfile};
+
+use crate::task_result::{TaskOutcome, TaskResult};
 
 const VALIDATOR_WIDTH: u32 = 64;
 const VALIDATOR_HEIGHT: u32 = 64;
@@ -361,7 +363,7 @@ fn center_pixel(pixels: &[[u8; 4]]) -> [u8; 4] {
     pixels[index as usize]
 }
 
-fn write_report(path: &PathBuf, report: &RenderValidationReport) -> Result<(), String> {
+fn write_report(path: &Path, report: &RenderValidationReport) -> Result<(), String> {
     let contents = format!(
         "result={}\n\
          empty_alpha_zero={}\n\

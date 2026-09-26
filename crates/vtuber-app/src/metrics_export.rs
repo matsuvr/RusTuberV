@@ -215,7 +215,7 @@ pub(crate) fn export_diagnostics_system(
     mut snapshot: ResMut<DiagnosticsSnapshot>,
     mut exporter: ResMut<MetricsExportState>,
     mut last_rendered: Local<Option<(ExportPhase, usize, UiLanguage)>>,
-    settings: Option<Res<crate::settings::ArmPoseSettings>>,
+    settings: Option<Res<crate::settings::AppSettings>>,
 ) {
     let lang = settings
         .as_deref()

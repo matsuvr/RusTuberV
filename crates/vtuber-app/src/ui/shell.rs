@@ -32,7 +32,7 @@ use crate::pose_runtime::{
 use crate::preview::PreviewState;
 use crate::preview_landmarks::{PreviewLandmarkState, sync_preview_landmark_system};
 use crate::settings::{
-    ArmPoseSettings, restore_arm_pose_settings_system, restore_expression_binding_settings_system,
+    AppSettings, restore_arm_pose_settings_system, restore_expression_binding_settings_system,
 };
 use crate::tracking_runtime::{TrackingRuntime, tracking_bridge_system};
 use crate::ui_model::{Pane, UiViewModel};
@@ -163,7 +163,7 @@ impl Plugin for UiShellPlugin {
             .init_resource::<UiFonts>()
             .init_resource::<UiViewModel>()
             .init_resource::<Orchestrator>()
-            .init_resource::<ArmPoseSettings>()
+            .init_resource::<AppSettings>()
             .init_resource::<ExpressionBindingStore>()
             .insert_resource(PreviewState {
                 visible: false,
@@ -394,7 +394,7 @@ fn sync_error_presenter(
     orchestrator: Res<Orchestrator>,
     mut presenter: ResMut<ErrorPresenter>,
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
-    settings: Option<Res<ArmPoseSettings>>,
+    settings: Option<Res<AppSettings>>,
 ) {
     let lang = settings
         .as_deref()
@@ -425,7 +425,7 @@ fn ui_render_system(
     mut preview: ResMut<PreviewState>,
     landmarks: Res<PreviewLandmarkState>,
     avatar_mirror: Res<AvatarMotionMirror>,
-    settings: Res<ArmPoseSettings>,
+    settings: Res<AppSettings>,
     fonts: Res<UiFonts>,
     target: Option<Res<AvatarOutputTarget>>,
     mut output: Option<ResMut<AvatarOutputState>>,
@@ -588,7 +588,7 @@ mod tests {
         app.init_resource::<Orchestrator>()
             .init_resource::<ErrorPresenter>()
             .init_resource::<DiagnosticsSnapshot>()
-            .init_resource::<ArmPoseSettings>()
+            .init_resource::<AppSettings>()
             .add_systems(Update, sync_error_presenter);
         // Exercise the existing public action boundary; Start without a
         // selected camera produces NoCameraSelected without camera/file I/O.

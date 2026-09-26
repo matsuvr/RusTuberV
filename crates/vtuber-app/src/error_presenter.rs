@@ -1,9 +1,10 @@
 //! Maps domain errors to localized user-facing summaries.
 //! Technical backend details retain their original text.
 
+use bevy::prelude::*;
+
 use crate::actions::UiAction;
 use crate::settings::UiLanguage;
-use bevy::prelude::*;
 
 /// A user-facing error presentation.
 #[derive(Clone, Debug, PartialEq)]
@@ -172,7 +173,6 @@ pub fn present_error(
 /// Tracks the currently presented error, including language changes.
 #[derive(Resource, Debug, Default)]
 pub struct ErrorPresenter {
-    last_presented_code: Option<String>,
     current: Option<ErrorPresentation>,
 }
 impl ErrorPresenter {
@@ -188,12 +188,10 @@ impl ErrorPresenter {
                 if self.current.as_ref() == Some(&presentation) {
                     return false;
                 }
-                self.last_presented_code = Some(presentation.code.to_owned());
                 self.current = Some(presentation);
                 true
             }
             None => {
-                self.last_presented_code = None;
                 self.current = None;
                 false
             }
@@ -207,7 +205,6 @@ impl ErrorPresenter {
     /// Dismiss the presentation.
     pub fn dismiss(&mut self) {
         self.current = None;
-        self.last_presented_code = None;
     }
 }
 
