@@ -103,6 +103,15 @@ pub enum InferenceError {
     /// Worker is already running and cannot be started again.
     #[error("inference worker already running")]
     AlreadyRunning,
+    /// The bounded control queue cannot accept another command without waiting.
+    #[error("inference control queue full")]
+    ControlQueueFull,
+    /// The worker no longer receives control commands.
+    #[error("inference control channel closed")]
+    ControlChannelClosed,
+    /// A command was requested before the worker was started.
+    #[error("inference worker not started")]
+    WorkerNotStarted,
     /// The worker thread panicked.
     #[error("inference worker panicked")]
     WorkerPanicked,
