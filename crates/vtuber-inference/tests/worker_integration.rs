@@ -170,7 +170,7 @@ trait ExpectNew<T> {
 impl<T> ExpectNew<T> for ReadResult<T> {
     fn expect_new(self, msg: &str) -> T {
         match self {
-            ReadResult::New(value) => value,
+            ReadResult::New { value, .. } => value,
             ReadResult::Closed => panic!("{msg}: slot was closed"),
         }
     }

@@ -167,8 +167,9 @@ mod tests {
                     return "stop-polled";
                 }
                 match slot_for_worker.wait_read_after(last_gen, Duration::from_millis(50)) {
-                    Some(ReadResult::New(value)) => {
-                        last_gen = value as u64;
+                    Some(ReadResult::New { generation, value }) => {
+                        last_gen = generation;
+                        let _ = value;
                     }
                     Some(ReadResult::Closed) => return "slot-closed",
                     None => {}

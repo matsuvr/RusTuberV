@@ -621,7 +621,10 @@ mod tests {
         // Wait briefly for the worker to produce at least one frame.
         let slot = controller.frame_slot();
         let result = slot.wait_read_after(0, Duration::from_secs(2));
-        assert!(matches!(result, Some(vtuber_core::ReadResult::New(_))));
+        assert!(matches!(
+            result,
+            Some(vtuber_core::ReadResult::New { .. })
+        ));
 
         let metrics = controller.shutdown();
         assert!(metrics.frames_captured > 0);
@@ -764,13 +767,15 @@ mod tests {
         let pointer = Arc::as_ptr(&frame.data);
         assert!(publish_tracking_frame(frame, &face, Some(&pose)));
 
-        let vtuber_core::ReadResult::New(face_frame) =
-            face.try_read_after(0).expect("face frame published")
+        let vtuber_core::ReadResult::New {
+            value: face_frame, ..
+        } = face.try_read_after(0).expect("face frame published")
         else {
             panic!("face slot should contain a new frame");
         };
-        let vtuber_core::ReadResult::New(pose_frame) =
-            pose.try_read_after(0).expect("pose frame published")
+        let vtuber_core::ReadResult::New {
+            value: pose_frame, ..
+        } = pose.try_read_after(0).expect("pose frame published")
         else {
             panic!("pose slot should contain a new frame");
         };
@@ -793,7 +798,7 @@ mod tests {
         assert!(publish_tracking_frame(frame, &face, None));
         assert!(matches!(
             face.try_read_after(0),
-            Some(vtuber_core::ReadResult::New(_))
+            Some(vtuber_core::ReadResult::New { .. })
         ));
     }
 

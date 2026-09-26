@@ -115,10 +115,12 @@ impl InferenceRuntime {
     /// Reads one latest-only canonical MediaPipe result, suppressing duplicate output.
     pub fn read_latest(&mut self) -> Option<FaceTrackingSample> {
         let outcome_slot = self.controller.canonical_outcome_slot();
-        if let Some(vtuber_core::ReadResult::New(outcome)) =
-            outcome_slot.try_read_after(self.canonical_outcome_generation)
+        if let Some(vtuber_core::ReadResult::New {
+            generation,
+            value: outcome,
+        }) = outcome_slot.try_read_after(self.canonical_outcome_generation)
         {
-            self.canonical_outcome_generation = outcome_slot.generation();
+            self.canonical_outcome_generation = generation;
             match outcome {
                 FaceTrackingOutcome::Face(sample) => {
                     self.latest_face_sample = Some(sample.clone());
