@@ -16,6 +16,12 @@ pub enum CameraError {
     /// Opening the device failed.
     #[error("CAMERA_OPEN_FAILED: {0}")]
     OpenFailed(String),
+    /// Stopping an open stream failed.
+    ///
+    /// Kept separate from [`CameraError::OpenFailed`] so a backend that refuses
+    /// to stop is never reported as a device that could not be opened.
+    #[error("CAMERA_STOP_FAILED: {0}")]
+    StopFailed(String),
     /// The capture worker can no longer receive control requests.
     #[error("CAMERA_COMMAND_CHANNEL_CLOSED")]
     CommandChannelClosed,

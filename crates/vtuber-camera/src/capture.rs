@@ -163,16 +163,22 @@ impl Drop for CaptureController {
             worker.stop();
             // Closing the slot wakes a worker waiting for its next frame.
             self.frame_slot.close();
-            // Drop cannot return a shutdown error; explicit shutdown can.
+            // Drop cannot return a shutdown error, so the final stop result the
+            // worker reports is discarded here; use explicit shutdown when it
+            // matters.
             let _ = worker.join();
         }
     }
 }
 
 /// Result returned by the capture worker when it finishes.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 struct CaptureWorkerResult {
     final_metrics: CaptureMetrics,
+    /// Failure of the last explicit stop the worker performed, if any. Carried
+    /// out of the worker thread so an explicit shutdown can report it; `Drop`
+    /// has no way to return it.
+    stop_error: Option<CameraError>,
 }
 
 impl CaptureController {
@@ -362,9 +368,12 @@ impl CaptureController {
     /// is running and the frame slot is closed.
     ///
     /// # Errors
-    /// Returns `WorkerPanicked` after closing the owned frame slot. Joining can
-    /// block. Dropping a live controller also stops and joins, but cannot report
-    /// that error; use explicit shutdown when its result matters.
+    /// Returns the final stop failure reported by the worker as
+    /// [`CameraError::StopFailed`], or `WorkerPanicked`. The frame slot is
+    /// closed and the joined worker's metrics are recorded in the shared
+    /// snapshot on both paths. Joining can block. Dropping a live controller
+    /// also stops and joins, but cannot report either error; use explicit
+    /// shutdown when the result matters.
     pub fn shutdown(mut self) -> Result<CaptureMetrics, CameraError> {
         let result = if let Some(worker) = self.worker.take() {
             worker.stop();
@@ -372,6 +381,7 @@ impl CaptureController {
         } else {
             WorkerResult::Completed(CaptureWorkerResult {
                 final_metrics: self.metrics(),
+                stop_error: None,
             })
         };
         // Cleanup must also run after a panicked worker.
@@ -383,6 +393,10 @@ impl CaptureController {
         match result {
             WorkerResult::Completed(result) => {
                 state.state = CaptureServiceState::Idle;
+                if let Some(error) = result.stop_error {
+                    state.metrics.last_error = Some(format!("{error:?}"));
+                    return Err(error);
+                }
                 Ok(result.final_metrics)
             }
             WorkerResult::Panicked => {
@@ -425,13 +439,21 @@ where
         loop {
             match command_rx.try_recv() {
                 Ok(ControlCommand::Start(device, request)) => {
-                    if let Some(mut stream) = active_stream.take() {
-                        let _ = stream.stop();
-                    }
                     selected_device = Some(device);
                     requested_format = Some(request);
                     reconnect_plan = None;
                     metrics.reconnect_attempts = 0;
+                    // A failed stop must not be hidden by opening a second
+                    // stream, so it is reported as this Start's failure.
+                    if let Err(err) = stop_active_stream(&mut active_stream) {
+                        metrics.last_error = Some(format!("{err:?}"));
+                        update_state(&state, |s| {
+                            s.state = CaptureServiceState::BackOff;
+                            s.metrics.reconnect_attempts = 0;
+                            s.metrics.last_error.clone_from(&metrics.last_error);
+                        });
+                        continue;
+                    }
                     metrics.last_error = None;
                     update_state(&state, |s| {
                         s.state = CaptureServiceState::Starting;
@@ -474,22 +496,30 @@ where
                 }
                 Ok(ControlCommand::Stop) => {
                     reconnect_plan = None;
-                    if let Some(mut stream) = active_stream.take() {
-                        let _ = stream.stop();
-                    }
+                    let stop_failed = record_stop_failure(
+                        &mut metrics,
+                        stop_active_stream(&mut active_stream).err(),
+                    );
                     clear_frame_slots(&slot, pose_slot.as_deref());
                     update_state(&state, |s| {
+                        // Selected/Idle only mean that no stream is retained.
+                        // They never imply that the stop succeeded; a failure is
+                        // readable through `last_error`.
                         s.state = if selected_device.is_some() {
                             CaptureServiceState::Selected
                         } else {
                             CaptureServiceState::Idle
                         };
+                        if stop_failed {
+                            s.metrics.last_error.clone_from(&metrics.last_error);
+                        }
                     });
                 }
                 Ok(ControlCommand::Reset) => {
-                    if let Some(mut stream) = active_stream.take() {
-                        let _ = stream.stop();
-                    }
+                    let stop_failed = record_stop_failure(
+                        &mut metrics,
+                        stop_active_stream(&mut active_stream).err(),
+                    );
                     clear_frame_slots(&slot, pose_slot.as_deref());
                     selected_device = None;
                     requested_format = None;
@@ -498,6 +528,9 @@ where
                         s.state = CaptureServiceState::Idle;
                         s.selected_device = None;
                         s.requested_format = None;
+                        if stop_failed {
+                            s.metrics.last_error.clone_from(&metrics.last_error);
+                        }
                     });
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -605,9 +638,7 @@ where
         }
     }
 
-    if let Some(mut stream) = active_stream.take() {
-        let _ = stream.stop();
-    }
+    let stop_error = stop_active_stream(&mut active_stream).err();
 
     let final_metrics = metrics.clone();
     update_state(&state, |s| {
@@ -615,7 +646,39 @@ where
         s.metrics = metrics;
     });
 
-    CaptureWorkerResult { final_metrics }
+    CaptureWorkerResult {
+        final_metrics,
+        stop_error,
+    }
+}
+
+/// Stops the retained stream, releasing it whether or not the backend stop
+/// succeeded.
+///
+/// `None` means no stream is retained and is `Ok`. The taken stream is stopped
+/// exactly once and dropped here on both paths, so a native object is never
+/// leaked and never kept alive by a failed stop. This is the only place a
+/// capture stop is requested, so a backend that refuses to stop is reported as
+/// [`CameraError::StopFailed`] instead of being folded into an open failure.
+fn stop_active_stream(
+    stream: &mut Option<Box<dyn crate::device::CameraStream>>,
+) -> Result<(), CameraError> {
+    let Some(mut owned) = stream.take() else {
+        return Ok(());
+    };
+    owned.stop()
+}
+
+/// Records a failed explicit stop and reports whether one happened, so the
+/// shared snapshot can mirror the same text.
+fn record_stop_failure(metrics: &mut CaptureMetrics, error: Option<CameraError>) -> bool {
+    match error {
+        Some(error) => {
+            metrics.last_error = Some(format!("{error:?}"));
+            true
+        }
+        None => false,
+    }
 }
 
 /// Opens the requested camera and returns the stream.
@@ -657,6 +720,11 @@ where
             Ok(stream)
         }
         Err(err) => {
+            // The first frame already failed, so that error is the actionable
+            // one for the caller. This cleanup stop is deliberately best
+            // effort: replacing the open failure with a stop failure would hide
+            // why the device could not start, and `Drop` on the stream could
+            // not report anything either.
             let _ = stream.stop();
             Err(err)
         }
@@ -779,6 +847,124 @@ mod tests {
             id: "scripted".into(),
             label: "Scripted".into(),
         }
+    }
+
+    /// What the controlled stream does on the first frame read.
+    #[derive(Clone, Copy)]
+    enum StreamOutcome {
+        Frames,
+        FirstFrameFails,
+    }
+
+    /// Records how often a controlled stream was opened and stopped.
+    #[derive(Default)]
+    struct StopProbe {
+        opens: std::sync::Mutex<Vec<String>>,
+        stop_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    /// Backend whose stream outcomes are supplied by the test, so a stop failure
+    /// is never confused with an open or frame failure.
+    struct ControllableBackend {
+        outcome: StreamOutcome,
+        stop_fails: bool,
+        probe: Arc<StopProbe>,
+        opened: std::sync::mpsc::Sender<()>,
+    }
+
+    struct ControllableStream {
+        outcome: StreamOutcome,
+        stop_fails: bool,
+        probe: Arc<StopProbe>,
+        frames: u64,
+    }
+
+    impl crate::device::CameraBackend for ControllableBackend {
+        fn enumerate(&self) -> Result<Vec<CameraDescriptor>, CameraError> {
+            Ok(vec![test_device()])
+        }
+
+        fn open(
+            &self,
+            descriptor: &CameraDescriptor,
+            _: &CameraRequest,
+        ) -> Result<Box<dyn crate::device::CameraStream>, CameraError> {
+            self.opened.send(()).unwrap();
+            self.probe.opens.lock().unwrap().push(descriptor.id.clone());
+            Ok(Box::new(ControllableStream {
+                outcome: self.outcome,
+                stop_fails: self.stop_fails,
+                probe: Arc::clone(&self.probe),
+                frames: 0,
+            }))
+        }
+    }
+
+    impl crate::device::CameraStream for ControllableStream {
+        fn actual_format(&self) -> CameraFormat {
+            CameraFormat {
+                width: 1,
+                height: 1,
+                fps_numerator: 30,
+                fps_denominator: 1,
+                format: vtuber_core::PixelFormat::Rgb8,
+            }
+        }
+
+        fn next_frame(&mut self, stop: &StopToken) -> Result<VideoFrame, CameraError> {
+            if stop.is_stopped() {
+                return Err(CameraError::Disconnected);
+            }
+            self.frames += 1;
+            if matches!(self.outcome, StreamOutcome::FirstFrameFails) {
+                return Err(CameraError::FrameDecodeFailed(
+                    "scripted first frame failure".into(),
+                ));
+            }
+            Ok(VideoFrame {
+                seq: FrameSeq(self.frames),
+                captured_at: vtuber_core::monotonic_now(),
+                width: 1,
+                height: 1,
+                stride_bytes: 3,
+                format: vtuber_core::PixelFormat::Rgb8,
+                data: Arc::from([0; 3]),
+            })
+        }
+
+        fn stop(&mut self) -> Result<(), CameraError> {
+            self.probe
+                .stop_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.stop_fails {
+                Err(CameraError::StopFailed("scripted stop failure".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Builds a started controller whose every stream fails `stop`.
+    fn stop_failing_controller() -> (
+        CaptureController,
+        std::sync::mpsc::Receiver<()>,
+        Arc<StopProbe>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = Arc::new(StopProbe::default());
+        let mut controller = CaptureController::new();
+        controller
+            .start_worker(ControllableBackend {
+                outcome: StreamOutcome::Frames,
+                stop_fails: true,
+                probe: Arc::clone(&probe),
+                opened: tx,
+            })
+            .unwrap();
+        controller
+            .select_and_start(test_device(), CameraRequest::default())
+            .unwrap();
+        (controller, rx, probe)
     }
 
     fn scripted_controller(
@@ -1266,5 +1452,126 @@ mod tests {
         };
         let result = controller.select_and_start(device, CameraRequest::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn explicit_stop_and_reset_keep_a_backend_stop_failure_readable() {
+        for reset in [false, true] {
+            let (mut controller, opened, probe) = stop_failing_controller();
+            opened.recv_timeout(Duration::from_secs(2)).unwrap();
+            wait_for_state(&controller, CaptureServiceState::Running);
+
+            if reset {
+                controller.reset().unwrap();
+                wait_for_state(&controller, CaptureServiceState::Idle);
+            } else {
+                controller.stop().unwrap();
+                wait_for_state(&controller, CaptureServiceState::Selected);
+            }
+
+            let last_error = controller
+                .metrics()
+                .last_error
+                .expect("the stop failure stays in the snapshot");
+            assert!(last_error.contains("StopFailed"), "{last_error}");
+            assert!(last_error.contains("scripted stop failure"), "{last_error}");
+            // The stream is released even though the stop failed, so it is
+            // stopped exactly once and never retained.
+            assert_eq!(
+                probe.stop_calls.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            // Stale frames are still discarded and the selection still follows
+            // the requested command.
+            assert!(controller.frame_slot().try_read_after(0).is_none());
+            assert_eq!(
+                controller.selected_device(),
+                if reset { None } else { Some(test_device()) }
+            );
+            let _ = controller.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_start_whose_old_stream_failed_to_stop_opens_nothing_new() {
+        let (mut controller, opened, probe) = stop_failing_controller();
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+
+        controller
+            .select_and_start(test_device(), CameraRequest::default())
+            .unwrap();
+        wait_for_state(&controller, CaptureServiceState::BackOff);
+
+        let last_error = controller.metrics().last_error.expect("start failed");
+        assert!(last_error.contains("StopFailed"), "{last_error}");
+        assert!(
+            matches!(
+                opened.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a second stream must not be opened behind a failed stop"
+        );
+        assert_eq!(probe.opens.lock().unwrap().as_slice(), ["scripted"]);
+        let _ = controller.shutdown();
+    }
+
+    #[test]
+    fn shutdown_reports_the_final_stop_failure_after_closing_the_slot() {
+        let (controller, opened, probe) = stop_failing_controller();
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        let slot = controller.frame_slot();
+
+        let error = controller
+            .shutdown()
+            .expect_err("the final stop failure is returned");
+        assert!(matches!(error, CameraError::StopFailed(_)), "{error:?}");
+        // Cleanup still ran, and the worker was reclaimed by the join.
+        assert!(slot.is_closed());
+        assert_eq!(
+            probe.stop_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[test]
+    fn open_and_stream_keeps_the_first_frame_error_over_the_cleanup_stop() {
+        let (_tx, _rx) = std::sync::mpsc::channel();
+        let probe = Arc::new(StopProbe::default());
+        let backend = ControllableBackend {
+            outcome: StreamOutcome::FirstFrameFails,
+            stop_fails: true,
+            probe: Arc::clone(&probe),
+            opened: _tx,
+        };
+        let state = Arc::new(std::sync::Mutex::new(SharedState::default()));
+        let slot = Arc::new(LatestSlot::new());
+        let stop = StopToken::new();
+        let mut metrics = CaptureMetrics::default();
+        let mut next_frame_seq = 0;
+
+        let error = open_and_stream(
+            &backend,
+            &test_device(),
+            CameraRequest::default(),
+            &stop,
+            &state,
+            &slot,
+            None,
+            &mut metrics,
+            &mut next_frame_seq,
+        )
+        .err()
+        .expect("the first frame failure is returned");
+
+        assert!(
+            matches!(error, CameraError::FrameDecodeFailed(_)),
+            "{error:?}"
+        );
+        assert_eq!(
+            probe.stop_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 }
