@@ -9,23 +9,37 @@ permissions:
   contents: read
 
 jobs:
-  tools:
+  dependencies:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: Prepare the repository-pinned Rust toolchain
+      - name: Fetch the actual reviewed branches and offline dependencies
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
-          root=$(rustup run 1.97.1 rustc --print sysroot)
-          tar -C "$root" -czf "$RUNNER_TEMP/rust-tools.tar.gz" bin/cargo bin/rustc bin/rustfmt lib
-          rustup run 1.97.1 rustc --version
-          rustup run 1.97.1 rustfmt --version
-          du -h "$RUNNER_TEMP/rust-tools.tar.gz"
-      - name: Export the tools for source editing
+          rustup toolchain install 1.97.1 --profile minimal
+          git clone --no-tags --single-branch --branch fix/123-reuse-user-asset-path "$SERVER_URL/$REPOSITORY.git" source
+          cd source
+          git fetch origin fix/127-image-size-overflow:refs/heads/fix/127-image-size-overflow fix/128-stream-explicit-close:refs/heads/fix/128-stream-explicit-close
+          git bundle create "$RUNNER_TEMP/repository.bundle" --branches
+          cargo +1.97.1 vendor --locked --versioned-dirs --sync vendor/mediapipe-rs/Cargo.toml "$RUNNER_TEMP/cargo-vendor" > "$RUNNER_TEMP/vendor-config.toml"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/offline-dependencies.tar.gz" cargo-vendor vendor-config.toml
+          du -h "$RUNNER_TEMP/repository.bundle" "$RUNNER_TEMP/offline-dependencies.tar.gz"
+      - name: Export repository history
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pinned-rust-tools-for-editing
-          path: ${{ runner.temp }}/rust-tools.tar.gz
+          name: repository-history-for-editing
+          path: ${{ runner.temp }}/repository.bundle
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: warn
+      - name: Export offline dependencies
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-dependencies-for-editing
+          path: ${{ runner.temp }}/offline-dependencies.tar.gz
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
