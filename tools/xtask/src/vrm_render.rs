@@ -242,12 +242,12 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
         &strength_zero,
     )?;
 
-    let difference = mean_absolute_difference(&off.data, &on.data);
-    let off_restore_difference = mean_absolute_difference(&off.data, &off_restored.data);
-    let on_repeat_difference = mean_absolute_difference(&on.data, &on_again.data);
-    let strength_zero_difference = mean_absolute_difference(&off.data, &strength_zero.data);
-    let half_difference = mean_absolute_difference(&off.data, &half.data);
-    let half_full_difference = mean_absolute_difference(&half.data, &on.data);
+    let difference = mean_absolute_difference(off.data(), on.data());
+    let off_restore_difference = mean_absolute_difference(off.data(), off_restored.data());
+    let on_repeat_difference = mean_absolute_difference(on.data(), on_again.data());
+    let strength_zero_difference = mean_absolute_difference(off.data(), strength_zero.data());
+    let half_difference = mean_absolute_difference(off.data(), half.data());
+    let half_full_difference = mean_absolute_difference(half.data(), on.data());
     if app
         .world()
         .resource::<vtuber_app::ndi_output::NdiOutputIntent>()
@@ -267,14 +267,14 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
          off_restore_diff={off_restore_difference:.3} on_repeat_diff={on_repeat_difference:.3} \
          strength_zero_diff={strength_zero_difference:.3} half_diff={half_difference:.3} half_full_diff={half_full_difference:.3} off_opaque={} on_opaque={}\n  \
          probes off={:?} on={:?} off_restored={:?} strength_zero={:?}\n",
-        mean(&off.data),
-        mean(&on.data),
-        opaque_pixels(&off.data),
-        opaque_pixels(&on.data),
-        probes(&off.data),
-        probes(&on.data),
-        probes(&off_restored.data),
-        probes(&strength_zero.data)
+        mean(off.data()),
+        mean(on.data()),
+        opaque_pixels(off.data()),
+        opaque_pixels(on.data()),
+        probes(off.data()),
+        probes(on.data()),
+        probes(off_restored.data()),
+        probes(strength_zero.data())
     );
     let _ = std::fs::remove_dir_all(&managed_root);
     if difference < 0.5 {
@@ -371,14 +371,14 @@ fn take_frame(app: &mut App, deadline: Instant) -> Result<VideoOutputFrame, Rend
 }
 
 fn write_frame(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
-    std::fs::write(path, &frame.data)
+    std::fs::write(path, frame.data())
         .map_err(|error| RenderError::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
 /// Writes the frame as a PNG so the render can be inspected as an image.
 fn write_png(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
-    let mut rgba = Vec::with_capacity(frame.data.len());
-    for pixel in frame.data.as_chunks::<4>().0 {
+    let mut rgba = Vec::with_capacity(frame.data().len());
+    for pixel in frame.data().as_chunks::<4>().0 {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
     let buffer = image::RgbaImage::from_raw(WIDTH, HEIGHT, rgba)

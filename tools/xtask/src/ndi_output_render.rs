@@ -342,7 +342,7 @@ fn wait_for_frame(app: &mut App) -> Result<VideoOutputFrame, RenderValidationErr
 #[allow(clippy::indexing_slicing)]
 fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
     frame
-        .data
+        .data()
         .chunks_exact(4)
         .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
         .collect()

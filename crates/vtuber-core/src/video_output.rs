@@ -55,22 +55,64 @@ impl Default for VideoOutputProfile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoOutputFrame {
     /// Frame width in pixels.
-    pub width: u32,
+    width: u32,
     /// Frame height in pixels.
-    pub height: u32,
+    height: u32,
     /// Number of bytes between the start of adjacent rows.
-    pub stride_bytes: usize,
+    stride_bytes: usize,
     /// Pixel format and alpha semantics of `data`.
-    pub pixel_format: VideoOutputPixelFormat,
+    pixel_format: VideoOutputPixelFormat,
     /// Monotonically identifiable output sequence.
-    pub frame_seq: FrameSeq,
+    frame_seq: FrameSeq,
     /// Completion timestamp from the process-local monotonic clock.
-    pub captured_at: MonoTimeNs,
+    captured_at: MonoTimeNs,
     /// Packed, owned frame bytes.
-    pub data: Arc<[u8]>,
+    data: Arc<[u8]>,
 }
 
 impl VideoOutputFrame {
+    /// Frame width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Frame height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Validated packed row stride.
+    #[must_use]
+    pub const fn stride_bytes(&self) -> usize {
+        self.stride_bytes
+    }
+
+    /// Pixel layout and alpha convention.
+    #[must_use]
+    pub const fn pixel_format(&self) -> VideoOutputPixelFormat {
+        self.pixel_format
+    }
+
+    /// Output sequence identifier.
+    #[must_use]
+    pub const fn frame_seq(&self) -> FrameSeq {
+        self.frame_seq
+    }
+
+    /// Process-local completion time.
+    #[must_use]
+    pub const fn captured_at(&self) -> MonoTimeNs {
+        self.captured_at
+    }
+
+    /// Borrows the validated packed frame bytes without copying.
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// Creates a validated packed BGRA8 frame.
     pub fn new_bgra8(
         width: u32,
@@ -242,6 +284,30 @@ mod tests {
 
     fn timestamp() -> MonoTimeNs {
         MonoTimeNs(7)
+    }
+
+    #[test]
+    fn accessors_expose_the_validated_frame_without_changing_its_layout() {
+        let frame = VideoOutputFrame::new_bgra8(
+            2,
+            1,
+            FrameSeq(3),
+            MonoTimeNs(4),
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+        )
+        .unwrap();
+        assert_eq!(
+            (frame.width(), frame.height(), frame.stride_bytes()),
+            (2, 1, 8)
+        );
+        assert_eq!(
+            frame.pixel_format(),
+            VideoOutputPixelFormat::Bgra8StraightAlpha
+        );
+        assert_eq!(frame.frame_seq(), FrameSeq(3));
+        assert_eq!(frame.captured_at(), MonoTimeNs(4));
+        assert_eq!(frame.data(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(frame.data().as_ptr(), frame.clone().data().as_ptr());
     }
 
     #[test]
