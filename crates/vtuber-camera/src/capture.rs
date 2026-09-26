@@ -185,11 +185,24 @@ impl CaptureController {
     /// Creates a new controller in the idle state.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_pose_output(None)
+    }
+
+    /// Creates a new controller that also publishes each captured frame to
+    /// `pose_slot` for a Pose worker.
+    ///
+    /// The output is fixed here and is never rewired: there is no setter, so
+    /// [`CaptureController::start_worker`] always hands the worker the same
+    /// slots this controller was built with. This performs no I/O and starts no
+    /// thread. `None` disables the arm-tracking fan-out, so a disabled Pose
+    /// worker is never fed frames.
+    #[must_use]
+    pub fn with_pose_output(pose_slot: Option<Arc<LatestSlot<VideoFrame>>>) -> Self {
         Self {
             state: Arc::new(std::sync::Mutex::new(SharedState::default())),
             command_tx: None,
             frame_slot: Arc::new(LatestSlot::new()),
-            pose_slot: None,
+            pose_slot,
             worker: None,
         }
     }
@@ -198,15 +211,6 @@ impl CaptureController {
     #[must_use]
     pub fn frame_slot(&self) -> Arc<LatestSlot<VideoFrame>> {
         Arc::clone(&self.frame_slot)
-    }
-
-    /// Enables or disables the second capacity-one slot used by the Pose worker.
-    ///
-    /// Must be called before [`CaptureController::start_worker`]. Passing `None`
-    /// disables the arm-tracking fan-out, so a disabled Pose worker is never
-    /// fed frames.
-    pub fn set_pose_output(&mut self, pose_slot: Option<Arc<LatestSlot<VideoFrame>>>) {
-        self.pose_slot = pose_slot;
     }
 
     /// Returns the current service state.
@@ -995,6 +999,14 @@ mod tests {
         }
     }
 
+    /// The device descriptor the shared [`MockBackend`] actually opens.
+    fn mock_device() -> CameraDescriptor {
+        CameraDescriptor {
+            id: "mock-0".into(),
+            label: "Mock".into(),
+        }
+    }
+
     #[test]
     fn debug_only_reads_the_controller_summary() {
         let controller = CaptureController::new();
@@ -1446,12 +1458,65 @@ mod tests {
     #[test]
     fn select_without_worker_fails() {
         let mut controller = CaptureController::new();
-        let device = CameraDescriptor {
-            id: "mock-0".into(),
-            label: "Mock".into(),
-        };
-        let result = controller.select_and_start(device, CameraRequest::default());
+        let result = controller.select_and_start(mock_device(), CameraRequest::default());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn the_pose_output_fixed_at_construction_survives_a_stop_and_start() {
+        let pose: Arc<LatestSlot<VideoFrame>> = Arc::new(LatestSlot::new());
+        let mut controller = CaptureController::with_pose_output(Some(Arc::clone(&pose)));
+        controller.start_worker(MockBackend::default()).unwrap();
+        let face = controller.frame_slot();
+        let mut cursor = 0;
+
+        for _ in 0..2 {
+            controller
+                .select_and_start(mock_device(), CameraRequest::default())
+                .unwrap();
+            wait_for_state(&controller, CaptureServiceState::Running);
+
+            // The Pose consumer receives the same frame body as the face one.
+            let Some(vtuber_core::ReadResult::New {
+                generation,
+                value: pose_frame,
+            }) = pose.wait_read_after(cursor, Duration::from_secs(2))
+            else {
+                panic!("pose slot should receive the captured frame");
+            };
+            cursor = generation;
+            let Some(vtuber_core::ReadResult::New {
+                value: face_frame, ..
+            }) = face.wait_read_after(0, Duration::from_secs(2))
+            else {
+                panic!("face slot should receive the captured frame");
+            };
+            assert_eq!(pose_frame.seq, face_frame.seq);
+            assert!(Arc::ptr_eq(&pose_frame.data, &face_frame.data));
+
+            controller.stop().unwrap();
+            wait_for_state(&controller, CaptureServiceState::Selected);
+            // The stale frame is discarded, so the reader sees nothing until the
+            // next start republishes.
+            assert!(pose.try_read_after(cursor).is_none());
+        }
+        let _ = controller.shutdown();
+    }
+
+    #[test]
+    fn without_a_pose_output_the_face_slot_still_receives_frames() {
+        let mut controller = CaptureController::new();
+        controller.start_worker(MockBackend::default()).unwrap();
+        let slot = controller.frame_slot();
+        controller
+            .select_and_start(mock_device(), CameraRequest::default())
+            .unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        assert!(matches!(
+            slot.wait_read_after(0, Duration::from_secs(2)),
+            Some(vtuber_core::ReadResult::New { .. })
+        ));
+        let _ = controller.shutdown();
     }
 
     #[test]

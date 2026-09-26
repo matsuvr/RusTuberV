@@ -57,6 +57,9 @@ pub struct CaptureRuntime {
     /// The underlying capture controller.
     controller: CaptureController,
     backend: CameraBackendKind,
+    /// The Pose output fixed at construction, kept so a controller rebuilt by
+    /// [`CaptureRuntime::shutdown`] keeps the same wiring.
+    pose_slot: Option<Arc<LatestSlot<VideoFrame>>>,
     /// Whether the worker thread has been started.
     worker_started: bool,
     /// Last-read generation for the frame slot.
@@ -73,9 +76,24 @@ impl CaptureRuntime {
     /// Creates an idle runtime with an explicit backend selection.
     #[must_use]
     pub fn with_backend(backend: CameraBackendKind) -> Self {
+        Self::with_backend_and_pose_output(backend, None)
+    }
+
+    /// Creates an idle runtime that also publishes each captured frame to
+    /// `pose_slot`.
+    ///
+    /// The Pose output is fixed here. There is no setter, so a call after
+    /// startup cannot appear to succeed without reaching the worker. `None`
+    /// means face-only output. This performs no I/O and starts no thread.
+    #[must_use]
+    pub fn with_backend_and_pose_output(
+        backend: CameraBackendKind,
+        pose_slot: Option<Arc<LatestSlot<VideoFrame>>>,
+    ) -> Self {
         Self {
-            controller: CaptureController::new(),
+            controller: CaptureController::with_pose_output(pose_slot.clone()),
             backend,
+            pose_slot,
             worker_started: false,
             last_generation: 0,
         }
@@ -168,13 +186,18 @@ impl CaptureRuntime {
     ///
     /// The controller is replaced with a fresh idle controller so this method
     /// can be called from a Bevy exit system without moving the resource out
-    /// of the world. Normal Stop uses [`Self::stop_capture`] and preserves the
-    /// worker for a later Start.
+    /// of the world. The replacement is built with the same construction-time
+    /// Pose output, so a later Start keeps feeding the Pose consumer. Normal
+    /// Stop uses [`Self::stop_capture`] and preserves the worker for a later
+    /// Start.
     ///
     /// A backend that failed to stop surfaces here as an error, including the
     /// worker's final stop; the caller must not treat this as a clean exit.
     pub fn shutdown(&mut self) -> Result<(), String> {
-        let controller = std::mem::replace(&mut self.controller, CaptureController::new());
+        let controller = std::mem::replace(
+            &mut self.controller,
+            CaptureController::with_pose_output(self.pose_slot.clone()),
+        );
         let result = controller
             .shutdown()
             .map(|_| ())
@@ -194,14 +217,6 @@ impl CaptureRuntime {
     #[must_use]
     pub fn frame_slot(&self) -> Arc<LatestSlot<VideoFrame>> {
         self.controller.frame_slot()
-    }
-
-    /// Enables the second capacity-one slot consumed by the Pose worker.
-    ///
-    /// Must be called before the capture worker starts; the application wires
-    /// it once at startup so one camera open feeds both consumers.
-    pub fn set_pose_output(&mut self, pose_slot: Option<Arc<LatestSlot<VideoFrame>>>) {
-        self.controller.set_pose_output(pose_slot);
     }
 
     /// Tries to read the latest frame from the slot.
@@ -488,6 +503,42 @@ mod preview_tests {
         assert!(runtime.ensure_worker_started().is_err());
         assert!(!runtime.worker_started);
         assert_eq!(runtime.backend_kind(), CameraBackendKind::Msmf);
+    }
+
+    /// Waits for one Pose-slot publication and returns the reader cursor.
+    fn read_pose_frame(pose: &LatestSlot<VideoFrame>, cursor: u64) -> u64 {
+        match pose.wait_read_after(cursor, std::time::Duration::from_secs(3)) {
+            Some(vtuber_core::ReadResult::New { generation, .. }) => generation,
+            _ => panic!("the Pose slot should receive the captured frame"),
+        }
+    }
+
+    #[test]
+    fn shutdown_keeps_the_construction_time_pose_output() {
+        let pose: Arc<LatestSlot<VideoFrame>> = Arc::new(LatestSlot::new());
+        let mut runtime = CaptureRuntime::with_backend_and_pose_output(
+            CameraBackendKind::Mock,
+            Some(Arc::clone(&pose)),
+        );
+        let device = vtuber_camera::CameraDescriptor {
+            id: "mock-0".into(),
+            label: "Mock".into(),
+        };
+
+        runtime
+            .start_capture(device.clone(), vtuber_camera::CameraRequest::default())
+            .expect("mock capture starts");
+        let mut cursor = read_pose_frame(&pose, 0);
+
+        // The controller is rebuilt on shutdown, so the construction-time Pose
+        // output must survive it for a later Start.
+        runtime.shutdown().expect("mock shutdown");
+        runtime
+            .start_capture(device, vtuber_camera::CameraRequest::default())
+            .expect("capture restarts after shutdown");
+        cursor = read_pose_frame(&pose, cursor);
+        assert!(cursor > 0);
+        runtime.shutdown().expect("second mock shutdown");
     }
 
     fn rgb_frame() -> VideoFrame {

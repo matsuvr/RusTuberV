@@ -8,8 +8,9 @@ use crate::actions::UiAction;
 use crate::avatar_bridge::publish_control_frame_system;
 use crate::avatar_bridge::sync_avatar_diagnostics;
 use crate::capture_runtime::{
-    CaptureRuntime, LatestVideoFrame, capture_bridge_system, read_latest_frame,
-    register_preview_texture_system, sync_capture_diagnostics, update_preview_texture_system,
+    CaptureRuntime, LatestVideoFrame, capture_bridge_system, default_camera_backend,
+    read_latest_frame, register_preview_texture_system, sync_capture_diagnostics,
+    update_preview_texture_system,
 };
 use crate::diagnostics::{DiagnosticsSnapshot, sync_engine_diagnostics};
 use crate::error_presenter::ErrorPresenter;
@@ -178,27 +179,30 @@ impl Plugin for UiShellPlugin {
             .init_resource::<DiagnosticsSnapshot>()
             .init_resource::<MetricsExportState>()
             .init_resource::<ErrorPresenter>()
-            .init_resource::<super::file_dialog::FileDialogState>()
-            .init_resource::<CaptureRuntime>()
-            .init_resource::<LatestVideoFrame>();
+            .init_resource::<super::file_dialog::FileDialogState>();
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::SwitchPane(Pane::Studio));
-        let frame_slot = app.world().resource::<CaptureRuntime>().frame_slot();
         let project_root = app
             .world()
             .get_resource::<InferenceProjectRoot>()
             .map(|root| root.0.clone())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        app.insert_resource(InferenceRuntime::new(frame_slot, project_root.clone()))
-            .insert_resource(PoseRuntime::new(project_root))
-            .init_resource::<TrackingRuntime>();
-        // Wire the camera fan-out to the Pose slot before the capture worker is
-        // ever started, so one camera open serves both face and Pose.
+        // The Pose consumer exists before the capture runtime so its slot can
+        // be handed to the constructor: one camera open serves both face and
+        // Pose, and the output is fixed before any worker can start.
+        app.insert_resource(PoseRuntime::new(project_root.clone()))
+            .init_resource::<TrackingRuntime>()
+            .insert_resource(LatestVideoFrame::default());
         let pose_slot = app.world().resource::<PoseRuntime>().frame_slot();
-        app.world_mut()
-            .resource_mut::<CaptureRuntime>()
-            .set_pose_output(Some(pose_slot));
+        if !app.world().contains_resource::<CaptureRuntime>() {
+            app.insert_resource(CaptureRuntime::with_backend_and_pose_output(
+                default_camera_backend(),
+                Some(pose_slot),
+            ));
+        }
+        let frame_slot = app.world().resource::<CaptureRuntime>().frame_slot();
+        app.insert_resource(InferenceRuntime::new(frame_slot, project_root));
         app.add_systems(
             Startup,
             (
