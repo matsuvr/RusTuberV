@@ -29,8 +29,8 @@ Scope: Body Motion final headless trace validation and control-order confirmatio
 | avatar replacement generation cleanup | `body_motion_trace.rs::avatar_generation_cleanup_rejects_stale_frames_and_targets`, managed replacement assertions | PASS |
 | same-frame order: body/root, idle, arm compositor, gaze, expressions, constraints, SpringBone | `schedule.rs::avatar_schedule_ordering_matches_design` + retired-writer absence assertion | PASS |
 | writer ownership confirmed in authoritative docs | ADR-004, ADR-019, ADR-020 | PASS |
-| representative VRM 0.x managed headless run | `cargo xtask -- vrm-managed-compat tests\fixtures\vrm\tsukuyomi-chan.vrm` | PASS |
-| representative VRM 1.0 managed headless run | `cargo xtask -- vrm-managed-compat tests\fixtures\vrm\inore-vrm1.vrm` | PASS |
+| representative VRM 0.x managed headless run | `cargo xtask vrm-managed-compat tests\fixtures\vrm\tsukuyomi-chan.vrm` | PASS |
+| representative VRM 1.0 managed headless run | `cargo xtask vrm-managed-compat tests\fixtures\vrm\inore-vrm1.vrm` | PASS |
 | workspace focused tests / fmt / check / clippy / deny / diff check | `cargo test --workspace`, `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets`, `cargo deny check`, `git diff --check` | PASS |
 
 ## Managed runner output summary
