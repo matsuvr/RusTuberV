@@ -1,6 +1,6 @@
 //! Eye-closure data preparation and threshold fitting (Issues #51-#54).
 //!
-//! Subcommand family under `cargo xtask -- eye-closure ...`. Raw pixels,
+//! Subcommand family under `cargo xtask eye-closure ...`. Raw pixels,
 //! derived traces, review images, and absolute paths stay in gitignored local
 //! working directories; only synthetic fixtures are committed.
 
