@@ -8,6 +8,21 @@ use crate::loader::lib;
 use crate::sys;
 use crate::types::Size;
 
+fn checked_image_len(size: Size, channels: u32) -> Result<usize> {
+    let overflow = || Error::ImageSizeOverflow {
+        width: size.width,
+        height: size.height,
+        channels,
+    };
+    let width = usize::try_from(size.width).map_err(|_| overflow())?;
+    let height = usize::try_from(size.height).map_err(|_| overflow())?;
+    let channels = usize::try_from(channels).map_err(|_| overflow())?;
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels))
+        .ok_or_else(overflow)
+}
+
 /// An image owned by this crate, freed on drop.
 ///
 /// MediaPipe copies pixel data on construction, so the source buffer does not
@@ -54,7 +69,7 @@ impl Image {
     fn from_u8(size: Size, data: &[u8], channels: u32, format: sys::MpImageFormat) -> Result<Self> {
         // The C side trusts the length it is given; a short buffer is an
         // out-of-bounds read inside MediaPipe, so check here.
-        let expected = (size.width as usize) * (size.height as usize) * (channels as usize);
+        let expected = checked_image_len(size, channels)?;
         if data.len() != expected {
             return Err(Error::BufferSize {
                 got: data.len(),
@@ -193,5 +208,45 @@ impl std::fmt::Debug for ImageRef<'_> {
             .field("height", &size.height)
             .field("channels", &self.channels())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_lengths_preserve_rgb_and_rgba_layouts() {
+        let size = Size { width: 640, height: 480 };
+        assert_eq!(checked_image_len(size, 3).unwrap(), 640 * 480 * 3);
+        assert_eq!(checked_image_len(size, 4).unwrap(), 640 * 480 * 4);
+    }
+
+    #[test]
+    fn overflow_is_rejected_before_buffer_validation_or_ffi() {
+        let size = Size { width: u32::MAX, height: u32::MAX };
+        assert!(matches!(
+            checked_image_len(size, 4),
+            Err(Error::ImageSizeOverflow { width: u32::MAX, height: u32::MAX, channels: 4 })
+        ));
+        assert!(matches!(Image::from_rgba(size, &[]), Err(Error::ImageSizeOverflow { .. })));
+    }
+
+    #[test]
+    fn incorrect_buffer_length_keeps_its_existing_error() {
+        assert!(matches!(
+            Image::from_rgb(Size { width: 2, height: 3 }, &[0; 17]),
+            Err(Error::BufferSize { got: 17, expected: 18, width: 2, height: 3, channels: 3 })
+        ));
+    }
+
+    #[test]
+    fn c_dimension_overflow_is_rejected_without_allocating_or_loading_ffi() {
+        for size in [
+            Size { width: u32::MAX, height: 0 },
+            Size { width: 0, height: u32::MAX },
+        ] {
+            assert!(matches!(Image::from_rgb(size, &[]), Err(Error::TooLarge { .. })));
+        }
     }
 }

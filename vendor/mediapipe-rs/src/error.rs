@@ -98,6 +98,13 @@ pub enum Error {
         channels: u32,
     },
 
+    #[error("image size {width}x{height}x{channels} cannot be represented as a buffer length")]
+    ImageSizeOverflow {
+        width: u32,
+        height: u32,
+        channels: u32,
+    },
+
     #[error("{what} is {len} bytes, which does not fit the C API's {limit}-byte limit")]
     TooLarge {
         what: &'static str,
