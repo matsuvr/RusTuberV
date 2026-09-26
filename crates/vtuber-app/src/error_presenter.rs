@@ -153,6 +153,19 @@ pub fn present_error(
             ),
             suggested_actions: vec![UiAction::RetryAfterError, UiAction::DismissError],
         },
+        OrchestratorError::PoseWorkerStartFailed(detail) => ErrorPresentation {
+            code: "POSE_WORKER_START_FAILED",
+            user_message: format!(
+                "{}: {detail}",
+                message(
+                    "腕トラッキングを開始できませんでした。再試行するには腕トラッキングをオフにしてからオンにしてください。",
+                    "Arm tracking could not be started. To retry, turn arm tracking off and then on again.",
+                    "无法开始手臂追踪。要重试，请先关闭手臂追踪，然后重新打开。",
+                    "팔 추적을 시작할 수 없습니다. 다시 시도하려면 팔 추적을 껐다가 다시 켜세요.",
+                )
+            ),
+            suggested_actions: vec![UiAction::DismissError],
+        },
     }
 }
 
@@ -282,5 +295,26 @@ mod tests {
                 .user_message
                 .starts_with("Please select a camera")
         );
+    }
+    #[test]
+    fn present_error_pose_worker_start_names_arm_tracking_in_every_language() {
+        let error = OrchestratorError::PoseWorkerStartFailed("resource exhausted".to_owned());
+        let summaries = [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ]
+        .map(|language| {
+            let presentation = present_error(&error, language);
+            assert_eq!(presentation.code, "POSE_WORKER_START_FAILED");
+            assert_eq!(presentation.suggested_actions, vec![UiAction::DismissError]);
+            assert!(presentation.user_message.contains("resource exhausted"));
+            presentation.user_message
+        });
+        assert!(summaries[0].contains("腕トラッキングをオフにしてからオンにしてください"));
+        assert!(summaries[1].contains("turn arm tracking off and then on again"));
+        assert!(summaries[2].contains("先关闭手臂追踪，然后重新打开"));
+        assert!(summaries[3].contains("팔 추적을 껐다가 다시 켜세요"));
     }
 }
