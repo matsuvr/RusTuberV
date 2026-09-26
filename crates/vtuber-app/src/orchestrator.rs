@@ -855,6 +855,16 @@ pub fn process_ui_actions_system(
             UiAction::ToggleMirror => preview.toggle_mirrored(),
             UiAction::ToggleAvatarMotionMirror => avatar_motion_mirror.toggle(),
             UiAction::SetArmTrackingEnabled { enabled } => {
+                // Persist first: a refused save must leave the runtime switch
+                // and the observation state exactly as they were.
+                if let Some(settings) = arm_pose_settings.as_deref_mut()
+                    && let Err(error) = settings.set_arm_tracking_enabled(*enabled)
+                {
+                    orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
+                        error.to_string(),
+                    )));
+                    continue;
+                }
                 if let Some(pose) = pose_runtime.as_deref_mut() {
                     pose.set_enabled(*enabled);
                     if !*enabled {
@@ -862,13 +872,6 @@ pub fn process_ui_actions_system(
                         // to the virtual anchors on the next compositor frame.
                         pose.recalibrate();
                     }
-                }
-                if let Some(settings) = arm_pose_settings.as_mut()
-                    && let Err(error) = settings.set_arm_tracking_enabled(*enabled)
-                {
-                    orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
-                        error.to_string(),
-                    )));
                 }
             }
             UiAction::RecalibrateArms => {
@@ -2293,6 +2296,115 @@ mod tests {
         );
         let restored = crate::settings::load_arm_pose_overrides(&path).expect("reset file");
         assert!(restored.profile_for(&id).is_none());
+    }
+
+    /// Minimal app that runs the UI action processor with a real settings
+    /// resource, so a save is observed through the same path the shell uses.
+    fn arm_tracking_action_app(settings: ArmPoseSettings) -> App {
+        let mut app = App::new();
+        app.init_resource::<Orchestrator>()
+            .init_resource::<UiState>()
+            .init_resource::<UiViewModel>()
+            .init_resource::<PreviewState>()
+            .init_resource::<AvatarMotionMirror>()
+            .init_resource::<crate::pose_runtime::PoseRuntime>()
+            .insert_resource(settings)
+            .add_systems(Update, process_ui_actions_system);
+        app
+    }
+
+    /// The persisted switch, the runtime switch, and the rendered switch.
+    fn arm_tracking_switches(app: &App) -> (bool, bool, bool) {
+        (
+            app.world()
+                .resource::<ArmPoseSettings>()
+                .arm_tracking_enabled(),
+            app.world()
+                .resource::<crate::pose_runtime::PoseRuntime>()
+                .enabled(),
+            app.world().resource::<UiViewModel>().arm_tracking_enabled,
+        )
+    }
+
+    fn toggle_arm_tracking(app: &mut App, enabled: bool) {
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::SetArmTrackingEnabled { enabled });
+        app.update();
+    }
+
+    fn assert_settings_save_refused(app: &App) {
+        assert!(matches!(
+            app.world().resource::<Orchestrator>().last_error(),
+            Some(OrchestratorError::ArmPoseSettingsFailed(_))
+        ));
+    }
+
+    #[test]
+    fn a_successful_arm_tracking_save_switches_the_runtime_and_the_file() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let path = directory.path().join("settings.toml");
+        let mut app =
+            arm_tracking_action_app(ArmPoseSettings::load(&path).expect("initial values"));
+        assert_eq!(arm_tracking_switches(&app), (false, false, false));
+
+        toggle_arm_tracking(&mut app, true);
+
+        assert_eq!(arm_tracking_switches(&app), (true, true, true));
+        assert!(crate::settings::load_arm_tracking_enabled(&path).expect("saved switch"));
+        toggle_arm_tracking(&mut app, false);
+
+        assert_eq!(arm_tracking_switches(&app), (false, false, false));
+        assert!(!crate::settings::load_arm_tracking_enabled(&path).expect("saved switch"));
+    }
+
+    #[test]
+    fn a_refused_arm_tracking_save_keeps_the_runtime_switch() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let path = directory.path().join("settings.toml");
+        let current = "schema_version = 1\n";
+        std::fs::write(&path, current).expect("settings seed");
+        let mut app =
+            arm_tracking_action_app(ArmPoseSettings::load(&path).expect("current schema"));
+        assert_eq!(arm_tracking_switches(&app), (false, false, false));
+
+        // A newer document on the same path refuses every later save, in both
+        // directions, and leaves the runtime switch where the operator had it.
+        let foreign = "schema_version = 99\n";
+        std::fs::write(&path, foreign).expect("foreign schema");
+        toggle_arm_tracking(&mut app, true);
+
+        assert_eq!(arm_tracking_switches(&app), (false, false, false));
+        assert_settings_save_refused(&app);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("settings bytes"),
+            foreign
+        );
+
+        std::fs::write(&path, current).expect("current schema");
+        toggle_arm_tracking(&mut app, true);
+        assert_eq!(arm_tracking_switches(&app), (true, true, true));
+
+        std::fs::write(&path, foreign).expect("foreign schema");
+        toggle_arm_tracking(&mut app, false);
+
+        assert_eq!(arm_tracking_switches(&app), (true, true, true));
+        assert_settings_save_refused(&app);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("settings bytes"),
+            foreign
+        );
+    }
+
+    #[test]
+    fn an_unreadable_settings_path_keeps_the_runtime_switch() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let mut app = arm_tracking_action_app(ArmPoseSettings::empty_at(directory.path()));
+
+        toggle_arm_tracking(&mut app, true);
+
+        assert_eq!(arm_tracking_switches(&app), (false, false, false));
+        assert_settings_save_refused(&app);
     }
 
     #[test]
