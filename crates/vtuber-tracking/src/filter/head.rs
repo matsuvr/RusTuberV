@@ -11,26 +11,16 @@ use vtuber_core::types::MonoTimeNs;
 /// Parameters for the head rotation filter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeadFilterParams {
-    /// Smoothing time constant in seconds while observations continue the
-    /// motion the filter is already following.
+    /// Smoothing time constant in seconds.
     ///
-    /// Smaller values make the filter follow input changes faster. Values
-    /// must be positive and finite; non-positive values are clamped to
+    /// One constant covers the whole channel. It used to be stretched when an
+    /// observation departed from the previous one faster than
+    /// [`Self::max_step_rad`] could explain, but a head that turns quickly is
+    /// not an outlier, and that coupling slowed exactly the motion that needed
+    /// to follow. Smaller values make the filter follow input changes faster.
+    /// Values must be positive and finite; non-positive values are clamped to
     /// [`f32::EPSILON`] when the filter runs.
     pub time_constant_sec: f32,
-    /// Smoothing time constant used when an observation jumps away from the
-    /// previous one.
-    ///
-    /// The first observation after a detection jump (or a loss) eases with
-    /// this value instead of the fast one, so the departure is absorbed. It is
-    /// never smaller than [`Self::time_constant_sec`].
-    pub slow_time_constant_sec: f32,
-    /// Observation rate in radians per second at which the response has fully
-    /// slowed to [`Self::slow_time_constant_sec`].
-    ///
-    /// A plausible head turn stays below this, so sustained motion keeps the
-    /// fast response; only a discontinuity slows the filter down.
-    pub jump_rate_rad_per_sec: f32,
     /// Maximum allowed delta-time in seconds.
     ///
     /// Larger gaps are clamped to this value so that a stale observation
@@ -38,8 +28,10 @@ pub struct HeadFilterParams {
     pub max_dt_sec: f32,
     /// Maximum accepted rotation step in radians.
     ///
-    /// A larger single-frame step is treated as an outlier and quarantined
-    /// until a later sample returns within the physical limit.
+    /// A larger single-frame step cannot be a head turn between two
+    /// observations, so it is treated as an outlier and quarantined until a
+    /// later sample returns within the physical limit. This is where a
+    /// discontinuity is rejected, instead of by stiffening the filter.
     pub max_step_rad: f32,
 }
 
@@ -47,8 +39,6 @@ impl Default for HeadFilterParams {
     fn default() -> Self {
         Self {
             time_constant_sec: 0.025,
-            slow_time_constant_sec: 0.1,
-            jump_rate_rad_per_sec: 8.0,
             max_dt_sec: super::damped::DEFAULT_MAX_DT_SEC,
             max_step_rad: 1.25,
         }
@@ -56,27 +46,13 @@ impl Default for HeadFilterParams {
 }
 
 impl HeadFilterParams {
-    /// Returns parameters with a fixed smoothing time constant.
-    ///
-    /// The jump response is disabled, so the filter smooths at
-    /// `time_constant_sec` regardless of how far an observation departs from
-    /// the previous one.
+    /// Returns parameters with the given smoothing time constant.
     #[must_use]
     pub fn with_time_constant(time_constant_sec: f32) -> Self {
         Self {
             time_constant_sec,
-            slow_time_constant_sec: time_constant_sec,
             ..Self::default()
         }
-    }
-
-    /// The residual-adaptive response implied by these parameters.
-    fn response(self) -> super::damped::ResidualResponse {
-        super::damped::ResidualResponse::new(
-            self.time_constant_sec,
-            self.slow_time_constant_sec,
-            self.jump_rate_rad_per_sec,
-        )
     }
 }
 
@@ -85,12 +61,6 @@ struct FilterState {
     quat: UnitQuaternion<f32>,
     velocity: Vector3<f32>,
     last_time: MonoTimeNs,
-    /// The observation the filter last received, used to measure how far the
-    /// next one departs from it.
-    last_target: UnitQuaternion<f32>,
-    /// When `last_target` first changed, so the departure is measured over the
-    /// observation interval rather than over one render tick.
-    last_target_time: MonoTimeNs,
 }
 
 /// Quaternion-centered exponential smoothing filter for head rotation.
@@ -180,8 +150,6 @@ impl HeadRotationFilter {
                 quat: target,
                 velocity: Vector3::zeros(),
                 last_time: timestamp,
-                last_target: target,
-                last_target_time: timestamp,
             });
             return target;
         };
@@ -198,22 +166,8 @@ impl HeadRotationFilter {
             return state.quat;
         }
 
-        // How far this observation departs from the previous one, per second
-        // of observation interval. A held sample repeats `last_target`, so it
-        // contributes no departure and keeps the fast response.
-        let observation_changed = target != state.last_target;
-        let departure = if observation_changed {
-            super::damped::observation_rate(
-                state.last_target.angle_to(&target),
-                (timestamp.0.saturating_sub(state.last_target_time.0) as f32) * 1.0e-9,
-            )
-        } else {
-            0.0
-        };
-        let time_constant_sec = self.params.response().time_constant_sec(departure);
-
         // Clamp tau to avoid division by zero and non-finite parameters.
-        let tau = time_constant_sec.max(f32::EPSILON);
+        let tau = self.params.time_constant_sec.max(f32::EPSILON);
 
         // Choose the quaternion sign that gives the shortest arc.
         let signed_target = choose_shortest_arc(state.quat, target);
@@ -238,16 +192,6 @@ impl HeadRotationFilter {
             quat: smoothed,
             velocity,
             last_time: timestamp,
-            last_target: if observation_changed {
-                target
-            } else {
-                state.last_target
-            },
-            last_target_time: if observation_changed {
-                timestamp
-            } else {
-                state.last_target_time
-            },
         });
 
         smoothed
@@ -363,51 +307,82 @@ mod tests {
         assert_eq!(filter.quarantined_samples(), 1);
     }
 
-    /// Feeds a steady turn at 30 Hz, holding each observation for two 60 Hz
-    /// render ticks, and returns the lag after the last observation.
-    fn sustained_turn_lag(filter: &mut HeadRotationFilter) -> f32 {
-        let observation_step_sec = 1.0 / 30.0;
-        let half_step_ns = (observation_step_sec * 0.5e9) as u64;
-        let turn_per_observation = 2.0 * observation_step_sec;
-        let mut target = UnitQuaternion::identity();
-        let mut now = 0u64;
-        let _ = filter.update(target, ts(now));
-        let mut out = target;
-        for _ in 0..60 {
-            target *= UnitQuaternion::from_axis_angle(&Vector3::y_axis(), turn_per_observation);
-            now += half_step_ns;
-            let _ = filter.update(target, ts(now));
-            now += half_step_ns;
-            out = filter.update(target, ts(now));
-        }
-        out.angle_to(&target)
-    }
-
     #[test]
-    fn a_sustained_turn_lags_less_than_the_slow_response() {
-        let mut adaptive = HeadRotationFilter::new(HeadFilterParams::default());
-        let mut slow = HeadRotationFilter::new(HeadFilterParams::with_time_constant(0.1));
-        let adaptive_lag = sustained_turn_lag(&mut adaptive);
-        let slow_lag = sustained_turn_lag(&mut slow);
+    fn a_sustained_turn_keeps_a_bounded_lag_at_every_speed() {
+        // 4 rad/s is a fast but ordinary head turn, well under the 1.25 rad
+        // single-observation quarantine. The lag a critically damped response
+        // leaves on a constant-rate ramp is tau * rate, so it grows in
+        // proportion to the speed instead of the filter stiffening and the head
+        // falling arbitrarily further behind.
+        let lag_per_rate = |rate: f32| {
+            let mut filter = HeadRotationFilter::new(HeadFilterParams::with_time_constant(0.025));
+            let mut turn = UnitQuaternion::identity();
+            let mut now = 0u64;
+            let _ = filter.update(turn, ts(now));
+            let mut out = turn;
+            let step_ns = 16_666_667u64;
+            for _ in 0..240 {
+                turn *= UnitQuaternion::from_axis_angle(&Vector3::y_axis(), rate / 60.0);
+                now += step_ns;
+                out = filter.update(turn, ts(now));
+            }
+            out.angle_to(&turn) / rate
+        };
+        let slow = lag_per_rate(2.0);
+        let fast = lag_per_rate(8.0);
         assert!(
-            adaptive_lag < slow_lag * 0.6,
-            "a plausible turn must use the fast response: adaptive={adaptive_lag}, slow={slow_lag}"
+            (fast - slow).abs() < 0.01,
+            "the lag per rad/s of turn must not depend on the turn's speed: \
+             {slow} vs {fast}"
+        );
+        assert!(
+            slow < 0.06,
+            "a 2 rad/s turn must be tracked closely: {slow}"
         );
     }
 
     #[test]
-    fn a_single_departure_is_absorbed() {
+    fn a_fast_turn_is_not_quarantined_as_a_jump() {
+        // A 4 rad/s turn at 30 Hz is 0.133 rad per observation, three orders
+        // below the quarantine limit, and must reach the output continuously.
         let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
-        let identity = UnitQuaternion::identity();
-        let _ = filter.update(identity, ts(0));
-        // A 40-degree one-observation departure stays below the quarantine
-        // limit, so only the adaptive response can absorb it.
-        let departure = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 40.0f32.to_radians());
-        let out = filter.update(departure, ts(16_666_667));
-        let followed = out.angle_to(&identity);
+        let mut turn = UnitQuaternion::identity();
+        let mut now = 0u64;
+        let _ = filter.update(turn, ts(now));
+        let mut previous = 0.0f32;
+        for _ in 0..60 {
+            turn *= UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 4.0 / 30.0);
+            now += 33_333_333;
+            let out = filter.update(turn, ts(now));
+            let step = out.angle_to(&turn);
+            assert!(step >= previous - 1.0e-6, "a fast turn must not stall");
+            previous = step;
+        }
+        assert_eq!(filter.quarantined_samples(), 0);
+    }
+
+    #[test]
+    fn every_accepted_departure_is_followed_at_the_same_rate() {
+        // Discontinuities are rejected by the quarantine, not by stiffening the
+        // filter, so any departure inside the physical limit is smoothed exactly
+        // like any other: the fraction of the rotation covered in one tick
+        // depends on the elapsed time alone.
+        let followed = |degrees: f32| {
+            let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+            let identity = UnitQuaternion::identity();
+            let _ = filter.update(identity, ts(0));
+            let target = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), degrees.to_radians());
+            let out = filter.update(target, ts(16_666_667));
+            out.angle_to(&identity) / identity.angle_to(&target)
+        };
+        // A 40-degree one-observation departure is inside the 1.25 rad
+        // quarantine, so it is smoothed rather than dropped.
+        let small = followed(40.0);
+        let large = followed(70.0);
         assert!(
-            followed < identity.angle_to(&departure) * 0.1,
-            "a detection jump must not reach the avatar in one frame: {followed}"
+            (small - large).abs() < 1.0e-3,
+            "the followed fraction must not depend on the departure: {small} vs {large}"
         );
+        assert!(small > 0.0 && small < 0.5);
     }
 }
