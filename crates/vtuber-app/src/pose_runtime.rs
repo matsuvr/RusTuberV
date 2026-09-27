@@ -255,8 +255,10 @@ impl Default for PoseRuntime {
 /// appends the raw world landmarks to `mediapipe_pose_debug.csv` next to the
 /// working directory. Comparing those rows with `propagation_debug.log` frame
 /// by frame separates a bad MediaPipe observation from a tracking reaction:
-/// each row is `seq,captured_ns,side,role,x,y,z,visibility,presence,score`
-/// with one row per shoulder/elbow/wrist plus a hand-score row per side.
+/// each row is `seq,captured_ns,side,role,x,y,z,visibility,presence,handedness`
+/// with one row per shoulder/elbow/wrist plus a handedness row per side. The
+/// handedness column is the left/right label confidence, not a detection
+/// quality, so it is logged for diagnosis only and never gates tracking.
 #[cfg(debug_assertions)]
 fn log_pose_frame(frame: &PoseArmFrame, file: &mut Option<std::fs::File>) {
     use std::fmt::Write as _;
@@ -270,20 +272,21 @@ fn log_pose_frame(frame: &PoseArmFrame, file: &mut Option<std::fs::File>) {
     {
         let _ = writeln!(
             handle,
-            "seq,captured_ns,side,role,x,y,z,visibility,presence,score"
+            "seq,captured_ns,side,role,x,y,z,visibility,presence,handedness"
         );
         *file = Some(handle);
     }
-    let score =
-        |arm: &vtuber_core::arm_tracking::ArmLandmarks| arm.hand.and_then(|hand| hand.score);
+    let handedness = |arm: &vtuber_core::arm_tracking::ArmLandmarks| {
+        arm.hand.and_then(|hand| hand.handedness_score)
+    };
     match &frame.observation {
         Some(observation) => bevy::log::info!(
             target: "palm_trace",
-            "pose seq={} captured_ns={} left_hand_score={:?} right_hand_score={:?}",
+            "pose seq={} captured_ns={} left_handedness={:?} right_handedness={:?}",
             frame.source_seq.0,
             frame.captured_at.0,
-            score(&observation.left),
-            score(&observation.right),
+            handedness(&observation.left),
+            handedness(&observation.right),
         ),
         None => {
             bevy::log::info!(
@@ -327,7 +330,7 @@ fn log_pose_frame(frame: &PoseArmFrame, file: &mut Option<std::fs::File>) {
             "{},{},{side},hand,-,-,-,-,-,{}",
             frame.source_seq.0,
             frame.captured_at.0,
-            number(arm.hand.and_then(|hand| hand.score)),
+            number(arm.hand.and_then(|hand| hand.handedness_score)),
         );
         // The palm-plane source: wrist, index MCP, and pinky MCP world points
         // from the Hand Landmarker, so the observed normal can be recomputed

@@ -154,17 +154,28 @@ deltaにする。前腕長軸は肘と手首を通るので、どちらの回転
 腕の採用判定は`ArmAdoptionGate`のヒステリシスで行う: 採用は
 `ARM_ENTER_VISIBILITY`（0.7）が`ARM_GOOD_FRAMES`（4）連続、喪失は
 `ARM_EXIT_VISIBILITY`（0.4）が`ARM_BAD_FRAMES`（6）連続、間の値は現状維持、
-欠損スコアは悪い側に数える。判定に使うスコアは肩・手首のvisibilityと
-Hand Landmarkerの検出スコアの最小値とする。単眼Poseは見えない腕を
-見えている腕と対称に捏造する（実機ログで左手首が右手首とほぼ鏡像で動き、
-visは0.5前後、Hand Landmarkerはその側の手を検出しない）ため、自分の手が
-検出されないPose腕は追跡しない。これで反対腕が勝手に動かず、手を見失えば
-5 sで仮想腕へ戻る。
+欠損スコアは悪い側に数える。判定に使うvisibilityは肩・手首のPose値とする。
+単眼Poseは見えない腕を見えている腕と対称に捏造する（実機ログで左手首が
+右手首とほぼ鏡像で動き、visは0.5前後、Hand Landmarkerはその側の手を
+検出しない）ため、自分の手が検出されないPose腕は追跡しない。これで反対腕が
+勝手に動かず、手を見失えば5 sで仮想腕へ戻る。
 これで片手を下ろしたら復帰が単調に進み、もう一方の腕の操作に巻き込まれない。
 
 MediaPipeの生観測はdebugビルドで`mediapipe_pose_debug.csv`へ1カメラフレーム
-1行（片側あたり肩・肘・手首・hand score）で残す。`propagation_debug.log`の
+1行（片側あたり肩・肘・手首・handedness score）で残す。`propagation_debug.log`の
 アバター側と突き合わせ、観測のvisibility低下と追跡の反応を切り分ける。
+
+追加（2026-09-27, handednessを品質に使わない）: Hand Landmarkerの
+`HandWorldLandmarks.score`は`handedness_score`へ改名し、左手/右手ラベルを
+推測した確信度だと明記した。ラベルの確信度は手の形から導かれるので、判定が
+曖昧な姿勢では下がるが座標の良さは変わらない。従来はこの値を腕の採用判定と
+掌チャンネルの信頼度として使っていたため、左右の判定が曖昧なだけで腕全体が
+落ち、掌も得られなくなっていた。採用判定はPoseの肩・手首のvisibilityと
+「その手首に手が検出されているか」だけを使う。`ArmTrackingProfile`の
+`palm_confidence`は削除し、掌は検出の有無だけで観測の可否を決める（平面が
+定まらない場合は法線が`None`になる）。左右の対応付けもhandednessの降順ではなく
+報告順のまま最近傍の空き側を取り、1件の検出が1つの手首に割り当てられる。
+`ArmAdoptionGate::update`はPoseのvisibilityと手検出の有無の2つを受け取る。
 
 欠損を原点や既定長で捏造せず、無期限維持・別推論器への自動切替は入れない。
 
