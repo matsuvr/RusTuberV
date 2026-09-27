@@ -77,15 +77,22 @@ pub fn natural_body_tracking_profile() -> BodyTrackingProfile {
         yaw_body_engagement_start_radians: 8.0_f32.to_radians(),
         yaw_body_engagement_full_radians: 35.0_f32.to_radians(),
         bone_half_lives: BodyBoneHalfLives {
-            // The tracking filter already absorbs detection jumps on the
-            // observation clock, so the head and neck only need the response
-            // that removes the per-frame step of a stepped control frame. A
-            // long half-life here would add its lag on top of the filter's.
-            head_seconds: 0.025,
-            neck_seconds: 0.050,
-            // The torso lags the head clearly: a sitting subject's face
-            // tracking can spike by tens of degrees for a few frames, and the
-            // body must not swing with those spikes.
+            // The tracking filter already runs a critically damped response on
+            // the render clock and the face pipeline re-feeds its held
+            // observation every tick, so the control frame arriving here is a
+            // continuous signal rather than a step per camera frame. What is
+            // left for the head and neck is to absorb the step of the per-bone
+            // weight distribution (and of the yaw engagement blend), and that
+            // needs only a fraction of a frame of response. The previous 0.025 s
+            // and 0.050 s put a second, redundant lag of the same order as the
+            // tracking filter's own on top of it, so the face trailed itself.
+            head_seconds: 0.010,
+            neck_seconds: 0.015,
+            // The torso is where the deliberate lag lives: a sitting subject's
+            // face tracking can spike by tens of degrees for a few frames, and
+            // the body must not swing with those spikes. Keeping these an order
+            // of magnitude longer than the head and neck is what separates "the
+            // face is already there" from "the body is still arriving".
             upper_chest_seconds: 0.220,
             chest_seconds: 0.350,
             spine_seconds: 0.600,
@@ -226,6 +233,37 @@ mod tests {
         assert!(60.0_f32.to_radians() * yaw_share <= neck_limits.yaw_radians);
         assert!(60.0_f32.to_radians() * pitch_share <= neck_limits.pitch_radians);
         assert!(60.0_f32.to_radians() * roll_share <= neck_limits.roll_radians);
+    }
+
+    #[test]
+    fn the_face_carries_no_deliberate_lag_and_the_torso_carries_all_of_it() {
+        // This stage sits behind the tracking filter, which already smooths the
+        // head on the render clock, so the head and neck must only add the
+        // response the per-bone distribution needs. The whole visible lag of the
+        // body has to come from the torso half-lives, which is what separates
+        // "the face is already there" from "the body is still arriving".
+        let half_lives = natural_body_tracking_profile().bone_half_lives;
+        let head_and_neck = half_lives.head_seconds.max(half_lives.neck_seconds);
+        let torso = [
+            half_lives.upper_chest_seconds,
+            half_lives.chest_seconds,
+            half_lives.spine_seconds,
+            half_lives.hips_seconds,
+        ];
+        assert!(
+            head_and_neck < torso[0] / 5.0,
+            "the head and neck must not add a lag comparable to the torso's: \
+             head={}, neck={}, upper_chest={}",
+            half_lives.head_seconds,
+            half_lives.neck_seconds,
+            half_lives.upper_chest_seconds
+        );
+        for value in torso {
+            assert!(
+                value > head_and_neck * 10.0,
+                "every torso bone must lag the face clearly: {value} vs {head_and_neck}"
+            );
+        }
     }
 
     #[test]

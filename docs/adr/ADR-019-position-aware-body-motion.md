@@ -94,3 +94,28 @@ head translation → torso lean (lateral) + root translation (Y/Z) + 頭部回�
 3. **胴体half-lifeの増加**: 自然プロファイルの upperChest 0.18→0.22、chest 0.285→0.35、spine 0.45→0.6、hips 0.35→0.5（`tracking_profile.toml` も同値に更新。このファイルが存在すれば実行時の値はこちらが優先される）。頭・首は速いまま、胴体は頭のスパイクに追従しにくくする。
 
 診断用に `propagation_debug.log` へ `pos(head=...,body=...,w=...)`、`root=(dx,dy,dz)`、`htraw=(x,y,z,state)`（body-follow前の観測）を追加し、観測の揺れと追従の増幅を次回ログで切り分けられるようにした。
+
+## Amendment 2026-09-27: 頭・首の後段平滑化を最小化し、胴体の遅れだけを明示的に残す
+
+bonesmoothingは`apply_direct_body_tracking`が毎render tickで行う1次のhalf-life
+（head/neck/upperChest/chest/spine/hips）だけで、tracking側の
+`HeadRotationFilter`は0.025 sの2次応答を同じrender clockで進め、毎tick保持した
+観測を再投入する。つまり`BodyTrackingPoseInput`へ届く値は既にカメラフレームごとの
+段差ではなく連続信号であるにもかかわらず、head 0.025 s / neck 0.050 s によって同じ
+程度の遅れがもう一度加算されていた。合計は各値の単純和ではないが、2つの応答が
+直列に並ぶことで顔の向きが自分より遅れていた。
+
+対策:
+
+1. 観測ノイズを抑える責任をtracking側に寄せ、head 0.025→0.010 s、neck 0.050→0.015 s
+   にした（`tracking_profile.toml` も同値）。残した役割は骨ごとの配分（およびyawの
+   engagement blend）の段差を吸収することだけで、1フレーム未満の応答で足りる。
+2. 胴体のhalf-life（upperChest 0.22 / chest 0.35 / spine 0.6 / hips 0.5）は変更して
+   いない。意図的な遅れはすべて 여기에集約し、「顔は既にそこにいる」と「胴体がまだ
+   追いつく」を分ける指標にした。回転分配、回転限界、親骨の回転、レスト座標も不変。
+3. `pose::tests::the_face_carries_no_deliberate_lag_and_the_torso_carries_all_of_it`
+   で、頭・首が胴体の5分の1未満であることと、すべての胴体骨が頭・首の10倍以上の
+   遅れを持つことを固定した。
+
+小さな首振り、大きな首振り、正面への戻り、急停止での目視確認と、macOS での確認は
+未実施。
