@@ -302,7 +302,7 @@ fn residual_cost(correspondences: &[PlanarCorrespondence], parameters: &SVector<
 
 #[expect(
     clippy::indexing_slicing,
-    reason = "`project` returns the fixed six-component vector and `parameters` is the fixed six-component projection vector"
+    reason = "`project` returns the fixed two-component vector and `parameters` is the fixed six-component projection vector"
 )]
 fn residual(
     correspondence: &PlanarCorrespondence,
