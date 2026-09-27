@@ -76,8 +76,17 @@ pub struct DiagnosticsSnapshot {
     pub stage_percentiles: Vec<(String, f32, f32)>,
     /// Model hash (short).
     pub model_hash: Option<String>,
-    /// Camera backend name.
+    /// Camera backend name, for example `MSMF` or `Mock`.
     pub camera_backend: Option<String>,
+    /// The capture format the camera actually negotiated, as
+    /// `widthxheight @ num/den {format}`.
+    ///
+    /// The request is only a preference and the backend may hand back something
+    /// else, so a resolution comparison has to read what was negotiated rather
+    /// than what was asked for. `None` until the stream is open. Recorded here
+    /// because ADR-003 asks for the selected format in the performance report
+    /// and the capture metrics already carry it.
+    pub camera_format: Option<String>,
     /// Avatar capability summary.
     pub avatar_capabilities: Option<String>,
     /// Number of avatar pose frames successfully applied.

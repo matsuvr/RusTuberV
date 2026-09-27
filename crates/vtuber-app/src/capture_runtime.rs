@@ -289,6 +289,12 @@ pub(crate) fn sync_capture_diagnostics(
         diagnostics.camera_backend = Some(backend.to_string());
         *cached_backend = true;
     }
+    // The negotiated format changes only when the stream restarts, so it is
+    // rebuilt on change instead of every frame.
+    let format = metrics.format.map(|format| format.to_string());
+    if diagnostics.camera_format != format {
+        diagnostics.camera_format = format;
+    }
     if let Some(err) = metrics.last_error {
         diagnostics.last_error = Some(err);
     }

@@ -20,7 +20,7 @@ use crate::body_motion::{
 };
 use crate::direct_look::register_direct_look;
 use crate::direct_pose::{apply_direct_body_tracking, register_direct_pose};
-use crate::direct_position::register_direct_position;
+use crate::direct_position::{apply_direct_body_position, register_direct_position};
 use crate::expression::apply_tracked_expressions;
 use crate::expression::manual::{
     ManualExpressionRequest, ManualExpressionSelection, ManualExpressionSet,
@@ -160,17 +160,24 @@ impl Plugin for VtuberAvatarPlugin {
                     .before(apply_direct_body_tracking)
                     .before(VrmSystemSets::Constraints),
             )
+            // Both arm target stages sample the torso bone the arms hang from,
+            // so they run after every writer of that bone's global rotation:
+            // the direct body-tracking writer and the position (lean) writer.
+            // Running before them would read the pose the previous frame left
+            // behind.
             .add_systems(
                 PostUpdate,
                 crate::arm_pipeline::update_dynamic_arm_targets
                     .after(update_body_tracking_position_input)
-                    .before(update_body_tracking_pose_input)
+                    .after(apply_direct_body_tracking)
+                    .after(apply_direct_body_position)
                     .before(apply_default_arm_pose),
             )
             .add_systems(
                 PostUpdate,
                 crate::arm_pipeline::update_tracked_arm_targets
                     .after(apply_direct_body_tracking)
+                    .after(apply_direct_body_position)
                     .after(crate::arm_pipeline::update_dynamic_arm_targets)
                     .before(apply_default_arm_pose),
             )
@@ -178,6 +185,7 @@ impl Plugin for VtuberAvatarPlugin {
                 PostUpdate,
                 apply_default_arm_pose
                     .after(apply_direct_body_tracking)
+                    .after(apply_direct_body_position)
                     .before(update_direct_look_at_input)
                     .before(VrmSystemSets::GazeControl)
                     .before(VrmSystemSets::Constraints),

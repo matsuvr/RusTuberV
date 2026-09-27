@@ -243,6 +243,40 @@ VRM 0.x / 1.0の表示、macOS。使用VRM形式・モデル名は実機未実�
 
 欠損を原点や既定長で捏造せず、無期限維持・別推論器への自動切替は入れない。
 
+追加（2026-09-27, 遅延の比較に必要な観測の可視化）: 入力解像度・推論モデル・
+描画負荷の比較を実機で行うには、実際にどのformatが取れたかを見る必要がある。
+`CameraRequest`は要求であって約束ではなく、`select_format`はハードコードされた
+優先順位（1280x720 → 640x480、30fps）で実デバイスの候補から選ぶので、
+要求値と実formatは違うことがある。`CaptureMetrics.format`には記録されて
+いたがUIにもCSVにも出ていなかった（ADR-003が「実際に選択されたformatをUIと
+performance reportへ記録する」と決めている事項）。そこで既存
+`DiagnosticsSnapshot`に`camera_format`を1項追加し、`sync_capture_diagnostics`が
+streamを開いたときだけ更新し、既存のopt-in CSVにも列を追加した。指標の集合を
+増やしたり新しい監視基盤を作ったりはしていない。
+
+更新順序の監査結果（ADR-004に反映）: 顔の経路はPoseの結果を待っていない。
+captureスレッドが同じ1フレームをface用とPose用の別々の`LatestSlot`へfan-outし、
+出力スレッドも別々で、`Update`内に両者を結ぶ順序指定はない。共有しているのは
+腕の`ArmSourceSelection`だけで、頭・胴体・表情の経路はそれに依存しない。
+一方、腕のターゲット解決は`update_dynamic_arm_targets`が胴体骨の
+`GlobalTransform`を読んでおり、このシステムが`update_body_tracking_pose_input`
+より前にスケジュールされていたため回転writerより前、つまり前フレームの胴体姿勢を
+読んでいた。lean writer（`apply_direct_body_position`）との前後関係はexecutorの
+アクセス競合解決に任されており、決まっていなかった。両armターゲット段を
+両writerの後ろへ移し、`tests/schedule.rs`にその5本の辺を固定した。
+
+実機での比較（Release、同じカメラ・VRM・画角・照明・動作で条件を1つずつ変える、
+640x360と1280x720、Pose FullとHeavy、通常表示/プレビュー/配信有効）は**未実施**。
+`pose_landmarker_heavy.task`は`assets/models`に同梱されておらず、選択する経路も
+無いのでHeavyの比較は先にアセットの追加が要る。`Delegate::Cpu`が3つのlandmarkerで
+ハードコードされていてGPU delegateは到達不能だが、委譲の切替は要求されておらず、
+負荷が測定されるまで恒久的な分岐を残さない方針なので変更していない。
+`inference_input_skipped_frames`はfaceワーカーのみであり、Poseワーカーの
+drop率・stage timing・結果は`DiagnosticsSnapshot`に一切出ていない。これは今回の
+比較で欲しければ扱うべき点として記録するにとどめ、新しい計測経路は追加しない。
+`capture_to_apply`は顔側の骨姿勢の適用までを測る値で、腕や指の遅延や画面提示までの
+遅延ではない点も再確認した（ADR-019/022の既存方針と一致）。
+
 追加（2026-09-27, 掌の回転連続性）: 手の位置0.05 sに対して掌は0.30 sで6倍遅く、
 手先位置は追いついていても掌の向きだけが後からついていく状態になっていた。時定数を
 0.10 s（位置の2倍）に縮めた。加えて掌法線は3ベクトルを平滑化して最後に正規化する

@@ -114,9 +114,10 @@ The authoritative same-frame order is:
 Bevy AnimationSystems
  -> update_body_tracking_position_input
  -> update_body_tracking_pose_input
- -> update_dynamic_arm_targets
  -> direct body-tracking rotation writer
  -> apply_direct_body_position
+ -> update_dynamic_arm_targets
+ -> update_tracked_arm_targets
  -> apply_default_arm_pose
  -> direct head-relative gaze
  -> expression apply
@@ -126,6 +127,15 @@ Bevy AnimationSystems
 ```
 
 Input producers may run before the corresponding writer, but modifier stages must not write bone transforms independently.
+
+Both arm target stages sit after both torso writers because each samples the bone the
+arms hang from and removes its current rotation once: `update_dynamic_arm_targets`
+derives the torso-lag rotation from it and `update_tracked_arm_targets` composes
+`tracking_to_rest` from it. `update_dynamic_arm_targets` used to be ordered before
+the pose-input bridge, which put it ahead of the rotation writer too, so it read the
+torso pose the previous frame left behind, and the lean writer's relative order was
+left to the executor's access-conflict resolution. `tests/schedule.rs` pins every one
+of these edges.
 
 ## Replacement and generation safety
 
