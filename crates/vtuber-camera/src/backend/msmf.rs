@@ -284,7 +284,9 @@ fn decode_frame(
             let stride = format.width as usize * 3;
             Ok((rgb.into(), PixelFormat::Rgb8, stride))
         }
-        // These formats need no conversion, so the buffer is shared as-is.
+        // These formats need no conversion, so the bytes go straight into the
+        // frame's own `Arc` and no intermediate `Vec` is built. The copy into
+        // that allocation still happens; only the redundant buffer is gone.
         FrameFormat::RAWRGB => {
             let stride = format.width as usize * 3;
             Ok((Arc::from(buffer.buffer()), PixelFormat::Rgb8, stride))
@@ -524,9 +526,10 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_frame_shares_the_buffer_without_an_intermediate_copy() {
-        // The three raw formats need no conversion, so the decoder shares the
-        // buffer as-is and the pixel order and stride stay as they were.
+    fn a_raw_frame_copies_into_the_frame_arc_without_an_intermediate_vec() {
+        // The three raw formats need no conversion, so the bytes go straight
+        // into the frame's own `Arc` with no intermediate `Vec`; the pixel
+        // order and stride stay as they were.
         let cases = [
             (FrameFormat::RAWRGB, PixelFormat::Rgb8, 6),
             (FrameFormat::RAWBGR, PixelFormat::Bgr8, 6),
