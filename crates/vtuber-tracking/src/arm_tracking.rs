@@ -125,85 +125,69 @@ const FINGER_FLEXION_LIMIT_RAD: [f32; 3] = [1.75, 1.92, 1.05];
 /// in radians. Smaller than a finger's because the thumb's axes are rotated.
 const THUMB_FLEXION_LIMIT_RAD: [f32; 2] = [0.96, 1.22];
 
-/// Finger articulation of one observed hand, in the canonical tracking basis.
-///
-/// Each flexion is the supplement of the interior angle at the joint, so a
-/// straight finger is 0 and a fully curled one approaches the joint's limit.
-/// The three joints of a finger are measured separately so a flat hand, a hook,
-/// and a fist stay distinguishable; the thumb is measured against its own
-/// carpometacarpal joint because its chains do not share the four fingers'
-/// geometry, and its opening is reported as a direction so the avatar compares
-/// it against its own rest thumb rather than against a number chosen here.
-///
-/// The hand task's origin is hand-centred, so this uses only differences inside
-/// one hand: the hand's wrist is never substituted for the body's wrist.
+/// Extract signed bends and spread in the observed palm frame before smoothing.
+/// A rigid hand rotation therefore cannot become finger articulation.
 fn observed_finger_pose(arm: ArmLandmarks) -> Option<HandFingerPose> {
-    let hand = arm.hand?;
-    let landmarks = hand.landmarks;
+    let landmarks = arm.hand?.landmarks;
     let point = |index: usize| landmarks.get(index).map(|value| vector(value.meters));
-    let flexion = |parent: Vector3<f32>, joint: Vector3<f32>, child: Vector3<f32>, limit: f32| {
-        // The interior angle at a joint is between the two bone directions as
-        // the chain traverses them, so they point against each other when the
-        // joint is straight. A flexion of 0 is therefore a straight chain.
-        let incoming = finite_normalized(joint - parent)?;
-        let outgoing = finite_normalized(joint - child)?;
-        let interior = incoming.dot(&outgoing).clamp(-1.0, 1.0).acos();
-        interior
-            .is_finite()
-            .then(|| (std::f32::consts::PI - interior).clamp(0.0, limit))
+    let wrist = point(HAND_WRIST)?;
+    let index = finite_normalized(point(HAND_INDEX_MCP)? - wrist)?;
+    let little = finite_normalized(point(HAND_PINKY_MCP)? - wrist)?;
+    let normal = finite_normalized(index.cross(&little))?;
+    let forward = finite_normalized(index + little)?;
+    let across = forward.cross(&normal);
+    let local = |ray: Vector3<f32>| [ray.dot(&across), ray.dot(&forward), ray.dot(&normal)];
+    let bend = |incoming: Vector3<f32>, outgoing: Vector3<f32>, axis: Vector3<f32>, limit: f32| {
+        let incoming = finite_normalized(incoming)?;
+        let outgoing = finite_normalized(outgoing)?;
+        let angle = axis
+            .dot(&incoming.cross(&outgoing))
+            .atan2(incoming.dot(&outgoing));
+        angle.is_finite().then(|| angle.clamp(-limit, limit))
     };
     let mut fingers = [[0.0; 3]; 4];
-    for (finger, chain) in FINGER_CHAINS.iter().enumerate() {
-        let mut previous = point(HAND_WRIST)?;
-        for joint in 0..3 {
-            let (Some(current), Some(next), Some(limit)) = (
-                chain.get(joint).copied(),
-                chain.get(joint + 1).copied(),
-                FINGER_FLEXION_LIMIT_RAD.get(joint).copied(),
-            ) else {
-                return None;
-            };
-            let angle = flexion(previous, point(current)?, point(next)?, limit)?;
-            if let Some(slot) = fingers.get_mut(finger).and_then(|row| row.get_mut(joint)) {
-                *slot = angle;
-            }
-            previous = point(current)?;
-        }
+    let mut spread = [0.0; 4];
+    for ((angles, opening), &[mcp, pip, dip, tip]) in
+        fingers.iter_mut().zip(&mut spread).zip(&FINGER_CHAINS)
+    {
+        let proximal = finite_normalized(point(pip)? - point(mcp)?)?;
+        let [x, y, z] = local(proximal);
+        let [mcp_limit, pip_limit, dip_limit] = FINGER_FLEXION_LIMIT_RAD;
+        // A knuckle can flex past 90 degrees. Keep its in-plane opening in
+        // the forward half-plane; a backward projection then means flexion
+        // past 90, not a 180-degree change in spread or a reversed PIP axis.
+        let facing = if y < 0.0 { -1.0 } else { 1.0 };
+        let axis = finite_normalized((proximal * facing).cross(&normal))?;
+        *opening = (facing * x).atan2(facing * y);
+        *angles = [
+            z.atan2(facing * x.hypot(y)).clamp(-mcp_limit, mcp_limit),
+            bend(proximal, point(dip)? - point(pip)?, axis, pip_limit)?,
+            bend(
+                point(dip)? - point(pip)?,
+                point(tip)? - point(dip)?,
+                axis,
+                dip_limit,
+            )?,
+        ];
     }
-    let mut thumb = [0.0; 2];
-    for joint in 0..2 {
-        let (Some(parent), Some(current), Some(next), Some(limit)) = (
-            THUMB_CHAIN.get(joint).copied(),
-            THUMB_CHAIN.get(joint + 1).copied(),
-            THUMB_CHAIN.get(joint + 2).copied(),
-            THUMB_FLEXION_LIMIT_RAD.get(joint).copied(),
-        ) else {
-            return None;
-        };
-        let angle = flexion(point(parent)?, point(current)?, point(next)?, limit)?;
-        if let Some(slot) = thumb.get_mut(joint) {
-            *slot = angle;
-        }
-    }
-    let (Some(ray_from), Some(ray_to)) =
-        (THUMB_CHAIN.first().copied(), THUMB_CHAIN.get(1).copied())
-    else {
-        return None;
-    };
-    let ray = to_canonical(point(ray_to)? - point(ray_from)?);
+    let [cmc, mcp, ip, tip] = THUMB_CHAIN;
+    let ray = finite_normalized(point(mcp)? - point(cmc)?)?;
+    let axis = finite_normalized(ray.cross(&normal))?;
+    let [mcp_limit, ip_limit] = THUMB_FLEXION_LIMIT_RAD;
     Some(HandFingerPose {
         fingers,
-        thumb,
-        thumb_direction: array(finite_normalized(ray)?),
+        spread,
+        thumb: [
+            bend(ray, point(ip)? - point(mcp)?, axis, mcp_limit)?,
+            bend(
+                point(ip)? - point(mcp)?,
+                point(tip)? - point(ip)?,
+                axis,
+                ip_limit,
+            )?,
+        ],
+        thumb_direction: local(ray),
     })
-}
-
-/// Converts a Hand Landmarker direction into the canonical tracking basis.
-///
-/// The change is a half turn about X, so angles and cross products are
-/// preserved; only the direction the palm faces and the thumb points changes.
-fn to_canonical(value: Vector3<f32>) -> Vector3<f32> {
-    Vector3::new(value.x, -value.y, -value.z)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -388,6 +372,8 @@ impl ScalarSmootherState {
 struct FingerSmootherState {
     /// Index, middle, ring, and little flexion as `(mcp, pip, dip)` radians.
     fingers: [PointSmootherState; 4],
+    /// In-plane opening of each proximal segment.
+    spread: [ScalarSmootherState; 4],
     /// Thumb flexion as `(mcp, ip)` radians.
     thumb: [ScalarSmootherState; 2],
     /// The thumb ray, followed as a direction for the same reason the palm
@@ -399,18 +385,17 @@ impl FingerSmootherState {
     /// Seeds at the first adopted observation; later ticks advance it.
     fn new(pose: HandFingerPose) -> Self {
         Self {
-            fingers: std::array::from_fn(|finger| {
-                let curl = pose.fingers.get(finger).copied().unwrap_or([0.0; 3]);
-                PointSmootherState::new(curl)
-            }),
-            thumb: std::array::from_fn(|joint| ScalarSmootherState {
-                value: pose.thumb.get(joint).copied().unwrap_or(0.0),
+            fingers: pose.fingers.map(PointSmootherState::new),
+            spread: pose.spread.map(|value| ScalarSmootherState {
+                value,
                 velocity: 0.0,
             }),
-            direction: DirectionSmootherState::new(
-                finite_normalized(vector(pose.thumb_direction))
-                    .unwrap_or_else(|| vector([1.0, 0.0, 0.0])),
-            ),
+            thumb: pose.thumb.map(|value| ScalarSmootherState {
+                value,
+                velocity: 0.0,
+            }),
+            // observed_finger_pose supplies a unit ray in the local palm frame.
+            direction: DirectionSmootherState::new(vector(pose.thumb_direction)),
         }
     }
 
@@ -419,6 +404,9 @@ impl FingerSmootherState {
             if curl.iter().all(|value| value.is_finite()) {
                 smoother.step(curl, dt_sec, ARM_FINGER_TIME_CONSTANT_SEC);
             }
+        }
+        for (smoother, angle) in self.spread.iter_mut().zip(pose.spread) {
+            smoother.step(angle, dt_sec, ARM_FINGER_TIME_CONSTANT_SEC);
         }
         for (smoother, angle) in self.thumb.iter_mut().zip(pose.thumb) {
             smoother.step(angle, dt_sec, ARM_FINGER_TIME_CONSTANT_SEC);
@@ -433,6 +421,7 @@ impl FingerSmootherState {
     fn output(self) -> Option<HandFingerPose> {
         Some(HandFingerPose {
             fingers: self.fingers.map(|smoother| array(smoother.position)),
+            spread: self.spread.map(|smoother| smoother.value),
             thumb: self.thumb.map(|smoother| smoother.value),
             thumb_direction: self.direction.normalized()?,
         })
@@ -2027,7 +2016,7 @@ mod tests {
     /// straight chain is collinear with the wrist and reports no knuckle
     /// flexion.
     fn splayed_ray(finger: usize) -> Vector3<f32> {
-        finite_normalized(Vector3::new(1.0, 0.0, (finger as f32 - 1.5) * 0.12))
+        finite_normalized(Vector3::new(1.0, 0.0, (1.5 - finger as f32) * 0.12))
             .expect("a splayed ray is normalizable")
     }
 
@@ -2168,50 +2157,128 @@ mod tests {
             for (joint, angle) in finger.iter().enumerate() {
                 let limit = FINGER_FLEXION_LIMIT_RAD.get(joint).copied().unwrap_or(0.0);
                 assert!(
-                    *angle <= limit + 1.0e-4,
+                    angle.abs() <= limit + 1.0e-4,
                     "joint {joint} must stop at its limit: {angle} > {limit}"
                 );
             }
         }
         for (joint, angle) in pose.thumb.iter().enumerate() {
             let limit = THUMB_FLEXION_LIMIT_RAD.get(joint).copied().unwrap_or(0.0);
-            assert!(*angle <= limit + 1.0e-4, "{angle} > {limit}");
+            assert!(angle.abs() <= limit + 1.0e-4, "{angle} > {limit}");
         }
     }
 
     #[test]
-    fn the_thumb_ray_is_reported_in_the_canonical_basis() {
-        let reference = measure_arm_reference(arm()).unwrap();
-        let hand = flat_hand([[0.0; 3]; 4], [0.0; 2]);
-        let wrist = hand
-            .landmarks
-            .get(HAND_WRIST)
-            .map(|point| vector(point.meters))
-            .expect("the wrist landmark");
-        let mcp = hand
-            .landmarks
-            .get(THUMB_CHAIN[1])
-            .map(|point| vector(point.meters))
-            .expect("the thumb's second landmark");
-        let pose = retarget_arm_landmarks(
-            ArmLandmarks {
-                hand: Some(hand),
+    fn thumb_uses_cmc_to_mcp_in_the_local_palm_frame() {
+        let mut hand = flat_hand([[0.0; 3]; 4], [0.0; 2]);
+        hand.landmarks[1] = point([0.012, 0.0, 0.022]);
+        hand.landmarks[2] = point([0.030, 0.0, 0.035]);
+        let pose = observed_finger_pose(ArmLandmarks {
+            hand: Some(hand),
+            ..arm()
+        })
+        .unwrap();
+        // This fixture has forward +X, across +Z, normal +Y. Wrist-to-CMC
+        // and CMC-to-MCP are deliberately non-collinear.
+        let expected = Vector3::new(0.013, 0.018, 0.0).normalize();
+        assert!((vector(pose.thumb_direction) - expected).norm() < 1.0e-5);
+    }
+
+    #[test]
+    fn non_radial_extended_finger_separates_spread_from_flexion() {
+        let mut hand = flat_hand([[0.0; 3]; 4], [0.0; 2]);
+        hand.landmarks[5] = point([0.02, 0.05, 0.0]);
+        hand.landmarks[17] = point([-0.02, 0.05, 0.0]);
+        let observe = |spread: f32, curl: f32| {
+            let mut posed = hand;
+            // Palm normal +Z; spread goes toward +X, curl toward +Z.
+            let ray = Vector3::new(
+                spread.sin() * curl.cos(),
+                spread.cos() * curl.cos(),
+                curl.sin(),
+            );
+            for (step, slot) in [6, 7, 8].into_iter().enumerate() {
+                posed.landmarks[slot] = point(array(
+                    Vector3::new(0.02, 0.05, 0.0) + ray * (0.03 * (step + 1) as f32),
+                ));
+            }
+            observed_finger_pose(ArmLandmarks {
+                hand: Some(posed),
                 ..arm()
-            },
-            reference,
-        )
-        .fingers
-        .expect("a flat hand defines its thumb");
-        // The canonical change is a half turn about X, so a ray with no Y
-        // component keeps pointing along the same world direction. The
-        // reported value must be that ray as a unit vector, which is what the
-        // avatar compares against its own rest thumb.
-        let expected = array(finite_normalized(to_canonical(mcp - wrist)).expect("thumb ray"));
-        assert!(
-            vector(pose.thumb_direction).dot(&vector(expected)) > 1.0 - 1.0e-5,
-            "the reported ray must be the canonical thumb direction: {:?} vs {expected:?}",
-            pose.thumb_direction
+            })
+            .unwrap()
+        };
+        for (spread, curl) in [(0.0, 0.0), (0.4, 0.0), (0.0, 0.6), (0.4, 0.6), (0.4, 1.6)] {
+            let pose = observe(spread, curl);
+            assert!((pose.fingers[0][0] - curl).abs() < 1.0e-5);
+            assert!((pose.spread[0] - spread).abs() < 1.0e-5);
+            assert!(pose.fingers[0][1].abs() < 1.0e-5);
+            assert!(pose.fingers[0][2].abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn local_finger_shape_and_smoothing_ignore_rigid_hand_motion() {
+        let hand = flat_hand([[0.3, 0.5, 0.2]; 4], [0.2, 0.4]);
+        let pose = observed_finger_pose(ArmLandmarks {
+            hand: Some(hand),
+            ..arm()
+        })
+        .unwrap();
+        let mut mirrored_hand = hand;
+        for point in &mut mirrored_hand.landmarks {
+            point.meters[0] = -point.meters[0];
+        }
+        let original_arm = ArmLandmarks {
+            hand: Some(hand),
+            ..arm()
+        };
+        let reflected_arm = ArmLandmarks {
+            hand: Some(mirrored_hand),
+            ..arm()
+        };
+        let reference = measure_arm_reference(original_arm).unwrap();
+        assert_eq!(
+            retarget_arm_landmarks(original_arm, reference)
+                .mirrored()
+                .fingers,
+            retarget_arm_landmarks(reflected_arm, reference).fingers,
         );
+        let mut smoother = FingerSmootherState::new(pose);
+        for angle in [0.4, 1.2, -0.8] {
+            let rotation = nalgebra::Rotation3::from_euler_angles(angle, angle * 0.7, -angle * 0.3);
+            let mut moved = hand;
+            for point in &mut moved.landmarks {
+                point.meters =
+                    array(rotation * vector(point.meters) + Vector3::new(0.1, -0.2, 0.4));
+            }
+            let moved_pose = observed_finger_pose(ArmLandmarks {
+                hand: Some(moved),
+                ..arm()
+            })
+            .unwrap();
+            smoother.step(moved_pose, 1.0 / 60.0);
+            for result in [moved_pose, smoother.output().unwrap()] {
+                for (a, b) in result
+                    .fingers
+                    .into_iter()
+                    .flatten()
+                    .chain(result.spread)
+                    .chain(result.thumb)
+                    .chain(result.thumb_direction)
+                    .zip(
+                        pose.fingers
+                            .into_iter()
+                            .flatten()
+                            .chain(pose.spread)
+                            .chain(pose.thumb)
+                            .chain(pose.thumb_direction),
+                    )
+                {
+                    assert!((a - b).abs() < 1.0e-4, "{a} != {b}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2227,7 +2294,7 @@ mod tests {
     }
 
     #[test]
-    fn the_finger_channel_is_independent_of_the_palm_channel() {
+    fn a_usable_palm_does_not_imply_usable_fingers() {
         let reference = measure_arm_reference(arm()).unwrap();
         // A hand whose only readable landmarks are the two knuckles still gives
         // the palm plane, but no finger joint spans anything, so the two

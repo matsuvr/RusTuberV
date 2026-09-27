@@ -193,47 +193,50 @@ hold/return/acquireの時間は変更していないので、戻った腕が飛�
 **実機未確認**。実測fpsの記録も残っていないため、待ち時間をms換算した値は記載して
 いない。
 
-追加（2026-09-27, Hand Landmarkerの21点から指の追従）: これまでは21点を保持
-していただけで、tracked-armの最終変換は指をrest poseに固定していた。追加は
-`vtuber_core::arm_tracking::HandFingerPose`（親指/小指/中指/人差し指/薬指の
-[mcp,pip,dip] の屈曲角、親指の[mcp,ip]屈曲角、親指の付け根方向）と、
-`ArmTrackingTarget::fingers` / `ArmBlendWeight::fingers` である。
+追加（2026-09-27, #190 レビュー R1–R3 の修正）:
+`HandFingerPose` は Hand Landmarker の21点から、各指の屈曲と開きを別々に保持する。
+掌の基準は wrist→index MCP と wrist→little MCP の単位方向の二等分線をforward、
+そのindex cross littleをnormal、forward cross normalをacrossとする。
+手ローカルXYZは(across, forward, normal)。4指のMCPは掌平面からの符号付き仰角、
+spreadはforwardからacrossへの面内角であり、wrist→MCPとの3D角度をcurlにしない。
+PIP/DIPも各指の節から個別に測る。親指の比較区間はcore・tracking・avatarすべて
+CMC→MCP、VRMではproximal.position - metacarpal.positionとする。
 
-角度はVRMの座標ではなく解剖学的な屈曲角として持つ。各関節は隣接する3点から
-内角の補角を求め、同じ指でも中間節と指先の角度は別々に測るため、平手・フック・
-握拳を区別できる。値は関節が到達できる範囲（人差し指約100度、中間節約110度、
-先端約60度、親指は55度/70度）にクランプする。限界を超えたランドマーク解は、
-このリグが表現できる指の姿勢ではなく、回転を骨に折り返してしまうため。
-各指を同じcurl量で動かす近似は使わない。
+指の屈曲は各指の節と掌normalが作る軸まわりの符号付き角度で、正はnormal側。
+normalは軸性ベクトルなので、左右ミラーでは屈曲と手ローカルZを反転し、spreadと
+ローカルXYを保存する。各関節の角度の絶対値には既存の上限を使う。
+`resolve_finger_joint`と既存bindingを再利用し、観測経路は節とrest掌normalから
+曲げ軸を求め、著作者のrest回転でローカルdeltaへ戻す。仮想腕の緩いcurlは従来の
+著作者軸を使う。4指の付け根はrestの仰角・開きとの差をproximalへ適用し、親指の
+開きは同じrest掌基準で比較してmetacarpalへ適用する。隣接するrest節がある関節は
+その曲がりを差し引く。VRMにtip骨はないため末節の軸は直前の節から取る。
 
-bend軸は観測側ではなくVRMのrest形状から取る。`arm_pose::resolve_finger_joint`が
-緩いcurl（`ArmPoseProfile::finger_curl_radians`）ですでにやっていた
-「節方向から投影した著作者のlocal軸」をそのまま使い、角度だけ観測値に置き換える。
-これにより、軸の違うリグでも自分の関節の向きに曲がり、親指を4本の指と同じ
-一本の曲げ軸へ押し込むこともない。VRMに人差し指等のmetacarpalは無いので、
-指先の屈手はproximal骨へ、親指のIPの屈手はdistal骨へ着地する（親指のdistalは
-intermediateが無いのでproximalを基準軸にする）。
+指形状は平滑化より前に手ローカル化する。`observed_finger_deltas`はIK解や
+`tracking_to_rest`を参照しないため、肩親だけを除いた方向を手ローカルと扱う経路は
+ない。掌twistの前腕分・hand_delta分はどちらも指の親側の姿勢にだけ反映される。
+最終掌姿勢を確認するテストではhand_deltaも含める。Transform writerは引き続き
+`apply_default_arm_pose`のみで、指回転は肘・手首のIK位置を変更しない。
 
-親指の開きは角度ではなく方向で受け、VRMの親指rest位置から求めたrayと
-`tracking_to_rest`で変換した観測rayを、掌平面に直交する面内で符号付き角度として
-比べる。したがってneutralはVRMのrest姿勢そのままで、restで親指が少し開いて
-いるリグが静止手で閉じない。回転軸はsolve後の掌法線で、前腕の回旋
-（`align_palm_twist`）はこの面内角に影響しないので2つのチャンネルは喧嘩しない。
-観測値はVRMの骨の位置などには一切代入せず、手内部の差分だけを使う
-（Hand Landmarkerの原点は手中心で、Poseの腰中心とは 다르いため）。
+指の平滑化は既存のrender clock・固定時定数0.04 s、欠測時の復帰は既存のLossBlendを
+使う。掌基準または指節が退化している観測は指チャンネルを生成しない。掌が読めても
+指節が読めない場合は掌だけを採用できる。新しい推論器・汎用リターゲット基盤・
+監視基盤は追加していない。
 
-tracking側は`FingerSmootherState`でrender clockの固定時定数0.04 s（観測チャンネル
-中では最短。指の屈手は小さく、遅いと拳がにじむ）に平滑化し、掌と同じ手検出を
-gateに別の`LossBlend`チャンネルを持つ。掌平面は退化していても指の関節は読める
-ことがあるため、チャンネルの在席はgateではなく実際に読み取れたかで決めている。
-欠測時は最後の屈曲角を保持したまま重みを0へ戻すので、指が急にrestへ飛ぶことは
-ない。
+修正時のローカル確認:
+- `cargo check -p vtuber-core -p vtuber-tracking -p vtuber-avatar -j 1`
+- `cargo test -p vtuber-core --lib arm_tracking::tests -j 1`（4件）
+- `cargo test -p vtuber-tracking --lib arm_tracking::tests -j 1`（55件）
+- `cargo test -p vtuber-avatar --lib tracked_arm::tests -j 1`（24件）
+- `cargo test -p vtuber-avatar --lib arm_pipeline::tests::tracked_side_applies_the_observed_fingers_through_the_finger_weight -j 1`（1件）
+- 対象3クレートの `cargo clippy --lib --tests -j 1`、fmt、diff check。
+  Clippyは変更外のavatarコードに10件のwarningがある。
 
-`arm_pose::resolve_finger_joint`を`pub(crate)`にしただけで、既存の指骨バインディング
-と`apply_default_arm_pose`の唯一のTransform writerはそのまま使う。新しいモデル・
-推論ワーカー・汎用リターゲット基盤は追加していない。純Rustと現在のネイティブ
-例外の範囲も変えていない。実機での確認、開く・握る・Vサイン・親指を立てる動作の
-左右の目視、使用したVRMの形式とconfirmは**未実施**。
+小さな合成ランドマークで、指定の非放射状伸展指、開きだけ/屈曲だけ、非共線の親指rest
+（metacarpalを含む）、剛体回転・掌twist、左右ミラー、非identityのrest軸での掌側への
+曲がり、指weightを変えても腕IKの回転が変わらないことを確認した。
+**実機は未確認**: 左右の開く・握る・Vサイン・親指を立てる動作、欠測復帰、
+VRM 0.x / 1.0の表示、macOS。使用VRM形式・モデル名は実機未実施のため記録なし。
+合成ランドマークの結果をVRMの実機受入結果とは扱わず、#183はOPENを維持する。
 
 欠損を原点や既定長で捏造せず、無期限維持・別推論器への自動切替は入れない。
 

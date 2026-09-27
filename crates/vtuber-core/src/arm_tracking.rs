@@ -89,29 +89,27 @@ pub struct PoseArmFrame {
     pub observation: Option<PoseArmObservation>,
 }
 
-/// Observed finger articulation of one hand, in the hand task's own basis.
+/// Observed articulation in a hand-local palm frame, independent of arm pose.
 ///
-/// Every angle is an anatomical flexion in radians with 0 at a straight joint,
-/// measured from the landmark triple that surrounds the joint and clamped to
-/// what that kind of joint can reach. These are joint *angles*, not rotations:
-/// the axis each one turns about is the model's own rest geometry, so a rig that
-/// authors its fingers on different axes still bends them correctly. The hand's
-/// origin is hand-centred, so nothing here substitutes the hand's wrist for the
-/// body's — only differences inside one hand are used.
+/// Forward is the bisector of the unit wrist-to-index/little MCP rays. Normal
+/// is their normalized index cross little; across is forward cross normal.
+/// Local XYZ means (across, forward, normal). The normal is axial: reflection
+/// reverses local Z and signed flexion, but preserves spread and local XY.
+/// Only differences inside one hand are used, never the hand task's origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HandFingerPose {
-    /// Index, middle, ring, and little flexion as `[mcp, pip, dip]` radians,
-    /// in the Hand Landmarker's landmark order.
+    /// Index, middle, ring, little `[mcp, pip, dip]` radians. MCP is signed
+    /// elevation from the palm plane; PIP/DIP are signed bends about the
+    /// proximal segment cross palm normal. Positive bends toward the normal.
     pub fingers: [[f32; 3]; 4],
-    /// Thumb flexion as `[mcp, ip]` radians. The thumb's joints do not share the
-    /// four fingers' single bend axis, which is why it is kept separate.
+    /// Each proximal segment's in-plane angle from forward toward across.
+    /// Spread is independent of MCP elevation and compared to the rig's rest.
+    pub spread: [f32; 4],
+    /// Thumb `[mcp, ip]` signed bends, about CMC-to-MCP cross palm normal.
+    /// Its own segment defines the bend axis, separately from the four fingers.
     pub thumb: [f32; 2],
-    /// Unit vector from the wrist toward the thumb's carpometacarpal joint, in
-    /// the canonical tracking basis.
-    ///
-    /// A direction rather than an angle, because the angle it opens to depends
-    /// on the rig's rest thumb. Comparing the two directions leaves the rest
-    /// geometry on the avatar side, where the rest pose lives.
+    /// Unit CMC-to-MCP ray in the hand-local palm frame above. Compare with
+    /// VRM proximal.position - metacarpal.position in the same rest palm frame.
     pub thumb_direction: [f32; 3],
 }
 
@@ -146,9 +144,8 @@ impl ArmTrackingTarget {
     ///
     /// The palm normal is the cross product of two landmark directions, so a
     /// reflection flips its sign in addition to reflecting it: `n -> -R n`,
-    /// which is `[x, -y, -z]` in the canonical basis. The thumb ray is a plain
-    /// direction, so it is only reflected. Flexion angles are scalars and pass
-    /// through unchanged.
+    /// which is `[x, -y, -z]` in the canonical basis. Hand-local normal
+    /// components and signed bends reverse; hand-local spread is unchanged.
     #[must_use]
     pub fn mirrored(self) -> Self {
         let reflect = |[x, y, z]: [f32; 3]| [-x, y, z];
@@ -157,10 +154,14 @@ impl ArmTrackingTarget {
             wrist: reflect(self.wrist),
             elbow_pole: reflect(self.elbow_pole),
             palm_normal: self.palm_normal.map(reflect_axial),
-            fingers: self.fingers.map(|fingers| HandFingerPose {
-                fingers: fingers.fingers,
-                thumb: fingers.thumb,
-                thumb_direction: reflect(fingers.thumb_direction),
+            fingers: self.fingers.map(|fingers| {
+                let [x, y, z] = fingers.thumb_direction;
+                HandFingerPose {
+                    fingers: fingers.fingers.map(|angles| angles.map(|angle| -angle)),
+                    spread: fingers.spread,
+                    thumb: fingers.thumb.map(|angle| -angle),
+                    thumb_direction: [x, y, -z],
+                }
             }),
         }
     }
@@ -289,6 +290,7 @@ mod tests {
             palm_normal: Some([0.1, 0.2, -0.9]),
             fingers: Some(HandFingerPose {
                 fingers: [[0.1, 0.2, 0.3]; 4],
+                spread: [0.2, 0.0, -0.1, -0.3],
                 thumb: [0.4, 0.5],
                 thumb_direction: [0.6, 0.7, 0.8],
             }),
@@ -302,12 +304,12 @@ mod tests {
         assert_eq!(mirrored.right.unwrap().wrist, [-0.3, 0.2, 0.4]);
         assert_eq!(mirrored.right.unwrap().elbow_pole, [-0.5, -0.1, 0.2]);
         assert_eq!(mirrored.right.unwrap().palm_normal, Some([0.1, -0.2, 0.9]));
-        // Flexion angles are scalars and survive; the thumb ray is a direction
-        // and is only reflected, unlike the palm normal's cross product.
+        // Local normal components and signed bends reverse on reflection.
         let fingers = mirrored.right.unwrap().fingers.unwrap();
-        assert_eq!(fingers.fingers, [[0.1, 0.2, 0.3]; 4]);
-        assert_eq!(fingers.thumb, [0.4, 0.5]);
-        assert_eq!(fingers.thumb_direction, [-0.6, 0.7, 0.8]);
+        assert_eq!(fingers.fingers, [[-0.1, -0.2, -0.3]; 4]);
+        assert_eq!(fingers.spread, [0.2, 0.0, -0.1, -0.3]);
+        assert_eq!(fingers.thumb, [-0.4, -0.5]);
+        assert_eq!(fingers.thumb_direction, [0.6, 0.7, -0.8]);
         assert_eq!(mirrored.mirrored(), targets);
     }
 

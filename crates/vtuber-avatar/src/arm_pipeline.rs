@@ -1342,16 +1342,10 @@ fn resolve_tracked_side(
             weights.palm,
         )
     });
-    // The fingers are read from the solution's hand orientation, so they are
-    // resolved after the palm twist rather than before it.
+    // Finger articulation is already hand-local, so neither share of the
+    // solved palm twist can change a finger's local rotation.
     let fingers = target.fingers.and_then(|fingers| {
-        crate::tracked_arm::observed_finger_deltas(
-            chain,
-            fingers,
-            &solution,
-            tracking_to_rest,
-            weights.fingers,
-        )
+        crate::tracked_arm::observed_finger_deltas(chain, fingers, weights.fingers)
     });
     crate::tracked_arm::resolved_tracked_arm_pose(chain, solution, hand_delta, fingers).ok()
 }
@@ -2454,6 +2448,7 @@ mod tests {
             palm_normal: None,
             fingers: Some(vtuber_core::arm_tracking::HandFingerPose {
                 fingers: [[0.9, 0.9, 0.4]; 4],
+                spread: [0.0; 4],
                 thumb: [0.3, 0.3],
                 thumb_direction: [1.0, 0.0, 0.0],
             }),

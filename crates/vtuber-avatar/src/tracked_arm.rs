@@ -154,153 +154,182 @@ pub fn resolved_tracked_arm_pose(
     Ok(pose)
 }
 
-/// Turns the observed finger articulation into rest-relative bone deltas.
-///
-/// The observed values are anatomical joint angles, not rotations, so each one
-/// is applied about the axis the model's own rest geometry gives that joint —
-/// the same helper the relaxed curl uses. That keeps the thumb on its own axes
-/// instead of being forced onto a four-finger bend, and lets each finger carry
-/// its own curl instead of one shared amount.
-///
-/// The thumb's opening is a rotation about the palm normal, computed from the
-/// observed ray and the rig's rest thumb ray, so the rest pose stays the
-/// neutral: a rig whose thumb rests half open is not snapped shut by a relaxed
-/// hand. `weight` scales the whole pose, so the channel's return time eases
-/// every finger back to the rest pose at once.
-///
-/// Returns `None` when the rest geometry cannot place the rotation. Individual
-/// bones are skipped rather than fabricated when the model has no such finger
-/// or joint.
+/// Converts hand-local articulation to the rig's rest-relative finger rotations.
+/// The palm frame is built from the same wrist/index/little rays as tracking.
+/// No solved arm orientation is read: arm swing, shoulder motion and both
+/// shares of `align_palm_twist` have already been removed by the observation's
+/// hand-local frame, before its independent smoothing.
 #[must_use]
 pub fn observed_finger_deltas(
     chain: &ArmChainBinding,
     observed: HandFingerPose,
-    solution: &ArmIkSolution,
-    tracking_to_rest: Quat,
     weight: f32,
 ) -> Option<ResolvedFingerPose> {
-    if !weight.is_finite() || weight <= f32::EPSILON || !tracking_to_rest.is_finite() {
+    if !weight.is_finite() || weight <= f32::EPSILON {
         return None;
     }
     let weight = weight.clamp(0.0, 1.0);
+    let normal = rest_palm_normal(chain)?;
+    let wrist = chain.rest.wrist.position;
+    let index =
+        crate::arm::finite_normalized(chain.finger_rest.index.proximal?.rest.position - wrist)?;
+    let little =
+        crate::arm::finite_normalized(chain.finger_rest.little.proximal?.rest.position - wrist)?;
+    let forward = crate::arm::finite_normalized(index + little)?;
+    let across = forward.cross(normal);
     let rest = &chain.finger_rest;
-    let four = [
-        (&rest.index, observed.fingers[0]),
-        (&rest.middle, observed.fingers[1]),
-        (&rest.ring, observed.fingers[2]),
-        (&rest.little, observed.fingers[3]),
-    ];
+    let [index_curl, middle_curl, ring_curl, little_curl] = observed.fingers;
+    let [index_spread, middle_spread, ring_spread, little_spread] = observed.spread;
+    let [thumb_mcp, thumb_ip] = observed.thumb;
+    let [x, y, z] = observed.thumb_direction;
     let thumb = ResolvedFingerJointPose {
-        metacarpal: thumb_opening_delta(chain, solution, &observed, tracking_to_rest, weight),
-        proximal: crate::arm_pose::resolve_finger_joint(
-            rest.thumb.proximal,
-            rest.thumb.intermediate,
+        metacarpal: opening_delta(
             rest.thumb.metacarpal,
-            observed.thumb[0] * weight,
+            rest.thumb.proximal,
+            across * x + forward * y + normal * z,
+            normal,
+            weight,
         ),
-        // A VRM has no thumb intermediate bone, so the observed interphalangeal
-        // angle lands on the distal bone, measured from the proximal one.
+        proximal: observed_joint_bend(
+            rest.thumb.proximal,
+            rest.thumb.distal,
+            rest.thumb.metacarpal,
+            thumb_mcp,
+            normal,
+            weight,
+        ),
         intermediate: None,
-        distal: crate::arm_pose::resolve_finger_joint(
+        distal: observed_joint_bend(
             rest.thumb.distal,
             None,
-            rest.thumb.intermediate.or(rest.thumb.proximal),
-            observed.thumb[1] * weight,
+            rest.thumb.proximal,
+            thumb_ip,
+            normal,
+            weight,
         ),
     };
-    let [index, middle, ring, little] = four;
+    let four = |finger, curl, spread: f32| {
+        three_joint_deltas(
+            finger,
+            curl,
+            across * spread.sin() + forward * spread.cos(),
+            normal,
+            weight,
+        )
+    };
     Some(ResolvedFingerPose {
         thumb,
-        index: three_joint_deltas(index.0, index.1, weight),
-        middle: three_joint_deltas(middle.0, middle.1, weight),
-        ring: three_joint_deltas(ring.0, ring.1, weight),
-        little: three_joint_deltas(little.0, little.1, weight),
+        index: four(&rest.index, index_curl, index_spread),
+        middle: four(&rest.middle, middle_curl, middle_spread),
+        ring: four(&rest.ring, ring_curl, ring_spread),
+        little: four(&rest.little, little_curl, little_spread),
     })
 }
 
-/// Resolves one four-finger chain's three observed joint angles.
 fn three_joint_deltas(
     finger: &FingerJointRestReferences,
-    curls: [f32; 3],
+    [mcp, pip, dip]: [f32; 3],
+    direction: Vec3,
+    normal: Vec3,
     weight: f32,
 ) -> ResolvedFingerJointPose {
-    ResolvedFingerJointPose {
-        // The four fingers have no metacarpal bone in the VRM humanoid, so the
-        // observed knuckle flexion lands on the proximal bone.
-        metacarpal: None,
-        proximal: crate::arm_pose::resolve_finger_joint(
+    let proximal = (|| {
+        let joint = finger.proximal?;
+        let segment = crate::arm::finite_normalized(
+            finger.intermediate?.rest.position - joint.rest.position,
+        )?;
+        let rest_elevation = segment.dot(normal).clamp(-1.0, 1.0).asin();
+        let curl = crate::arm_pose::resolve_finger_joint(
             finger.proximal,
             finger.intermediate,
-            finger.metacarpal,
-            curls[0] * weight,
-        ),
-        intermediate: crate::arm_pose::resolve_finger_joint(
+            None,
+            (mcp - rest_elevation) * weight,
+            Some(normal),
+        )?;
+        let opening = opening_delta(
+            finger.proximal,
+            finger.intermediate,
+            direction,
+            normal,
+            weight,
+        )?;
+        Some(ResolvedBoneDelta {
+            entity: joint.entity,
+            delta: opening.delta * curl.delta,
+        })
+    })();
+    ResolvedFingerJointPose {
+        metacarpal: None,
+        proximal,
+        intermediate: observed_joint_bend(
             finger.intermediate,
             finger.distal,
             finger.proximal,
-            curls[1] * weight,
+            pip,
+            normal,
+            weight,
         ),
-        distal: crate::arm_pose::resolve_finger_joint(
+        distal: observed_joint_bend(
             finger.distal,
             None,
             finger.intermediate,
-            curls[2] * weight,
+            dip,
+            normal,
+            weight,
         ),
     }
 }
 
-/// Rest-relative rotation that opens the thumb away from the palm.
-///
-/// Both the observed ray and the rig's rest thumb ray are projected
-/// perpendicular to the solved hand's palm normal, so what is compared is the
-/// in-plane angle between them. That angle is unaffected by the forearm
-/// pronation the palm channel applies separately, so the two channels compose
-/// without fighting.
-///
-/// The rotation is about the palm normal through the thumb's own origin, so no
-/// finger tip moves because of it and the following bones' flexions are
-/// unaffected. Returns `None` when the rig has no thumb bone to rotate or the
-/// two rays are degenerate in the palm plane.
-fn thumb_opening_delta(
-    chain: &ArmChainBinding,
-    solution: &ArmIkSolution,
-    observed: &HandFingerPose,
-    tracking_to_rest: Quat,
+/// Subtract the authored bend where both adjacent segments exist. VRM has no
+/// fingertip bone, so the terminal joint uses the preceding segment as its axis.
+fn observed_joint_bend(
+    joint: Option<crate::arm::FingerJointRestBinding>,
+    next: Option<crate::arm::FingerJointRestBinding>,
+    previous: Option<crate::arm::FingerJointRestBinding>,
+    angle: f32,
+    normal: Vec3,
     weight: f32,
 ) -> Option<ResolvedBoneDelta> {
-    let metacarpal = chain.finger_rest.thumb.metacarpal?;
-    let observed_ray =
-        crate::arm::finite_normalized(tracking_to_rest * Vec3::from(observed.thumb_direction))?;
-    let palm_normal = current_palm_normal(chain, solution).unwrap_or(observed_ray);
-    let rest_ray =
-        crate::arm::finite_normalized(metacarpal.rest.position - chain.rest.wrist.position)?;
-    let rest_in_plane =
-        crate::arm::finite_normalized(rest_ray - palm_normal * rest_ray.dot(palm_normal))?;
-    let observed_in_plane =
-        crate::arm::finite_normalized(observed_ray - palm_normal * observed_ray.dot(palm_normal))?;
-    let angle = palm_normal
-        .dot(rest_in_plane.cross(observed_in_plane))
-        .atan2(rest_in_plane.dot(observed_in_plane))
-        * weight;
-    if !angle.is_finite() || angle.abs() <= 1.0e-6 {
-        return None;
-    }
-    let rest_global = metacarpal.rest.global_rotation;
-    let delta = normalized_finite(
-        rest_global.inverse() * Quat::from_axis_angle(palm_normal, angle) * rest_global,
-    )?;
-    Some(ResolvedBoneDelta {
-        entity: metacarpal.entity,
-        delta,
-    })
+    let rest_angle = if let (Some(joint), Some(next), Some(previous)) = (joint, next, previous) {
+        let incoming = crate::arm::finite_normalized(joint.rest.position - previous.rest.position)?;
+        let outgoing = crate::arm::finite_normalized(next.rest.position - joint.rest.position)?;
+        let axis = crate::arm::finite_normalized(incoming.cross(normal))?;
+        axis.dot(incoming.cross(outgoing))
+            .atan2(incoming.dot(outgoing))
+    } else {
+        0.0
+    };
+    crate::arm_pose::resolve_finger_joint(
+        joint,
+        next,
+        previous,
+        (angle - rest_angle) * weight,
+        Some(normal),
+    )
 }
 
-/// The hand's model-space palm normal after the solve and the observed twist.
-fn current_palm_normal(chain: &ArmChainBinding, solution: &ArmIkSolution) -> Option<Vec3> {
-    let rest_normal = rest_palm_normal(chain)?;
-    let rest_hand = chain.rest.wrist.global_rotation;
-    let current = hand_global(chain, solution) * (rest_hand.inverse() * rest_normal);
-    crate::arm::finite_normalized(current)
+/// Compare the same segment in the rest palm frame and rotate about its normal.
+/// For the thumb this is CMC-to-MCP (metacarpal-to-proximal), not wrist-to-CMC.
+fn opening_delta(
+    joint: Option<crate::arm::FingerJointRestBinding>,
+    next: Option<crate::arm::FingerJointRestBinding>,
+    observed_ray: Vec3,
+    normal: Vec3,
+    weight: f32,
+) -> Option<ResolvedBoneDelta> {
+    let joint = joint?;
+    let rest_ray = next?.rest.position - joint.rest.position;
+    let in_plane = |ray: Vec3| crate::arm::finite_normalized(ray - normal * ray.dot(normal));
+    let rest = in_plane(rest_ray)?;
+    let observed = in_plane(observed_ray)?;
+    let angle = normal.dot(rest.cross(observed)).atan2(rest.dot(observed)) * weight;
+    let rotation = joint.rest.global_rotation;
+    Some(ResolvedBoneDelta {
+        entity: joint.entity,
+        delta: normalized_finite(
+            rotation.inverse() * Quat::from_axis_angle(normal, angle) * rotation,
+        )?,
+    })
 }
 
 /// Normalizes a quaternion, or reports that it is not usable.
@@ -794,36 +823,96 @@ mod tests {
         fingers: HandFingerPose,
         weight: f32,
     ) -> ResolvedFingerPose {
-        let solution = solve_tracked_arm(chain.rest, straight_target(), Quat::IDENTITY).unwrap();
-        observed_finger_deltas(chain, fingers, &solution, Quat::IDENTITY, weight)
-            .expect("finger deltas")
+        observed_finger_deltas(chain, fingers, weight).expect("finger deltas")
+    }
+
+    /// Make actual tracking input from a rig, including its non-collinear
+    /// wrist/CMC/MCP. Tips continue the terminal rest segment.
+    fn rest_observation(
+        chain: &ArmChainBinding,
+        arm_rotation: Quat,
+        hand_rotation: Quat,
+    ) -> ArmTrackingTarget {
+        use vtuber_core::arm_tracking::{ArmLandmarks, HandWorldLandmarks, PoseWorldLandmark};
+        let point = |v: Vec3| PoseWorldLandmark {
+            meters: [v.x, -v.y, -v.z],
+            visibility: Some(1.0),
+            presence: Some(1.0),
+        };
+        let wrist = chain.rest.wrist.position;
+        let mut landmarks = [point(Vec3::ZERO); 21];
+        let finger =
+            |bone: Option<crate::arm::FingerJointRestBinding>| bone.unwrap().rest.position - wrist;
+        for (start, row) in [
+            (5, chain.finger_rest.index),
+            (9, chain.finger_rest.middle),
+            (13, chain.finger_rest.ring),
+            (17, chain.finger_rest.little),
+        ] {
+            let [a, b, c] = [
+                finger(row.proximal),
+                finger(row.intermediate),
+                finger(row.distal),
+            ];
+            for (i, position) in [a, b, c, c + (c - b)].into_iter().enumerate() {
+                landmarks[start + i] = point(hand_rotation * position);
+            }
+        }
+        let thumb = chain.finger_rest.thumb;
+        let [a, b, c] = [
+            finger(thumb.metacarpal),
+            finger(thumb.proximal),
+            finger(thumb.distal),
+        ];
+        for (i, position) in [a, b, c, c + (c - b)].into_iter().enumerate() {
+            landmarks[1 + i] = point(hand_rotation * position);
+        }
+        let arm = ArmLandmarks {
+            shoulder: point(Vec3::ZERO),
+            elbow: point(
+                arm_rotation * (chain.rest.elbow.position - chain.rest.upper_arm.position),
+            ),
+            wrist: point(arm_rotation * (wrist - chain.rest.upper_arm.position)),
+            hand: Some(HandWorldLandmarks {
+                landmarks,
+                handedness_score: None,
+            }),
+        };
+        vtuber_tracking::arm_tracking::retarget_arm_landmarks(
+            arm,
+            vtuber_tracking::arm_tracking::measure_arm_reference(arm).unwrap(),
+        )
     }
 
     fn straight_fingers() -> HandFingerPose {
-        HandFingerPose {
-            fingers: [[0.0; 3]; 4],
-            thumb: [0.0; 2],
-            thumb_direction: [1.0, 0.0, 0.0],
-        }
+        rest_observation(&articulated_chain(), Quat::IDENTITY, Quat::IDENTITY)
+            .fingers
+            .unwrap()
     }
 
     #[test]
     fn a_straight_hand_leaves_every_finger_at_rest() {
         let chain = articulated_chain();
         let pose = resolved_fingers(&chain, straight_fingers(), 1.0);
-        for (finger, has_intermediate) in [
-            (&pose.index, true),
-            (&pose.middle, true),
-            (&pose.ring, true),
-            (&pose.little, true),
-            // A VRM has no thumb intermediate bone.
-            (&pose.thumb, false),
+        assert!(pose.thumb.metacarpal.is_some());
+        assert!(pose.thumb.intermediate.is_none());
+        for finger in [
+            &pose.index,
+            &pose.middle,
+            &pose.ring,
+            &pose.little,
+            &pose.thumb,
         ] {
-            for joint in [finger.proximal, finger.intermediate, finger.distal] {
-                let Some(delta) = joint else {
-                    assert!(!has_intermediate, "the chain has every joint");
-                    continue;
-                };
+            for joint in [
+                finger.metacarpal,
+                finger.proximal,
+                finger.intermediate,
+                finger.distal,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let delta = joint;
                 assert!(
                     delta.delta.angle_between(Quat::IDENTITY) < 1.0e-5,
                     "a straight finger must stay at its rest pose: {:?}",
@@ -889,40 +978,215 @@ mod tests {
     #[test]
     fn the_thumb_opens_relative_to_the_models_own_rest_spread() {
         let chain = articulated_chain();
-        let rest_direction = crate::arm::finite_normalized(
-            chain
-                .finger_rest
-                .thumb
-                .metacarpal
-                .expect("thumb metacarpal")
-                .rest
-                .position
-                - chain.rest.wrist.position,
-        )
-        .expect("rest thumb ray");
+        let rest_direction = (chain.finger_rest.thumb.proximal.unwrap().rest.position
+            - chain.finger_rest.thumb.metacarpal.unwrap().rest.position)
+            .normalize();
+        let mut observed = straight_fingers();
+        // Rotate the local CMC-to-MCP ray in the palm plane by 0.3 radians.
+        let [x, y, z] = observed.thumb_direction;
+        let angle: f32 = 0.3;
+        observed.thumb_direction = [
+            x * angle.cos() - y * angle.sin(),
+            x * angle.sin() + y * angle.cos(),
+            z,
+        ];
+        let pose = resolved_fingers(&chain, observed, 1.0);
+        let opened = pose.thumb.metacarpal.unwrap();
+        let expected =
+            Quat::from_axis_angle(rest_palm_normal(&chain).unwrap(), angle) * rest_direction;
+        near(opened.delta * rest_direction, expected);
+    }
 
-        // The rig's rest thumb points partly along +Z; a flat hand's points
-        // along +X, so applying the observation must open it about the palm
-        // normal by the angle between the two, not leave it where it was.
-        let pose = resolved_fingers(&chain, straight_fingers(), 1.0);
-        let opened = pose.thumb.metacarpal.expect("thumb metacarpal");
-        assert!(
-            opened.delta.angle_between(Quat::IDENTITY) > 0.1,
-            "the rest spread and the observation differ, so a rotation is expected"
-        );
-        // Rotating the rest ray by the delta must land on the observed ray,
-        // projected off the palm normal the way the rotation is defined.
-        let axis = rest_palm_normal(&chain).expect("rest palm normal");
-        let in_plane = |value: Vec3| value - axis * value.dot(axis);
-        let rotated = in_plane(opened.delta * rest_direction);
-        let expected = in_plane(Vec3::X);
-        assert!(
-            crate::arm::finite_normalized(rotated)
-                .expect("the rotated ray stays in the plane")
-                .dot(crate::arm::finite_normalized(expected).expect("expected ray"))
-                > 0.99,
-            "the thumb must open onto the observation"
-        );
+    #[test]
+    fn local_fingers_ignore_arm_swing_and_both_palm_twist_shares() {
+        let chain = articulated_chain();
+        let neutral = observed_finger_deltas(&chain, straight_fingers(), 1.0).unwrap();
+        for (arm_rotation, twist) in [
+            (
+                Quat::from_rotation_y(0.7) * Quat::from_rotation_z(-0.4),
+                0.0,
+            ),
+            (Quat::IDENTITY, 1.0),
+            (Quat::from_rotation_z(0.45), -0.8),
+        ] {
+            let target = rest_observation(
+                &chain,
+                arm_rotation,
+                arm_rotation * Quat::from_rotation_x(twist),
+            );
+            let mut solution = solve_tracked_arm(chain.rest, target, Quat::IDENTITY).unwrap();
+            let positions = (solution.elbow, solution.wrist);
+            let hand_delta = align_palm_twist(
+                &chain,
+                &mut solution,
+                target.palm_normal.unwrap(),
+                Quat::IDENTITY,
+                1.0,
+            );
+            let fingers = observed_finger_deltas(&chain, target.fingers.unwrap(), 1.0).unwrap();
+            let pose =
+                resolved_tracked_arm_pose(&chain, solution, hand_delta, Some(fingers)).unwrap();
+            for (a, b) in [
+                (&pose.fingers.thumb, &neutral.thumb),
+                (&pose.fingers.index, &neutral.index),
+                (&pose.fingers.middle, &neutral.middle),
+                (&pose.fingers.ring, &neutral.ring),
+                (&pose.fingers.little, &neutral.little),
+            ] {
+                for (a, b) in [a.metacarpal, a.proximal, a.intermediate, a.distal]
+                    .into_iter()
+                    .zip([b.metacarpal, b.proximal, b.intermediate, b.distal])
+                {
+                    match (a, b) {
+                        (Some(a), Some(b)) => assert!(a.delta.angle_between(b.delta) < 1.0e-3),
+                        (None, None) => (),
+                        _ => panic!("finger binding changed"),
+                    }
+                }
+            }
+            if twist != 0.0 {
+                assert!(hand_delta.unwrap().angle_between(Quat::IDENTITY) > 0.1);
+                // The solve keeps a small elbow bend at full extension.
+                // Palm alignment constrains roll about that solved forearm,
+                // i.e. the perpendicular projections, not its axial component.
+                let axis = (solution.wrist - solution.elbow).normalize();
+                let perpendicular = |v: Vec3| (v - axis * v.dot(axis)).normalize();
+                near(
+                    perpendicular(solved_palm_normal(&chain, &solution, hand_delta.unwrap())),
+                    perpendicular(Vec3::from(target.palm_normal.unwrap())),
+                );
+            }
+            near(solution.elbow, positions.0);
+            near(solution.wrist, positions.1);
+        }
+    }
+
+    #[test]
+    fn both_hands_bend_palmward_with_non_identity_rest_axes() {
+        for reflected in [false, true] {
+            let mut chain = articulated_chain();
+            let reflect = |v: Vec3| {
+                if reflected {
+                    Vec3::new(-v.x, v.y, v.z)
+                } else {
+                    v
+                }
+            };
+            chain.side = if reflected {
+                crate::arm::ArmSide::Right
+            } else {
+                crate::arm::ArmSide::Left
+            };
+            for bone in [
+                &mut chain.rest.upper_arm,
+                &mut chain.rest.elbow,
+                &mut chain.rest.wrist,
+            ] {
+                bone.position = reflect(bone.position);
+            }
+            for row in [
+                &mut chain.finger_rest.thumb,
+                &mut chain.finger_rest.index,
+                &mut chain.finger_rest.middle,
+                &mut chain.finger_rest.ring,
+                &mut chain.finger_rest.little,
+            ] {
+                let mut parent_rotation = chain.rest.wrist.global_rotation;
+                for (i, joint) in [
+                    &mut row.metacarpal,
+                    &mut row.proximal,
+                    &mut row.intermediate,
+                    &mut row.distal,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if let Some(joint) = joint {
+                        joint.rest.position = reflect(joint.rest.position);
+                        joint.rest.global_rotation = Quat::from_rotation_x(0.4 + i as f32 * 0.3)
+                            * Quat::from_rotation_z(-0.6);
+                        joint.rest.local_rotation =
+                            parent_rotation.inverse() * joint.rest.global_rotation;
+                        parent_rotation = joint.rest.global_rotation;
+                    }
+                }
+            }
+            let mut observed = rest_observation(&chain, Quat::IDENTITY, Quat::IDENTITY)
+                .fingers
+                .unwrap();
+            let normal = rest_palm_normal(&chain).unwrap();
+            let curl = 0.4 * normal.dot(Vec3::Y).signum();
+            observed.fingers = [[curl; 3]; 4];
+            observed.thumb = [curl; 2];
+            let pose = observed_finger_deltas(&chain, observed, 1.0).unwrap();
+            for (row, deltas) in [
+                (chain.finger_rest.thumb, pose.thumb),
+                (chain.finger_rest.index, pose.index),
+                (chain.finger_rest.middle, pose.middle),
+                (chain.finger_rest.ring, pose.ring),
+                (chain.finger_rest.little, pose.little),
+            ] {
+                for (joint, next, previous, delta) in [
+                    (
+                        row.proximal,
+                        row.intermediate.or(row.distal),
+                        row.metacarpal,
+                        deltas.proximal,
+                    ),
+                    (
+                        row.intermediate,
+                        row.distal,
+                        row.proximal,
+                        deltas.intermediate,
+                    ),
+                    (
+                        row.distal,
+                        None,
+                        row.intermediate.or(row.proximal),
+                        deltas.distal,
+                    ),
+                ] {
+                    let Some(joint) = joint else {
+                        continue;
+                    };
+                    let ray = next
+                        .map(|next| next.rest.position - joint.rest.position)
+                        .unwrap_or_else(|| joint.rest.position - previous.unwrap().rest.position)
+                        .normalize();
+                    let rotation = joint.rest.global_rotation;
+                    let bent = rotation * delta.unwrap().delta * rotation.inverse() * ray;
+                    assert!(
+                        bent.dot(Vec3::Y) > 0.3,
+                        "both hands must bend toward the physical palm: {bent:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn proximal_spread_and_curl_reach_independent_rest_relative_directions() {
+        let chain = articulated_chain();
+        let joint = chain.finger_rest.index.proximal.unwrap();
+        let ray = (chain.finger_rest.index.intermediate.unwrap().rest.position
+            - joint.rest.position)
+            .normalize();
+        let normal = rest_palm_normal(&chain).unwrap();
+        for (spread, curl) in [(0.35, 0.0), (0.0, 0.6), (0.35, 0.6)] {
+            let mut observed = straight_fingers();
+            observed.spread[0] += spread;
+            observed.fingers[0][0] = curl;
+            let delta = observed_finger_deltas(&chain, observed, 1.0)
+                .unwrap()
+                .index
+                .proximal
+                .unwrap()
+                .delta;
+            let expected =
+                Quat::from_axis_angle(normal, -spread) * ray * curl.cos() + normal * curl.sin();
+            let rotation = joint.rest.global_rotation;
+            near(rotation * delta * rotation.inverse() * ray, expected);
+        }
     }
 
     #[test]
@@ -949,9 +1213,8 @@ mod tests {
             );
         }
         // A zero weight is the virtual channel: no finger rotation at all.
-        let solution = solve_tracked_arm(chain.rest, straight_target(), Quat::IDENTITY).unwrap();
         assert_eq!(
-            observed_finger_deltas(&chain, straight_fingers(), &solution, Quat::IDENTITY, 0.0),
+            observed_finger_deltas(&chain, straight_fingers(), 0.0),
             None
         );
     }
@@ -962,7 +1225,8 @@ mod tests {
         let mut chain = articulated_chain();
         chain.finger_rest.middle = crate::arm::FingerJointRestReferences::default();
         chain.finger_rest.ring = crate::arm::FingerJointRestReferences::default();
-        chain.finger_rest.little = crate::arm::FingerJointRestReferences::default();
+        chain.finger_rest.little.intermediate = None;
+        chain.finger_rest.little.distal = None;
         chain.finger_rest.thumb = crate::arm::FingerJointRestReferences::default();
         let mut observed = straight_fingers();
         observed.fingers[0] = [0.5, 0.5, 0.5];
