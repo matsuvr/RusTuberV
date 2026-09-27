@@ -695,46 +695,55 @@ fn avatar_import_review_modal(
     let mut checked = accepted;
     let mut import_requested = false;
     let mut cancel_requested = false;
-    let modal = egui::Modal::new(Id::new("avatar_import_review")).show(ctx, |ui| {
-        ui.set_width(540.0);
-        review_sheet_header(ui, review, lang);
-        ui.add_space(12.0);
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .id_salt("avatar_import_review_details")
-            .max_height(330.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| review_sheet_details(ui, review, lang));
-        ui.separator();
-        ui.add_space(8.0);
-        ui.checkbox(
-            &mut checked,
-            lang.pick(
-                "この VRM のライセンス・利用条件を確認しました",
-                "I have reviewed this VRM's license and usage terms",
-                "我已确认该 VRM 的许可与使用条件",
-                "이 VRM의 라이선스 및 이용 조건을 확인했습니다",
-            ),
-        );
-        ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if primary_button(
-                ui,
-                lang.pick("読み込む", "Import", "导入", "불러오기"),
-                checked,
-            )
-            .clicked()
-            {
-                import_requested = true;
-            }
-            if ui
-                .button(lang.pick("キャンセル", "Cancel", "取消", "취소"))
+    let viewport = ctx.content_rect();
+    let frame = egui::Frame::popup(&ctx.global_style());
+    let content_width = viewport.width() * 0.8 - frame.total_margin().sum().x;
+    let modal = egui::Modal::new(Id::new("avatar_import_review"))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(content_width);
+            // Horizontal metadata rows must wrap too, including unbroken URLs.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            egui::ScrollArea::vertical()
+                .id_salt("avatar_import_review_details")
+                .max_height(viewport.height() * 0.6)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    review_sheet_header(ui, review, lang);
+                    ui.add_space(12.0);
+                    ui.separator();
+                    review_sheet_details(ui, review, lang);
+                });
+            ui.separator();
+            ui.add_space(8.0);
+            ui.checkbox(
+                &mut checked,
+                lang.pick(
+                    "この VRM のライセンス・利用条件を確認しました",
+                    "I have reviewed this VRM's license and usage terms",
+                    "我已确认该 VRM 的许可与使用条件",
+                    "이 VRM의 라이선스 및 이용 조건을 확인했습니다",
+                ),
+            );
+            ui.add_space(8.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if primary_button(
+                    ui,
+                    lang.pick("読み込む", "Import", "导入", "불러오기"),
+                    checked,
+                )
                 .clicked()
-            {
-                cancel_requested = true;
-            }
+                {
+                    import_requested = true;
+                }
+                if ui
+                    .button(lang.pick("キャンセル", "Cancel", "取消", "취소"))
+                    .clicked()
+                {
+                    cancel_requested = true;
+                }
+            });
         });
-    });
     if checked != accepted {
         state.emit(UiAction::SetAvatarImportReviewAccepted { accepted: checked });
     }
@@ -895,10 +904,11 @@ fn review_sheet_group(ui: &mut Ui, title: &str) {
 }
 
 fn review_field(ui: &mut Ui, label: &str, value: Option<&str>, lang: UiLanguage) {
+    let label_width = (ui.available_width() * 0.3).min(150.0);
     ui.horizontal_top(|ui| {
         ui.add_sized(
-            [150.0, 18.0],
-            egui::Label::new(RichText::new(label).weak()).truncate(),
+            [label_width, 18.0],
+            egui::Label::new(RichText::new(label).weak()).wrap(),
         );
         match value.filter(|value| !value.is_empty()) {
             Some(value) if is_external_url(value) => {
