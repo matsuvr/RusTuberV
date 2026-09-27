@@ -198,6 +198,7 @@ fn observed_target() -> ArmTrackingTarget {
         wrist: [0.30, -0.24, 0.05],
         elbow_pole: [0.16, -0.10, 0.02],
         palm_normal: Some([0.10, 0.20, -0.90]),
+        fingers: None,
     }
 }
 
@@ -208,6 +209,7 @@ fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
         wrist: 0.25,
         pole: 0.5,
         palm: 0.75,
+        fingers: 0.0,
     };
     let (mut app, rig) = build_app(true, generation);
 
@@ -331,6 +333,7 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
             wrist: to_tracking(virtual_target.wrist),
             elbow_pole: to_tracking(virtual_target.wrist * 2.0 - virtual_target.elbow_pole),
             palm_normal: None,
+            fingers: None,
         }
     };
 
@@ -348,6 +351,7 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
                     wrist: 0.5,
                     pole: 0.5,
                     palm: 0.0,
+                    fingers: 0.0,
                 },
                 right: ArmBlendWeight::ZERO,
             },

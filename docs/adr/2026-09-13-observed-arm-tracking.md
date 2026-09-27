@@ -193,6 +193,54 @@ hold/return/acquireの時間は変更していないので、戻った腕が飛�
 **実機未確認**。実測fpsの記録も残っていないため、待ち時間をms換算した値は記載して
 いない。
 
+追加（2026-09-27, #190 レビュー R1–R3 の修正）:
+`HandFingerPose` は Hand Landmarker の21点から、各指の屈曲と開きを別々に保持する。
+掌の基準は wrist→index MCP と wrist→little MCP の単位方向の二等分線をforward、
+そのindex cross littleをnormal、forward cross normalをacrossとする。
+手ローカルXYZは(across, forward, normal)。4指のMCPは掌平面からの符号付き仰角、
+spreadはforwardからacrossへの面内角であり、wrist→MCPとの3D角度をcurlにしない。
+PIP/DIPも各指の節から個別に測る。親指の比較区間はcore・tracking・avatarすべて
+CMC→MCP、VRMではproximal.position - metacarpal.positionとする。
+
+指の屈曲は各指の節と掌normalが作る軸まわりの符号付き角度で、正はnormal側。
+normalは軸性ベクトルなので、左右ミラーでは屈曲と手ローカルZを反転し、spreadと
+ローカルXYを保存する。各関節の角度の絶対値には既存の上限を使う。
+`resolve_finger_joint`と既存bindingを再利用し、観測経路は節とrest掌normalから
+曲げ軸を求め、著作者のrest回転でローカルdeltaへ戻す。仮想腕の緩いcurlは従来の
+著作者軸を使う。4指の付け根はrestの仰角・開きとの差をproximalへ適用する。
+親指もCMC→MCPのrestと観測の符号付き仰角差を`resolve_finger_joint`へ渡し、
+面内の開きと`opening.delta * elevation.delta`の順に合成してmetacarpalへ適用する
+（#190 再レビューR4）。4指のspread用`opening_delta`は面内処理を維持する。
+隣接するrest節がある関節は
+その曲がりを差し引く。VRMにtip骨はないため末節の軸は直前の節から取る。
+
+指形状は平滑化より前に手ローカル化する。`observed_finger_deltas`はIK解や
+`tracking_to_rest`を参照しないため、肩親だけを除いた方向を手ローカルと扱う経路は
+ない。掌twistの前腕分・hand_delta分はどちらも指の親側の姿勢にだけ反映される。
+最終掌姿勢を確認するテストではhand_deltaも含める。Transform writerは引き続き
+`apply_default_arm_pose`のみで、指回転は肘・手首のIK位置を変更しない。
+
+指の平滑化は既存のrender clock・固定時定数0.04 s、欠測時の復帰は既存のLossBlendを
+使う。掌基準または指節が退化している観測は指チャンネルを生成しない。掌が読めても
+指節が読めない場合は掌だけを採用できる。新しい推論器・汎用リターゲット基盤・
+監視基盤は追加していない。
+
+修正時のローカル確認:
+- `cargo check -p vtuber-core -p vtuber-tracking -p vtuber-avatar -j 1`
+- `cargo test -p vtuber-core --lib arm_tracking::tests -j 1`（4件）
+- `cargo test -p vtuber-tracking --lib arm_tracking::tests -j 1`（55件）
+- `cargo test -p vtuber-avatar --lib tracked_arm::tests -j 1`（24件）
+- `cargo test -p vtuber-avatar --lib arm_pipeline::tests::tracked_side_applies_the_observed_fingers_through_the_finger_weight -j 1`（1件）
+- 対象3クレートの `cargo clippy --lib --tests -j 1`、fmt、diff check。
+  Clippyは変更外のavatarコードに10件のwarningがある。
+
+小さな合成ランドマークで、指定の非放射状伸展指、開きだけ/屈曲だけ、非共線の親指rest
+（metacarpalを含む）、剛体回転・掌twist、左右ミラー、非identityのrest軸での掌側への
+曲がり、指weightを変えても腕IKの回転が変わらないことを確認した。
+**実機は未確認**: 左右の開く・握る・Vサイン・親指を立てる動作、欠測復帰、
+VRM 0.x / 1.0の表示、macOS。使用VRM形式・モデル名は実機未実施のため記録なし。
+合成ランドマークの結果をVRMの実機受入結果とは扱わず、#183はOPENを維持する。
+
 欠損を原点や既定長で捏造せず、無期限維持・別推論器への自動切替は入れない。
 
 追加（2026-09-27, 掌の回転連続性）: 手の位置0.05 sに対して掌は0.30 sで6倍遅く、

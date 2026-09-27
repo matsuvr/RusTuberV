@@ -754,45 +754,63 @@ fn resolve_finger_joints(
     curl_radians: f32,
 ) -> ResolvedFingerJointPose {
     ResolvedFingerJointPose {
-        metacarpal: resolve_finger_joint(finger.metacarpal, finger.proximal, None, curl_radians),
+        metacarpal: resolve_finger_joint(
+            finger.metacarpal,
+            finger.proximal,
+            None,
+            curl_radians,
+            None,
+        ),
         proximal: resolve_finger_joint(
             finger.proximal,
             finger.intermediate,
             finger.metacarpal,
             curl_radians,
+            None,
         ),
         intermediate: resolve_finger_joint(
             finger.intermediate,
             finger.distal,
             finger.proximal,
             curl_radians,
+            None,
         ),
-        distal: resolve_finger_joint(finger.distal, None, finger.intermediate, curl_radians),
+        distal: resolve_finger_joint(finger.distal, None, finger.intermediate, curl_radians, None),
     }
 }
 
-fn resolve_finger_joint(
+/// Builds the rest-relative rotation for one finger joint's flexion.
+///
+/// Observed signed flexion supplies the rest palm normal as `bend_toward`.
+/// The virtual relaxed curl passes `None` to use its authored local axes.
+/// Both paths conjugate the model-space rotation into the joint's rest frame.
+pub(crate) fn resolve_finger_joint(
     joint: Option<FingerJointRestBinding>,
     next: Option<FingerJointRestBinding>,
     previous: Option<FingerJointRestBinding>,
     curl_radians: f32,
+    bend_toward: Option<Vec3>,
 ) -> Option<ResolvedBoneDelta> {
     let joint = joint?;
     let segment = next
         .map(|next| next.rest.position - joint.rest.position)
         .or_else(|| previous.map(|previous| joint.rest.position - previous.rest.position))?;
     let segment_direction = finite_normalized(segment)?;
-    // Prefer authored local Z/Y axes, projected off the finger segment. This
-    // gives a bend axis for the common straight +X finger without assuming a
-    // universal world Euler axis, while still handling unusual authored axes.
-    let axis = [
-        joint.rest.global_rotation * Vec3::Z,
-        joint.rest.global_rotation * Vec3::Y,
-        joint.rest.global_rotation * Vec3::X,
-    ]
-    .into_iter()
-    .map(|candidate| candidate - segment_direction * candidate.dot(segment_direction))
-    .find_map(finite_normalized)?;
+    // Observed signed bends use the segment and rest palm normal, so an
+    // arbitrary authored local Z cannot reverse the physical bend direction.
+    // The virtual relaxed curl continues to use the authored local axes.
+    let axis = if let Some(direction) = bend_toward {
+        finite_normalized(segment_direction.cross(direction))?
+    } else {
+        [
+            joint.rest.global_rotation * Vec3::Z,
+            joint.rest.global_rotation * Vec3::Y,
+            joint.rest.global_rotation * Vec3::X,
+        ]
+        .into_iter()
+        .map(|candidate| candidate - segment_direction * candidate.dot(segment_direction))
+        .find_map(finite_normalized)?
+    };
     let model_delta = Quat::from_axis_angle(axis, curl_radians);
     let delta = normalized_or_identity(
         joint.rest.global_rotation.inverse() * model_delta * joint.rest.global_rotation,
