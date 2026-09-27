@@ -7,7 +7,7 @@
 - 状態: OFFは #94 の透明BLEND画素破棄だけを加えた上流MToon（またはBevy Standard / Unlit）と正面の標準ライト1灯。ONは同じ透明修正を土台にしたアプリ側Richシェーダー（MToon / Standard）と、標準ライトを残したままの追加SpotLight 2灯。強度は追加分だけを0〜100%で変える。露出・HDR・トーンマッピングは全状態で共通。
 - UI: 既存のリッチ表示スイッチと0〜100%スライダーが `AvatarLookSettings` の `enabled` / `strength` に接続され、モデル別設定（`rich_look` セクション）に保存される。旧材質役割設定は今回の描画に適用せず、UIと保存項目からも削除した。古い `material_roles` セクションは通常の設定読込みで無視される。
 - 短期の例外: 追加灯はBevyのクラスタ照明を通るが、Bevy 0.19既定のGPUクラスタリングではこのシーンのクラスタが空になり追加灯が材質に届かない。`look/lighting.rs` がCPUクラスタリングへ切り替える（一時的、撤去条件はAGENTS.mdに記す）。
-- 確認: 既存の `cargo xtask -- vrm-render` が実際のUIアクション経路で OFF → ON 100% → 50% → 0% → OFF を同じモデル・ポーズ・カメラで描画する。下記の測定と目視を行った。旧設計のゲート（SSIM・全GPU・全OS・NDI全面再試験など）は新方式の完成条件にしていない。
+- 確認: 既存の `cargo xtask vrm-render` が実際のUIアクション経路で OFF → ON 100% → 50% → 0% → OFF を同じモデル・ポーズ・カメラで描画する。下記の測定と目視を行った。旧設計のゲート（SSIM・全GPU・全OS・NDI全面再試験など）は新方式の完成条件にしていない。
 
 ### #96 実施記録（Windows 11、Vulkan、ローカルGPU）
 
@@ -18,7 +18,7 @@
 | `data/vrm_data/6208967401843641193.vrm` | VRM 0.x | 6（顔・肌・髪後・まつげ・目線・口） | 1（Tops/袖） | 1（前髪・UnlitCutout） |
 | `data/vrm_data/AvatarSample_C.vrm` | VRM 1.0 | 11（VRMC_materials_mtoon） | 1（Tops/ベスト） | 1（Bottoms/ズボン） |
 
-計測値（`cargo xtask -- vrm-render <model> <out>`、256x256、同一ポーズ・カメラ）:
+計測値（`cargo xtask vrm-render <model> <out>`、256x256、同一ポーズ・カメラ）:
 
 | モデル | OFF平均 | ON100%平均 | OFF→ON100 平均差 | ON 0% vs OFF | OFF再適用 vs OFF | 50% vs 100% |
 |---|---|---|---|---|---|---|
