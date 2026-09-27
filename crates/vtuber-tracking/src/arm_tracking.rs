@@ -22,9 +22,7 @@ use vtuber_core::arm_tracking::{
 };
 use vtuber_core::{FrameSeq, MonoTimeNs};
 
-use crate::filter::damped::{
-    DEFAULT_MAX_DT_SEC, ResidualResponse, critically_damped_step, observation_rate,
-};
+use crate::filter::damped::{DEFAULT_MAX_DT_SEC, critically_damped_step};
 use crate::loss_blend::{LossBlend, LossBlendProfile};
 
 /// A fixed subject arm length measured at calibration, never remeasured per tick.
@@ -117,22 +115,22 @@ impl PointSmootherState {
     }
 }
 
-/// Residual-adaptive response for observed wrist and elbow positions.
+/// Time constant of the observed wrist and elbow positions, in seconds.
 ///
-/// A hand follows the observation with the fast constant while the observation
-/// continues the hand's own motion, and eases with the slow one when a single
-/// observation jumps. The fast value is several times quicker than the face
-/// filter: an observed hand that is genuinely moving must reach the avatar
-/// without the arm-length lag a slower filter would add, and the jump response
-/// is what keeps a detection teleport from snapping.
-const ARM_POSITION_RESPONSE: ResidualResponse = ResidualResponse::new(0.05, 0.15, 8.0);
+/// An observed hand that is genuinely moving must reach the avatar without the
+/// arm-length lag a slower filter would add, so this is a fixed response and
+/// not one that stretches with the observation's speed: a fast hand is motion,
+/// not an outlier. A detection teleport is rejected outright by
+/// [`ArmTrackingProfile::max_wrist_step`] instead, and a real loss is eased back
+/// by the shared loss blend.
+const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.05;
 
-/// Residual-adaptive response for the observed palm plane.
+/// Time constant of the observed palm plane, in seconds.
 ///
-/// An orientation flip is far more jarring than positional lag, and a hand
-/// reacquiring after a frame-out often lands at a very different normal, so the
-/// palm stays several times slower than the wrist even on its fast response.
-const ARM_PALM_RESPONSE: ResidualResponse = ResidualResponse::new(0.30, 0.60, 4.0);
+/// The palm normal is far noisier than a joint position — it comes from a cross
+/// product of two keypoints — and an orientation flip reads worse than a
+/// positional lag, so it is smoothed several times slower than the wrist.
+const ARM_PALM_TIME_CONSTANT_SEC: f32 = 0.30;
 
 /// Visibility at or above which an arm observation counts as good.
 const ARM_ENTER_VISIBILITY: f32 = 0.7;
@@ -231,23 +229,17 @@ impl ArmSmootherState {
         }
     }
 
-    fn advance(
-        &mut self,
-        target: ArmTrackingTarget,
-        dt_sec: f32,
-        position_rate: f32,
-        palm_rate: f32,
-    ) -> ArmTrackingTarget {
+    fn advance(&mut self, target: ArmTrackingTarget, dt_sec: f32) -> ArmTrackingTarget {
         let dt_sec = dt_sec.clamp(0.0, DEFAULT_MAX_DT_SEC);
-        let position_tau = ARM_POSITION_RESPONSE.time_constant_sec(position_rate);
-        let palm_tau = ARM_PALM_RESPONSE.time_constant_sec(palm_rate);
-        self.wrist.step(target.wrist, dt_sec, position_tau);
-        self.elbow.step(target.elbow_pole, dt_sec, position_tau);
+        self.wrist
+            .step(target.wrist, dt_sec, ARM_POSITION_TIME_CONSTANT_SEC);
+        self.elbow
+            .step(target.elbow_pole, dt_sec, ARM_POSITION_TIME_CONSTANT_SEC);
         if self.palm.is_none() {
             self.palm = target.palm_normal.map(PointSmootherState::new);
         }
         if let (Some(palm), Some(normal)) = (self.palm.as_mut(), target.palm_normal) {
-            palm.step(normal, dt_sec, palm_tau);
+            palm.step(normal, dt_sec, ARM_PALM_TIME_CONSTANT_SEC);
         }
         let plane = limit_plane_rotation(
             self.last_plane,
@@ -613,12 +605,6 @@ struct ArmSideState {
     last_pole: Option<[f32; 3]>,
     /// Channel presence of the latest consumed frame, reused on held ticks.
     presence: ChannelPresence,
-    /// Rate the latest wrist observation departed from the previous one at, in
-    /// calibrated arm lengths per second. Drives the adaptive position response.
-    position_rate: f32,
-    /// Rate the latest observed palm normal departed from the previous one at,
-    /// in radians per second. Drives the adaptive palm response.
-    palm_rate: f32,
     /// A real wrist gap happened since the last adopted target, so the next
     /// usable observation is a reacquisition rather than a candidate teleport.
     wrist_lost: bool,
@@ -639,8 +625,6 @@ impl ArmSideState {
             output: None,
             last_pole: None,
             presence: ChannelPresence::NONE,
-            position_rate: 0.0,
-            palm_rate: 0.0,
             wrist_lost: false,
             adoption: ArmAdoptionGate::new(),
             wrist_blend: LossBlend::new(),
@@ -668,12 +652,7 @@ impl ArmSideState {
     /// allows in one observation is quarantined as a detection teleport; the
     /// first usable observation after a real loss is instead accepted as a
     /// reacquisition.
-    fn consume(
-        &mut self,
-        arm: Option<&ArmLandmarks>,
-        profile: &ArmTrackingProfile,
-        observation_dt_ns: u64,
-    ) {
+    fn consume(&mut self, arm: Option<&ArmLandmarks>, profile: &ArmTrackingProfile) {
         let quality = arm.map(|value| assess_arm_observation(value, profile));
         // Only the Pose joint visibilities rank how well located the arm is.
         // The Hand Landmarker adds presence, not a score: its handedness
@@ -713,7 +692,6 @@ impl ArmSideState {
             self.presence = ChannelPresence::NONE;
             return;
         }
-        let reacquiring = self.wrist_lost;
         self.wrist_lost = false;
 
         let mut target = target;
@@ -734,40 +712,6 @@ impl ArmSideState {
             self.smoother = Some(ArmSmootherState::new(target));
             self.output = Some(target);
         }
-        // Measure the departure before overwriting the previous observation, so
-        // a genuine fast hand stays on the fast response while a detection
-        // teleport or a reacquisition is absorbed. A gap leaves no contiguous
-        // observation to compare with, so the first frame after a loss is
-        // treated as a departure too. A missing previous palm normal carries no
-        // orientation evidence and does not slow the palm.
-        let observation_dt_sec = observation_dt_ns as f32 * 1.0e-9;
-        self.position_rate = if reacquiring {
-            f32::INFINITY
-        } else {
-            self.source.map_or(0.0, |previous| {
-                observation_rate(
-                    (vector(target.wrist) - vector(previous.wrist)).norm(),
-                    observation_dt_sec,
-                )
-            })
-        };
-        self.palm_rate = if reacquiring {
-            f32::INFINITY
-        } else {
-            match (
-                self.source.and_then(|previous| previous.palm_normal),
-                target.palm_normal,
-            ) {
-                (Some(previous), Some(current)) => observation_rate(
-                    vector(previous)
-                        .dot(&vector(current))
-                        .clamp(-1.0, 1.0)
-                        .acos(),
-                    observation_dt_sec,
-                ),
-                _ => 0.0,
-            }
-        };
         self.source = Some(target);
         self.presence = ChannelPresence {
             wrist: true,
@@ -796,8 +740,7 @@ impl ArmSideState {
             .advance(now, self.presence.palm, &profile.blend);
         if let (Some(source), Some(smoother)) = (self.source, self.smoother.as_mut()) {
             let dt_sec = render_dt_ns.unwrap_or(0) as f32 * 1.0e-9;
-            self.output =
-                Some(smoother.advance(source, dt_sec, self.position_rate, self.palm_rate));
+            self.output = Some(smoother.advance(source, dt_sec));
         }
     }
 
@@ -877,16 +820,13 @@ pub fn step_arm_tracking(
         frame.source_seq.0 > seq.0 && frame.captured_at.0 > captured_at.0
     });
     if is_new {
-        let previous_captured = state.last_consumed.map(|(_, captured_at)| captured_at.0);
         state.last_consumed = Some((frame.source_seq, frame.captured_at));
-        let observation_dt_ns =
-            previous_captured.map_or(0, |previous| frame.captured_at.0.saturating_sub(previous));
         let (left, right) = match &frame.observation {
             Some(value) => (Some(&value.left), Some(&value.right)),
             None => (None, None),
         };
-        state.left.consume(left, profile, observation_dt_ns);
-        state.right.consume(right, profile, observation_dt_ns);
+        state.left.consume(left, profile);
+        state.right.consume(right, profile);
     }
     state.left.advance(now, render_dt_ns, profile);
     state.right.advance(now, render_dt_ns, profile);
@@ -1196,7 +1136,7 @@ mod tests {
             let mut smoother = ArmSmootherState::new(target);
             let mut value = target;
             for _ in 0..120 {
-                value = smoother.advance(target, step_sec, 0.0, 0.0);
+                value = smoother.advance(target, step_sec);
             }
             assert_eq!(value, target);
         }
@@ -1207,7 +1147,7 @@ mod tests {
         let mut smoother = ArmSmootherState::new(target(0.0));
         let mut previous = 0.0;
         for _ in 0..120 {
-            let value = smoother.advance(target(1.0), RENDER_STEP_SEC, 0.0, 0.0);
+            let value = smoother.advance(target(1.0), RENDER_STEP_SEC);
             assert!(value.wrist[0] >= previous);
             assert!(value.wrist[0] <= 1.0);
             previous = value.wrist[0];
@@ -1222,38 +1162,67 @@ mod tests {
         for frame in 0..240 {
             let raw = target(if frame % 2 == 0 { 0.01 } else { -0.01 });
             let mut copy = smoother;
-            let value = smoother.advance(raw, RENDER_STEP_SEC, 0.0, 0.0);
-            assert_eq!(value, copy.advance(raw, RENDER_STEP_SEC, 0.0, 0.0));
+            let value = smoother.advance(raw, RENDER_STEP_SEC);
+            assert_eq!(value, copy.advance(raw, RENDER_STEP_SEC));
             squared += value.wrist[0].powi(2);
         }
         assert!((squared / 240.0).sqrt() < 0.005);
     }
 
     #[test]
-    fn adaptive_response_follows_a_smooth_observation_faster_than_a_jump() {
+    fn a_fast_hand_is_followed_at_the_same_rate_as_a_slow_one() {
+        // The response is a fixed time constant, so the fraction of the
+        // remaining distance covered per render tick does not depend on how far
+        // the observation moved. A hand crossing the body is motion, not a jump,
+        // and must not be slowed for being quick.
         let target = |value: f32| ArmTrackingTarget {
             wrist: [value, 0.0, 0.0],
             elbow_pole: [value, 0.0, 0.0],
             palm_normal: None,
         };
         let dt = 1.0 / 60.0;
-        // One arm length per second is a plausible hand speed; twenty is a
-        // detection jump.
-        let mut smooth = ArmSmootherState::new(target(0.0));
-        let mut jump = ArmSmootherState::new(target(0.0));
-        let smooth = smooth.advance(target(1.0), dt, 1.0, 0.0);
-        let jump = jump.advance(target(1.0), dt, 20.0, 0.0);
+        let followed = |distance: f32| {
+            let mut smoother = ArmSmootherState::new(target(0.0));
+            smoother.advance(target(distance), dt).wrist[0] / distance
+        };
+        // A slow drift and a hand thrown across the body in one observation.
+        let slow = followed(0.05);
+        let fast = followed(1.5);
         assert!(
-            smooth.wrist[0] > jump.wrist[0] * 3.0,
-            "a smooth hand must use the fast response: smooth={}, jump={}",
-            smooth.wrist[0],
-            jump.wrist[0]
+            (slow - fast).abs() < 1.0e-5,
+            "the followed fraction must not depend on the step: {slow} vs {fast}"
         );
-        assert!(
-            jump.wrist[0] < 0.05,
-            "a jump must be absorbed, not followed: {}",
-            jump.wrist[0]
-        );
+    }
+
+    #[test]
+    fn a_teleport_is_rejected_before_it_reaches_the_smoother() {
+        // The fixed response above follows any step, so the discontinuity guard
+        // is `max_wrist_step` rather than a stiffer filter. A wrist more than
+        // one calibrated arm length away in a single observation is dropped and
+        // never becomes a target; a plausible step is followed.
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let settled = state.left.source.unwrap();
+
+        let teleport = arm_at([0.3, 0.2, 0.0], [-0.5, -0.4, 0.0]);
+        let now = TRACKED_FRAMES * OBSERVATION_STEP_NS;
+        let _ = feed(&mut state, teleport, 500, now, &profile);
+        assert_eq!(state.left.source, Some(settled));
+
+        // The same distance reached over several observations is ordinary motion
+        // and is adopted, because the guard looks at one step, not at speed.
+        let mut state = tracked_state(base, &profile);
+        for step in 1..=10u64 {
+            let fraction = step as f32 / 10.0;
+            let moved = arm_at(
+                [0.3 * fraction, 0.2 * fraction, 0.0],
+                [0.3 - 0.8 * fraction, -0.4, 0.0],
+            );
+            let now = TRACKED_FRAMES * OBSERVATION_STEP_NS + step * OBSERVATION_STEP_NS;
+            let _ = feed(&mut state, moved, 500 + step, now, &profile);
+        }
+        assert_ne!(state.left.source, Some(settled));
     }
 
     fn low_visibility(point: PoseWorldLandmark) -> PoseWorldLandmark {
@@ -1355,16 +1324,12 @@ mod tests {
         let dt = 1.0 / 60.0;
         let mut smoother = ArmSmootherState::new(target([1.0, 0.0, 0.0]));
         let axis = vector([0.0, 0.0, 1.0]);
-        let mut previous = smoother
-            .advance(target([1.0, 0.0, 0.0]), dt, 0.0, 0.0)
-            .elbow_pole;
+        let mut previous = smoother.advance(target([1.0, 0.0, 0.0]), dt).elbow_pole;
 
         // A one-observation quarter turn is paced out at the capped rate.
         let mut turned = 0.0;
         for _ in 0..240 {
-            let value = smoother
-                .advance(target([0.0, 1.0, 0.0]), dt, 0.0, 0.0)
-                .elbow_pole;
+            let value = smoother.advance(target([0.0, 1.0, 0.0]), dt).elbow_pole;
             let before = perpendicular(vector(previous), axis).normalize();
             let after = perpendicular(vector(value), axis).normalize();
             let step = before.dot(&after).clamp(-1.0, 1.0).acos();
