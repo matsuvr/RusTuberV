@@ -640,6 +640,7 @@ pub(crate) fn resolved_from_solution(
             weak_follow_delta(
                 upper_model_delta,
                 rest.global_rotation,
+                chain.rest.elbow.position - chain.rest.upper_arm.position,
                 profile.shoulder_follow_weight,
             )
             .map(|delta| ResolvedBoneDelta { entity, delta })
@@ -684,10 +685,22 @@ fn normalized_or_identity(value: Quat) -> Option<Quat> {
     }
 }
 
-fn weak_follow_delta(model_delta: Quat, rest_global: Quat, weight: f32) -> Option<Quat> {
+fn weak_follow_delta(
+    model_delta: Quat,
+    rest_global: Quat,
+    rest_arm_direction: Vec3,
+    weight: f32,
+) -> Option<Quat> {
     let model_delta = normalized_or_identity(model_delta)?;
-    let (axis, angle) = model_delta.to_axis_angle();
-    let angle = (angle * weight).min(SHOULDER_FOLLOW_MAX_RADIANS);
+    // The clavicle follows arm elevation about a rig-defined axis. Copying
+    // the upper arm's full axis-angle also copied its changing twist axis,
+    // wobbling the shoulder even while its angle stayed at the five-degree cap.
+    let lateral = finite_normalized(rest_arm_direction)?;
+    let axis = finite_normalized(lateral.cross(Vec3::Y))?;
+    let up = axis.cross(lateral);
+    let elevation = (model_delta * lateral).dot(up).clamp(-1.0, 1.0).asin();
+    let angle =
+        (elevation * weight).clamp(-SHOULDER_FOLLOW_MAX_RADIANS, SHOULDER_FOLLOW_MAX_RADIANS);
     let weak_model_delta = Quat::from_axis_angle(axis, angle);
     normalized_or_identity(rest_global.inverse() * weak_model_delta * rest_global)
 }
@@ -1141,6 +1154,49 @@ fn refresh_subtree(
     if let Ok(child_entities) = children.get(entity) {
         for child in child_entities.iter() {
             refresh_subtree(child, current_global, transforms, children, visited);
+        }
+    }
+}
+
+#[cfg(test)]
+mod shoulder_follow_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn shoulder_axis_and_elevation_do_not_follow_upper_arm_twist() {
+        for lateral in [Vec3::X, Vec3::NEG_X] {
+            let axis = lateral.cross(Vec3::Y);
+            for rest in [Quat::IDENTITY, Quat::from_rotation_y(0.4)] {
+                let swing = Quat::from_axis_angle(axis, -0.2);
+                let baseline = weak_follow_delta(swing, rest, lateral, 0.35).unwrap();
+                for twist in [-2.0, 0.0, 2.0] {
+                    let upper = swing * Quat::from_axis_angle(lateral, twist);
+                    let shoulder = weak_follow_delta(upper, rest, lateral, 0.35).unwrap();
+                    assert!(
+                        shoulder.dot(baseline).abs() > 1.0 - 1.0e-6,
+                        "upper-arm twist changed the shoulder: {twist}"
+                    );
+                    let model = rest * shoulder * rest.inverse();
+                    assert!(
+                        model.xyz().cross(axis).length() < 1.0e-6,
+                        "shoulder rotation left its rest elevation axis"
+                    );
+                }
+                let raised =
+                    weak_follow_delta(Quat::from_axis_angle(axis, 0.1), rest, lateral, 0.35)
+                        .unwrap();
+                assert!(
+                    raised.angle_between(baseline) > 0.05,
+                    "arm elevation must still reach the shoulder"
+                );
+                let capped =
+                    weak_follow_delta(Quat::from_axis_angle(axis, 1.0), rest, lateral, 0.35)
+                        .unwrap();
+                assert!(
+                    capped.angle_between(Quat::IDENTITY) <= SHOULDER_FOLLOW_MAX_RADIANS + 1.0e-5
+                );
+            }
         }
     }
 }
