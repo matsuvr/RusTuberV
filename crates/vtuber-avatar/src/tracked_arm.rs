@@ -8,7 +8,7 @@ use vtuber_core::arm_tracking::{ArmBlendWeight, ArmTrackingTarget, HandFingerPos
 
 use crate::arm::{
     ArmChainBinding, ArmIkError, ArmIkInput, ArmIkSolution, ArmIkTarget, ArmPoseProfile,
-    ArmRestGeometry, FingerJointRestReferences, solve_two_bone_arm,
+    ArmRestGeometry, FingerJointRestBinding, FingerJointRestReferences, solve_two_bone_arm,
 };
 use crate::arm_pipeline::ArmPipelineError;
 use crate::arm_pose::{
@@ -183,7 +183,7 @@ pub fn observed_finger_deltas(
     let [thumb_mcp, thumb_ip] = observed.thumb;
     let [x, y, z] = observed.thumb_direction;
     let thumb = ResolvedFingerJointPose {
-        metacarpal: opening_delta(
+        metacarpal: thumb_metacarpal_delta(
             rest.thumb.metacarpal,
             rest.thumb.proximal,
             across * x + forward * y + normal * z,
@@ -306,6 +306,32 @@ fn observed_joint_bend(
         (angle - rest_angle) * weight,
         Some(normal),
     )
+}
+
+/// Preserve both the elevation and in-plane opening of the CMC-to-MCP ray.
+fn thumb_metacarpal_delta(
+    metacarpal: Option<FingerJointRestBinding>,
+    proximal: Option<FingerJointRestBinding>,
+    observed_ray: Vec3,
+    normal: Vec3,
+    weight: f32,
+) -> Option<ResolvedBoneDelta> {
+    let rest = crate::arm::finite_normalized(proximal?.rest.position - metacarpal?.rest.position)?;
+    let observed = crate::arm::finite_normalized(observed_ray)?;
+    let elevation_delta =
+        observed.dot(normal).clamp(-1.0, 1.0).asin() - rest.dot(normal).clamp(-1.0, 1.0).asin();
+    let elevation = crate::arm_pose::resolve_finger_joint(
+        metacarpal,
+        proximal,
+        None,
+        elevation_delta * weight,
+        Some(normal),
+    )?;
+    let opening = opening_delta(metacarpal, proximal, observed_ray, normal, weight)?;
+    Some(ResolvedBoneDelta {
+        entity: elevation.entity,
+        delta: opening.delta * elevation.delta,
+    })
 }
 
 /// Compare the same segment in the rest palm frame and rotate about its normal.
@@ -995,6 +1021,92 @@ mod tests {
         let expected =
             Quat::from_axis_angle(rest_palm_normal(&chain).unwrap(), angle) * rest_direction;
         near(opened.delta * rest_direction, expected);
+    }
+
+    #[test]
+    fn thumb_cmc_direction_keeps_elevation_and_opening_through_tracking() {
+        for rest_elevation in [0.0, 0.25] {
+            let mut chain = articulated_chain();
+            let normal = Vec3::Y;
+            let flat_ray = Vec3::new(0.018, 0.0, 0.013);
+            let axis = flat_ray.cross(normal).normalize();
+            let rest_ray = Quat::from_axis_angle(axis, rest_elevation) * flat_ray;
+            let rotation = Quat::from_rotation_x(0.4) * Quat::from_rotation_z(-0.6);
+            let thumb = &mut chain.finger_rest.thumb;
+            let cmc = thumb.metacarpal.as_mut().unwrap();
+            cmc.rest.global_rotation = rotation;
+            cmc.rest.local_rotation = rotation;
+            let origin = cmc.rest.position;
+            let mcp = thumb.proximal.as_mut().unwrap();
+            mcp.rest.position = origin + rest_ray;
+            mcp.rest.local_rotation = rotation.inverse();
+            thumb.distal.as_mut().unwrap().rest.position = origin + rest_ray * 2.0;
+            let baseline = rest_observation(&chain, Quat::IDENTITY, Quat::IDENTITY);
+            let solution = solve_tracked_arm(chain.rest, baseline, Quat::IDENTITY).unwrap();
+
+            for (opening, elevation) in [(0.35, 0.0), (0.0, 0.6), (0.35, 0.6), (-0.35, -0.6)] {
+                // Keep the CMC, palm, arm and four fingers fixed. Only rotate
+                // MCP/IP/tip around CMC; rest_observation extends IP to tip.
+                let movement =
+                    Quat::from_axis_angle(normal, opening) * Quat::from_axis_angle(axis, elevation);
+                let mut observed_chain = chain;
+                for joint in [
+                    &mut observed_chain.finger_rest.thumb.proximal,
+                    &mut observed_chain.finger_rest.thumb.distal,
+                ] {
+                    let joint = joint.as_mut().unwrap();
+                    joint.rest.position = origin + movement * (joint.rest.position - origin);
+                }
+                let target = rest_observation(&observed_chain, Quat::IDENTITY, Quat::IDENTITY);
+                let observed = target.fingers.unwrap();
+                assert!(observed.thumb.into_iter().all(|bend| bend.abs() < 1.0e-5));
+                near(Vec3::from(target.wrist), Vec3::from(baseline.wrist));
+                near(
+                    Vec3::from(target.palm_normal.unwrap()),
+                    Vec3::from(baseline.palm_normal.unwrap()),
+                );
+
+                for weight in [0.0, 0.5, 1.0] {
+                    let fingers = observed_finger_deltas(&chain, observed, weight);
+                    if weight == 0.0 {
+                        assert!(fingers.is_none());
+                    }
+                    let pose = resolved_tracked_arm_pose(&chain, solution, None, fingers).unwrap();
+                    let delta = pose.fingers.thumb.metacarpal.unwrap().delta;
+                    let applied = rotation * delta * rotation.inverse() * rest_ray.normalize();
+                    let angle = rest_elevation + elevation * weight;
+                    let expected = Quat::from_axis_angle(normal, opening * weight)
+                        * (flat_ray.normalize() * angle.cos() + normal * angle.sin());
+                    near(applied, expected);
+                    if weight == 1.0 {
+                        let observed_ray = observed_chain
+                            .finger_rest
+                            .thumb
+                            .proximal
+                            .unwrap()
+                            .rest
+                            .position
+                            - origin;
+                        near(applied, observed_ray.normalize());
+                    }
+                    if weight > 0.0 {
+                        for joint in [pose.fingers.thumb.proximal, pose.fingers.thumb.distal] {
+                            assert!(joint.unwrap().delta.angle_between(Quat::IDENTITY) < 1.0e-5);
+                        }
+                    }
+                    for finger in [
+                        pose.fingers.index,
+                        pose.fingers.middle,
+                        pose.fingers.ring,
+                        pose.fingers.little,
+                    ] {
+                        for joint in [finger.proximal, finger.intermediate, finger.distal] {
+                            assert!(joint.unwrap().delta.angle_between(Quat::IDENTITY) < 1.0e-5);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

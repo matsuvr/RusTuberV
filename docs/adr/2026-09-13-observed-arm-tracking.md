@@ -207,8 +207,11 @@ normalは軸性ベクトルなので、左右ミラーでは屈曲と手ロー�
 ローカルXYを保存する。各関節の角度の絶対値には既存の上限を使う。
 `resolve_finger_joint`と既存bindingを再利用し、観測経路は節とrest掌normalから
 曲げ軸を求め、著作者のrest回転でローカルdeltaへ戻す。仮想腕の緩いcurlは従来の
-著作者軸を使う。4指の付け根はrestの仰角・開きとの差をproximalへ適用し、親指の
-開きは同じrest掌基準で比較してmetacarpalへ適用する。隣接するrest節がある関節は
+著作者軸を使う。4指の付け根はrestの仰角・開きとの差をproximalへ適用する。
+親指もCMC→MCPのrestと観測の符号付き仰角差を`resolve_finger_joint`へ渡し、
+面内の開きと`opening.delta * elevation.delta`の順に合成してmetacarpalへ適用する
+（#190 再レビューR4）。4指のspread用`opening_delta`は面内処理を維持する。
+隣接するrest節がある関節は
 その曲がりを差し引く。VRMにtip骨はないため末節の軸は直前の節から取る。
 
 指形状は平滑化より前に手ローカル化する。`observed_finger_deltas`はIK解や
