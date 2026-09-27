@@ -771,7 +771,13 @@ fn resolve_finger_joints(
     }
 }
 
-fn resolve_finger_joint(
+/// Builds the rest-relative rotation for one finger joint's flexion.
+///
+/// The angle is an anatomical flexion; the axis it turns about comes from the
+/// model's own rest geometry, so a rig that authors its fingers on unusual axes
+/// still bends them the way its bones actually hinge. Shared with the relaxed
+/// curl above, which is the same rotation with one angle for every joint.
+pub(crate) fn resolve_finger_joint(
     joint: Option<FingerJointRestBinding>,
     next: Option<FingerJointRestBinding>,
     previous: Option<FingerJointRestBinding>,

@@ -1342,7 +1342,18 @@ fn resolve_tracked_side(
             weights.palm,
         )
     });
-    crate::tracked_arm::resolved_tracked_arm_pose(chain, solution, hand_delta).ok()
+    // The fingers are read from the solution's hand orientation, so they are
+    // resolved after the palm twist rather than before it.
+    let fingers = target.fingers.and_then(|fingers| {
+        crate::tracked_arm::observed_finger_deltas(
+            chain,
+            fingers,
+            &solution,
+            tracking_to_rest,
+            weights.fingers,
+        )
+    });
+    crate::tracked_arm::resolved_tracked_arm_pose(chain, solution, hand_delta, fingers).ok()
 }
 
 /// The virtual target used as the blend source for observed arms.
@@ -2399,6 +2410,89 @@ mod tests {
     }
 
     #[test]
+    fn tracked_side_applies_the_observed_fingers_through_the_finger_weight() {
+        // The finger channel is its own weight, so a hand with fingers observed
+        // but the palm channel weighted out still articulates, and a zero
+        // finger weight leaves the rest pose the shared conversion produced.
+        let mut chain = chain_with_fingers(ArmSide::Right);
+        let wrist = chain.rest.wrist.position;
+        let row = |dx: [f32; 3], z: f32| crate::arm::FingerJointRestReferences {
+            metacarpal: None,
+            proximal: Some(crate::arm::FingerJointRestBinding {
+                entity: bevy::prelude::Entity::from_raw_u32(40).unwrap(),
+                rest: crate::arm::RestSpaceBonePose {
+                    position: wrist + Vec3::new(dx[0], 0.0, z),
+                    global_rotation: Quat::IDENTITY,
+                    local_rotation: Quat::IDENTITY,
+                },
+            }),
+            intermediate: Some(crate::arm::FingerJointRestBinding {
+                entity: bevy::prelude::Entity::from_raw_u32(41).unwrap(),
+                rest: crate::arm::RestSpaceBonePose {
+                    position: wrist + Vec3::new(dx[1], 0.0, z),
+                    global_rotation: Quat::IDENTITY,
+                    local_rotation: Quat::IDENTITY,
+                },
+            }),
+            distal: Some(crate::arm::FingerJointRestBinding {
+                entity: bevy::prelude::Entity::from_raw_u32(42).unwrap(),
+                rest: crate::arm::RestSpaceBonePose {
+                    position: wrist + Vec3::new(dx[2], 0.0, z),
+                    global_rotation: Quat::IDENTITY,
+                    local_rotation: Quat::IDENTITY,
+                },
+            }),
+        };
+        chain.finger_rest.index = row([0.02, 0.04, 0.055], 0.0);
+        chain.finger_rest.middle = row([0.02, 0.04, 0.055], 0.002);
+        chain.finger_rest.ring = row([0.02, 0.04, 0.055], -0.002);
+        chain.finger_rest.little = row([0.02, 0.04, 0.055], -0.004);
+
+        let target = vtuber_core::arm_tracking::ArmTrackingTarget {
+            wrist: [0.4, -0.3, 0.5],
+            elbow_pole: [0.7, -0.5, -0.1],
+            palm_normal: None,
+            fingers: Some(vtuber_core::arm_tracking::HandFingerPose {
+                fingers: [[0.9, 0.9, 0.4]; 4],
+                thumb: [0.3, 0.3],
+                thumb_direction: [1.0, 0.0, 0.0],
+            }),
+        };
+        let resolve = |fingers: f32| {
+            resolve_tracked_side(
+                Some(&chain),
+                None,
+                DynamicArmProfile::default(),
+                0.7,
+                Some(target),
+                vtuber_core::arm_tracking::ArmBlendWeight {
+                    wrist: 1.0,
+                    pole: 1.0,
+                    palm: 0.0,
+                    fingers,
+                },
+                Quat::IDENTITY,
+            )
+        };
+        let curled = resolve(1.0).expect("a curled hand resolves");
+        let delta = curled.fingers.index.proximal.expect("index proximal");
+        assert!(
+            delta.delta.angle_between(Quat::IDENTITY) > 0.2,
+            "the observed curl must reach the bone: {:?}",
+            delta.delta
+        );
+        // The elbow and wrist are solved from the observation, not from the
+        // finger articulation, so a curl cannot move the hand. A zero finger
+        // weight leaves the identity deltas the shared conversion already
+        // produced, which the compositor skips.
+        let rest = resolve(0.0).expect("the rest pose still resolves");
+        let straight = rest.fingers.index.proximal.expect("index proximal");
+        assert!(straight.delta.angle_between(Quat::IDENTITY) < 1.0e-5);
+        assert_eq!(rest.lower_arm_delta, curled.lower_arm_delta);
+        assert_eq!(rest.upper_arm_delta, curled.upper_arm_delta);
+    }
+
+    #[test]
     fn tracked_side_respects_the_coronal_descent_limit() {
         // An observed hand that crossed the body: the analytic shortest-arc
         // solve alone wraps the upper arm past the shoulder's range (the
@@ -2409,6 +2503,7 @@ mod tests {
             wrist: [-0.55, 0.10, 0.55],
             elbow_pole: [-0.20, -0.40, -0.20],
             palm_normal: None,
+            fingers: None,
         };
         let geometrized =
             crate::tracked_arm::tracked_arm_ik_target(chain.rest, target, Quat::IDENTITY);
@@ -2485,11 +2580,13 @@ mod tests {
             wrist: [0.4, -0.3, 0.5],
             elbow_pole: [0.7, -0.5, -0.1],
             palm_normal: Some([0.0, 0.0, 1.0]),
+            fingers: None,
         };
         let weights = |palm| ArmBlendWeight {
             wrist: 1.0,
             pole: 1.0,
             palm,
+            fingers: 0.0,
         };
         let resolve = |target: ArmTrackingTarget, palm: f32| {
             resolve_tracked_side(

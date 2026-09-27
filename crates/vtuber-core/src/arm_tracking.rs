@@ -89,6 +89,32 @@ pub struct PoseArmFrame {
     pub observation: Option<PoseArmObservation>,
 }
 
+/// Observed finger articulation of one hand, in the hand task's own basis.
+///
+/// Every angle is an anatomical flexion in radians with 0 at a straight joint,
+/// measured from the landmark triple that surrounds the joint and clamped to
+/// what that kind of joint can reach. These are joint *angles*, not rotations:
+/// the axis each one turns about is the model's own rest geometry, so a rig that
+/// authors its fingers on different axes still bends them correctly. The hand's
+/// origin is hand-centred, so nothing here substitutes the hand's wrist for the
+/// body's — only differences inside one hand are used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandFingerPose {
+    /// Index, middle, ring, and little flexion as `[mcp, pip, dip]` radians,
+    /// in the Hand Landmarker's landmark order.
+    pub fingers: [[f32; 3]; 4],
+    /// Thumb flexion as `[mcp, ip]` radians. The thumb's joints do not share the
+    /// four fingers' single bend axis, which is why it is kept separate.
+    pub thumb: [f32; 2],
+    /// Unit vector from the wrist toward the thumb's carpometacarpal joint, in
+    /// the canonical tracking basis.
+    ///
+    /// A direction rather than an angle, because the angle it opens to depends
+    /// on the rig's rest thumb. Comparing the two directions leaves the rest
+    /// geometry on the avatar side, where the rest pose lives.
+    pub thumb_direction: [f32; 3],
+}
+
 /// Shoulder-relative target in units of the subject's calibrated total arm length.
 ///
 /// The canonical front-view basis is +X image-right, +Y up, +Z toward the
@@ -108,6 +134,11 @@ pub struct ArmTrackingTarget {
     /// geometry's index/pinky cross product, so no per-side sign is applied.
     /// `None` means "no palm observation", never a fabricated neutral twist.
     pub palm_normal: Option<[f32; 3]>,
+    /// Observed finger articulation, when the hand's landmarks defined it.
+    ///
+    /// `None` means "no finger observation", never a fabricated rest pose; the
+    /// avatar keeps its own rest fingers in that case.
+    pub fingers: Option<HandFingerPose>,
 }
 
 impl ArmTrackingTarget {
@@ -115,7 +146,9 @@ impl ArmTrackingTarget {
     ///
     /// The palm normal is the cross product of two landmark directions, so a
     /// reflection flips its sign in addition to reflecting it: `n -> -R n`,
-    /// which is `[x, -y, -z]` in the canonical basis.
+    /// which is `[x, -y, -z]` in the canonical basis. The thumb ray is a plain
+    /// direction, so it is only reflected. Flexion angles are scalars and pass
+    /// through unchanged.
     #[must_use]
     pub fn mirrored(self) -> Self {
         let reflect = |[x, y, z]: [f32; 3]| [-x, y, z];
@@ -124,6 +157,11 @@ impl ArmTrackingTarget {
             wrist: reflect(self.wrist),
             elbow_pole: reflect(self.elbow_pole),
             palm_normal: self.palm_normal.map(reflect_axial),
+            fingers: self.fingers.map(|fingers| HandFingerPose {
+                fingers: fingers.fingers,
+                thumb: fingers.thumb,
+                thumb_direction: reflect(fingers.thumb_direction),
+            }),
         }
     }
 }
@@ -153,10 +191,11 @@ impl ArmTrackingTargets {
 /// How much an observed channel should replace the avatar's virtual arm.
 ///
 /// `wrist` gates the hand position; `pole` gates the observed bend plane;
-/// `palm` gates the observed forearm twist. They are separate so losing an
-/// elbow keeps the visible hand following while the avatar supplies a natural
-/// pole. All are in `0.0..=1.0`; zero means "use the virtual arm", not "the
-/// observation is at the origin".
+/// `palm` gates the observed forearm twist; `fingers` gates the observed finger
+/// articulation. They are separate so losing an elbow keeps the visible hand
+/// following while the avatar supplies a natural pole, and losing a hand
+/// detection keeps the twist and the fingers. All are in `0.0..=1.0`; zero
+/// means "use the virtual arm", not "the observation is at the origin".
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmBlendWeight {
     /// Observed wrist contribution.
@@ -165,6 +204,8 @@ pub struct ArmBlendWeight {
     pub pole: f32,
     /// Observed palm-plane contribution.
     pub palm: f32,
+    /// Observed finger-articulation contribution.
+    pub fingers: f32,
 }
 
 impl ArmBlendWeight {
@@ -173,12 +214,14 @@ impl ArmBlendWeight {
         wrist: 0.0,
         pole: 0.0,
         palm: 0.0,
+        fingers: 0.0,
     };
     /// Fully observed: every channel is trusted.
     pub const ONE: Self = Self {
         wrist: 1.0,
         pole: 1.0,
         palm: 1.0,
+        fingers: 1.0,
     };
 }
 
@@ -244,6 +287,11 @@ mod tests {
             wrist: [0.3, 0.2, 0.4],
             elbow_pole: [0.5, -0.1, 0.2],
             palm_normal: Some([0.1, 0.2, -0.9]),
+            fingers: Some(HandFingerPose {
+                fingers: [[0.1, 0.2, 0.3]; 4],
+                thumb: [0.4, 0.5],
+                thumb_direction: [0.6, 0.7, 0.8],
+            }),
         };
         let targets = ArmTrackingTargets {
             left: Some(left),
@@ -254,6 +302,12 @@ mod tests {
         assert_eq!(mirrored.right.unwrap().wrist, [-0.3, 0.2, 0.4]);
         assert_eq!(mirrored.right.unwrap().elbow_pole, [-0.5, -0.1, 0.2]);
         assert_eq!(mirrored.right.unwrap().palm_normal, Some([0.1, -0.2, 0.9]));
+        // Flexion angles are scalars and survive; the thumb ray is a direction
+        // and is only reflected, unlike the palm normal's cross product.
+        let fingers = mirrored.right.unwrap().fingers.unwrap();
+        assert_eq!(fingers.fingers, [[0.1, 0.2, 0.3]; 4]);
+        assert_eq!(fingers.thumb, [0.4, 0.5]);
+        assert_eq!(fingers.thumb_direction, [-0.6, 0.7, 0.8]);
         assert_eq!(mirrored.mirrored(), targets);
     }
 
@@ -264,6 +318,7 @@ mod tests {
                 wrist: 0.25,
                 pole: 0.5,
                 palm: 0.75,
+                fingers: 1.0,
             },
             right: ArmBlendWeight::ONE,
         };
@@ -272,6 +327,7 @@ mod tests {
         assert_eq!(mirrored.right.wrist, 0.25);
         assert_eq!(mirrored.right.pole, 0.5);
         assert_eq!(mirrored.right.palm, 0.75);
+        assert_eq!(mirrored.right.fingers, 1.0);
         assert_eq!(mirrored.mirrored(), weights);
     }
 
@@ -281,6 +337,7 @@ mod tests {
             wrist: [0.0; 3],
             elbow_pole: [0.0; 3],
             palm_normal: None,
+            fingers: None,
         };
         let frame = ArmControlFrame {
             source_seq: FrameSeq(1),
