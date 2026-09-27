@@ -37,7 +37,7 @@ impl Default for MsmfBackend {
 impl CameraBackend for MsmfBackend {
     fn enumerate(&self) -> Result<Vec<CameraDescriptor>, CameraError> {
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
-            .map_err(|e| CameraError::EnumFailed(format!("{e}")))?;
+            .map_err(|e| map_nokhwa_error(CameraOperation::Enumerate, e))?;
 
         devices.into_iter().map(descriptor_from_info).collect()
     }
@@ -59,7 +59,7 @@ impl CameraBackend for MsmfBackend {
             ),
             ApiBackend::MediaFoundation,
         )
-        .map_err(map_nokhwa_error)?;
+        .map_err(|e| map_nokhwa_error(CameraOperation::Open, e))?;
 
         // Enumerate available formats and pick the best match.
         let candidates = enumerate_format_candidates(&mut camera)?;
@@ -70,9 +70,11 @@ impl CameraBackend for MsmfBackend {
         #[allow(deprecated)]
         camera
             .set_camera_format(nokhwa_fmt)
-            .map_err(map_nokhwa_error)?;
+            .map_err(|e| map_nokhwa_error(CameraOperation::Open, e))?;
 
-        camera.open_stream().map_err(map_nokhwa_error)?;
+        camera
+            .open_stream()
+            .map_err(|e| map_nokhwa_error(CameraOperation::Open, e))?;
 
         let source_format = camera.frame_format();
 
@@ -164,13 +166,39 @@ fn to_nokhwa_format(format: &CameraFormat) -> NokhwaFormat {
     )
 }
 
-/// Map a nokhwa error to our typed error.
-fn map_nokhwa_error(e: nokhwa::NokhwaError) -> CameraError {
-    let msg = format!("{e}");
-    if msg.contains("permission") || msg.contains("access") || msg.contains("denied") {
-        CameraError::PermissionDenied
-    } else {
-        CameraError::OpenFailed(msg)
+/// The camera operation that produced a nokhwa error.
+///
+/// The stage is known at every call site, so it is passed in instead of being
+/// recovered from the error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CameraOperation {
+    Enumerate,
+    Open,
+    ReadFrame,
+    Stop,
+}
+
+/// Classifies a nokhwa error by operation stage.
+///
+/// nokhwa 0.10.11 exposes no structured cause: every `NokhwaError` payload is a
+/// `String` built from a Windows error's `Display`, no variant keeps the HRESULT
+/// or a `source()`, and the MSMF `stop_stream` wrapper is infallible. A refused
+/// permission and a removed device are therefore not determinable here, so this
+/// never claims [`CameraError::PermissionDenied`] or
+/// [`CameraError::Disconnected`] from wording. It keeps the operation stage and
+/// the original text and leaves the cause unclassified. The text is recorded
+/// for diagnosis only; it is never searched or parsed again.
+fn map_nokhwa_error(operation: CameraOperation, error: nokhwa::NokhwaError) -> CameraError {
+    // The stage, not the message, selects the variant, so the same failure at
+    // a different stage stays a different error. This is the single
+    // normalisation point for nokhwa errors, so a stop failure is not wrapped
+    // twice.
+    let detail = error.to_string();
+    match operation {
+        CameraOperation::Enumerate => CameraError::EnumFailed(detail),
+        CameraOperation::Open => CameraError::OpenFailed(detail),
+        CameraOperation::ReadFrame => CameraError::FrameReadFailed(detail),
+        CameraOperation::Stop => CameraError::StopFailed(detail),
     }
 }
 
@@ -194,14 +222,12 @@ impl CameraStream for MsmfStream {
             return Err(CameraError::Disconnected);
         }
 
-        let buffer = self.camera.frame().map_err(|e| {
-            let msg = format!("{e}");
-            if msg.contains("disconnect") || msg.contains("removed") {
-                CameraError::Disconnected
-            } else {
-                CameraError::FrameDecodeFailed(msg)
-            }
-        })?;
+        // A frame that could not be read is not a decode failure, so it gets its
+        // own variant and no decoder is run for it.
+        let buffer = self
+            .camera
+            .frame()
+            .map_err(|e| map_nokhwa_error(CameraOperation::ReadFrame, e))?;
 
         self.seq += 1;
         let now = vtuber_core::monotonic_now().0;
@@ -222,7 +248,7 @@ impl CameraStream for MsmfStream {
     fn stop(&mut self) -> Result<(), CameraError> {
         self.camera
             .stop_stream()
-            .map_err(|e| CameraError::StopFailed(format!("{e}")))
+            .map_err(|e| map_nokhwa_error(CameraOperation::Stop, e))
     }
 }
 
@@ -516,5 +542,90 @@ mod tests {
         assert_eq!(nf.width(), 1280);
         assert_eq!(nf.height(), 720);
         assert_eq!(nf.format(), FrameFormat::MJPEG);
+    }
+
+    #[test]
+    fn the_operation_stage_selects_the_error_variant() {
+        let cases = [
+            (CameraOperation::Enumerate, "enum"),
+            (CameraOperation::Open, "open"),
+            (CameraOperation::ReadFrame, "read"),
+            (CameraOperation::Stop, "stop"),
+        ];
+        for (operation, text) in cases {
+            let error = nokhwa::NokhwaError::GeneralError(text.to_owned());
+            let mapped = map_nokhwa_error(operation, error);
+            let expected = match operation {
+                CameraOperation::Enumerate => "CAMERA_ENUM_FAILED",
+                CameraOperation::Open => "CAMERA_OPEN_FAILED",
+                CameraOperation::ReadFrame => "CAMERA_FRAME_READ_FAILED",
+                CameraOperation::Stop => "CAMERA_STOP_FAILED",
+            };
+            assert!(
+                mapped.to_string().starts_with(expected),
+                "{operation:?} produced {mapped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_and_disconnect_wording_is_not_reparsed() {
+        // nokhwa gives no structured cause, so wording that used to be
+        // substring-matched must now stay inside the stage's own variant.
+        for text in [
+            "Access is denied.",
+            "The device has been removed.",
+            "The device was disconnected.",
+        ] {
+            let open = map_nokhwa_error(
+                CameraOperation::Open,
+                nokhwa::NokhwaError::GeneralError(text.to_owned()),
+            );
+            assert!(matches!(open, CameraError::OpenFailed(_)), "{text}");
+            let read = map_nokhwa_error(
+                CameraOperation::ReadFrame,
+                nokhwa::NokhwaError::GeneralError(text.to_owned()),
+            );
+            assert!(matches!(read, CameraError::FrameReadFailed(_)), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_nokhwa_variant_is_carried_into_the_same_stage_variant() {
+        // The variant is type information nokhwa does provide, so it is kept
+        // as the diagnostic text together with its original wording.
+        let mapped = map_nokhwa_error(
+            CameraOperation::ReadFrame,
+            nokhwa::NokhwaError::ReadFrameError("The device has been removed.".to_owned()),
+        );
+        assert!(
+            matches!(mapped, CameraError::FrameReadFailed(_)),
+            "{mapped:?}"
+        );
+        assert!(
+            mapped.to_string().contains("The device has been removed."),
+            "{mapped}"
+        );
+    }
+
+    #[test]
+    fn a_read_failure_stays_distinct_from_a_decode_failure() {
+        let read = map_nokhwa_error(
+            CameraOperation::ReadFrame,
+            nokhwa::NokhwaError::GeneralError("busy".into()),
+        );
+        let decode = decode_frame(
+            &nokhwa::Buffer::new(Resolution::new(1, 1), &[], FrameFormat::NV12),
+            FrameFormat::NV12,
+            &CameraFormat {
+                width: 1,
+                height: 1,
+                fps_numerator: 30,
+                fps_denominator: 1,
+                format: PixelFormat::Bgr8,
+            },
+        );
+        assert!(matches!(read, CameraError::FrameReadFailed(_)));
+        assert!(matches!(decode, Err(CameraError::FrameDecodeFailed(_))));
     }
 }
