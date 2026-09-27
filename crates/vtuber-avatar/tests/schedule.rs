@@ -129,6 +129,17 @@ fn avatar_schedule_ordering_matches_design() {
                 ("update_direct_look_at_input", "trace_gaze"),
                 ("trace_gaze", "apply_tracked_expressions"),
                 ("apply_tracked_expressions", "trace_expressions"),
+                // Both arm target stages sample the torso bone the arms hang
+                // from, so they must run after every writer of that bone's
+                // global rotation. Reading it before either writer would use
+                // the pose the previous frame left behind.
+                ("apply_direct_body_tracking", "update_dynamic_arm_targets"),
+                ("apply_direct_body_position", "update_dynamic_arm_targets"),
+                ("apply_direct_body_tracking", "update_tracked_arm_targets"),
+                ("apply_direct_body_position", "update_tracked_arm_targets"),
+                ("apply_direct_body_position", "apply_default_arm_pose"),
+                ("update_dynamic_arm_targets", "update_tracked_arm_targets"),
+                ("update_tracked_arm_targets", "apply_default_arm_pose"),
             ] {
                 assert_before(schedule, before, after);
             }

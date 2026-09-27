@@ -18,7 +18,7 @@ pub const SAMPLE_INTERVAL_SECONDS: f64 = 60.0;
 /// Start plus 30 one-minute intervals, covering 0 through 1,800 seconds.
 pub const MAX_SAMPLES: usize = 31;
 
-const HEADER: &str = "sample,measurement_elapsed_s,render_fps,process_cpu_pct,process_memory_gib,capture_hz,inference_hz,detector_hz,landmark_hz,tracking_hz,capture_to_apply_p50_ms,capture_to_apply_p95_ms,capture_publish_rejected_frames,inference_input_skipped_frames,no_face_frames,avatar_frames_applied,avatar_frames_skipped,capture_worker,inference_worker,tracking_state,stage_percentiles";
+const HEADER: &str = "sample,measurement_elapsed_s,render_fps,process_cpu_pct,process_memory_gib,capture_hz,inference_hz,detector_hz,landmark_hz,tracking_hz,capture_to_apply_p50_ms,capture_to_apply_p95_ms,capture_publish_rejected_frames,inference_input_skipped_frames,no_face_frames,avatar_frames_applied,avatar_frames_skipped,capture_worker,capture_format,inference_worker,tracking_state,stage_percentiles";
 
 /// Runtime state for the opt-in bounded metrics exporter.
 #[derive(Resource, Debug)]
@@ -130,7 +130,7 @@ impl MetricsExportState {
             .ok_or_else(|| io::Error::other("metrics output file is unavailable"))?;
         writeln!(
             file,
-            "{},{:.3},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{:.3},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.samples_written,
             measurement_elapsed,
             snapshot.render_fps,
@@ -149,6 +149,7 @@ impl MetricsExportState {
             snapshot.avatar_frames_applied,
             snapshot.avatar_frames_skipped,
             csv_escape(&snapshot.capture_state),
+            csv_escape(snapshot.camera_format.as_deref().unwrap_or_default()),
             csv_escape(&snapshot.inference_state),
             csv_escape(&snapshot.tracking_state),
             csv_escape(&stage_percentiles(snapshot)),
@@ -305,6 +306,38 @@ mod tests {
     fn csv_names_distinguish_publish_rejections_from_reader_skips() {
         assert!(HEADER.contains("capture_publish_rejected_frames,inference_input_skipped_frames"));
         assert!(!HEADER.contains("overwrites"));
+    }
+
+    #[test]
+    fn csv_records_the_negotiated_capture_format() {
+        // A resolution comparison has to read what the camera actually
+        // negotiated, because the request is only a preference. The format
+        // carries no comma, but it is escaped like every other string column so
+        // a format string can never shift the columns.
+        assert!(HEADER.contains("capture_format"));
+        let temp = tempfile::tempdir().expect("temporary directory must be created");
+        let path = temp.path().join("metrics.csv");
+        let mut exporter = MetricsExportState::for_path(path.clone());
+        let mut snapshot = ready_snapshot();
+        snapshot.camera_format = Some("1280x720 @ 30/1 Rgb8".to_string());
+        exporter.tick(0.0, &snapshot);
+        exporter.tick(WARMUP_SECONDS, &snapshot);
+        let written = std::fs::read_to_string(&path).expect("metrics csv must be written");
+        let header = written.lines().next().expect("header row");
+        let row = written.lines().nth(1).expect("sample row");
+        let column = header.split(',').position(|name| name == "capture_format");
+        let column = column.expect("the header must name the column");
+        assert_eq!(
+            row.split(',')
+                .nth(column)
+                .expect("the row must have the column"),
+            "1280x720 @ 30/1 Rgb8"
+        );
+        assert_eq!(
+            row.split(',').count(),
+            header.split(',').count(),
+            "the row and the header must have the same number of columns"
+        );
     }
 
     #[test]
