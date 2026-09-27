@@ -544,7 +544,16 @@ where
         // If a stream is active, capture one frame with a short timeout so we
         // remain responsive to stop/commands.
         if let Some(stream) = active_stream.as_mut() {
-            match stream.next_frame(&stop) {
+            let next = stream.next_frame(&stop);
+            // A stop request can land between the loop check and the read, and
+            // a backend then reports the pending read as `Disconnected`. That is
+            // the end of the worker, not a lost device: the stream is retained
+            // so the final stop below still reaches it, and the stop request is
+            // never turned into a reconnect episode.
+            if stop.is_stopped() {
+                break;
+            }
+            match next {
                 Ok(frame) => {
                     reconnect_plan = None;
                     let frame = stamp_frame_sequence(frame, &mut next_frame_seq);
@@ -639,6 +648,9 @@ where
     }
 
     let stop_error = stop_active_stream(&mut active_stream).err();
+    if let Some(error) = &stop_error {
+        metrics.last_error = Some(format!("{error:?}"));
+    }
 
     let final_metrics = metrics.clone();
     update_state(&state, |s| {
@@ -965,6 +977,87 @@ mod tests {
             .select_and_start(test_device(), CameraRequest::default())
             .unwrap();
         (controller, rx, probe)
+    }
+
+    /// Backend whose stream reports a read as `Disconnected` only because the
+    /// test asked for a stop, and whose stop always fails.
+    ///
+    /// The second read is held on a channel so the test can place a stop request
+    /// between the worker's loop check and the read itself.
+    struct StopDuringReadBackend {
+        entered_read: std::sync::mpsc::Sender<()>,
+        resume_read: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        stop_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct StopDuringReadStream {
+        reads: u64,
+        entered_read: std::sync::mpsc::Sender<()>,
+        resume_read: std::sync::mpsc::Receiver<()>,
+        stop_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::device::CameraBackend for StopDuringReadBackend {
+        fn enumerate(&self) -> Result<Vec<CameraDescriptor>, CameraError> {
+            Ok(vec![test_device()])
+        }
+
+        fn open(
+            &self,
+            _: &CameraDescriptor,
+            _: &CameraRequest,
+        ) -> Result<Box<dyn crate::device::CameraStream>, CameraError> {
+            let resume_read = self
+                .resume_read
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the stream is opened once");
+            Ok(Box::new(StopDuringReadStream {
+                reads: 0,
+                entered_read: self.entered_read.clone(),
+                resume_read,
+                stop_calls: Arc::clone(&self.stop_calls),
+            }))
+        }
+    }
+
+    impl crate::device::CameraStream for StopDuringReadStream {
+        fn actual_format(&self) -> CameraFormat {
+            CameraFormat {
+                width: 1,
+                height: 1,
+                fps_numerator: 30,
+                fps_denominator: 1,
+                format: vtuber_core::PixelFormat::Rgb8,
+            }
+        }
+
+        fn next_frame(&mut self, stop: &StopToken) -> Result<VideoFrame, CameraError> {
+            self.reads += 1;
+            if self.reads > 1 {
+                self.entered_read.send(()).unwrap();
+                let _ = self.resume_read.recv();
+            }
+            if stop.is_stopped() {
+                return Err(CameraError::Disconnected);
+            }
+            Ok(VideoFrame {
+                seq: FrameSeq(self.reads),
+                captured_at: vtuber_core::monotonic_now(),
+                width: 1,
+                height: 1,
+                stride_bytes: 3,
+                format: vtuber_core::PixelFormat::Rgb8,
+                data: Arc::from([0; 3]),
+            })
+        }
+
+        fn stop(&mut self) -> Result<(), CameraError> {
+            self.stop_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(CameraError::StopFailed("scripted stop failure".into()))
+        }
     }
 
     fn scripted_controller(
@@ -1533,6 +1626,41 @@ mod tests {
             probe.stop_calls.load(std::sync::atomic::Ordering::SeqCst),
             1
         );
+    }
+
+    #[test]
+    fn a_stop_request_during_a_read_still_reaches_the_final_stop() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let stop_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut controller = CaptureController::new();
+        controller
+            .start_worker(StopDuringReadBackend {
+                entered_read: entered_tx,
+                resume_read: std::sync::Mutex::new(Some(resume_rx)),
+                stop_calls: Arc::clone(&stop_calls),
+            })
+            .unwrap();
+        controller
+            .select_and_start(test_device(), CameraRequest::default())
+            .unwrap();
+        let slot = controller.frame_slot();
+
+        // The first frame passed through open_and_stream; the second read is
+        // held inside the worker loop, so a stop request now lands between the
+        // loop check and the read.
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        controller.worker.as_ref().unwrap().stop();
+        resume_tx.send(()).unwrap();
+
+        let error = controller
+            .shutdown()
+            .expect_err("the retained stream must still be stopped");
+        assert!(matches!(error, CameraError::StopFailed(_)), "{error:?}");
+        // The retained stream is stopped exactly once and never dropped
+        // unreported, and the slot close still runs.
+        assert_eq!(stop_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(slot.is_closed());
     }
 
     #[test]
