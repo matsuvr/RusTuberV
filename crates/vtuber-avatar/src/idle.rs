@@ -6,9 +6,9 @@
 //! tracking-loss micro-motion as the only additive low-frequency motion layer.
 //!
 //! The legacy #20 hips-only `sin²` breathing writer is retired. The
-//! `hips.translation` channel has no runtime writer in `vtuber-avatar`; the
-//! ADR-019 body/root writer owns avatar-root translation rather than the hips
-//! bone. Tracking-loss micro-motion publishes through the
+//! ADR-019 body/root writer owns avatar-root translation; standing foot
+//! contact subsequently corrects the hips to maintain planted feet.
+//! Tracking-loss micro-motion publishes through the
 //! `BodyTrackingPositionInput` bridge and therefore composes without a second
 //! idle writer.
 

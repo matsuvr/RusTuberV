@@ -72,6 +72,7 @@ impl Plugin for VtuberAvatarPlugin {
         register_direct_pose(app);
         register_direct_position(app);
         register_direct_look(app);
+        crate::grounding::register_grounding(app);
         app.init_resource::<AvatarLifecycle>()
             .init_resource::<AvatarCameraControl>()
             .init_resource::<CameraPointerInputGate>()

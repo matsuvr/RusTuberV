@@ -193,9 +193,9 @@ pub(crate) fn register_direct_position(app: &mut App) {
 ///    premultiplied in world space on top of the rotations produced by the
 ///    direct-pose writer.
 ///
-/// Head rotation remains exclusively owned by the direct-pose writer, hips
-/// translation remains owned by the application breathing layer, and no
-/// camera/projection property is touched.
+/// Head rotation remains owned by the direct-pose writer. Standing foot
+/// contact subsequently corrects the pelvis and legs; no camera/projection
+/// property is touched.
 ///
 /// Applications normally use [`bevy_vrm1::prelude::VrmPlugin`], which registers
 /// this system in the correct order.

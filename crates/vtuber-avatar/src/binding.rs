@@ -491,6 +491,11 @@ pub fn bind_humanoid_bones(
                 // dropped by the existing unload lifecycle.
                 crate::expression::material::AvatarMaterialExpressionState::default(),
             ));
+            if let Some(grounding) = crate::grounding::GroundedFeet::from_rest(&root_ref, |bone| {
+                bone_query.get(bone).ok()?.2.map(|rest| rest.0)
+            }) {
+                commands.entity(root_entity).insert(grounding);
+            }
             if capabilities.gaze_backend != SelectedGazeBackend::None {
                 let effective_properties =
                     effective_look_at_properties(look_at_properties, capabilities.gaze_backend);

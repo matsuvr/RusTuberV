@@ -9,8 +9,8 @@
 //!
 //! - head/neck/upper-chest/chest/spine **rotation**: the application direct-pose
 //!   writer (`update_body_tracking_pose_input` is its only input writer).
-//! - hips translation: no runtime writer. The idle contract retires the #20
-//!   breathing writer; the authored or animated rest value is the idle value.
+//! - hips translation: standing foot contact adds a pelvis reaction and the
+//!   lowering required to keep both legs within reach; no breathing writer.
 //! - avatar-root translation + torso lean: the application
 //!   `apply_direct_body_position`, whose only input writer is this module.
 //!

@@ -28,6 +28,7 @@ pub mod expression;
 pub mod expression_catalog;
 mod framing;
 pub mod gaze;
+mod grounding;
 pub mod idle;
 pub mod lifecycle;
 pub mod load;

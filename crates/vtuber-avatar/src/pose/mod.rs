@@ -34,8 +34,8 @@ fn limit_degrees(yaw: f32, pitch: f32, roll: f32) -> BoneRotationLimit {
 /// half-life stays close to the head's, while the torso keeps a visible,
 /// slower share so large turns propagate into the chest, shoulders, and
 /// spine instead of kinking at the neck. The hips keep a real share so every
-/// rotation propagates through the whole body to the legs and feet, like a
-/// real body shifting its weight; their half-life still lags well behind
+/// rotation propagates through the whole body; standing contact lets the legs
+/// absorb this weight shift while keeping the feet planted. The hips lag behind
 /// the head and neck so the sway reads as weight shift, but no longer so
 /// slow that oscillating head motion cancels out before reaching them.
 /// Torso engagement starts early (8 degrees) and is complete by 35 degrees,

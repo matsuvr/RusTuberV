@@ -62,7 +62,7 @@ pub struct BodyBoneWeights {
     /// Spine contribution.
     pub spine: f32,
     /// Hips contribution. Small values let head motion propagate through the
-    /// whole body; the legs follow the hips automatically as child bones.
+    /// whole body; standing contact then bends the legs to keep the feet planted.
     pub hips: f32,
 }
 
