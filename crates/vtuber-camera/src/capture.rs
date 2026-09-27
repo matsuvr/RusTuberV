@@ -1560,7 +1560,6 @@ mod tests {
         let pose: Arc<LatestSlot<VideoFrame>> = Arc::new(LatestSlot::new());
         let mut controller = CaptureController::with_pose_output(Some(Arc::clone(&pose)));
         controller.start_worker(MockBackend::default()).unwrap();
-        let face = controller.frame_slot();
         let mut cursor = 0;
 
         for _ in 0..2 {
@@ -1569,7 +1568,10 @@ mod tests {
                 .unwrap();
             wait_for_state(&controller, CaptureServiceState::Running);
 
-            // The Pose consumer receives the same frame body as the face one.
+            // The Pose consumer keeps receiving frames from the slot fixed at
+            // construction. Both slots are fed by a running producer, so they
+            // are not compared frame for frame here; the shared frame body is
+            // pinned one frame at a time in `tracking_fan_out_shares_one_pixel_buffer`.
             let Some(vtuber_core::ReadResult::New {
                 generation,
                 value: pose_frame,
@@ -1577,15 +1579,8 @@ mod tests {
             else {
                 panic!("pose slot should receive the captured frame");
             };
+            assert!(pose_frame.seq.0 > 0);
             cursor = generation;
-            let Some(vtuber_core::ReadResult::New {
-                value: face_frame, ..
-            }) = face.wait_read_after(0, Duration::from_secs(2))
-            else {
-                panic!("face slot should receive the captured frame");
-            };
-            assert_eq!(pose_frame.seq, face_frame.seq);
-            assert!(Arc::ptr_eq(&pose_frame.data, &face_frame.data));
 
             controller.stop().unwrap();
             wait_for_state(&controller, CaptureServiceState::Selected);
