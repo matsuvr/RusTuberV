@@ -14,6 +14,12 @@
 //! like an outlier head sample, and the first observation after a real loss
 //! is accepted as a reacquisition so a hand that moved while hidden can be
 //! picked up again.
+//!
+//! Reacquisition is therefore delayed by exactly one thing: the adoption gate
+//! waiting for consecutive good camera frames. Nothing else is tuned against it
+//! — the channel's authority comes back on the shared acquire ramp, and the
+//! smoother no longer stiffens after a loss, so a second delay on the same
+//! timeline would only delay the return twice.
 
 use nalgebra::Vector3;
 use vtuber_core::arm_tracking::{
@@ -240,8 +246,21 @@ const ARM_PALM_TIME_CONSTANT_SEC: f32 = 0.10;
 const ARM_ENTER_VISIBILITY: f32 = 0.7;
 /// Visibility at or below which an arm observation counts as bad.
 const ARM_EXIT_VISIBILITY: f32 = 0.4;
-/// Consecutive good observations required before an arm is adopted.
+/// Consecutive good observations required before an arm is adopted for the
+/// first time.
 const ARM_GOOD_FRAMES: u32 = 4;
+/// Consecutive good observations required before a previously adopted arm comes
+/// back.
+///
+/// A cold start has to survive the calibration window, so it waits the longer
+/// count. An arm that was already tracked has proved the setup works, and the
+/// only thing left to guard against is a single spurious detection, which two
+/// consecutive good observations already reject. Returning sooner matters
+/// because the count is in camera frames: Pose and the Hand Landmarker share one
+/// worker, so a frame is tens of milliseconds, and the same wait was added on
+/// top of the shared `LossBlend` acquire ramp that already eases the authority
+/// back over a second. Nothing here snaps, because that ramp is unchanged.
+const ARM_REACQUIRE_GOOD_FRAMES: u32 = 2;
 /// Consecutive bad observations required before an adopted arm is lost.
 const ARM_BAD_FRAMES: u32 = 6;
 
@@ -249,11 +268,11 @@ const ARM_BAD_FRAMES: u32 = 6;
 ///
 /// Real visibility hovers around any single threshold, so a one-frame decision
 /// makes a lost arm reacquire every other frame and the return and acquire
-/// ramps fight instead of returning. Acquiring now needs
-/// [`ARM_GOOD_FRAMES`] consecutive good observations and losing needs
-/// [`ARM_BAD_FRAMES`] consecutive bad ones; a score inside the hysteresis band
-/// holds the current state. Missing scores count as bad rather than being
-/// invented.
+/// ramps fight instead of returning. A cold start needs [`ARM_GOOD_FRAMES`]
+/// consecutive good observations, a return needs [`ARM_REACQUIRE_GOOD_FRAMES`],
+/// and losing needs [`ARM_BAD_FRAMES`] consecutive bad ones; a score inside the
+/// hysteresis band holds the current state. Missing scores count as bad rather
+/// than being invented.
 ///
 /// "Good" is the weakest of the Pose shoulder and wrist visibility scores, plus
 /// the Hand Landmarker having detected a hand for that wrist at all. The
@@ -267,6 +286,9 @@ const ARM_BAD_FRAMES: u32 = 6;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ArmAdoptionGate {
     adopted: bool,
+    /// The arm was adopted at least once, so the next return is a reacquisition
+    /// rather than a cold start.
+    returned: bool,
     good: u32,
     bad: u32,
 }
@@ -275,6 +297,7 @@ impl ArmAdoptionGate {
     const fn new() -> Self {
         Self {
             adopted: false,
+            returned: false,
             good: 0,
             bad: 0,
         }
@@ -283,16 +306,24 @@ impl ArmAdoptionGate {
     /// Feeds one observation's Pose visibility and whether a hand was detected.
     fn update(&mut self, score: Option<f32>, hand_detected: bool) -> bool {
         let score = score.unwrap_or(0.0);
+        let needed = if self.returned {
+            ARM_REACQUIRE_GOOD_FRAMES
+        } else {
+            ARM_GOOD_FRAMES
+        };
         if score >= ARM_ENTER_VISIBILITY && hand_detected {
-            self.good = self.good.saturating_add(1).min(ARM_GOOD_FRAMES);
+            self.good = self.good.saturating_add(1).min(needed);
             self.bad = 0;
-            if self.good >= ARM_GOOD_FRAMES {
+            if self.good >= needed {
                 self.adopted = true;
             }
         } else if score <= ARM_EXIT_VISIBILITY || !hand_detected {
             self.bad = self.bad.saturating_add(1).min(ARM_BAD_FRAMES);
             self.good = 0;
             if self.bad >= ARM_BAD_FRAMES {
+                // Only an arm that was actually tracked counts as a return; an
+                // arm that never came up is still waiting for its cold start.
+                self.returned |= self.adopted;
                 self.adopted = false;
             }
         }
@@ -1490,6 +1521,10 @@ mod tests {
         for _ in 0..ARM_GOOD_FRAMES * 2 {
             assert!(!gate.update(Some(1.0), false));
         }
+        assert!(
+            !gate.returned,
+            "an arm that was never adopted has no return"
+        );
         for _ in 0..ARM_GOOD_FRAMES - 1 {
             assert!(!gate.update(Some(1.0), true));
         }
@@ -1498,6 +1533,7 @@ mod tests {
             assert!(gate.update(Some(1.0), false));
         }
         assert!(!gate.update(Some(1.0), false));
+        assert!(gate.returned);
     }
 
     #[test]
@@ -1984,14 +2020,14 @@ mod tests {
         }
         assert_eq!(state.left.weights().wrist, 0.0);
 
-        // Adoption takes consecutive good camera frames, then the retained
+        // Reacquisition takes consecutive good camera frames, then the retained
         // observation is re-fed at render rate. The held ticks must keep
         // ramping instead of being mistaken for absence and snapping the
         // weight to full authority.
         let mut captured = SETTLED_NS + (FULL_RETURN_FRAMES + 1) * OBSERVATION_STEP_NS;
         let mut seq = 300;
         let mut first = 0.0;
-        for step in 0..ARM_GOOD_FRAMES as u64 {
+        for step in 0..ARM_REACQUIRE_GOOD_FRAMES as u64 {
             seq = 300 + step;
             captured = SETTLED_NS + (FULL_RETURN_FRAMES + 1 + step) * OBSERVATION_STEP_NS;
             let control = feed(&mut state, base, seq, captured, &profile).unwrap();
@@ -2061,7 +2097,7 @@ mod tests {
         // but it must blend in from the current authority.
         let far = arm_at([0.3, 0.2, 0.0], [-0.5, -0.4, 0.0]);
         let mut weight = 0.0;
-        for step in 0..ARM_GOOD_FRAMES as u64 {
+        for step in 0..ARM_REACQUIRE_GOOD_FRAMES as u64 {
             let now = SETTLED_NS + (20 + step) * OBSERVATION_STEP_NS;
             let control = feed(&mut state, far, 120 + step, now, &profile).unwrap();
             weight = control.weights.left.wrist;
@@ -2075,6 +2111,118 @@ mod tests {
             state.left.source.unwrap().wrist,
             [-0.5 / 0.7, 0.4 / 0.7, 0.0],
         );
+    }
+
+    #[test]
+    fn a_returning_arm_needs_fewer_good_frames_than_a_cold_start() {
+        // The count is in camera frames, and Pose and the Hand Landmarker share
+        // one worker, so the wait scales with however slow inference currently
+        // is. A cold start has to survive the calibration window; a return only
+        // has to reject a single spurious detection, because the shared acquire
+        // ramp is what brings the authority back.
+        let mut gate = ArmAdoptionGate::new();
+        for _ in 0..ARM_GOOD_FRAMES - 1 {
+            assert!(!gate.update(Some(1.0), true));
+        }
+        assert!(gate.update(Some(1.0), true), "the cold start adopts");
+        for _ in 0..ARM_BAD_FRAMES - 1 {
+            assert!(gate.update(Some(0.0), true));
+        }
+        assert!(!gate.update(Some(0.0), true), "the arm is lost");
+
+        let mut frames = 0u32;
+        loop {
+            frames += 1;
+            if gate.update(Some(1.0), true) {
+                break;
+            }
+            assert!(
+                frames <= ARM_REACQUIRE_GOOD_FRAMES,
+                "a returning arm must not wait the cold-start count: {frames}"
+            );
+        }
+        assert_eq!(frames, ARM_REACQUIRE_GOOD_FRAMES);
+
+        // A single good frame in the middle of the return is not enough on its
+        // own, so the shorter count still rejects a flapping decision.
+        let mut gate = ArmAdoptionGate::new();
+        for _ in 0..ARM_GOOD_FRAMES - 1 {
+            assert!(!gate.update(Some(1.0), true));
+        }
+        assert!(gate.update(Some(1.0), true));
+        for _ in 0..ARM_BAD_FRAMES - 1 {
+            assert!(gate.update(Some(0.0), true));
+        }
+        assert!(!gate.update(Some(0.0), true));
+        assert!(!gate.update(Some(1.0), true));
+        assert!(gate.update(Some(1.0), true));
+    }
+
+    #[test]
+    fn a_returned_arm_still_ramps_its_authority_back_in() {
+        // The shortened wait must not turn into a snap: the channel's weight
+        // still comes back over the profile's acquire time.
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let hidden = hidden_arm(base);
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let _ = feed(&mut state, hidden, 100 + seq, now, &profile);
+        }
+        assert_eq!(state.left.weights().wrist, 0.0);
+
+        let start = SETTLED_NS + (FULL_RETURN_FRAMES + 1) * OBSERVATION_STEP_NS;
+        let mut previous = 0.0;
+        let mut reached_full_after = None;
+        for step in 0..40u64 {
+            let now = start + step * OBSERVATION_STEP_NS;
+            let weight = feed(&mut state, base, 1000 + step, now, &profile)
+                .unwrap()
+                .weights
+                .left
+                .wrist;
+            assert!(weight >= previous, "the acquire ramp must not reverse");
+            assert!(weight <= 1.0);
+            if weight >= 1.0 {
+                reached_full_after = Some(step);
+                break;
+            }
+            previous = weight;
+        }
+        let elapsed_sec = reached_full_after.expect("the arm must come back") as f32
+            * OBSERVATION_STEP_NS as f32
+            * 1.0e-9;
+        assert!(
+            elapsed_sec > profile.blend.acquire.as_secs_f32() * 0.5,
+            "the authority must still ramp over the acquire time: {elapsed_sec}"
+        );
+    }
+
+    #[test]
+    fn one_sides_loss_does_not_disturb_the_other_sides_recovery() {
+        // Losing one arm must not consume the other arm's adoption state, and a
+        // return on one side must not be read as the other side being seen.
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let hidden = hidden_arm(base);
+
+        // Only the left arm goes out of frame; the right keeps good observations
+        // and must stay at full authority throughout.
+        for seq in 0..FULL_RETURN_FRAMES {
+            let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
+            let frame = pose_frame(seq + 100, now, Some(observation(hidden, base)));
+            let (next, control) =
+                step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile);
+            state = next;
+            assert_eq!(control.unwrap().weights.right.wrist, 1.0);
+        }
+        assert_eq!(state.left.weights().wrist, 0.0);
+        assert!(!state.left.adoption.adopted);
+        assert!(state.left.adoption.returned);
+        assert!(state.right.adoption.adopted);
+        assert!(!state.right.adoption.returned);
     }
 
     #[test]
