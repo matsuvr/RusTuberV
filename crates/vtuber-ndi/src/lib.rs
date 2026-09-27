@@ -241,8 +241,9 @@ pub enum NdiFourCc {
 ///
 /// This function performs no SDK call: it does not submit or send anything. An
 /// `Ok` result means the frame satisfies the mapping contract, not that any
-/// receiver got it. Delivery is the sender's separate step, and its result is
-/// reported by the output status and metrics.
+/// receiver got it. Handing a frame to the SDK is the sender's separate step,
+/// and the output status and metrics describe that sender-side progress, not
+/// confirmation that a receiver received the frame.
 ///
 /// # Errors
 ///
@@ -261,13 +262,13 @@ pub enum NdiFourCc {
 /// use vtuber_ndi::map_video_frame;
 ///
 /// let profile = VideoOutputProfile::DEFAULT;
-/// let bytes = (profile.width as usize * profile.height as usize * 4) as u32;
+/// let bytes = profile.width as usize * profile.height as usize * 4;
 /// let frame = VideoOutputFrame::new_bgra8(
 ///     profile.width,
 ///     profile.height,
 ///     FrameSeq(1),
 ///     MonoTimeNs(0),
-///     vec![0; bytes as usize],
+///     vec![0; bytes],
 /// )
 /// .expect("the packed length matches the profile");
 ///
