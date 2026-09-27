@@ -124,6 +124,12 @@ pub(crate) fn solve_fixed_fov_fit(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn bounds(min: Vec3, max: Vec3) -> WorldBounds {

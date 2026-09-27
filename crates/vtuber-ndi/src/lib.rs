@@ -1,13 +1,3 @@
-// Unit tests may use unwrap/expect/panic (AGENTS.md: Production Rust panic policy).
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )
-)]
 //! Safe, optional NDI video-output boundary.
 //!
 //! The public API contains only application-owned configuration, status,
@@ -1235,6 +1225,12 @@ fn map_runtime_error(error: &grafton_ndi::Error) -> NdiOutputError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use std::time::Instant;
     use vtuber_core::MonoTimeNs;

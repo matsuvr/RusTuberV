@@ -542,10 +542,10 @@ fn verify_artifact(
     Ok(())
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "nibble indices come from `byte >> 4` and `byte & 0x0f`, so both stay inside the 16-entry hex table"
+)]
 fn sha256_hex(digest: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut result = String::with_capacity(digest.len() * 2);
@@ -670,10 +670,10 @@ fn parse_usize_array(value: &toml::Value, field: &str) -> Result<Vec<usize>, Mod
         .collect()
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the length check above rejects every array whose length is not 3, and the loop index stays below 3"
+)]
 fn parse_float3(value: &toml::Value, field: &str) -> Result<[f32; 3], ModelCatalogError> {
     let values = value
         .as_array()
@@ -748,6 +748,12 @@ fn invalid(field: impl Into<String>, reason: impl Into<String>) -> ModelCatalogE
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     fn repository_manifest_text() -> String {

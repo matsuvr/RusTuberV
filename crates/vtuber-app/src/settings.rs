@@ -725,6 +725,12 @@ pub enum SettingsError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::expression_keys::ExpressionKey;
     use tempfile::tempdir;
@@ -1249,6 +1255,12 @@ mod tests {
 
 #[cfg(test)]
 mod dynamic_profile_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use tempfile::tempdir;
     use vtuber_avatar::{

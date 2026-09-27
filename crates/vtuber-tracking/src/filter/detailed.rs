@@ -94,10 +94,10 @@ impl DetailedExpressionFilter {
         }
     }
 
-    // Invariant: `snap_to` copies validated `[0, 1]` coefficients, `smooth`
-    // clamps every update, and the state starts at `0.0`, so validation
-    // cannot reject the vector.
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "`snap_to` copies validated coefficients, `smooth` clamps every update, and the state starts at zero"
+    )]
     fn coefficients(&self) -> Arkit52Coefficients {
         Arkit52Coefficients::try_from_array(self.values)
             .expect("detailed expression state is clamped to [0, 1]")
@@ -115,6 +115,12 @@ fn coefficient(channel: ArkitBlendshape, input: &Arkit52Coefficients) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     // Two 60 fps frames make one 30 fps frame, so the two step counts below

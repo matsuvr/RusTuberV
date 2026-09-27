@@ -1,13 +1,3 @@
-// Unit tests may use unwrap/expect/panic (AGENTS.md: Production Rust panic policy).
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )
-)]
 //! `vtuber-avatar`: Bevy and `bevy_vrm1` adapter.
 //!
 //! Adapts VRM scenes, materials, expressions and tracking signals to Bevy.

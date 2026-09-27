@@ -239,6 +239,12 @@ fn upper_body_camera_transform(head: Vec3, hips: Vec3, vertical_fov: f32) -> Opt
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use bevy::asset::RenderAssetUsages;
     use bevy::camera::Viewport;

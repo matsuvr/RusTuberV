@@ -117,6 +117,12 @@ fn quaternion(rotation_xyzw: [f32; 4]) -> UnitQuaternion<f32> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::super::semantic_pose_to_quaternion;
     use super::*;
     use approx::assert_relative_eq;

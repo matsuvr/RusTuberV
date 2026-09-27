@@ -363,10 +363,10 @@ fn normalized_landmark_spread(
 }
 
 /// Estimate face scale as the average pairwise distance among landmarks.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the `n < 2` check above and both loop bounds derive from the landmark count"
+)]
 fn estimate_face_scale(landmarks: &[Landmark3]) -> f32 {
     let n = landmarks.len();
     if n < 2 {
@@ -402,10 +402,10 @@ fn landmarks_to_set(landmarks: &[Landmark3]) -> LandmarkSet {
 }
 
 /// Returns `true` if the point cloud lacks enough volume for pose solving.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the matrix is sized to the set length above and both loops enumerate that same set"
+)]
 fn is_degenerate(set: &LandmarkSet) -> bool {
     let n = set.len();
     if n < MIN_LANDMARK_POINTS {
@@ -435,10 +435,10 @@ fn is_degenerate(set: &LandmarkSet) -> bool {
 }
 
 /// Computes the median of a slice by sorting it in place.
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the empty case returns early, so the vector is not empty here"
+)]
 fn median_sorted(values: &mut [f32]) -> f32 {
     if values.is_empty() {
         return 0.0;
@@ -466,6 +466,12 @@ fn map_pose_error_to_calibration_error(err: PoseError) -> CalibrationError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::SampleDecision;
     use vtuber_core::types::{FrameSeq, LandmarkSchemaId};

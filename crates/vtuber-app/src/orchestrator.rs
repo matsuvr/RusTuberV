@@ -833,7 +833,10 @@ pub struct LookSystemParams<'w> {
 }
 
 /// System that processes pending UI actions through the orchestrator.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and message streams, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 pub fn process_ui_actions_system(
     mut orchestrator: ResMut<Orchestrator>,
     mut ui_state: ResMut<UiState>,
@@ -1504,7 +1507,10 @@ fn map_avatar_lifecycle_state(
 ///
 /// Runs after UI actions and the engine's load/request/unload systems, so
 /// accepted results commit the model, look, save owner and UI snapshot together.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects this system's resources and message streams, so the parameter list is the declared ECS contract and has no call site to restructure"
+)]
 pub fn sync_avatar_lifecycle_system(
     mut orchestrator: ResMut<Orchestrator>,
     lifecycle: Res<vtuber_avatar::lifecycle::AvatarLifecycle>,
@@ -1604,6 +1610,12 @@ pub fn sync_avatar_lifecycle_system(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
     use crate::preview::PreviewState;
 

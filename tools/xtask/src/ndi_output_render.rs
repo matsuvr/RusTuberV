@@ -342,10 +342,10 @@ fn wait_for_frame(app: &mut App) -> Result<VideoOutputFrame, RenderValidationErr
     ))
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`chunks_exact(4)` yields exactly four-byte groups from the validated packed frame"
+)]
 fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
     frame
         .data()
@@ -354,10 +354,10 @@ fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
         .collect()
 }
 
-// Bounds are guaranteed by construction in this numeric kernel
-// (loop ranges bounded by buffer lengths / fixed-size dimensions);
-// see the AGENTS.md production panic policy.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "the index is the centre of the fixed validator image"
+)]
 fn center_pixel(pixels: &[[u8; 4]]) -> [u8; 4] {
     let index = (VALIDATOR_HEIGHT / 2) * VALIDATOR_WIDTH + (VALIDATOR_WIDTH / 2);
     pixels[index as usize]

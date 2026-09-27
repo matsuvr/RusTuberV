@@ -181,6 +181,10 @@ pub(crate) fn run_inference_worker(
                     });
                 }
                 #[cfg(test)]
+                #[allow(
+                    clippy::panic,
+                    reason = "test-only command; the panic is the scripted outcome under test"
+                )]
                 Ok(ControlCommand::Panic) => {
                     panic!("inference worker panic requested by test");
                 }

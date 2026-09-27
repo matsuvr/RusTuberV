@@ -289,7 +289,10 @@ pub fn reset_pose_metrics_on_lifecycle_change(
 ///
 /// Appends one line per second to `propagation_debug.log` next to the
 /// executable's working directory (the GUI subsystem has no stderr).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "temporary propagation probe; each parameter is one stage input written to the debug log"
+)]
 pub fn debug_propagation_probe(
     lifecycle: Res<AvatarLifecycle>,
     mut frame_counter: Local<u64>,
@@ -443,7 +446,10 @@ fn tracked_arm_text(
     text
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the probe writes one line from the lifecycle, look, arm and body state it is diagnosing"
+)]
 fn propagation_line(
     lifecycle: &AvatarLifecycle,
     frame_counter: u64,

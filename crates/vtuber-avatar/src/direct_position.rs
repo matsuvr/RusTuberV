@@ -199,7 +199,10 @@ pub(crate) fn register_direct_position(app: &mut App) {
 ///
 /// Applications normally use [`bevy_vrm1::prelude::VrmPlugin`], which registers
 /// this system in the correct order.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy's `Query` filter tuple for this system's declared components, with no call site to change"
+)]
 pub fn apply_direct_body_position(
     vrms: Query<
         (

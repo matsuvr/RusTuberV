@@ -423,9 +423,10 @@ impl Arkit52Coefficients {
     ///
     /// Every semantic must occur exactly once.  Unknown names, duplicate
     /// semantic aliases, missing semantics, and invalid values are rejected.
-    // Invariant: `ArkitBlendshape::index()` is always `< ARKIT52_CHANNEL_COUNT`,
-    // so every index below is in bounds by construction.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`ArkitBlendshape::index()` is below `ARKIT52_CHANNEL_COUNT` for every variant, so the fixed-size writes are in bounds"
+    )]
     pub fn try_from_named<I, S>(pairs: I) -> Result<Self, Arkit52NameError>
     where
         I: IntoIterator<Item = (S, f32)>,
@@ -458,8 +459,10 @@ impl Arkit52Coefficients {
     }
 
     /// Returns the validated value for one semantic.
-    // Invariant: `channel.index() < ARKIT52_CHANNEL_COUNT` for every variant.
-    #[allow(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`channel.index()` is below `ARKIT52_CHANNEL_COUNT` for every `ArkitBlendshape` variant"
+    )]
     #[must_use]
     pub const fn get(&self, channel: ArkitBlendshape) -> f32 {
         self.0[channel.index()]
@@ -580,6 +583,12 @@ impl std::error::Error for Arkit52NameError {}
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
     use super::*;
 
     #[test]
