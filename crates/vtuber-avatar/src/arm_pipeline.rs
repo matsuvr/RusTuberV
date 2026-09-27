@@ -460,7 +460,9 @@ pub fn decompose_swing_twist(q: Quat, axis: Vec3) -> Option<(Quat, Quat)> {
 /// swing and twist around the rest-space forearm axis, removes
 /// `weight * crossfade` of the relative twist from the forearm, and
 /// redistributes `weight * (1 - crossfade)` onto the upper arm as bounded
-/// compensation. Weight 0 leaves the solution untouched; missing or
+/// compensation. Both corrections roll around the respective bone's own
+/// axis and preserve the solved elbow and wrist positions.
+/// Weight 0 leaves the solution untouched; missing or
 /// degenerate twist geometry is a safe no-op.
 pub fn relax_forearm_twist(
     solution: &mut crate::arm::ArmIkSolution,
@@ -504,10 +506,17 @@ pub fn relax_forearm_twist(
     }
 
     let reduce_q = Quat::from_axis_angle(axis_model, -reduce);
-    let compensate_q = Quat::from_axis_angle(axis_model, compensate);
+    let upper_axis = (rest.elbow.position - rest.upper_arm.position)
+        .try_normalize()
+        .ok_or(ArmPipelineError::DegenerateSolvedPose)?;
+    let compensate_q = Quat::from_axis_angle(upper_axis, compensate);
 
-    let upper_corrected = compensate_q * upper_model_delta;
-    let lower_relative_corrected = relative * reduce_q;
+    // Post-multiply in the bone's rest frame: pre-multiplying rotates the
+    // lowered arm around the T-pose axis and swings the elbow like a pendulum.
+    let upper_corrected = upper_model_delta * compensate_q;
+    let lower_corrected = lower_model_delta * reduce_q;
+    // Cancel the parent's added roll so its children keep the solved reach.
+    let lower_relative_corrected = upper_corrected.inverse() * lower_corrected;
 
     let upper_rest = rest.upper_arm.global_rotation;
     let lower_rest = rest.elbow.global_rotation;
@@ -519,7 +528,7 @@ pub fn relax_forearm_twist(
         }
     };
     solution.upper_arm_global_rotation = normalize(upper_corrected * upper_rest)?;
-    solution.lower_arm_global_rotation = normalize(lower_relative_corrected * lower_rest)?;
+    solution.lower_arm_global_rotation = normalize(lower_corrected * lower_rest)?;
     solution.upper_arm_delta = crate::arm::conjugated_rest_delta(upper_corrected, upper_rest)
         .map_err(ArmPipelineError::Solve)?;
     solution.lower_arm_delta =
@@ -1864,6 +1873,53 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(plain, relaxed_zero, "weight=0 must be a no-op");
+    }
+
+    #[test]
+    fn twist_relaxation_preserves_solved_elbow_and_wrist_positions() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            for basis in [Quat::IDENTITY, Quat::from_rotation_z(0.6)] {
+                let (mut chain, motion) = anchored_motion(side);
+                chain.rest.upper_arm.global_rotation = basis;
+                chain.rest.elbow.global_rotation = basis;
+                let sign = if side == ArmSide::Left { 1.0 } else { -1.0 };
+                let origin = chain.rest.upper_arm.position;
+                let target = ArmIkTarget {
+                    wrist: origin + Vec3::new(sign * 0.2, -0.4, 0.12),
+                    elbow_pole: chain.rest.elbow.position + Vec3::NEG_Z * 0.1,
+                };
+                let mut solution =
+                    crate::arm::solve_two_bone_arm(ArmIkInput::from_geometry(chain.rest, target))
+                        .unwrap();
+                let params = TwistRelaxParams {
+                    chain: &chain,
+                    motion: &motion,
+                    weight: 0.65,
+                    crossfade: 0.5,
+                };
+                relax_forearm_twist(&mut solution, &params).unwrap();
+                // Reconstruct the positions the actual parent/child rotations
+                // produce. A twist-only correction must not swing the elbow
+                // or move the wrist away from the solved hand target.
+                let upper = basis * solution.upper_arm_delta * basis.inverse();
+                let lower = basis * solution.lower_arm_delta * basis.inverse();
+                let elbow = origin + upper * (chain.rest.elbow.position - origin);
+                let wrist =
+                    elbow + upper * lower * (chain.rest.wrist.position - chain.rest.elbow.position);
+                assert!(
+                    elbow.distance(solution.elbow) < 1.0e-5,
+                    "twist moved elbow by {} m",
+                    elbow.distance(solution.elbow)
+                );
+                assert!(
+                    wrist.distance(solution.wrist) < 1.0e-5,
+                    "twist moved wrist by {} m",
+                    wrist.distance(solution.wrist)
+                );
+                let lower_global = upper * lower * basis;
+                assert!(lower_global.dot(solution.lower_arm_global_rotation).abs() > 0.99999);
+            }
+        }
     }
 
     #[test]
