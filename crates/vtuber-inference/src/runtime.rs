@@ -160,11 +160,13 @@ impl OnnxRuntime {
             })?
             .to_plain_array_view::<f32>()
             .map_err(|e| InferenceError::ExecutionFailed(format!("{e:?}")))?;
-        let actual = output.shape().to_vec();
+        // The expected shape is borrowed for the comparison; only the
+        // mismatching branch needs an owned copy for the error.
+        let actual = output.shape();
         if actual != [1, 98, 3] {
             return Err(InferenceError::OutputShapeMismatch {
                 expected: vec![1, 98, 3],
-                actual,
+                actual: actual.to_vec(),
             });
         }
         for (index, value) in output.iter().copied().enumerate() {
