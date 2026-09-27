@@ -153,10 +153,15 @@ const ARM_BAD_FRAMES: u32 = 6;
 /// holds the current state. Missing scores count as bad rather than being
 /// invented.
 ///
-/// The score is the weakest of the Pose shoulder/wrist visibility and the Hand
-/// Landmarker's detection score, so a Pose arm without its own visible hand —
-/// the usual hallucination for a hidden limb — is never adopted, and an
-/// adopted arm loses authority a few frames after its hand stops being seen.
+/// "Good" is the weakest of the Pose shoulder and wrist visibility scores, plus
+/// the Hand Landmarker having detected a hand for that wrist at all. The
+/// Hand Landmarker reports no landmark quality, so presence is the only honest
+/// hand signal: its Left/Right confidence describes the label it derived from
+/// the hand's shape, not how well the coordinates were localized, and must not
+/// stand in for one. Requiring a detection still keeps a Pose arm without its
+/// own visible hand — the usual hallucination for a hidden limb — from ever
+/// being adopted, and an adopted arm loses authority a few frames after its
+/// hand stops being seen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ArmAdoptionGate {
     adopted: bool,
@@ -173,15 +178,16 @@ impl ArmAdoptionGate {
         }
     }
 
-    fn update(&mut self, score: Option<f32>) -> bool {
+    /// Feeds one observation's Pose visibility and whether a hand was detected.
+    fn update(&mut self, score: Option<f32>, hand_detected: bool) -> bool {
         let score = score.unwrap_or(0.0);
-        if score >= ARM_ENTER_VISIBILITY {
+        if score >= ARM_ENTER_VISIBILITY && hand_detected {
             self.good = self.good.saturating_add(1).min(ARM_GOOD_FRAMES);
             self.bad = 0;
             if self.good >= ARM_GOOD_FRAMES {
                 self.adopted = true;
             }
-        } else if score <= ARM_EXIT_VISIBILITY {
+        } else if score <= ARM_EXIT_VISIBILITY || !hand_detected {
             self.bad = self.bad.saturating_add(1).min(ARM_BAD_FRAMES);
             self.good = 0;
             if self.bad >= ARM_BAD_FRAMES {
@@ -330,8 +336,6 @@ pub struct ArmTrackingProfile {
     pub wrist_visibility: f32,
     /// Minimum elbow visibility to use the observed bend plane.
     pub elbow_visibility: f32,
-    /// Minimum Hand Landmarker score to use the observed palm plane.
-    pub palm_confidence: f32,
     /// Unified hold / return / acquire timing shared with the face pipeline.
     pub blend: LossBlendProfile,
     /// Largest accepted wrist displacement between two observations, in units
@@ -349,7 +353,6 @@ impl Default for ArmTrackingProfile {
             shoulder_visibility: 0.5,
             wrist_visibility: 0.5,
             elbow_visibility: 0.5,
-            palm_confidence: 0.5,
             blend: LossBlendProfile::default(),
             max_wrist_step: 0.75,
         }
@@ -365,7 +368,11 @@ pub struct ArmObservationQuality {
     pub wrist: bool,
     /// The elbow bend plane is usable.
     pub elbow: bool,
-    /// The detected hand is trusted, so the palm plane can be observed.
+    /// A hand was detected for this wrist, so the palm plane can be observed.
+    ///
+    /// The Hand Landmarker reports no landmark quality, so this is the plain
+    /// presence of a detection. Whether those landmarks span a plane is decided
+    /// later, when the normal is actually derived.
     pub palm: bool,
 }
 
@@ -401,15 +408,11 @@ pub fn assess_arm_observation(
     let adopt = |point: PoseWorldLandmark, threshold: f32| {
         landmark_score(point).is_some_and(|score| score >= threshold)
     };
-    let palm = arm.hand.is_some_and(|hand| {
-        hand.score
-            .is_some_and(|score| score.is_finite() && score >= profile.palm_confidence)
-    });
     ArmObservationQuality {
         shoulder: adopt(arm.shoulder, profile.shoulder_visibility),
         wrist: adopt(arm.wrist, profile.wrist_visibility),
         elbow: adopt(arm.elbow, profile.elbow_visibility),
-        palm,
+        palm: arm.hand.is_some(),
     }
 }
 
@@ -656,14 +659,15 @@ impl ArmSideState {
 
     /// Adopts one new observation and records which channels it contained.
     ///
-    /// The arm is adopted only when the Pose chain and a Hand Landmarker
-    /// detection agree: Pose keeps emitting a plausible arm for a limb it
-    /// cannot see, usually mirrored onto the visible one, so a "visible" Pose
-    /// arm without its own hand is not tracked. An occluded elbow keeps the
-    /// previous bend plane instead of freezing the wrist or injecting a
-    /// fabricated one. A wrist that moved farther than the profile allows in
-    /// one observation is quarantined as a detection teleport; the first usable
-    /// observation after a real loss is instead accepted as a reacquisition.
+    /// The arm is adopted only when the Pose chain is visible and a Hand
+    /// Landmarker detection agrees: Pose keeps emitting a plausible arm for a
+    /// limb it cannot see, usually mirrored onto the visible one, so a
+    /// "visible" Pose arm without its own hand is not tracked. An occluded
+    /// elbow keeps the previous bend plane instead of freezing the wrist or
+    /// injecting a fabricated one. A wrist that moved farther than the profile
+    /// allows in one observation is quarantined as a detection teleport; the
+    /// first usable observation after a real loss is instead accepted as a
+    /// reacquisition.
     fn consume(
         &mut self,
         arm: Option<&ArmLandmarks>,
@@ -671,13 +675,17 @@ impl ArmSideState {
         observation_dt_ns: u64,
     ) {
         let quality = arm.map(|value| assess_arm_observation(value, profile));
+        // Only the Pose joint visibilities rank how well located the arm is.
+        // The Hand Landmarker adds presence, not a score: its handedness
+        // confidence describes the left/right label, so folding it in here would
+        // let an ambiguous label drop an otherwise well-observed arm.
         let adoption_score = arm.and_then(|value| {
             let shoulder = landmark_score(value.shoulder)?;
             let wrist = landmark_score(value.wrist)?;
-            let hand = value.hand.and_then(|hand| hand.score)?;
-            Some(shoulder.min(wrist).min(hand))
+            Some(shoulder.min(wrist))
         });
-        let wrist_usable = self.adoption.update(adoption_score);
+        let hand_detected = quality.is_some_and(|value| value.palm);
+        let wrist_usable = self.adoption.update(adoption_score, hand_detected);
         let elbow_usable = wrist_usable && quality.is_some_and(|value| value.elbow);
         let palm_usable = wrist_usable && quality.is_some_and(|value| value.palm);
 
@@ -933,13 +941,13 @@ mod tests {
         }
     }
 
-    /// A hand detection with no usable palm plane: the score gates adoption,
-    /// the zeroed landmarks cannot form a normal, so the palm channel stays
-    /// absent.
-    fn scored_hand(score: f32) -> HandWorldLandmarks {
+    /// A hand detection with no usable palm plane: the zeroed landmarks cannot
+    /// form a normal, so the palm channel stays absent even though the hand was
+    /// detected.
+    fn detected_hand(handedness: f32) -> HandWorldLandmarks {
         HandWorldLandmarks {
             landmarks: [point([0.0, 0.0, 0.0]); 21],
-            score: Some(score),
+            handedness_score: Some(handedness),
         }
     }
 
@@ -948,7 +956,7 @@ mod tests {
             shoulder: point([0.0, 0.0, 0.0]),
             elbow: point([0.3, 0.0, 0.0]),
             wrist: point([0.3, -0.4, 0.0]),
-            hand: Some(scored_hand(1.0)),
+            hand: Some(detected_hand(1.0)),
         }
     }
 
@@ -998,19 +1006,17 @@ mod tests {
     }
 
     /// 21 hand world landmarks with the wrist, index MCP, and pinky MCP set.
-    fn hand_with(
-        wrist: [f32; 3],
-        index_mcp: [f32; 3],
-        pinky_mcp: [f32; 3],
-        score: Option<f32>,
-    ) -> HandWorldLandmarks {
+    fn hand_with(wrist: [f32; 3], index_mcp: [f32; 3], pinky_mcp: [f32; 3]) -> HandWorldLandmarks {
         let landmarks = std::array::from_fn(|index| match index {
             0 => point(wrist),
             5 => point(index_mcp),
             17 => point(pinky_mcp),
             _ => point(wrist),
         });
-        HandWorldLandmarks { landmarks, score }
+        HandWorldLandmarks {
+            landmarks,
+            handedness_score: Some(1.0),
+        }
     }
 
     /// Hand keypoints whose canonical palm normal points toward the camera (+Z).
@@ -1020,7 +1026,6 @@ mod tests {
             array(wrist),
             array(wrist + Vector3::new(0.0, 0.02, 0.0)),
             array(wrist + Vector3::new(0.01, 0.0, 0.0)),
-            Some(1.0),
         )
     }
 
@@ -1031,7 +1036,6 @@ mod tests {
             array(wrist),
             array(wrist + Vector3::new(0.01, 0.0, 0.0)),
             array(wrist + Vector3::new(0.0, 0.02, 0.0)),
-            Some(1.0),
         )
     }
 
@@ -1043,7 +1047,6 @@ mod tests {
                 [0.3, -0.4, 0.0],
                 [0.31, -0.4, 0.0],
                 [0.30, -0.38, 0.0],
-                Some(1.0),
             )),
             ..arm()
         };
@@ -1060,7 +1063,7 @@ mod tests {
             }
             HandWorldLandmarks {
                 landmarks,
-                score: hand.score,
+                handedness_score: hand.handedness_score,
             }
         });
         let translated = ArmLandmarks {
@@ -1083,7 +1086,6 @@ mod tests {
                 [0.3, -0.4, 0.0],
                 [0.31, -0.4, 0.0],
                 [0.32, -0.4, 0.0],
-                Some(1.0),
             )),
             ..arm()
         };
@@ -1091,26 +1093,51 @@ mod tests {
     }
 
     #[test]
-    fn palm_quality_requires_a_trusted_hand_detection() {
+    fn palm_quality_is_the_presence_of_a_hand_detection() {
         let profile = ArmTrackingProfile::default();
-        let with_score = |score: Option<f32>| ArmLandmarks {
+        let base = arm();
+        let detected = ArmLandmarks {
             hand: Some(hand_with(
                 [0.3, -0.4, 0.0],
                 [0.31, -0.4, 0.0],
                 [0.30, -0.38, 0.0],
-                score,
             )),
-            ..arm()
+            ..base
         };
-        assert!(assess_arm_observation(&with_score(Some(1.0)), &profile).palm);
-        assert!(assess_arm_observation(&with_score(Some(0.7)), &profile).palm);
-        assert!(!assess_arm_observation(&with_score(Some(0.1)), &profile).palm);
-        assert!(!assess_arm_observation(&with_score(None), &profile).palm);
-        let no_hand = ArmLandmarks {
-            hand: None,
-            ..arm()
+        // The Hand Landmarker reports no landmark quality, so any detection is
+        // an observed palm — including one whose left/right label was ambiguous.
+        let ambiguous = ArmLandmarks {
+            hand: detected.hand.map(|mut hand| {
+                hand.handedness_score = Some(0.1);
+                hand
+            }),
+            ..base
         };
-        assert!(!assess_arm_observation(&no_hand, &profile).palm);
+        assert!(assess_arm_observation(&detected, &profile).palm);
+        assert!(assess_arm_observation(&ambiguous, &profile).palm);
+        assert!(
+            !assess_arm_observation(&ArmLandmarks { hand: None, ..base }, &profile).palm,
+            "no detection means no palm observation"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_handedness_label_does_not_drop_a_visible_arm() {
+        // Pose sees the whole arm and the Hand Landmarker found the hand, but
+        // the left/right label was ambiguous. The arm must stay adopted: the
+        // handedness score says nothing about how well located the arm is.
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let ambiguous = ArmLandmarks {
+            hand: base.hand.map(|mut hand| {
+                hand.handedness_score = Some(0.05);
+                hand
+            }),
+            ..base
+        };
+        let state = tracked_state(ambiguous, &profile);
+        assert_eq!(state.left.weights().wrist, 1.0);
+        assert_eq!(state.right.weights().wrist, 1.0);
     }
 
     #[test]
@@ -1241,7 +1268,7 @@ mod tests {
             shoulder: point([0.0, 0.0, 0.0]),
             elbow: point(elbow),
             wrist: point(wrist),
-            hand: Some(scored_hand(1.0)),
+            hand: Some(detected_hand(1.0)),
         }
     }
 
@@ -1362,25 +1389,46 @@ mod tests {
     #[test]
     fn arm_adoption_gate_requires_consecutive_good_frames() {
         let mut gate = ArmAdoptionGate::new();
-        assert!(!gate.update(Some(0.9)));
-        assert!(!gate.update(Some(0.2)), "a bad frame resets progress");
+        assert!(!gate.update(Some(0.9), true));
+        assert!(!gate.update(Some(0.2), true), "a bad frame resets progress");
         for _ in 0..ARM_GOOD_FRAMES - 1 {
-            assert!(!gate.update(Some(0.9)));
+            assert!(!gate.update(Some(0.9), true));
         }
-        assert!(gate.update(Some(0.9)), "four consecutive good frames adopt");
+        assert!(
+            gate.update(Some(0.9), true),
+            "four consecutive good frames adopt"
+        );
 
         // Band values hold the current state without counting either way.
         for _ in 0..10 {
-            assert!(gate.update(Some(0.55)));
+            assert!(gate.update(Some(0.55), true));
         }
         for _ in 0..ARM_BAD_FRAMES - 1 {
-            assert!(gate.update(Some(0.2)));
+            assert!(gate.update(Some(0.2), true));
         }
         assert!(
-            !gate.update(Some(0.2)),
+            !gate.update(Some(0.2), true),
             "six consecutive bad frames lose it"
         );
-        assert!(!gate.update(None), "a missing score is not good");
+        assert!(!gate.update(None, true), "a missing score is not good");
+    }
+
+    #[test]
+    fn a_missing_hand_detection_blocks_adoption_and_ends_it() {
+        let mut gate = ArmAdoptionGate::new();
+        // Perfect Pose visibility with no detected hand is the hidden-limb
+        // hallucination a Pose arm produces on its own.
+        for _ in 0..ARM_GOOD_FRAMES * 2 {
+            assert!(!gate.update(Some(1.0), false));
+        }
+        for _ in 0..ARM_GOOD_FRAMES - 1 {
+            assert!(!gate.update(Some(1.0), true));
+        }
+        assert!(gate.update(Some(1.0), true));
+        for _ in 0..ARM_BAD_FRAMES - 1 {
+            assert!(gate.update(Some(1.0), false));
+        }
+        assert!(!gate.update(Some(1.0), false));
     }
 
     #[test]

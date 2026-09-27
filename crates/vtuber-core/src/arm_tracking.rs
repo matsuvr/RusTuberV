@@ -28,12 +28,25 @@ pub const HAND_LANDMARK_COUNT: usize = 21;
 /// camera-aligned basis; only orientation is derived from them, because their
 /// origin is hand-centred rather than body-centred. The full set is retained so
 /// finger articulation can be consumed without a new inference model.
+///
+/// The presence of this value is the only hand-quality signal available: the
+/// Hand Landmarker reports no per-landmark detection confidence, so a hand that
+/// was paired to a wrist is treated as observed and a hand that is absent stays
+/// absent. See [`Self::handedness_score`] for what is deliberately not a
+/// quality signal.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HandWorldLandmarks {
     /// 21 world landmarks of one hand, in meters.
     pub landmarks: [PoseWorldLandmark; HAND_LANDMARK_COUNT],
-    /// MediaPipe's handedness score for this hand, when supplied.
-    pub score: Option<f32>,
+    /// MediaPipe's confidence in its Left/Right classification of this hand.
+    ///
+    /// This is the confidence of a *left/right label*, not of the landmark
+    /// coordinates: the task derives the label from the hand's own shape, so an
+    /// ambiguous pose lowers it while the landmarks stay exactly as usable. It
+    /// therefore must never be read as detection quality, coordinate accuracy,
+    /// or an ordering between competing hands, and no missing value is ever
+    /// replaced with confidence 1.
+    pub handedness_score: Option<f32>,
 }
 
 /// Three observations belonging to the same anatomical arm and source image.

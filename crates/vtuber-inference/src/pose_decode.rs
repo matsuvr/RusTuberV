@@ -193,7 +193,7 @@ pub fn decode_pose_arms(
 pub fn decode_hand_world(
     hand: usize,
     world: &[WorldLandmark],
-    score: Option<f32>,
+    handedness_score: Option<f32>,
 ) -> Result<HandWorldLandmarks, PoseDecodeError> {
     if world.len() != HAND_LANDMARK_COUNT {
         return Err(PoseDecodeError::HandLandmarkCount {
@@ -226,12 +226,15 @@ pub fn decode_hand_world(
             presence: source.presence.map(|value| value.get()),
         };
     }
-    if let Some(score) = score
+    if let Some(score) = handedness_score
         && (!score.is_finite() || !(0.0..=1.0).contains(&score))
     {
         return Err(PoseDecodeError::InvalidHandScore { hand, score });
     }
-    Ok(HandWorldLandmarks { landmarks, score })
+    Ok(HandWorldLandmarks {
+        landmarks,
+        handedness_score,
+    })
 }
 
 /// Pairs every detected hand with the Pose wrist nearest to it and returns one
@@ -239,9 +242,13 @@ pub fn decode_hand_world(
 ///
 /// Pairing uses the normalized image positions of the Pose wrists and the
 /// hand's own wrist, so it does not depend on MediaPipe's handedness label being
-/// computed for mirrored input. Higher-scoring hands claim their nearest free
-/// side first; a hand farther than [`HAND_WRIST_PAIR_DISTANCE`] from every free
-/// wrist is ignored rather than assigned to a side it does not belong to.
+/// computed for mirrored input. Each hand claims its nearest free side in the
+/// order the task reported it; a hand farther than [`HAND_WRIST_PAIR_DISTANCE`]
+/// from every free wrist is ignored rather than assigned to a side it does not
+/// belong to. Handedness is deliberately not consulted: it is a left/right
+/// label confidence, not a statement about coordinate accuracy, so ranking
+/// candidates by it would silently prefer an ambiguous hand over a confident one
+/// for no reason the observation supports.
 ///
 /// # Errors
 ///
@@ -287,12 +294,12 @@ pub fn decode_hand_result(
         if !wrist.iter().all(|value| value.is_finite()) {
             return Err(PoseDecodeError::InvalidHandLandmark { hand, index: 0 });
         }
-        let score = result
+        let handedness_score = result
             .handedness
             .get(hand)
             .and_then(|categories| categories.first())
             .map(|category| category.score.get());
-        let hand_observation = decode_hand_world(hand, world, score)?;
+        let hand_observation = decode_hand_world(hand, world, handedness_score)?;
         let distances = std::array::from_fn(|side| {
             wrist_xy
                 .get(side)
@@ -302,7 +309,6 @@ pub fn decode_hand_result(
         });
         candidates.push(HandCandidate {
             distances,
-            score: score.unwrap_or(0.0),
             hand: hand_observation,
         });
     }
@@ -310,12 +316,11 @@ pub fn decode_hand_result(
     Ok(assign_hands(candidates, HAND_WRIST_PAIR_DISTANCE))
 }
 
-/// Gives each detected hand its nearest free side, best-scoring hand first.
+/// Gives each detected hand its nearest free side, in the reported order.
 fn assign_hands(
-    mut candidates: Vec<HandCandidate>,
+    candidates: Vec<HandCandidate>,
     max_distance: f32,
 ) -> [Option<HandWorldLandmarks>; 2] {
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut hands: [Option<HandWorldLandmarks>; 2] = [None, None];
     for candidate in candidates {
         let best = candidate
@@ -337,7 +342,6 @@ fn assign_hands(
 
 struct HandCandidate {
     distances: [Option<f32>; 2],
-    score: f32,
     hand: HandWorldLandmarks,
 }
 
@@ -520,7 +524,13 @@ mod tests {
         let hand = decode_hand_world(0, &hand_world(0.5), Some(0.9)).unwrap();
         let mcp = hand.landmarks[5].meters;
         assert!((mcp[0] - 0.05).abs() < 1.0e-6 && mcp[1] == 0.5 && mcp[2] == 0.0);
-        assert_eq!(hand.score, Some(0.9));
+        assert_eq!(hand.handedness_score, Some(0.9));
+        assert_eq!(
+            decode_hand_world(0, &hand_world(0.5), None)
+                .unwrap()
+                .handedness_score,
+            None
+        );
         assert!(matches!(
             decode_hand_world(0, &hand_world(0.5)[..20], Some(0.9)),
             Err(PoseDecodeError::HandLandmarkCount { .. })
@@ -531,11 +541,12 @@ mod tests {
         ));
     }
 
-    fn candidate(distances: [Option<f32>; 2], score: f32) -> HandCandidate {
+    /// A hand candidate whose landmarks encode its handedness score, so a test can
+    /// tell two candidates apart without a separate identifier.
+    fn candidate(distances: [Option<f32>; 2], handedness: f32) -> HandCandidate {
         HandCandidate {
             distances,
-            score,
-            hand: decode_hand_world(0, &hand_world(score), Some(score)).unwrap(),
+            hand: decode_hand_world(0, &hand_world(handedness), Some(handedness)).unwrap(),
         }
     }
 
@@ -552,23 +563,26 @@ mod tests {
         assert!(hands[1].is_some());
         // The first hand takes the left side (closest); the second then takes
         // the remaining right side even though its left distance is smaller.
-        assert_eq!(hands[0].unwrap().score, Some(0.9));
-        assert_eq!(hands[1].unwrap().score, Some(0.8));
+        assert_eq!(hands[0].unwrap().handedness_score, Some(0.9));
+        assert_eq!(hands[1].unwrap().handedness_score, Some(0.8));
 
         let far = assign_hands(vec![candidate([Some(0.60), Some(0.70)], 0.9)], 0.15);
         assert_eq!(far, [None, None]);
     }
 
     #[test]
-    fn higher_scoring_hand_claims_its_side_first() {
+    fn handedness_confidence_does_not_decide_which_hand_claims_a_side() {
+        // Two hands compete for the same free wrist. The nearer one is the same
+        // physical hand by construction, so a lower handedness confidence must
+        // not hand the side to the farther one.
         let hands = assign_hands(
             vec![
-                candidate([Some(0.10), None], 0.5),
+                candidate([Some(0.05), None], 0.4),
                 candidate([Some(0.02), None], 0.9),
             ],
             0.15,
         );
-        assert_eq!(hands[0].unwrap().score, Some(0.9));
+        assert_eq!(hands[0].unwrap().handedness_score, Some(0.4));
         assert_eq!(hands[1], None);
     }
 }
