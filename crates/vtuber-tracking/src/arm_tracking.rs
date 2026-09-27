@@ -115,6 +115,107 @@ impl PointSmootherState {
     }
 }
 
+/// Render-clock critically damped state for one observed unit direction.
+///
+/// The direction is followed as a rotation rather than as a raw 3-vector. A
+/// palm flip sends the observation to the opposite side of the sphere, and
+/// filtering the vector would drive the state toward the origin: normalizing
+/// a nearly zero vector picks an arbitrary direction, so the palm could swing
+/// through a side the hand never showed. Here the error is the shortest
+/// rotation between the current and observed directions, so an opposed pair
+/// turns about a stable perpendicular and arrives from the side the hand
+/// actually moved through. This is the same treatment the head rotation filter
+/// applies in tangent space; only the shared step is reused, not the head's
+/// single-frame angle limit, which has no meaning for a palm normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DirectionSmootherState {
+    value: Vector3<f32>,
+    /// Retained angular derivative in the tangent plane, as a rotation vector.
+    velocity: Vector3<f32>,
+}
+
+impl DirectionSmootherState {
+    /// `value` must be a unit vector, so every rotation starts from a point on
+    /// the sphere.
+    fn new(value: Vector3<f32>) -> Self {
+        Self {
+            value,
+            velocity: Vector3::zeros(),
+        }
+    }
+
+    /// Advances one render tick. An unusable observation holds the direction.
+    fn step(&mut self, target: [f32; 3], dt_sec: f32, time_constant_sec: f32) {
+        let Some(target) = finite_normalized(vector(target)) else {
+            return;
+        };
+        let Some(rotation) = shortest_arc_rotation(self.value, target) else {
+            return;
+        };
+        let (correction, velocity) =
+            critically_damped_step(rotation, self.velocity, dt_sec, time_constant_sec);
+        if let Some(value) = finite_normalized(rotate(self.value, correction)) {
+            self.value = value;
+            self.velocity = velocity;
+        }
+    }
+
+    /// The smoothed direction, or `None` if it drifted off the unit sphere.
+    fn normalized(self) -> Option<[f32; 3]> {
+        finite_normalized(self.value).map(array)
+    }
+}
+
+/// Normalizes a candidate direction, returning `None` when it cannot be used.
+fn unit_direction(value: [f32; 3]) -> Option<Vector3<f32>> {
+    finite_normalized(vector(value))
+}
+
+/// Rotation vector of the shortest arc carrying one unit direction onto another.
+///
+/// Both inputs must be unit vectors. An exactly opposed pair leaves the axis
+/// free, so a stable perpendicular of `from` is used instead of leaving the
+/// rotation undefined; a `None` axis means the target is not usable.
+fn shortest_arc_rotation(from: Vector3<f32>, to: Vector3<f32>) -> Option<Vector3<f32>> {
+    let axis = from.cross(&to);
+    let sine = axis.norm();
+    let cosine = from.dot(&to);
+    if sine <= f32::EPSILON {
+        return (cosine >= 0.0)
+            .then_some(Vector3::zeros())
+            .or_else(|| stable_perpendicular(from).map(|axis| axis * std::f32::consts::PI));
+    }
+    Some(axis * (sine.atan2(cosine) / sine))
+}
+
+/// Rotates a vector by the rotation vector `rotation` (axis scaled by angle).
+///
+/// Rodrigues' formula, so a zero rotation is the identity without a degenerate
+/// division. The caller renormalizes the result, which is what the rotation
+/// about a unit axis already guarantees up to rounding.
+fn rotate(value: Vector3<f32>, rotation: Vector3<f32>) -> Vector3<f32> {
+    let angle = rotation.norm();
+    if angle <= f32::EPSILON {
+        return value;
+    }
+    let axis = rotation / angle;
+    let (sine, cosine) = angle.sin_cos();
+    value * cosine + axis.cross(&value) * sine + axis * axis.dot(&value) * (1.0 - cosine)
+}
+
+/// A unit vector perpendicular to `value`, chosen from the world axis least
+/// aligned with it so the result does not flip between ticks.
+fn stable_perpendicular(value: Vector3<f32>) -> Option<Vector3<f32>> {
+    let seed = if value.x.abs() <= value.y.abs() && value.x.abs() <= value.z.abs() {
+        Vector3::x()
+    } else if value.y.abs() <= value.z.abs() {
+        Vector3::y()
+    } else {
+        Vector3::z()
+    };
+    finite_normalized(value.cross(&seed))
+}
+
 /// Time constant of the observed wrist and elbow positions, in seconds.
 ///
 /// An observed hand that is genuinely moving must reach the avatar without the
@@ -127,10 +228,13 @@ const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.05;
 
 /// Time constant of the observed palm plane, in seconds.
 ///
-/// The palm normal is far noisier than a joint position — it comes from a cross
-/// product of two keypoints — and an orientation flip reads worse than a
-/// positional lag, so it is smoothed several times slower than the wrist.
-const ARM_PALM_TIME_CONSTANT_SEC: f32 = 0.30;
+/// The palm normal comes from a cross product of two hand keypoints and is the
+/// noisiest observed channel, so it keeps a longer constant than the wrist
+/// rather than the same one. It is deliberately only twice the wrist constant:
+/// the previous 0.30 s left the orientation trailing the hand position by three
+/// times as long, which read as the palm lagging behind the wrist rather than
+/// as a smoother plane.
+const ARM_PALM_TIME_CONSTANT_SEC: f32 = 0.10;
 
 /// Visibility at or above which an arm observation counts as good.
 const ARM_ENTER_VISIBILITY: f32 = 0.7;
@@ -212,7 +316,7 @@ const ELBOW_PLANE_MAX_RATE_RAD_PER_SEC: f32 = 3.0;
 struct ArmSmootherState {
     wrist: PointSmootherState,
     elbow: PointSmootherState,
-    palm: Option<PointSmootherState>,
+    palm: Option<DirectionSmootherState>,
     /// Bend-plane direction emitted on the previous tick, used to rate-limit
     /// the next one.
     last_plane: Option<[f32; 3]>,
@@ -224,7 +328,10 @@ impl ArmSmootherState {
         Self {
             wrist: PointSmootherState::new(target.wrist),
             elbow: PointSmootherState::new(target.elbow_pole),
-            palm: target.palm_normal.map(PointSmootherState::new),
+            palm: target
+                .palm_normal
+                .and_then(unit_direction)
+                .map(DirectionSmootherState::new),
             last_plane: None,
         }
     }
@@ -236,7 +343,10 @@ impl ArmSmootherState {
         self.elbow
             .step(target.elbow_pole, dt_sec, ARM_POSITION_TIME_CONSTANT_SEC);
         if self.palm.is_none() {
-            self.palm = target.palm_normal.map(PointSmootherState::new);
+            self.palm = target
+                .palm_normal
+                .and_then(unit_direction)
+                .map(DirectionSmootherState::new);
         }
         if let (Some(palm), Some(normal)) = (self.palm.as_mut(), target.palm_normal) {
             palm.step(normal, dt_sec, ARM_PALM_TIME_CONSTANT_SEC);
@@ -249,14 +359,8 @@ impl ArmSmootherState {
         );
         self.last_plane = Some(array(plane));
         // A lost palm observation holds the last smoothed normal while the
-        // palm blend decays, exactly like a held elbow pole. The normal is
-        // re-normalized so the vector smoother cannot drift off the unit
-        // sphere.
-        let palm_normal = self
-            .palm
-            .as_ref()
-            .and_then(|palm| finite_normalized(palm.position))
-            .map(array);
+        // palm blend decays, exactly like a held elbow pole.
+        let palm_normal = self.palm.and_then(DirectionSmootherState::normalized);
         ArmTrackingTarget {
             wrist: array(self.wrist.position),
             elbow_pole: array(plane),
@@ -1647,6 +1751,97 @@ mod tests {
             previous = current;
         }
         assert!(previous[2] < -0.99);
+    }
+
+    #[test]
+    fn an_exactly_opposed_palm_turns_through_a_stable_side() {
+        // Turning the hand over leaves the two palm planes exactly opposed, so
+        // the shortest arc has no preferred axis. The state must still turn
+        // continuously and land on the observation; filtering the raw vector
+        // instead would pass through a near-zero vector, whose normalization
+        // picks an arbitrary side the hand never showed.
+        let dt = 1.0 / 60.0;
+        let start = vector([0.0, 0.0, 1.0]);
+        let mut palm = DirectionSmootherState::new(start);
+        let mut previous = start;
+        let mut axis = Vector3::zeros();
+        for _ in 0..300 {
+            palm.step(array(-start), dt, ARM_PALM_TIME_CONSTANT_SEC);
+            let current = vector(palm.normalized().expect("the palm stays on the sphere"));
+            assert!(
+                (current.norm() - 1.0).abs() < 1.0e-5,
+                "the smoothed palm must stay a unit vector: {current:?}"
+            );
+            let turn = previous.cross(&current);
+            if turn.norm() > 1.0e-6 {
+                let first = if axis.norm() > 0.0 { &axis } else { &turn };
+                assert!(
+                    turn.dot(first) > 0.0,
+                    "the palm must not reverse its turn: {turn:?}"
+                );
+                axis = turn;
+            }
+            previous = current;
+        }
+        assert!(
+            previous.dot(&(-start)) > 1.0 - 1.0e-4,
+            "the palm must reach the opposed observation: {previous:?}"
+        );
+    }
+
+    #[test]
+    fn a_palm_turn_never_leaves_the_plane_of_the_observation() {
+        // The rotation between two palm planes is about the line where they meet,
+        // so every intermediate direction stays inside the plane the two
+        // observations span. A vector-space smoother can leave that plane
+        // because it corrects all three components at once.
+        let dt = 1.0 / 60.0;
+        let from = vector([0.0, 0.0, 1.0]);
+        let to = vector([1.0, 0.0, 0.0]);
+        let mut palm = DirectionSmootherState::new(from);
+        for _ in 0..300 {
+            palm.step(array(to), dt, ARM_PALM_TIME_CONSTANT_SEC);
+            let current = vector(palm.normalized().expect("the palm stays on the sphere"));
+            assert!(
+                current.y.abs() < 1.0e-4,
+                "the turn must stay in the observation's plane: {current:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_palm_observation_holds_the_last_direction() {
+        let mut palm = DirectionSmootherState::new(vector([0.0, 0.0, 1.0]));
+        palm.step([0.0, 0.0, 0.0], RENDER_STEP_SEC, ARM_PALM_TIME_CONSTANT_SEC);
+        palm.step(
+            [f32::NAN, 0.0, 0.0],
+            RENDER_STEP_SEC,
+            ARM_PALM_TIME_CONSTANT_SEC,
+        );
+        near(palm.normalized().unwrap(), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_palm_flip_settles_within_a_second_of_render_ticks() {
+        // The palm constant is deliberately only a multiple of the wrist one, so
+        // turning the hand over reaches the observation in about a second of
+        // render ticks instead of trailing the wrist position for several.
+        let mut palm = DirectionSmootherState::new(vector([0.0, 0.0, 1.0]));
+        let target = array(-vector([0.0, 0.0, 1.0]));
+        let mut ticks = 0u32;
+        loop {
+            palm.step(target, RENDER_STEP_SEC, ARM_PALM_TIME_CONSTANT_SEC);
+            ticks += 1;
+            let current = vector(palm.normalized().expect("the palm stays on the sphere"));
+            if current.dot(&-vector([0.0, 0.0, 1.0])) > 1.0 - 1.0e-3 {
+                break;
+            }
+            assert!(ticks < 60, "the palm must settle within a second: {ticks}");
+        }
+        assert!(
+            ticks > 5,
+            "the palm must still be smoothed, not snapped: {ticks} ticks"
+        );
     }
 
     #[test]
