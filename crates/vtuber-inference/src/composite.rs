@@ -22,7 +22,7 @@ use crate::roi::FaceRoi;
 use crate::runtime::{
     FrameFaceInference, FrameInferenceOutcome, FrameInferenceTiming, OnnxRuntime,
 };
-use crate::schema::BasicExpressionFallback;
+use crate::schema::SCHEMA_PEPPAPIG_98;
 
 const LANDMARK_COUNT: usize = 98;
 const MIN_FACE_CONFIDENCE: f32 = 0.5;
@@ -217,7 +217,10 @@ where
 
         let schema = landmark_schema(&self.descriptor)?;
         let roi = transform.source_roi();
-        let mut observation = RawFaceObservation {
+        // `expressions` keeps the zero-confidence default: the legacy stack
+        // produces no named blendshapes, and this runtime has no verified
+        // landmark index set for the 98-point output.
+        let observation = RawFaceObservation {
             source_seq: frame.seq,
             captured_at: frame.captured_at,
             inference_started_at: vtuber_core::monotonic_now(),
@@ -229,12 +232,6 @@ where
             roi,
             schema,
         };
-        observation.expressions = BasicExpressionFallback::from_landmarks(
-            &observation.landmarks,
-            schema,
-            face_confidence,
-        )
-        .unwrap_or_default();
         self.last_timing.decode = Some(decode_started.elapsed());
 
         if self
@@ -477,7 +474,7 @@ fn validate_descriptor(
 
 fn landmark_schema(descriptor: &FacePipelineDescriptor) -> Result<LandmarkSchemaId> {
     match descriptor.landmarks.schema.as_deref() {
-        Some("peppapig-98") => Ok(LandmarkSchemaId("peppapig-98")),
+        Some(name) if name == SCHEMA_PEPPAPIG_98.0 => Ok(SCHEMA_PEPPAPIG_98),
         Some(other) => Err(InferenceError::InvalidInput(format!(
             "unsupported landmark schema `{other}`"
         ))),
