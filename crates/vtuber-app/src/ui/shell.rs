@@ -8,8 +8,9 @@ use crate::actions::UiAction;
 use crate::avatar_bridge::publish_control_frame_system;
 use crate::avatar_bridge::sync_avatar_diagnostics;
 use crate::capture_runtime::{
-    CaptureRuntime, LatestVideoFrame, capture_bridge_system, read_latest_frame,
-    register_preview_texture_system, sync_capture_diagnostics, update_preview_texture_system,
+    CaptureRuntime, LatestVideoFrame, capture_bridge_system, default_camera_backend,
+    read_latest_frame, register_preview_texture_system, sync_capture_diagnostics,
+    update_preview_texture_system,
 };
 use crate::diagnostics::{DiagnosticsSnapshot, sync_engine_diagnostics};
 use crate::error_presenter::ErrorPresenter;
@@ -178,27 +179,16 @@ impl Plugin for UiShellPlugin {
             .init_resource::<DiagnosticsSnapshot>()
             .init_resource::<MetricsExportState>()
             .init_resource::<ErrorPresenter>()
-            .init_resource::<super::file_dialog::FileDialogState>()
-            .init_resource::<CaptureRuntime>()
-            .init_resource::<LatestVideoFrame>();
+            .init_resource::<super::file_dialog::FileDialogState>();
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::SwitchPane(Pane::Studio));
-        let frame_slot = app.world().resource::<CaptureRuntime>().frame_slot();
         let project_root = app
             .world()
             .get_resource::<InferenceProjectRoot>()
             .map(|root| root.0.clone())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        app.insert_resource(InferenceRuntime::new(frame_slot, project_root.clone()))
-            .insert_resource(PoseRuntime::new(project_root))
-            .init_resource::<TrackingRuntime>();
-        // Wire the camera fan-out to the Pose slot before the capture worker is
-        // ever started, so one camera open serves both face and Pose.
-        let pose_slot = app.world().resource::<PoseRuntime>().frame_slot();
-        app.world_mut()
-            .resource_mut::<CaptureRuntime>()
-            .set_pose_output(Some(pose_slot));
+        init_tracking_runtimes(app, project_root);
         app.add_systems(
             Startup,
             (
@@ -322,6 +312,35 @@ impl Plugin for UiShellPlugin {
                 sync_avatar_diagnostics.after(crate::synthetic_tracking::synthetic_tracking_system),
             );
     }
+}
+
+/// Installs the Pose, capture and inference runtimes, keeping any the caller
+/// inserted first.
+///
+/// A caller that wires a Pose/Capture pair on one slot before this plugin runs
+/// keeps both halves: replacing only the Pose runtime would leave the capture
+/// worker publishing into the previous slot, so the arm input never arrives.
+/// The Pose slot is taken from the runtime that is actually retained, and an
+/// existing capture runtime keeps its backend, worker and sinks untouched; no
+/// running controller is rebuilt here.
+fn init_tracking_runtimes(app: &mut App, project_root: std::path::PathBuf) {
+    // The Pose consumer exists before the capture runtime so its slot can be
+    // handed to the constructor: one camera open serves both face and Pose, and
+    // the output is fixed before any worker can start.
+    if !app.world().contains_resource::<PoseRuntime>() {
+        app.insert_resource(PoseRuntime::new(project_root.clone()));
+    }
+    app.init_resource::<TrackingRuntime>()
+        .insert_resource(LatestVideoFrame::default());
+    let pose_slot = app.world().resource::<PoseRuntime>().frame_slot();
+    if !app.world().contains_resource::<CaptureRuntime>() {
+        app.insert_resource(CaptureRuntime::with_backend_and_pose_output(
+            default_camera_backend(),
+            Some(pose_slot),
+        ));
+    }
+    let frame_slot = app.world().resource::<CaptureRuntime>().frame_slot();
+    app.insert_resource(InferenceRuntime::new(frame_slot, project_root));
 }
 
 /// Starts tracking as soon as the avatar is ready and a camera is selected,
@@ -489,6 +508,8 @@ fn ui_render_system(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -551,6 +572,51 @@ mod tests {
         assert_eq!(state.camera_consent, CameraPreviewConsent::Visible);
         state.sync_pane(Pane::Studio);
         assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
+    }
+
+    #[test]
+    fn a_pre_wired_pose_capture_pair_survives_the_shell_initialization() {
+        let mut app = App::new();
+        let pose = PoseRuntime::new(std::path::PathBuf::from("."));
+        let pose_slot = pose.frame_slot();
+        app.insert_resource(pose).insert_resource(
+            crate::capture_runtime::CaptureRuntime::with_backend_and_pose_output(
+                crate::capture_runtime::CameraBackendKind::Mock,
+                Some(Arc::clone(&pose_slot)),
+            ),
+        );
+
+        init_tracking_runtimes(&mut app, std::path::PathBuf::from("."));
+
+        // The connected Pose runtime is kept, not replaced by a fresh one, and
+        // the caller's capture runtime keeps its Mock backend.
+        assert!(Arc::ptr_eq(
+            &app.world().resource::<PoseRuntime>().frame_slot(),
+            &pose_slot
+        ));
+        assert_eq!(
+            app.world()
+                .resource::<crate::capture_runtime::CaptureRuntime>()
+                .backend_kind(),
+            crate::capture_runtime::CameraBackendKind::Mock
+        );
+    }
+
+    #[test]
+    fn the_shell_initialization_wires_a_default_capture_runtime_to_the_pose_slot() {
+        let mut app = App::new();
+        init_tracking_runtimes(&mut app, std::path::PathBuf::from("."));
+
+        assert_eq!(
+            app.world()
+                .resource::<crate::capture_runtime::CaptureRuntime>()
+                .backend_kind(),
+            default_camera_backend()
+        );
+        // The Pose consumer and the inference consumer both exist, so the shell
+        // never has to wire anything after startup.
+        assert!(app.world().contains_resource::<PoseRuntime>());
+        assert!(app.world().contains_resource::<InferenceRuntime>());
     }
 
     #[test]
