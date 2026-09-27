@@ -251,8 +251,9 @@ VRM 0.x / 1.0の表示、macOS。使用VRM形式・モデル名は実機未実�
 いたがUIにもCSVにも出ていなかった（ADR-003が「実際に選択されたformatをUIと
 performance reportへ記録する」と決めている事項）。そこで既存
 `DiagnosticsSnapshot`に`camera_format`を1項追加し、`sync_capture_diagnostics`が
-streamを開いたときだけ更新し、既存のopt-in CSVにも列を追加した。指標の集合を
-増やしたり新しい監視基盤を作ったりはしていない。
+formatがある場合は同期のたびに`format.to_string()`を実行する。文字列の比較後、
+違いがある場合だけsnapshotへ代入し、既存のopt-in CSVにも列を追加した。
+stream開始時だけ文字列を生成する実装ではない。新しい監視基盤は追加していない。
 
 更新順序の監査結果（ADR-004に反映）: 顔の経路はPoseの結果を待っていない。
 captureスレッドが同じ1フレームをface用とPose用の別々の`LatestSlot`へfan-outし、
@@ -264,11 +265,15 @@ captureスレッドが同じ1フレームをface用とPose用の別々の`Latest
 読んでいた。lean writer（`apply_direct_body_position`）との前後関係はexecutorの
 アクセス競合解決に任されており、決まっていなかった。両armターゲット段を
 両writerの後ろへ移し、`tests/schedule.rs`にその5本の辺を固定した。
+body writerが先、arm-target段が後である。循環はテスト実行中のschedule初期化時に
+検出されるもので、Rustのコンパイル時検出ではない。
 
 実機での比較（Release、同じカメラ・VRM・画角・照明・動作で条件を1つずつ変える、
 640x360と1280x720、Pose FullとHeavy、通常表示/プレビュー/配信有効）は**未実施**。
 `pose_landmarker_heavy.task`は`assets/models`に同梱されておらず、選択する経路も
-無いのでHeavyの比較は先にアセットの追加が要る。`Delegate::Cpu`が3つのlandmarkerで
+無いのでHeavyの比較にはアセットと一時的な選択手順が要る。ファイルを置くだけでは
+比較できない。640x360が選べない場合は非対応として記録し、640x480等の結果を
+640x360と表記しない。`Delegate::Cpu`が3つのlandmarkerで
 ハードコードされていてGPU delegateは到達不能だが、委譲の切替は要求されておらず、
 負荷が測定されるまで恒久的な分岐を残さない方針なので変更していない。
 `inference_input_skipped_frames`はfaceワーカーのみであり、Poseワーカーの
@@ -276,6 +281,13 @@ drop率・stage timing・結果は`DiagnosticsSnapshot`に一切出ていない�
 比較で欲しければ扱うべき点として記録するにとどめ、新しい計測経路は追加しない。
 `capture_to_apply`は顔側の骨姿勢の適用までを測る値で、腕や指の遅延や画面提示までの
 遅延ではない点も再確認した（ADR-019/022の既存方針と一致）。
+
+#191は修正済み#190（`83a318e3c06bc663e29f2d3ebedc087d905843f4`）へ追従し、
+更新順序とCSVの固有変更を維持した。追従後のローカル確認は
+`cargo check -p vtuber-app -p vtuber-avatar -j 1`、avatarの`--test schedule`（3件）、
+appの`metrics_export::tests::csv_records_the_negotiated_capture_format`（1件）、
+avatarの`tracked_arm::tests`（24件）が成功。fmtとdiff checkも成功。
+これは比較用コードの確認であり、#184の実測比較と採用判断は未実施のまま残す。
 
 追加（2026-09-27, 掌の回転連続性）: 手の位置0.05 sに対して掌は0.30 sで6倍遅く、
 手先位置は追いついていても掌の向きだけが後からついていく状態になっていた。時定数を

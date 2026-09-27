@@ -135,7 +135,9 @@ derives the torso-lag rotation from it and `update_tracked_arm_targets` composes
 the pose-input bridge, which put it ahead of the rotation writer too, so it read the
 torso pose the previous frame left behind, and the lean writer's relative order was
 left to the executor's access-conflict resolution. `tests/schedule.rs` pins every one
-of these edges.
+of these edges: both body writers run first, then the arm target stages.
+The test initializes the schedule at test runtime, where a dependency cycle
+would be reported; this is not a Rust compile-time check.
 
 ## Replacement and generation safety
 
