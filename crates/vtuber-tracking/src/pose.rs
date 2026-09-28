@@ -60,8 +60,8 @@ pub struct PoseAlignment {
     pub rotation: UnitQuaternion<f32>,
     /// Relative head pose using `quaternion_to_semantic_pose` sign conventions.
     pub pose: HeadPose,
-    /// Rotation-compensated residual translation of the current cloud
-    /// relative to neutral, in canonical basis units. Defined with the
+    /// Weighted centroid displacement of the current cloud relative to neutral,
+    /// in canonical basis units. Defined with the
     /// pivot at the weighted neutral centroid, so a pure head rotation
     /// about the face centre yields zero first-order cross-talk:
     /// `d = c_current - c_neutral`.
@@ -203,7 +203,7 @@ pub fn solve_relative_pose(
 
     let pose = quaternion_to_semantic_pose(quat);
 
-    // Rotation-compensated residual translation plus projected size
+    // Face-centroid displacement plus projected size
     // evidence for Issue #166's head-translation contract. Projected radii
     // deliberately use only x/y because canonical z is model-defined depth
     // that does not follow perspective scaling.
@@ -495,11 +495,11 @@ mod tests {
     }
 
     #[test]
-    fn recover_roll_negative_clockwise() {
+    fn recover_negative_roll() {
         let points = synthetic_face_points();
         let neutral = points_to_set(&points);
-        // DESIGN.md convention: clockwise tilt (as viewed) -> roll > 0.
-        // Test with a negative angle to verify the sign is preserved.
+        // Positive roll is clockwise as viewed by the camera.
+        // Test a negative angle to verify the sign is preserved.
         let expected = HeadPose {
             yaw_rad: 0.0,
             pitch_rad: 0.0,
