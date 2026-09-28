@@ -182,7 +182,7 @@ impl Plugin for UiShellPlugin {
             .init_resource::<super::file_dialog::FileDialogState>();
         app.world_mut()
             .resource_mut::<UiState>()
-            .emit(UiAction::SwitchPane(Pane::VrmImport));
+            .emit(UiAction::SwitchPane(Pane::VrmCamera));
         let project_root = app
             .world()
             .get_resource::<InferenceProjectRoot>()
@@ -493,7 +493,7 @@ fn ui_render_system(
     super::studio::expression_key_input(ctx, &vm, &mut state, file_dialog.is_active());
     // Uploads depend on explicit session consent; capture and inference do not.
     preview.visible = state.controls_open
-        && matches!(vm.pane, Pane::CameraStatus)
+        && matches!(vm.pane, Pane::PoseCamera)
         && state.camera_consent == CameraPreviewConsent::Visible;
     // A running transition samples the same avatar texture the monitor uses,
     // so the offscreen render outlives the settings until the card is gone.
@@ -537,12 +537,12 @@ mod tests {
             camera_consent: CameraPreviewConsent::Visible,
             ..Default::default()
         };
-        state.emit(UiAction::SwitchPane(Pane::CameraStatus));
-        state.emit(UiAction::SwitchPane(Pane::CameraStatus));
+        state.emit(UiAction::SwitchPane(Pane::PoseCamera));
+        state.emit(UiAction::SwitchPane(Pane::PoseCamera));
         assert_eq!(state.pending_actions.len(), 1);
         assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
         state.take_actions();
-        state.emit(UiAction::SwitchPane(Pane::CameraStatus));
+        state.emit(UiAction::SwitchPane(Pane::PoseCamera));
         assert_eq!(state.pending_actions.len(), 1);
     }
 
@@ -575,11 +575,11 @@ mod tests {
     #[test]
     fn same_page_rerender_preserves_consent_but_external_navigation_does_not() {
         let mut state = UiState::default();
-        state.sync_pane(Pane::CameraStatus);
+        state.sync_pane(Pane::PoseCamera);
         state.camera_consent = CameraPreviewConsent::Visible;
-        state.sync_pane(Pane::CameraStatus);
+        state.sync_pane(Pane::PoseCamera);
         assert_eq!(state.camera_consent, CameraPreviewConsent::Visible);
-        state.sync_pane(Pane::VrmImport);
+        state.sync_pane(Pane::VrmCamera);
         assert_eq!(state.camera_consent, CameraPreviewConsent::Hidden);
     }
 

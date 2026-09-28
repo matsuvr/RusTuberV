@@ -22,61 +22,36 @@ use vtuber_avatar::{
 };
 use vtuber_core::monotonic_now;
 
-/// Sidebar groups in display order. The label renders as a section header
-/// above its destinations.
-const NAVIGATION_GROUPS: [(&str, &str, &str, &str, &[Pane]); 3] = [
-    (
-        "VRMとカメラ選択",
-        "VRM & camera",
-        "VRM与摄像头",
-        "VRM 및 카메라",
-        &[Pane::VrmImport, Pane::CameraSelect, Pane::RichLook],
-    ),
-    (
-        "姿勢・カメラ調整",
-        "Pose & camera",
-        "姿势与摄像头调整",
-        "자세·카메라 조정",
-        &[Pane::Calibration, Pane::CameraStatus],
-    ),
-    (
-        "表情設定",
-        "Expressions",
-        "表情设置",
-        "표정 설정",
-        &[Pane::ExpressionKeys],
-    ),
+/// Sidebar destinations in display order. There is no hierarchy: every
+/// destination shows all of its sections in the right pane at once.
+const DESTINATIONS: [Pane; 5] = [
+    Pane::VrmCamera,
+    Pane::PoseCamera,
+    Pane::ExpressionKeys,
+    Pane::NdiOutput,
+    Pane::Diagnostics,
 ];
-
-/// Destinations without a group header, shown below the groups.
-const UNGROUPED_DESTINATIONS: [Pane; 2] = [Pane::NdiOutput, Pane::Diagnostics];
 
 /// Every sidebar destination in display order.
 fn destinations() -> impl Iterator<Item = Pane> {
-    NAVIGATION_GROUPS
-        .iter()
-        .flat_map(|(_, _, _, _, panes)| panes.iter().copied())
-        .chain(UNGROUPED_DESTINATIONS)
+    DESTINATIONS.into_iter()
 }
 
 fn page_title(pane: Pane, lang: UiLanguage) -> &'static str {
     match pane {
-        Pane::VrmImport => lang.pick("VRMを読み込む", "Load VRM", "加载VRM", "VRM 불러오기"),
-        Pane::CameraSelect => lang.pick(
-            "カメラを選択する",
-            "Select camera",
-            "选择摄像头",
-            "카메라 선택",
+        Pane::VrmCamera => lang.pick(
+            "VRM・カメラ選択",
+            "VRM & camera",
+            "VRM与摄像头",
+            "VRM 및 카메라",
         ),
-        Pane::RichLook => lang.pick("リッチ化", "Enhanced look", "增强显示", "고급 렌더링"),
-        Pane::Calibration => lang.pick("キャリブレーション", "Calibration", "校准", "캘리브레이션"),
-        Pane::CameraStatus => lang.pick(
-            "カメラ状態の確認",
-            "Camera status",
-            "摄像头状态",
-            "카메라 상태 확인",
+        Pane::PoseCamera => lang.pick(
+            "姿勢・カメラ調整",
+            "Pose & camera",
+            "姿势与摄像头调整",
+            "자세·카메라 조정",
         ),
-        Pane::ExpressionKeys => lang.pick("キー割り当て", "Key bindings", "按键绑定", "키 할당"),
+        Pane::ExpressionKeys => lang.pick("表情設定", "Expressions", "表情设置", "표정 설정"),
         Pane::NdiOutput => lang.pick("NDI出力", "NDI output", "NDI输出", "NDI 출력"),
         Pane::Diagnostics => lang.pick("診断", "Diagnostics", "诊断", "진단"),
     }
@@ -302,16 +277,8 @@ fn floating_settings_control(
 }
 
 fn navigation(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
-    for (ja, en, zh, ko, panes) in NAVIGATION_GROUPS {
-        ui.add_space(12.0);
-        ui.label(RichText::new(lang.pick(ja, en, zh, ko)).small().weak());
-        ui.add_space(4.0);
-        for &pane in panes {
-            navigation_button(ui, vm, state, pane, lang);
-        }
-    }
     ui.add_space(12.0);
-    for pane in UNGROUPED_DESTINATIONS {
+    for pane in destinations() {
         navigation_button(ui, vm, state, pane, lang);
     }
 }
@@ -657,20 +624,24 @@ pub(crate) fn render_studio(
                             );
                         }
                         match vm.pane {
-                            Pane::VrmImport => vrm_page(ui, vm, state, dialog_active, lang),
-                            Pane::CameraSelect => camera_select_page(ui, vm, state, lang),
-                            Pane::RichLook => render_rich_look_controls(ui, vm, state, lang),
-                            Pane::Calibration => calibration_page(ui, vm, state, lang),
-                            Pane::CameraStatus => camera_status_page(
-                                ui,
-                                vm,
-                                state,
-                                preview,
-                                landmarks,
-                                camera_texture,
-                                avatar_mirror,
-                                lang,
-                            ),
+                            Pane::VrmCamera => {
+                                vrm_page(ui, vm, state, dialog_active, lang);
+                                camera_select_page(ui, vm, state, lang);
+                                render_rich_look_controls(ui, vm, state, lang);
+                            }
+                            Pane::PoseCamera => {
+                                calibration_page(ui, vm, state, lang);
+                                camera_status_page(
+                                    ui,
+                                    vm,
+                                    state,
+                                    preview,
+                                    landmarks,
+                                    camera_texture,
+                                    avatar_mirror,
+                                    lang,
+                                );
+                            }
                             Pane::ExpressionKeys => expression_keys_page(ui, vm, state, lang),
                             Pane::NdiOutput => output_page(ui, vm, state, lang),
                             Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
@@ -2246,9 +2217,9 @@ mod tests {
         assert!(!use_sidebar(800.0));
         assert!(use_sidebar(1280.0));
         let destinations: Vec<Pane> = destinations().collect();
-        assert_eq!(destinations.len(), 8);
-        assert_eq!(destinations.first(), Some(&Pane::VrmImport));
-        assert!(destinations.contains(&Pane::CameraStatus));
+        assert_eq!(destinations.len(), 5);
+        assert_eq!(destinations.first(), Some(&Pane::VrmCamera));
+        assert!(destinations.contains(&Pane::PoseCamera));
         assert!(destinations.contains(&Pane::ExpressionKeys));
         assert!(destinations.contains(&Pane::NdiOutput));
         assert!(destinations.contains(&Pane::Diagnostics));

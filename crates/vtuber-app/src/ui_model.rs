@@ -11,17 +11,11 @@ use vtuber_avatar::{ArmPoseProfile, ExpressionAvailability, ExpressionKind};
 /// Destination selected by the navigation-only sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
-    /// VRM import: load, unload, and retry the model.
+    /// VRM import, camera selection, and rich look for the loaded model.
     #[default]
-    VrmImport,
-    /// Capture device selection.
-    CameraSelect,
-    /// Rich look switch and strength for the loaded model.
-    RichLook,
-    /// Neutral pose calibration and arm pose adjustments.
-    Calibration,
-    /// Explicitly confirmed camera preview plus avatar display and framing.
-    CameraStatus,
+    VrmCamera,
+    /// Neutral pose calibration, arm tracking, and camera preview status.
+    PoseCamera,
     /// Expression key assignments and the assigned expression list.
     ExpressionKeys,
     /// Clean avatar output, including optional NDI.
@@ -365,7 +359,7 @@ mod tests {
     fn ui_model_default_is_idle() {
         let vm = UiViewModel::default();
         assert_eq!(vm.lifecycle, AppLifecycle::Idle);
-        assert_eq!(vm.pane, Pane::VrmImport);
+        assert_eq!(vm.pane, Pane::VrmCamera);
         assert!(!vm.can_start());
         assert!(!vm.can_stop());
     }
@@ -464,12 +458,12 @@ mod tests {
     #[test]
     fn ui_model_pane_transitions() {
         let mut vm = UiViewModel::default();
-        assert_eq!(vm.pane, Pane::VrmImport);
+        assert_eq!(vm.pane, Pane::VrmCamera);
         for pane in [
-            Pane::CameraSelect,
+            Pane::PoseCamera,
+            Pane::ExpressionKeys,
+            Pane::NdiOutput,
             Pane::Diagnostics,
-            Pane::RichLook,
-            Pane::CameraStatus,
         ] {
             vm.pane = pane;
             assert_eq!(vm.pane, pane);
