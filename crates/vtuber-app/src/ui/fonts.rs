@@ -6,6 +6,8 @@ use bevy_egui::{EguiContexts, egui};
 use std::{io, path::PathBuf, sync::Arc};
 
 const JAPANESE_FONT_NAME: &str = "LINESeedJP_A_Rg";
+const CHINESE_FONT_NAME: &str = "zh-system-font";
+const KOREAN_FONT_NAME: &str = "ko-system-font";
 static JAPANESE_FONT_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/fonts/LINESeedJP_A_TTF_Rg.ttf"
@@ -64,24 +66,30 @@ fn font_definitions(language: UiLanguage) -> io::Result<egui::FontDefinitions> {
         JAPANESE_FONT_NAME.to_owned(),
         Arc::new(egui::FontData::from_static(JAPANESE_FONT_BYTES)),
     );
-    let locale_font = match language {
-        UiLanguage::Ja | UiLanguage::En => None,
-        UiLanguage::Zh | UiLanguage::Ko => {
-            let path = system_font_path(language)?;
-            let data = std::fs::read(&path).map_err(|error| {
-                io::Error::new(error.kind(), format!("{}: {error}", path.display()))
-            })?;
-            fonts.font_data.insert(
-                "locale-system-font".to_owned(),
-                Arc::new(egui::FontData::from_owned(data)),
-            );
-            Some("locale-system-font")
+    // Every language button is visible in every language, so both CJK system
+    // fonts are loaded regardless of the active language.
+    for (name, font_language) in [
+        (CHINESE_FONT_NAME, UiLanguage::Zh),
+        (KOREAN_FONT_NAME, UiLanguage::Ko),
+    ] {
+        let path = system_font_path(font_language)?;
+        let data = std::fs::read(&path).map_err(|error| {
+            io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+        })?;
+        fonts
+            .font_data
+            .insert(name.to_owned(), Arc::new(egui::FontData::from_owned(data)));
+    }
+    let priority = match language {
+        UiLanguage::Zh => [CHINESE_FONT_NAME, JAPANESE_FONT_NAME, KOREAN_FONT_NAME],
+        UiLanguage::Ko => [KOREAN_FONT_NAME, JAPANESE_FONT_NAME, CHINESE_FONT_NAME],
+        UiLanguage::Ja | UiLanguage::En => {
+            [JAPANESE_FONT_NAME, KOREAN_FONT_NAME, CHINESE_FONT_NAME]
         }
     };
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         let names = fonts.families.entry(family).or_default();
-        names.insert(0, JAPANESE_FONT_NAME.to_owned());
-        if let Some(name) = locale_font {
+        for name in priority.into_iter().rev() {
             names.insert(0, name.to_owned());
         }
     }
@@ -127,13 +135,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn japanese_and_english_need_no_system_font_or_network() {
-        for language in [UiLanguage::Ja, UiLanguage::En] {
-            let fonts = font_definitions(language).expect("bundled font");
+    fn every_language_loads_the_bundled_and_both_cjk_system_fonts() {
+        for language in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            let fonts = font_definitions(language).expect("bundled and CJK system fonts");
             assert_eq!(
                 fonts.font_data[JAPANESE_FONT_NAME].font.as_ref(),
                 JAPANESE_FONT_BYTES
             );
+            for name in [CHINESE_FONT_NAME, KOREAN_FONT_NAME] {
+                assert!(
+                    fonts.font_data.contains_key(name),
+                    "{language:?} keeps the {name} label renderable"
+                );
+            }
         }
     }
 }
