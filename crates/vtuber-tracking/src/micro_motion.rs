@@ -1,5 +1,4 @@
-//! Bounded procedural micro-motion after tracking loss (`DESIGN.md` §11.10,
-//! Issue #172, ADR-021).
+//! Bounded procedural micro-motion after tracking loss (ADR-021).
 //!
 //! Instead of freezing or snapping to neutral, the upper body transitions
 //! into a low-frequency bounded idle sway after the face is lost. The motion
@@ -64,9 +63,9 @@ impl MicroMotionProfile {
     ///
     /// # Errors
     ///
-    /// Returns [`MicroMotionProfileError`] when durations are zero or
-    /// non-finite when converted, amplitudes are negative or non-finite, or
-    /// rotation amplitudes exceed half a turn.
+    /// Returns [`MicroMotionProfileError`] when any duration is zero,
+    /// translation amplitudes are negative or non-finite, or rotation
+    /// amplitudes are non-finite or outside `[0, PI]`.
     pub fn validate(&self) -> Result<(), MicroMotionProfileError> {
         if self.transition.is_zero() || self.period.is_zero() || self.breath_period.is_zero() {
             return Err(MicroMotionProfileError::ZeroDuration);
@@ -96,7 +95,7 @@ impl MicroMotionProfile {
 /// Errors produced while validating a [`MicroMotionProfile`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MicroMotionProfileError {
-    /// Transition or period was zero.
+    /// Transition duration, sway period, or breathing period was zero.
     ZeroDuration,
     /// A translation amplitude ratio was negative or non-finite.
     NegativeAmplitude {

@@ -1,5 +1,5 @@
 //! Scale-aware soft-cap and dt-aware state filtering for neutral-relative
-//! head translation (`DESIGN.md` §6, Issue #164).
+//! head translation.
 //!
 //! The shaping policy passes small motions through untouched while only large
 //! motions are compressed, so no dead zone is introduced and small inputs are

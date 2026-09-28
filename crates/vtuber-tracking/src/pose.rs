@@ -1,8 +1,8 @@
 //! Head pose estimation from neutral-relative landmark sets.
 //!
 //! Uses weighted Kabsch to solve for rotation between a calibrated neutral
-//! point cloud and a current observation. Coordinate conventions follow
-//! `DESIGN.md` section 11.6.
+//! point cloud and a current observation. Semantic angle signs are documented
+//! by `quaternion_to_semantic_pose`.
 
 use nalgebra::{Dyn, OMatrix, OVector, Rotation3, SVD, U3, UnitQuaternion};
 use thiserror::Error;
@@ -58,7 +58,7 @@ pub struct LandmarkSet {
 pub struct PoseAlignment {
     /// Rotation from neutral to current in the canonical basis.
     pub rotation: UnitQuaternion<f32>,
-    /// Relative head pose with DESIGN.md semantic sign conventions.
+    /// Relative head pose using `quaternion_to_semantic_pose` sign conventions.
     pub pose: HeadPose,
     /// Rotation-compensated residual translation of the current cloud
     /// relative to neutral, in canonical basis units. Defined with the
@@ -131,7 +131,7 @@ impl LandmarkSet {
 /// # Coordinate conventions
 ///
 /// All positions are in the canonical basis used throughout the tracking
-/// pipeline. The returned `HeadPose` follows `DESIGN.md`:
+/// pipeline. The returned `HeadPose` uses these semantic signs:
 ///
 /// - `yaw > 0`: face turns right in the unmirrored image.
 /// - `pitch > 0`: chin goes up.
@@ -246,7 +246,7 @@ fn projected_radius(points: &[WeightedPoint], centroid: &[f32; 3]) -> f32 {
 
 /// Converts a canonical rotation quaternion to semantic yaw/pitch/roll.
 ///
-/// The mapping follows `DESIGN.md`:
+/// The mapping uses these semantic signs:
 ///
 /// - yaw   > 0  -> +Y axis rotation
 /// - pitch > 0  -> +X axis rotation
@@ -328,7 +328,7 @@ pub(crate) fn quaternion_to_semantic_pose(q: UnitQuaternion<f32>) -> HeadPose {
 pub fn semantic_pose_to_quaternion(pose: HeadPose) -> UnitQuaternion<f32> {
     // Canonical basis: right +X, up +Y, forward +Z.
     //
-    // semantic convention (from `DESIGN.md`):
+    // Semantic signs used by the pose conversion helpers:
     //   yaw   > 0  -> face turns right in the unmirrored image
     //   pitch > 0  -> chin goes up
     //   roll  > 0  -> head tilts clockwise as viewed by the camera
