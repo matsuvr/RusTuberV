@@ -1,0 +1,41 @@
+#!/bin/sh
+# Local-only Jev review. Git passes one line per pushed ref on stdin.
+if [ -z "${TYPESAFE_API_KEY:-${TYPESAFEAI_API_KEY:-}}" ]; then
+  echo 'jev-lint: TYPESAFE_API_KEY is not set; skipping.'
+  exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)" || exit 2
+head_sha=$(git rev-parse HEAD) || exit 2
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/heads/*) ;;
+    *) continue ;;
+  esac
+
+  # review reads the checked-out worktree, so only judge its own push.
+  if [ "$local_sha" != "$head_sha" ]; then
+    echo "jev-lint: skipping $local_ref (not the checked-out HEAD)."
+    continue
+  fi
+
+  case "$remote_sha" in
+    0000000000000000000000000000000000000000)
+      base=$(git merge-base "$local_sha" main) || exit 2
+      ;;
+    *) base=$remote_sha ;;
+  esac
+
+  npx -y jev-lint@0.7.0 review --base "$base" --fail-on error
+  status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    exit "$status"
+  fi
+
+  npx -y jev-lint@0.7.0 commits "$base..$local_sha" --fail-on error
+  status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    exit "$status"
+  fi
+done

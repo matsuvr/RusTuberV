@@ -67,3 +67,6 @@ desktop.ini
 # Python research tool artifacts
 __pycache__/
 *.pyc
+
+# Local jev-lint verdict cache
+/.jev-lint/
