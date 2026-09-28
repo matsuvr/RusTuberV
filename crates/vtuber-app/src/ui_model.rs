@@ -11,23 +11,23 @@ use vtuber_avatar::{ArmPoseProfile, ExpressionAvailability, ExpressionKind};
 /// Destination selected by the navigation-only sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
-    /// Guided setup overview. The desktop shell selects this on startup.
-    Studio,
-    /// Capture device and explicitly confirmed camera preview.
+    /// VRM import: load, unload, and retry the model.
     #[default]
-    Camera,
-    /// VRM import and arm pose.
-    Avatar,
-    /// Neutral pose calibration.
+    VrmImport,
+    /// Capture device selection.
+    CameraSelect,
+    /// Rich look switch and strength for the loaded model.
+    RichLook,
+    /// Neutral pose calibration and arm pose adjustments.
     Calibration,
-    /// Legacy camera-preview destination, rendered as the camera page.
-    Preview,
+    /// Explicitly confirmed camera preview plus avatar display and framing.
+    CameraStatus,
+    /// Expression key assignments and the assigned expression list.
+    ExpressionKeys,
     /// Clean avatar output, including optional NDI.
     NdiOutput,
     /// Tracking health and technical diagnostics.
     Diagnostics,
-    /// Application language and appearance settings.
-    Settings,
 }
 
 /// Overall application lifecycle state for UI display.
@@ -365,7 +365,7 @@ mod tests {
     fn ui_model_default_is_idle() {
         let vm = UiViewModel::default();
         assert_eq!(vm.lifecycle, AppLifecycle::Idle);
-        assert_eq!(vm.pane, Pane::Camera);
+        assert_eq!(vm.pane, Pane::VrmImport);
         assert!(!vm.can_start());
         assert!(!vm.can_stop());
     }
@@ -464,12 +464,12 @@ mod tests {
     #[test]
     fn ui_model_pane_transitions() {
         let mut vm = UiViewModel::default();
-        assert_eq!(vm.pane, Pane::Camera);
+        assert_eq!(vm.pane, Pane::VrmImport);
         for pane in [
-            Pane::Studio,
+            Pane::CameraSelect,
             Pane::Diagnostics,
-            Pane::Settings,
-            Pane::Camera,
+            Pane::RichLook,
+            Pane::CameraStatus,
         ] {
             vm.pane = pane;
             assert_eq!(vm.pane, pane);
