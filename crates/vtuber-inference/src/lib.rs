@@ -13,7 +13,7 @@ pub mod pose_decode;
 
 pub use pose_decode::{PoseDecodeError, decode_pose_result};
 
-/// Tract-based inference backends.
+/// MediaPipe Tasks and optional Rust inference backends.
 pub mod backend;
 /// Composite detector-to-landmark runtime with ROI recovery.
 #[cfg(feature = "onnx")]

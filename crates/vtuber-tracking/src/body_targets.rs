@@ -1,5 +1,5 @@
 //! Axis-selective root compensation and virtual head/body target generation
-//! (`DESIGN.md` §6, Issue #165).
+//! from shaped neutral-relative head translation.
 //!
 //! The shaped neutral-relative head translation (Issue #164) is split into a
 //! pure, engine-neutral [`VirtualBodyTargets`] state:

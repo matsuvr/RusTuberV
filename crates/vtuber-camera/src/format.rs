@@ -18,16 +18,17 @@ pub struct FormatCandidate {
     pub format: PixelFormat,
 }
 
-/// Selects the best matching format from the available candidates.
+/// Selects a candidate using fixed preferred tiers, then a distance score.
 ///
-/// Priority:
-/// 1. 1280x720 @ 30fps MJPEG
-/// 2. 1280x720 @ 30fps YUYV
-/// 3. 640x480 @ 30fps MJPEG
-/// 4. 640x480 @ 30fps YUYV
-/// 5. Closest 30fps format available
+/// The first pass checks 1280x720, then 640x480, at exactly `30/1` fps. With
+/// [`RequestedFormat::Any`], each resolution tries the MJPEG marker (`Rgb8`)
+/// before the YUYV marker (`Bgr8`). An explicit requested format replaces the
+/// format preference in every tier; it does not change the resolution order.
 ///
-/// The requested format in `CameraRequest` biases the choice.
+/// If no preferred tier matches, the lowest-scoring `30/1` fps candidate wins.
+/// If none exists, candidates at any frame rate are considered. These scoring
+/// passes use squared resolution distance plus 100 times squared integer-FPS
+/// distance from the request; they do not compare pixel-format preferences.
 pub fn select_format(
     request: &CameraRequest,
     candidates: &[FormatCandidate],
@@ -124,7 +125,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefers_720p30_mjpeg() {
+    fn prefers_720p30_over_480p30_for_default_request() {
         let request = CameraRequest::default();
         let candidates = vec![
             FormatCandidate {

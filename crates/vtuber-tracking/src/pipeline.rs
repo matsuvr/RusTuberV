@@ -11,10 +11,10 @@
 //! 5. Expression normalization and smoothing.
 //! 6. Loss glide, neutral decay, and recovery blending.
 //!
-//! The result is a single [`AvatarControlFrame`] per input observation, or
-//! `None` when no frame should be published. All timing uses the caller's
-//! monotonic timestamp and a caller-supplied delta-time so that recorded
-//! streams replay deterministically.
+//! Updates produce an optional [`AvatarControlFrame`]; consumer ticks may
+//! continue filtering between observation arrivals. Timing uses the caller's
+//! monotonic timestamp and a caller-supplied delta-time so recorded streams
+//! replay deterministically.
 
 use std::error::Error;
 use std::fmt;
@@ -155,9 +155,10 @@ impl Error for HeadPoseFailure {
 
 /// Computes the neutral-relative head pose for `observation`.
 ///
-/// The current landmarks are aligned to `neutral.landmarks` with the weighted
-/// Kabsch solver. The resulting rotation is converted to the semantic
-/// yaw/pitch/roll convention from `DESIGN.md` §11.6.
+/// Three-dimensional landmarks use the weighted Kabsch solver against
+/// `neutral.landmarks`. The `peppapig-98` image-space schema instead uses the
+/// planar canonical-template adapter for the neutral and current observations.
+/// Both paths use the semantic signs documented by `quaternion_to_semantic_pose`.
 ///
 /// Pose confidence is derived from the overall face confidence and the mean
 /// landmark visibility. It is always in `[0, 1]`.

@@ -135,19 +135,19 @@ impl ArmPoseOverrideStore {
         accepted
     }
 
-    /// Returns the number of stored model overrides.
+    /// Returns the number of legacy static overrides, excluding dynamic profiles.
     #[must_use]
     pub fn len(&self) -> usize {
         self.overrides.len()
     }
 
-    /// Returns whether no model overrides are stored.
+    /// Returns whether no legacy static overrides are stored, ignoring dynamic profiles.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.overrides.is_empty()
     }
 
-    /// Iterates over validated entries for application settings persistence.
+    /// Iterates over validated legacy static overrides for settings persistence.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &ArmPoseProfileOverride)> {
         self.overrides
             .iter()
@@ -156,8 +156,8 @@ impl ArmPoseOverrideStore {
 
     /// Imports entries from a persistence layer, retaining only valid entries.
     ///
-    /// The caller can persist the returned map in its chosen application
-    /// settings format without exposing unvalidated values to the avatar.
+    /// Returns the number of successfully accepted entries, including
+    /// replacements. Stored static overrides can be read with [`Self::entries`].
     pub fn import_entries<I>(&mut self, entries: I) -> usize
     where
         I: IntoIterator<Item = (String, ArmPoseProfileOverride)>,

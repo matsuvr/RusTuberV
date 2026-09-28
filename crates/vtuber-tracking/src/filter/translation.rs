@@ -76,10 +76,14 @@ impl TranslationFilter {
 
     /// Updates the filter with a new target translation.
     ///
-    /// An unavailable target passes through unchanged while the internal
-    /// state is retained, so the filtered output never steps across an
-    /// observation gap. The returned signal carries the target's availability
-    /// state.
+    /// An unavailable target returns [`HeadTranslationSignal::UNAVAILABLE`]
+    /// without advancing the stored value or timestamp. The next available
+    /// update uses elapsed time from the last accepted update, capped by
+    /// [`TranslationFilterParams::max_dt_sec`].
+    ///
+    /// At an unchanged or earlier timestamp, the previous signal is returned,
+    /// including its availability state. An available target's state is copied
+    /// on initialization or when a positive-time smoothing step is performed.
     #[must_use]
     pub fn update(
         &mut self,
@@ -199,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_target_passes_through_and_resumes_smoothly() {
+    fn unavailable_target_resumes_from_stored_value_after_short_gap() {
         let mut filter = TranslationFilter::new(params());
         let start = HeadTranslationSignal::tracked(0.0, 0.0, 0.0);
         let _ = filter.update(start, MonoTimeNs(0));

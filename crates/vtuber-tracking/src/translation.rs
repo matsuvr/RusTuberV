@@ -1,13 +1,13 @@
 //! Neutral-relative head translation from ordinary webcam face geometry.
 //!
 //! This module turns the geometry already produced by the Direct head-pose
-//! estimators into the engine-neutral [`HeadTranslationSignal`] contract from
-//! `DESIGN.md` §11.8 / Issue #163. It never re-solves a second pose problem:
+//! estimators into the engine-neutral [`HeadTranslationSignal`] contract.
+//! It never re-solves a second pose problem:
 //!
-//! * The Kabsch landmark path reuses the rotation from
-//!   [`crate::pose::solve_relative_pose`] together with the two weighted
-//!   centroids. Translation is the residual `c_current - R * c_neutral`,
-//!   so a pure rigid rotation produces no cross-talk by construction.
+//! * The Kabsch landmark path reuses the centroid displacement and projected
+//!   radii from [`crate::pose::solve_relative_pose`]. The displacement is
+//!   `c_current - c_neutral`, with the rotation pivot at the neutral face
+//!   centroid. Rotation about that pivot leaves the centroid unchanged.
 //! * The MediaPipe face-transform path reuses the relative translation of
 //!   [`RelativeFaceTransform`](crate::pose::mediapipe::RelativeFaceTransform).
 //!
@@ -53,8 +53,8 @@ const DEGRADED_VISIBILITY_THRESHOLD: f32 = 0.6;
 ///
 /// `mean_visibility` is the mean landmark visibility/presence of the current
 /// observation; it selects tracked versus degraded state. Non-finite or
-/// degenerate inputs produce [`HeadTranslationSignal::UNAVAILABLE`]; NaN/Inf
-/// are never published.
+/// degenerate geometry produces [`HeadTranslationSignal::UNAVAILABLE`]; NaN/Inf
+/// coordinates are never published.
 #[must_use]
 pub fn signal_from_alignment(
     alignment: &PoseAlignment,
@@ -63,13 +63,13 @@ pub fn signal_from_alignment(
     let state = availability(mean_visibility);
     let neutral_radius = alignment.neutral_projected_radius;
     if !neutral_radius.is_finite()
-        || !current_radius_is_finite(alignment)
+        || !current_radius_is_usable(alignment)
         || neutral_radius < MIN_NEUTRAL_RADIUS
     {
         return HeadTranslationSignal::UNAVAILABLE;
     }
 
-    // Rotation-compensated residual displacement in canonical units.
+    // Face-centroid displacement in canonical units.
     let [tx, ty, tz] = alignment.translation;
     if !tx.is_finite() || !ty.is_finite() || !tz.is_finite() {
         return HeadTranslationSignal::UNAVAILABLE;
@@ -109,7 +109,7 @@ pub fn signal_from_face_transform(
     build(tx * k, ty * k, tz * k, state)
 }
 
-fn current_radius_is_finite(alignment: &PoseAlignment) -> bool {
+fn current_radius_is_usable(alignment: &PoseAlignment) -> bool {
     alignment.current_projected_radius.is_finite()
         && alignment.current_projected_radius >= MIN_NEUTRAL_RADIUS
 }

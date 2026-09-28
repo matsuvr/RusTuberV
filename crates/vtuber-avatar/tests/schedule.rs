@@ -6,48 +6,28 @@
     clippy::indexing_slicing
 )]
 
-//! VRM schedule ordering and input-path guard tests.
+//! Public-construction smoke tests and registered PostUpdate ordering checks.
 //!
-//! Verifies that:
-//! - The product app does not use `bevy_vrm1::LookAt` to encode face pose.
-//! - The application-owned direct-pose writer drives the humanoid.
-//! - The pose and expression systems are registered in the correct schedule.
-//! - No schedule cycles exist.
+//! These tests construct the public avatar plugin and lifecycle values,
+//! initialize the real PostUpdate schedule, and inspect the listed system
+//! ordering constraints and absence of a system name containing "breathing".
+//! They do not prove the absence of public APIs or exercise pose application.
 
-/// Verify that the avatar plugin remains constructible without exposing a
-/// synthetic face-pose `LookAt` API.
-///
-/// This test verifies by checking that our public API does not re-export
-/// these bevy_vrm1 types. The plugin.rs also does not insert them.
+/// Verifies that downstream code can construct the public avatar plugin.
 #[test]
-fn avatar_schedule_has_no_synthetic_look_at_api() {
-    // Verify that VtuberAvatarPlugin is constructible and our public types
-    // don't include a synthetic LookAt target.
+fn avatar_plugin_is_publicly_constructible() {
     let _plugin = vtuber_avatar::VtuberAvatarPlugin;
-
-    // The following types should NOT exist in our public API:
-    // - bevy_vrm1::LookAt (we never insert it)
-    // Direct-pose BodyTracking is integrated internally by Q2-06-001.
-    //
-    // This is verified by the fact that this test compiles without
-    // importing those types, and our lib.rs doesn't re-export them.
 }
 
-/// Verify the schedule graph registered by the real avatar and VRM plugins:
+/// Checks the listed ordering edges in the real avatar/VRM PostUpdate schedule.
 ///
-/// 1. apply_avatar_request_events (Update, chained)
-/// 2. despawn_unloading_avatar (Update, chained)
-/// 3. bind_humanoid_bones (Update, chained)
-/// 4. application direct-pose writer (PostUpdate, before gaze and constraints)
-/// 5. application direct gaze writer (PostUpdate, in gaze control)
-/// 6. model-adaptive default arm pose compositor (PostUpdate)
-/// 7. application tracked-expression writer (PostUpdate, after gaze control,
-///    before the upstream expression set)
-///
-/// Inter-set order beyond these edges belongs to the unmodified upstream
-/// runtime and is not re-chained here.
+/// The checks cover animation before body inputs, body writers before arm
+/// target generation and composition, arm composition before direct gaze, and
+/// tracked expressions between gaze control and the upstream expression set.
+/// Schedule initialization also detects cycles in this PostUpdate schedule.
+/// Update-stage lifecycle ordering is not inspected by this test.
 #[test]
-fn avatar_schedule_ordering_matches_design() {
+fn avatar_post_update_schedule_orders_body_arms_gaze_and_expressions() {
     use bevy::app::AnimationSystems;
     use bevy::ecs::schedule::{IntoScheduleConfigs, Schedule};
     use bevy::prelude::*;
@@ -120,9 +100,9 @@ fn avatar_schedule_ordering_matches_design() {
                     "update_body_tracking_position_input",
                     "apply_direct_body_tracking",
                 ),
-                // The #20 breathing writer is retired (issue #180, ADR-020):
-                // no system named "breathing" may exist anywhere in PostUpdate
-                // (asserted below), so the hips channel has no runtime writer.
+                // The retired always-on breathing writer is absent (ADR-020):
+                // below we reject any PostUpdate system name containing
+                // "breathing". This does not rule out other hips writers.
                 ("apply_direct_body_tracking", "apply_default_arm_pose"),
                 ("apply_default_arm_pose", "update_direct_look_at_input"),
                 ("apply_direct_body_tracking", "update_direct_look_at_input"),
