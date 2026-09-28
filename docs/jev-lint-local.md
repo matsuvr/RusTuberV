@@ -48,7 +48,7 @@ npx -y jev-lint@0.7.0 review --base main --dry-run
 npx -y jev-lint@0.7.0 review --base main
 ```
 
-API の失敗（終了コード 3）はその旨を表示して push を続行します。設定エラー（2）や、将来 `severity: error` を設定したルールの指摘（1）は push を止めます。フックを使わない場合はローカル設定を解除します。
+クレジット切れ（API の HTTP 402）やサービス障害などで API リクエストに失敗したとき、`jev-lint` は理由を表示して終了コード 3 を返します。フックも API を利用できない旨を表示し、残りの Jev 確認を省いて push を続けます。ほかの Jev 実行エラーや指摘でも push は止めません。フックを使わない場合はローカル設定を解除します。
 
 ```sh
 git config --local --unset core.hooksPath
