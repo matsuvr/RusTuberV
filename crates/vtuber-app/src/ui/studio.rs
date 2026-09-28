@@ -126,8 +126,10 @@ fn primary_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     )
 }
 
+/// Below this viewport width the right monitor panel would leave too little
+/// room for the settings content, so the monitor moves above it instead.
 fn use_sidebar(width: f32) -> bool {
-    width >= 1000.0
+    width >= 200.0 + MONITOR_PANEL_WIDTH + 400.0
 }
 
 const FLOATING_CONTROL_MARGIN: f32 = 16.0;
@@ -137,6 +139,9 @@ const FLOATING_CONTROL_SIZE: f32 = 40.0;
 const AVATAR_ONLY_TRANSITION_SECONDS: f32 = 0.36;
 /// Corner radius shared by the avatar monitor card and the expanding preview.
 const MONITOR_CARD_RADIUS: u8 = 8;
+/// Width of the right-hand monitor panel. Wide enough that the avatar preview
+/// reads as a real preview instead of a thumbnail.
+const MONITOR_PANEL_WIDTH: f32 = 692.0;
 /// Background of the avatar-only view. `UiShellPlugin` installs the same color
 /// as Bevy's window `ClearColor`, and the monitor card fills with it, so the
 /// small preview and the fullscreen view show the avatar on one background and
@@ -544,13 +549,21 @@ pub(crate) fn render_studio(
                     egui::ScrollArea::vertical().show(ui, |ui| navigation(ui, vm, state, lang));
                 });
             egui::Panel::right("studio_monitor")
-                .exact_size(300.0)
+                .exact_size(MONITOR_PANEL_WIDTH)
                 .resizable(false)
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
-                    if let Some(rect) =
-                        avatar_monitor(ui, vm, avatar_texture.clone(), 268.0, !transitioning, lang)
-                    {
+                    // The panel frame eats 16px of margin on each side, so the
+                    // preview is capped just under the panel width to keep the
+                    // card from ever spilling out of it.
+                    if let Some(rect) = avatar_monitor(
+                        ui,
+                        vm,
+                        avatar_texture.clone(),
+                        MONITOR_PANEL_WIDTH - 32.0,
+                        !transitioning,
+                        lang,
+                    ) {
                         monitor_rect = Some(rect);
                     }
                 });
@@ -2215,7 +2228,7 @@ mod tests {
     #[test]
     fn compact_layout_keeps_navigation_and_a_persistent_monitor() {
         assert!(!use_sidebar(800.0));
-        assert!(use_sidebar(1280.0));
+        assert!(use_sidebar(1600.0));
         let destinations: Vec<Pane> = destinations().collect();
         assert_eq!(destinations.len(), 5);
         assert_eq!(destinations.first(), Some(&Pane::VrmCamera));
