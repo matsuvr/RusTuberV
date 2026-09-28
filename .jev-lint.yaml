@@ -1,0 +1,14 @@
+# Only locally pushed, self-authored Rust code is reviewed.
+files: [apps, crates, tools]
+rules:
+  rust/comment-describes-block: on
+  rust/comment-describes-declaration: on
+  rust/doc-errors-match-body: on
+  rust/fn-name-promises: on
+  rust/module-name-describes-contents: on
+  rust/test-name-describes-code: on
+  rust/test-name-verifies-claim: on
+  rust/trait-name-describes-methods: on
+  rust/var-name-describes-value: on
+  git/commit-message-describes-diff: on
+  git/diff-follows-instructions: on
