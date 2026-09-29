@@ -126,10 +126,38 @@ fn primary_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     )
 }
 
-/// Below this viewport width the right monitor panel would leave too little
-/// room for the settings content, so the monitor moves above it instead.
+/// Width of the left pane that lists the destinations.
+const SIDEBAR_PANEL_WIDTH: f32 = 200.0;
+/// The monitor panel frame adds 16px of margin on each side of the preview.
+const MONITOR_PANEL_PADDING: f32 = 32.0;
+/// Preview width the monitor panel aims for. Wide enough that the avatar
+/// preview reads as a real preview instead of a thumbnail; a narrower window
+/// shrinks it rather than dropping back to the compact layout.
+const MONITOR_TARGET_WIDTH: f32 = 660.0;
+/// Narrowest preview worth showing. The compact layout shows exactly this.
+const MIN_MONITOR_WIDTH: f32 = 200.0;
+/// Narrowest the settings column gets before the monitor moves above it.
+const MIN_SETTINGS_WIDTH: f32 = 400.0;
+/// Narrowest viewport that still fits the left pane, a minimum-width monitor
+/// panel, and the settings column side by side.
+const SIDEBAR_LAYOUT_MIN_WIDTH: f32 =
+    SIDEBAR_PANEL_WIDTH + MONITOR_PANEL_PADDING + MIN_MONITOR_WIDTH + MIN_SETTINGS_WIDTH;
+
+/// Below this width the side-by-side layout would squeeze either the preview or
+/// the settings page past its minimum, so the monitor moves above the settings
+/// instead.
 fn use_sidebar(width: f32) -> bool {
-    width >= 200.0 + MONITOR_PANEL_WIDTH + 400.0
+    width >= SIDEBAR_LAYOUT_MIN_WIDTH
+}
+
+/// Width of the right-hand monitor panel: the target preview width on a wide
+/// window, and whatever the settings column can spare on a narrower one. The
+/// preview card is capped just under it so the frame margin never spills out.
+fn monitor_panel_width(viewport_width: f32) -> f32 {
+    (viewport_width - SIDEBAR_PANEL_WIDTH - MIN_SETTINGS_WIDTH).clamp(
+        MIN_MONITOR_WIDTH + MONITOR_PANEL_PADDING,
+        MONITOR_TARGET_WIDTH + MONITOR_PANEL_PADDING,
+    )
 }
 
 const FLOATING_CONTROL_MARGIN: f32 = 16.0;
@@ -139,9 +167,6 @@ const FLOATING_CONTROL_SIZE: f32 = 40.0;
 const AVATAR_ONLY_TRANSITION_SECONDS: f32 = 0.36;
 /// Corner radius shared by the avatar monitor card and the expanding preview.
 const MONITOR_CARD_RADIUS: u8 = 8;
-/// Width of the right-hand monitor panel. Wide enough that the avatar preview
-/// reads as a real preview instead of a thumbnail.
-const MONITOR_PANEL_WIDTH: f32 = 692.0;
 /// Background of the avatar-only view. `UiShellPlugin` installs the same color
 /// as Bevy's window `ClearColor`, and the monitor card fills with it, so the
 /// small preview and the fullscreen view show the avatar on one background and
@@ -538,7 +563,7 @@ pub(crate) fn render_studio(
             .show(ui, |ui| toolbar(ui, vm, state, sidebar, lang));
         if sidebar {
             egui::Panel::left("studio_sidebar")
-                .exact_size(200.0)
+                .exact_size(SIDEBAR_PANEL_WIDTH)
                 .resizable(false)
                 .frame(panel_frame(242))
                 .show(ui, |ui| {
@@ -548,19 +573,17 @@ pub(crate) fn render_studio(
                         .show(ui, |ui| language_buttons(ui, state, lang));
                     egui::ScrollArea::vertical().show(ui, |ui| navigation(ui, vm, state, lang));
                 });
+            let panel = monitor_panel_width(viewport.width());
             egui::Panel::right("studio_monitor")
-                .exact_size(MONITOR_PANEL_WIDTH)
+                .exact_size(panel)
                 .resizable(false)
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
-                    // The panel frame eats 16px of margin on each side, so the
-                    // preview is capped just under the panel width to keep the
-                    // card from ever spilling out of it.
                     if let Some(rect) = avatar_monitor(
                         ui,
                         vm,
                         avatar_texture.clone(),
-                        MONITOR_PANEL_WIDTH - 32.0,
+                        panel - MONITOR_PANEL_PADDING,
                         !transitioning,
                         lang,
                     ) {
@@ -573,9 +596,14 @@ pub(crate) fn render_studio(
                 .resizable(false)
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
-                    if let Some(rect) =
-                        avatar_monitor(ui, vm, avatar_texture.clone(), 200.0, !transitioning, lang)
-                    {
+                    if let Some(rect) = avatar_monitor(
+                        ui,
+                        vm,
+                        avatar_texture.clone(),
+                        MIN_MONITOR_WIDTH,
+                        !transitioning,
+                        lang,
+                    ) {
                         monitor_rect = Some(rect);
                     }
                 });
@@ -2227,7 +2255,7 @@ mod tests {
     use super::*;
     #[test]
     fn compact_layout_keeps_navigation_and_a_persistent_monitor() {
-        assert!(!use_sidebar(800.0));
+        assert!(!use_sidebar(720.0));
         assert!(use_sidebar(1600.0));
         let destinations: Vec<Pane> = destinations().collect();
         assert_eq!(destinations.len(), 5);
@@ -2236,6 +2264,27 @@ mod tests {
         assert!(destinations.contains(&Pane::ExpressionKeys));
         assert!(destinations.contains(&Pane::NdiOutput));
         assert!(destinations.contains(&Pane::Diagnostics));
+    }
+
+    /// The regression: a 1280px window used to fall back to the compact layout
+    /// and a 200px preview even though the side-by-side layout still fits.
+    #[test]
+    fn the_preview_stays_wide_near_1280_and_the_layout_switches_only_at_its_minimum() {
+        let preview = |width: f32| monitor_panel_width(width) - MONITOR_PANEL_PADDING;
+        // Wide windows get the full target; 1280 gets a preview that is still
+        // three times the one the old 1292px threshold fell back to.
+        assert_eq!(preview(1600.0), MONITOR_TARGET_WIDTH);
+        assert_eq!(preview(1280.0), 648.0);
+        assert_eq!(preview(1000.0), 368.0);
+        assert!(use_sidebar(SIDEBAR_LAYOUT_MIN_WIDTH));
+        assert!(!use_sidebar(SIDEBAR_LAYOUT_MIN_WIDTH - 1.0));
+        for width in [SIDEBAR_LAYOUT_MIN_WIDTH, 900.0, 1280.0, 1600.0, 2400.0] {
+            assert!(use_sidebar(width), "{width} keeps the side-by-side layout");
+            assert!(
+                width - SIDEBAR_PANEL_WIDTH - monitor_panel_width(width) >= MIN_SETTINGS_WIDTH,
+                "{width} keeps the settings column usable"
+            );
+        }
     }
     #[test]
     fn floating_control_reopens_settings_on_click() {
