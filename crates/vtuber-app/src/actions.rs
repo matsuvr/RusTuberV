@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn actions_navigation_is_navigation() {
-        assert!(UiAction::SwitchPane(Pane::Camera).is_navigation());
+        assert!(UiAction::SwitchPane(Pane::PoseCamera).is_navigation());
         assert!(UiAction::SwitchPane(Pane::Diagnostics).is_navigation());
     }
 

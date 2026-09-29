@@ -22,32 +22,48 @@ use vtuber_avatar::{
 };
 use vtuber_core::monotonic_now;
 
-const NAVIGATION: [Pane; 7] = [
-    Pane::Studio,
-    Pane::Avatar,
-    Pane::Camera,
-    Pane::Calibration,
+/// Sidebar destinations in display order. There is no hierarchy: every
+/// destination shows all of its sections in the right pane at once.
+const DESTINATIONS: [Pane; 5] = [
+    Pane::VrmCamera,
+    Pane::PoseCamera,
+    Pane::ExpressionKeys,
     Pane::NdiOutput,
-    Pane::Settings,
     Pane::Diagnostics,
 ];
 
+/// Every sidebar destination in display order.
+fn destinations() -> impl Iterator<Item = Pane> {
+    DESTINATIONS.into_iter()
+}
+
 fn page_title(pane: Pane, lang: UiLanguage) -> &'static str {
     match pane {
-        Pane::Studio => lang.pick("スタジオ", "Studio", "工作室", "스튜디오"),
-        Pane::Avatar => lang.pick("アバター", "Avatar", "虚拟形象", "아바타"),
-        Pane::Camera | Pane::Preview => lang.pick("カメラ", "Camera", "摄像头", "카메라"),
-        Pane::Calibration => lang.pick("キャリブレーション", "Calibration", "校准", "캘리브레이션"),
-        Pane::NdiOutput => lang.pick("出力", "Output", "输出", "출력"),
-        Pane::Settings => lang.pick(
-            "表情のキー割り当て",
-            "Expression Key Bindings",
-            "表情按键绑定",
-            "표정 키 할당",
+        Pane::VrmCamera => lang.pick(
+            "VRM・カメラ選択",
+            "VRM & camera",
+            "VRM与摄像头",
+            "VRM 및 카메라",
         ),
+        Pane::PoseCamera => lang.pick(
+            "姿勢・カメラ調整",
+            "Pose & camera",
+            "姿势与摄像头调整",
+            "자세·카메라 조정",
+        ),
+        Pane::ExpressionKeys => lang.pick("表情設定", "Expressions", "表情设置", "표정 설정"),
+        Pane::NdiOutput => lang.pick("NDI出力", "NDI output", "NDI输出", "NDI 출력"),
         Pane::Diagnostics => lang.pick("診断", "Diagnostics", "诊断", "진단"),
     }
 }
+
+/// Language buttons shown in the left pane and, without one, in the toolbar.
+const LANGUAGES: [(UiLanguage, &str); 4] = [
+    (UiLanguage::Ja, "日本語"),
+    (UiLanguage::En, "ENGLISH"),
+    (UiLanguage::Zh, "中文"),
+    (UiLanguage::Ko, "한국어"),
+];
 
 fn session_label(state: AppLifecycle, lang: UiLanguage) -> &'static str {
     match state {
@@ -110,8 +126,38 @@ fn primary_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
     )
 }
 
+/// Width of the left pane that lists the destinations.
+const SIDEBAR_PANEL_WIDTH: f32 = 200.0;
+/// The monitor panel frame adds 16px of margin on each side of the preview.
+const MONITOR_PANEL_PADDING: f32 = 32.0;
+/// Preview width the monitor panel aims for. Wide enough that the avatar
+/// preview reads as a real preview instead of a thumbnail; a narrower window
+/// shrinks it rather than dropping back to the compact layout.
+const MONITOR_TARGET_WIDTH: f32 = 660.0;
+/// Narrowest preview worth showing. The compact layout shows exactly this.
+const MIN_MONITOR_WIDTH: f32 = 200.0;
+/// Narrowest the settings column gets before the monitor moves above it.
+const MIN_SETTINGS_WIDTH: f32 = 400.0;
+/// Narrowest viewport that still fits the left pane, a minimum-width monitor
+/// panel, and the settings column side by side.
+const SIDEBAR_LAYOUT_MIN_WIDTH: f32 =
+    SIDEBAR_PANEL_WIDTH + MONITOR_PANEL_PADDING + MIN_MONITOR_WIDTH + MIN_SETTINGS_WIDTH;
+
+/// Below this width the side-by-side layout would squeeze either the preview or
+/// the settings page past its minimum, so the monitor moves above the settings
+/// instead.
 fn use_sidebar(width: f32) -> bool {
-    width >= 1000.0
+    width >= SIDEBAR_LAYOUT_MIN_WIDTH
+}
+
+/// Width of the right-hand monitor panel: the target preview width on a wide
+/// window, and whatever the settings column can spare on a narrower one. The
+/// preview card is capped just under it so the frame margin never spills out.
+fn monitor_panel_width(viewport_width: f32) -> f32 {
+    (viewport_width - SIDEBAR_PANEL_WIDTH - MIN_SETTINGS_WIDTH).clamp(
+        MIN_MONITOR_WIDTH + MONITOR_PANEL_PADDING,
+        MONITOR_TARGET_WIDTH + MONITOR_PANEL_PADDING,
+    )
 }
 
 const FLOATING_CONTROL_MARGIN: f32 = 16.0;
@@ -250,7 +296,10 @@ fn floating_settings_control(
     let response = area
         .inner
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("{} (F1)", page_title(Pane::Settings, lang)));
+        .on_hover_text(format!(
+            "{} (F1)",
+            lang.pick("設定", "Settings", "设置", "설정")
+        ));
     if response.clicked() {
         state.set_controls_open(true);
     }
@@ -258,27 +307,59 @@ fn floating_settings_control(
 }
 
 fn navigation(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
-    for pane in NAVIGATION {
-        let group = match pane {
-            Pane::Studio => Some(lang.pick("セットアップ", "Setup", "准备", "준비")),
-            Pane::NdiOutput => Some(lang.pick("配信", "Broadcast", "直播", "방송")),
-            Pane::Settings => Some(lang.pick("アプリ", "App", "应用", "앱")),
-            _ => None,
-        };
-        if let Some(group) = group {
-            ui.add_space(12.0);
-            ui.label(RichText::new(group).small().weak());
-            ui.add_space(4.0);
-        }
-        let selected = vm.pane == pane || (pane == Pane::Camera && vm.pane == Pane::Preview);
+    ui.add_space(12.0);
+    for pane in destinations() {
+        navigation_button(ui, vm, state, pane, lang);
+    }
+}
+
+fn navigation_button(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    pane: Pane,
+    lang: UiLanguage,
+) {
+    if ui
+        .add_sized(
+            [ui.available_width(), 30.0],
+            egui::Button::selectable(vm.pane == pane, page_title(pane, lang)),
+        )
+        .clicked()
+    {
+        state.emit(UiAction::SwitchPane(pane));
+    }
+}
+
+/// Full-width language rows for the left pane.
+fn language_buttons(ui: &mut Ui, state: &mut UiState, lang: UiLanguage) {
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new(lang.pick("表示言語", "Display language", "显示语言", "표시 언어"))
+            .small()
+            .weak(),
+    );
+    ui.add_space(4.0);
+    for (language, label) in LANGUAGES {
         if ui
             .add_sized(
-                [ui.available_width(), 30.0],
-                egui::Button::selectable(selected, page_title(pane, lang)),
+                [ui.available_width(), 24.0],
+                egui::Button::selectable(lang == language, label),
             )
             .clicked()
+            && lang != language
         {
-            state.emit(UiAction::SwitchPane(pane));
+            state.emit(UiAction::SetLanguage(language));
+        }
+    }
+    ui.add_space(8.0);
+}
+
+/// Inline language buttons for the toolbar when no left pane is shown.
+fn compact_language_buttons(ui: &mut Ui, state: &mut UiState, lang: UiLanguage) {
+    for (language, label) in LANGUAGES {
+        if ui.selectable_label(lang == language, label).clicked() && lang != language {
+            state.emit(UiAction::SetLanguage(language));
         }
     }
 }
@@ -287,7 +368,7 @@ fn compact_navigation(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: 
     egui::ComboBox::from_id_salt("studio_navigation")
         .selected_text(page_title(vm.pane, lang))
         .show_ui(ui, |ui| {
-            for pane in NAVIGATION {
+            for pane in destinations() {
                 if ui
                     .selectable_label(vm.pane == pane, page_title(pane, lang))
                     .clicked()
@@ -303,6 +384,7 @@ fn toolbar(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, sidebar: bool, la
         ui.label(RichText::new("RusTuberV").strong());
         if !sidebar {
             compact_navigation(ui, vm, state, lang);
+            compact_language_buttons(ui, state, lang);
         }
         ui.separator();
         ui.label(session_label(vm.lifecycle, lang));
@@ -481,20 +563,30 @@ pub(crate) fn render_studio(
             .show(ui, |ui| toolbar(ui, vm, state, sidebar, lang));
         if sidebar {
             egui::Panel::left("studio_sidebar")
-                .exact_size(200.0)
+                .exact_size(SIDEBAR_PANEL_WIDTH)
                 .resizable(false)
                 .frame(panel_frame(242))
                 .show(ui, |ui| {
+                    egui::Panel::bottom("studio_sidebar_language")
+                        .resizable(false)
+                        .frame(Frame::new())
+                        .show(ui, |ui| language_buttons(ui, state, lang));
                     egui::ScrollArea::vertical().show(ui, |ui| navigation(ui, vm, state, lang));
                 });
+            let panel = monitor_panel_width(viewport.width());
             egui::Panel::right("studio_monitor")
-                .exact_size(300.0)
+                .exact_size(panel)
                 .resizable(false)
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
-                    if let Some(rect) =
-                        avatar_monitor(ui, vm, avatar_texture.clone(), 268.0, !transitioning, lang)
-                    {
+                    if let Some(rect) = avatar_monitor(
+                        ui,
+                        vm,
+                        avatar_texture.clone(),
+                        panel - MONITOR_PANEL_PADDING,
+                        !transitioning,
+                        lang,
+                    ) {
                         monitor_rect = Some(rect);
                     }
                 });
@@ -504,9 +596,14 @@ pub(crate) fn render_studio(
                 .resizable(false)
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
-                    if let Some(rect) =
-                        avatar_monitor(ui, vm, avatar_texture.clone(), 200.0, !transitioning, lang)
-                    {
+                    if let Some(rect) = avatar_monitor(
+                        ui,
+                        vm,
+                        avatar_texture.clone(),
+                        MIN_MONITOR_WIDTH,
+                        !transitioning,
+                        lang,
+                    ) {
                         monitor_rect = Some(rect);
                     }
                 });
@@ -568,16 +665,26 @@ pub(crate) fn render_studio(
                             );
                         }
                         match vm.pane {
-                            Pane::Studio => overview(ui, vm, state, dialog_active, lang),
-                            Pane::Avatar => {
-                                avatar_page(ui, vm, state, avatar_mirror, dialog_active, lang)
+                            Pane::VrmCamera => {
+                                vrm_page(ui, vm, state, dialog_active, lang);
+                                camera_select_page(ui, vm, state, lang);
+                                render_rich_look_controls(ui, vm, state, lang);
                             }
-                            Pane::Camera | Pane::Preview => {
-                                camera_page(ui, vm, state, preview, landmarks, camera_texture, lang)
+                            Pane::PoseCamera => {
+                                calibration_page(ui, vm, state, lang);
+                                camera_status_page(
+                                    ui,
+                                    vm,
+                                    state,
+                                    preview,
+                                    landmarks,
+                                    camera_texture,
+                                    avatar_mirror,
+                                    lang,
+                                );
                             }
-                            Pane::Calibration => calibration_page(ui, vm, state, lang),
+                            Pane::ExpressionKeys => expression_keys_page(ui, vm, state, lang),
                             Pane::NdiOutput => output_page(ui, vm, state, lang),
-                            Pane::Settings => settings_page(ui, vm, state, lang),
                             Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
                         }
                         ui.add_space(16.0);
@@ -1022,91 +1129,10 @@ fn camera_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiL
     }
 }
 
-fn overview(
+fn vrm_page(
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
-    dialog_active: bool,
-    lang: UiLanguage,
-) {
-    ui.label(lang.pick(
-        "アバターを読み込み、カメラを選ぶとトラッキングが自動で始まります。",
-        "Load an avatar and select a camera; tracking starts automatically.",
-        "加载虚拟形象并选择摄像头后，将自动开始跟踪。",
-        "아바타를 불러오고 카메라를 선택하면 트래킹이 자동으로 시작됩니다.",
-    ));
-    section(
-        ui,
-        lang.pick(
-            "1. アバターを読み込む",
-            "1. Load an avatar",
-            "1. 加载虚拟形象",
-            "1. 아바타 불러오기",
-        ),
-        |ui| import_controls(ui, vm, state, dialog_active, lang),
-    );
-    section(
-        ui,
-        lang.pick(
-            "2. カメラを選ぶ",
-            "2. Choose a camera",
-            "2. 选择摄像头",
-            "2. 카메라 선택",
-        ),
-        |ui| {
-            camera_controls(ui, vm, state, lang);
-            ui.add_space(8.0);
-            ui.label(lang.pick(
-                "カメラ映像は非表示です。メニューを開くだけでは表示されません。",
-                "Camera preview is hidden. Opening a menu never reveals it.",
-                "摄像头预览默认隐藏，打开菜单不会显示影像。",
-                "카메라 미리 보기는 숨겨져 있습니다. 메뉴를 열어도 영상이 표시되지 않습니다.",
-            ));
-            if ui
-                .button(lang.pick(
-                    "カメラ調整へ",
-                    "Camera settings",
-                    "摄像头设置",
-                    "카메라 설정",
-                ))
-                .clicked()
-            {
-                state.emit(UiAction::SwitchPane(Pane::Camera));
-            }
-        },
-    );
-    section(
-        ui,
-        lang.pick(
-            "3. 動きと出力を確認する",
-            "3. Check motion and output",
-            "3. 检查动作与输出",
-            "3. 움직임과 출력 확인",
-        ),
-        |ui| {
-            ui.label(lang.pick("アバターとカメラが揃うと自動で始まります。動きは常時表示のアバタープレビューで確認できます。停止後は上部のボタンで再開できます。", "Tracking starts automatically once the avatar and camera are ready. Check motion in the persistent avatar preview; use the toolbar button to resume after stopping.", "虚拟形象与摄像头就绪后将自动开始。可在常驻预览中确认动作，停止后可用顶部按钮重新开始。", "아바타와 카메라가 준비되면 자동으로 시작됩니다. 항상 표시되는 미리 보기에서 움직임을 확인하고, 중지 후에는 상단 버튼으로 다시 시작할 수 있습니다."));
-            ui.horizontal_wrapped(|ui| {
-                if ui.button(page_title(Pane::Calibration, lang)).clicked() {
-                    state.emit(UiAction::SwitchPane(Pane::Calibration));
-                }
-                if ui
-                    .button(lang.pick("出力を設定", "Configure output", "设置输出", "출력 설정"))
-                    .clicked()
-                {
-                    state.emit(UiAction::SwitchPane(Pane::NdiOutput));
-                }
-            });
-        },
-    );
-    expression_status_section(ui, vm, state, lang);
-    render_rich_look_controls(ui, vm, state, lang);
-}
-
-fn avatar_page(
-    ui: &mut Ui,
-    vm: &UiViewModel,
-    state: &mut UiState,
-    mirror: AvatarMotionMirror,
     dialog_active: bool,
     lang: UiLanguage,
 ) {
@@ -1136,154 +1162,25 @@ fn avatar_page(
             }
         },
     );
-    section(
-        ui,
-        lang.pick(
-            "表示と構図",
-            "Display and framing",
-            "显示与构图",
-            "표시 및 구도",
-        ),
-        |ui| {
-            let mut reflected = mirror.is_enabled();
-            if ui
-                .checkbox(
-                    &mut reflected,
-                    lang.pick(
-                        "アバターの動きを左右反転",
-                        "Mirror avatar motion",
-                        "镜像虚拟形象动作",
-                        "아바타 움직임 좌우 반전",
-                    ),
-                )
-                .changed()
-            {
-                state.emit(UiAction::ToggleAvatarMotionMirror);
-            }
-            if ui
-                .add_enabled(
-                    vm.can_reset_camera(),
-                    egui::Button::new(lang.pick(
-                        "アバターの画角をリセット",
-                        "Reset avatar framing",
-                        "重置虚拟形象构图",
-                        "아바타 구도 초기화",
-                    )),
-                )
-                .clicked()
-            {
-                state.emit(UiAction::ResetAvatarCamera);
-            }
-            ui.label(lang.pick("F1でアバターのみを表示。左ドラッグで回転、右ドラッグで移動、ホイールでズームします。", "Use F1 for avatar-only view. Left-drag to orbit, right-drag to pan, and scroll to zoom.", "按F1仅显示虚拟形象。左键拖动旋转，右键拖动平移，滚轮缩放。", "F1로 아바타만 표시합니다. 왼쪽 드래그로 회전, 오른쪽 드래그로 이동, 휠로 확대·축소합니다."));
-        },
-    );
-    if vm.avatar.imported_model.is_some() {
-        section(
-            ui,
-            lang.pick("腕の姿勢", "Arm pose", "手臂姿势", "팔 자세"),
-            |ui| {
-                ui.label(lang.pick(
-                    "このモデルの設定として保存されます。",
-                    "Saved for this model.",
-                    "设置将为此模型保存。",
-                    "이 모델의 설정으로 저장됩니다.",
-                ));
-                let mut profile = vm.arm_pose.profile;
-                let mut drop_degrees = profile.arm_drop_radians.to_degrees();
-                let mut curl_degrees = profile.finger_curl_radians.to_degrees();
-                let mut changed = ui
-                    .add(
-                        egui::Slider::new(&mut drop_degrees, 0.0..=90.0).text(lang.pick(
-                            "腕下げ",
-                            "Arm drop",
-                            "手臂下垂",
-                            "팔 내리기",
-                        )),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut profile.reach_ratio, 0.01..=1.0).text(lang.pick(
-                            "リーチ比",
-                            "Reach ratio",
-                            "伸展比例",
-                            "뻗기 비율",
-                        )),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut profile.forward_hand_offset_ratio, -1.0..=1.0).text(
-                            lang.pick(
-                                "前方オフセット",
-                                "Forward offset",
-                                "前向偏移",
-                                "앞쪽 오프셋",
-                            ),
-                        ),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut profile.elbow_pole_offset_ratio, 0.0..=1.0)
-                            .text(lang.pick("肘の位置", "Elbow pole", "肘部位置", "팔꿈치 위치")),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut profile.shoulder_follow_weight, 0.0..=1.0).text(
-                            lang.pick("肩の追従", "Shoulder follow", "肩部跟随", "어깨 추종"),
-                        ),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut curl_degrees, 0.0..=90.0).text(lang.pick(
-                            "指の曲げ",
-                            "Finger curl",
-                            "手指弯曲",
-                            "손가락 굽힘",
-                        )),
-                    )
-                    .changed();
-                if changed {
-                    profile.arm_drop_radians = drop_degrees.to_radians();
-                    profile.finger_curl_radians = curl_degrees.to_radians();
-                    state.emit(UiAction::SetArmPoseProfile {
-                        profile: ArmPoseProfileOverride::from_profile(profile),
-                    });
-                }
-                if vm.arm_pose.has_override
-                    && ui
-                        .button(lang.pick(
-                            "自動に戻す",
-                            "Reset to automatic",
-                            "恢复自动",
-                            "자동으로 되돌리기",
-                        ))
-                        .clicked()
-                {
-                    state.emit(UiAction::ResetArmPoseProfile);
-                }
-            },
-        );
-    }
 }
 
-fn camera_page(
+fn camera_select_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+    section(
+        ui,
+        lang.pick("入力カメラ", "Input camera", "输入摄像头", "입력 카메라"),
+        |ui| camera_controls(ui, vm, state, lang),
+    );
+}
+
+/// Camera preview consent and mirroring, moved from the camera page.
+fn camera_preview_section(
     ui: &mut Ui,
-    vm: &UiViewModel,
     state: &mut UiState,
     preview: &PreviewState,
     landmarks: &PreviewLandmarkState,
     texture: Option<TextureId>,
     lang: UiLanguage,
 ) {
-    section(
-        ui,
-        lang.pick("入力カメラ", "Input camera", "输入摄像头", "입력 카메라"),
-        |ui| camera_controls(ui, vm, state, lang),
-    );
     section(
         ui,
         lang.pick(
@@ -1433,6 +1330,170 @@ fn camera_page(
     );
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pane draws from one argument per widget input, so each widget reads exactly the state it is given"
+)]
+fn camera_status_page(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    preview: &PreviewState,
+    landmarks: &PreviewLandmarkState,
+    texture: Option<TextureId>,
+    mirror: AvatarMotionMirror,
+    lang: UiLanguage,
+) {
+    camera_preview_section(ui, state, preview, landmarks, texture, lang);
+    display_framing_section(ui, vm, state, mirror, lang);
+}
+
+/// Avatar mirroring, framing reset, and viewport help.
+fn display_framing_section(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    mirror: AvatarMotionMirror,
+    lang: UiLanguage,
+) {
+    section(
+        ui,
+        lang.pick(
+            "表示と構図",
+            "Display and framing",
+            "显示与构图",
+            "표시 및 구도",
+        ),
+        |ui| {
+            let mut reflected = mirror.is_enabled();
+            if ui
+                .checkbox(
+                    &mut reflected,
+                    lang.pick(
+                        "アバターの動きを左右反転",
+                        "Mirror avatar motion",
+                        "镜像虚拟形象动作",
+                        "아바타 움직임 좌우 반전",
+                    ),
+                )
+                .changed()
+            {
+                state.emit(UiAction::ToggleAvatarMotionMirror);
+            }
+            if ui
+                .add_enabled(
+                    vm.can_reset_camera(),
+                    egui::Button::new(lang.pick(
+                        "アバターの画角をリセット",
+                        "Reset avatar framing",
+                        "重置虚拟形象构图",
+                        "아바타 구도 초기화",
+                    )),
+                )
+                .clicked()
+            {
+                state.emit(UiAction::ResetAvatarCamera);
+            }
+            ui.label(lang.pick("F1でアバターのみを表示。左ドラッグで回転、右ドラッグで移動、ホイールでズームします。", "Use F1 for avatar-only view. Left-drag to orbit, right-drag to pan, and scroll to zoom.", "按F1仅显示虚拟形象。左键拖动旋转，右键拖动平移，滚轮缩放。", "F1로 아바타만 표시합니다. 왼쪽 드래그로 회전, 오른쪽 드래그로 이동, 휠로 확대·축소합니다."));
+        },
+    );
+}
+
+/// Per-model default arm pose sliders, shown on the calibration page.
+fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+    if vm.avatar.imported_model.is_none() {
+        return;
+    }
+    section(
+        ui,
+        lang.pick("腕の姿勢", "Arm pose", "手臂姿势", "팔 자세"),
+        |ui| {
+            ui.label(lang.pick(
+                "このモデルの設定として保存されます。",
+                "Saved for this model.",
+                "设置将为此模型保存。",
+                "이 모델의 설정으로 저장됩니다.",
+            ));
+            let mut profile = vm.arm_pose.profile;
+            let mut drop_degrees = profile.arm_drop_radians.to_degrees();
+            let mut curl_degrees = profile.finger_curl_radians.to_degrees();
+            let mut changed = ui
+                .add(
+                    egui::Slider::new(&mut drop_degrees, 0.0..=90.0).text(lang.pick(
+                        "腕下げ",
+                        "Arm drop",
+                        "手臂下垂",
+                        "팔 내리기",
+                    )),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut profile.reach_ratio, 0.01..=1.0).text(lang.pick(
+                        "リーチ比",
+                        "Reach ratio",
+                        "伸展比例",
+                        "뻗기 비율",
+                    )),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut profile.forward_hand_offset_ratio, -1.0..=1.0).text(
+                        lang.pick(
+                            "前方オフセット",
+                            "Forward offset",
+                            "前向偏移",
+                            "앞쪽 오프셋",
+                        ),
+                    ),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut profile.elbow_pole_offset_ratio, 0.0..=1.0)
+                        .text(lang.pick("肘の位置", "Elbow pole", "肘部位置", "팔꿈치 위치")),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut profile.shoulder_follow_weight, 0.0..=1.0)
+                        .text(lang.pick("肩の追従", "Shoulder follow", "肩部跟随", "어깨 추종")),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut curl_degrees, 0.0..=90.0).text(lang.pick(
+                        "指の曲げ",
+                        "Finger curl",
+                        "手指弯曲",
+                        "손가락 굽힘",
+                    )),
+                )
+                .changed();
+            if changed {
+                profile.arm_drop_radians = drop_degrees.to_radians();
+                profile.finger_curl_radians = curl_degrees.to_radians();
+                state.emit(UiAction::SetArmPoseProfile {
+                    profile: ArmPoseProfileOverride::from_profile(profile),
+                });
+            }
+            if vm.arm_pose.has_override
+                && ui
+                    .button(lang.pick(
+                        "自動に戻す",
+                        "Reset to automatic",
+                        "恢复自动",
+                        "자동으로 되돌리기",
+                    ))
+                    .clicked()
+            {
+                state.emit(UiAction::ResetArmPoseProfile);
+            }
+        },
+    );
+}
+
 fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
     section(
         ui,
@@ -1552,6 +1613,7 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
             );
         },
     );
+    arm_pose_section(ui, vm, state, lang);
 }
 
 fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
@@ -1722,41 +1784,9 @@ fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
     });
 }
 
-fn settings_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
-    render_rich_look_controls(ui, vm, state, lang);
+fn expression_keys_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
     expression_settings_section(ui, vm, state, lang);
-    section(
-        ui,
-        lang.pick("表示言語", "Display language", "显示语言", "표시 언어"),
-        |ui| {
-            let languages = [
-                (
-                    UiLanguage::Ja,
-                    lang.pick("日本語", "Japanese", "日语", "일본어"),
-                ),
-                (UiLanguage::En, lang.pick("英語", "English", "英语", "영어")),
-                (
-                    UiLanguage::Zh,
-                    lang.pick(
-                        "中国語（簡体字）",
-                        "Chinese (Simplified)",
-                        "简体中文",
-                        "중국어 (간체)",
-                    ),
-                ),
-                (
-                    UiLanguage::Ko,
-                    lang.pick("韓国語", "Korean", "韩语", "한국어"),
-                ),
-            ];
-            for (language, label) in languages {
-                if ui.radio(lang == language, label).clicked() && lang != language {
-                    state.emit(UiAction::SetLanguage(language));
-                }
-            }
-            ui.label(lang.pick("初期設定は日本語です。変更はすぐに反映され、再起動後も維持されます。", "Japanese is the initial language. Changes apply immediately and persist across restarts.", "初始语言为日语。更改立即生效，重启后仍会保留。", "초기 언어는 일본어입니다. 변경 사항은 즉시 적용되며 재시작 후에도 유지됩니다."));
-        },
-    );
+    expression_status_section(ui, vm, state, lang);
 }
 
 /// Translates standard presets and keeps the exact runtime ID visible.
@@ -2225,13 +2255,89 @@ mod tests {
     use super::*;
     #[test]
     fn compact_layout_keeps_navigation_and_a_persistent_monitor() {
-        assert!(!use_sidebar(800.0));
-        assert!(use_sidebar(1280.0));
-        assert_eq!(NAVIGATION.len(), 7);
-        assert!(NAVIGATION.contains(&Pane::Studio));
-        assert!(NAVIGATION.contains(&Pane::Settings));
-        assert!(!NAVIGATION.contains(&Pane::Preview));
+        assert!(!use_sidebar(720.0));
+        assert!(use_sidebar(1600.0));
+        let destinations: Vec<Pane> = destinations().collect();
+        assert_eq!(destinations.len(), 5);
+        assert_eq!(destinations.first(), Some(&Pane::VrmCamera));
+        assert!(destinations.contains(&Pane::PoseCamera));
+        assert!(destinations.contains(&Pane::ExpressionKeys));
+        assert!(destinations.contains(&Pane::NdiOutput));
+        assert!(destinations.contains(&Pane::Diagnostics));
     }
+
+    /// The regression: a 1280px window used to fall back to the compact layout
+    /// and a 200px preview even though the side-by-side layout still fits.
+    #[test]
+    fn the_preview_stays_wide_near_1280_and_the_layout_switches_only_at_its_minimum() {
+        let preview = |width: f32| monitor_panel_width(width) - MONITOR_PANEL_PADDING;
+        // Wide windows get the full target; 1280 gets a preview that is still
+        // three times the one the old 1292px threshold fell back to.
+        assert_eq!(preview(1600.0), MONITOR_TARGET_WIDTH);
+        assert_eq!(preview(1280.0), 648.0);
+        assert_eq!(preview(1000.0), 368.0);
+        assert!(use_sidebar(SIDEBAR_LAYOUT_MIN_WIDTH));
+        assert!(!use_sidebar(SIDEBAR_LAYOUT_MIN_WIDTH - 1.0));
+        for width in [SIDEBAR_LAYOUT_MIN_WIDTH, 900.0, 1280.0, 1600.0, 2400.0] {
+            assert!(use_sidebar(width), "{width} keeps the side-by-side layout");
+            assert!(
+                width - SIDEBAR_PANEL_WIDTH - monitor_panel_width(width) >= MIN_SETTINGS_WIDTH,
+                "{width} keeps the settings column usable"
+            );
+        }
+    }
+
+    /// The width the monitor card really gets, measured through the rendered
+    /// panels rather than through the width arithmetic alone.
+    fn rendered_preview_width(viewport_width: f32) -> f32 {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(viewport_width, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut vm = UiViewModel::default();
+        vm.avatar.is_ready = true;
+        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+        let mut state = UiState::default();
+        let _ = ctx.run_ui(input, |ui| {
+            render_studio(
+                ui.ctx(),
+                &vm,
+                &mut state,
+                &DiagnosticsSnapshot::default(),
+                None,
+                &PreviewState::default(),
+                &PreviewLandmarkState::default(),
+                AvatarMotionMirror::default(),
+                None,
+                Some(AvatarPreviewTexture::new(
+                    bevy::asset::Handle::default(),
+                    vtuber_core::VideoOutputProfile::default(),
+                )),
+                false,
+                None,
+                UiLanguage::Ja,
+            );
+        });
+        state.monitor_image_rect.map_or(0.0, |rect| rect.width())
+    }
+
+    #[test]
+    fn the_rendered_preview_matches_the_layout_at_each_width() {
+        assert_eq!(rendered_preview_width(1600.0), MONITOR_TARGET_WIDTH);
+        assert_eq!(rendered_preview_width(1280.0), 648.0);
+        assert_eq!(rendered_preview_width(900.0), 268.0);
+        // Below the minimum the monitor moves above the settings and keeps the
+        // same narrow preview the compact layout has always shown.
+        assert_eq!(
+            rendered_preview_width(SIDEBAR_LAYOUT_MIN_WIDTH - 1.0),
+            MIN_MONITOR_WIDTH
+        );
+    }
+
     #[test]
     fn floating_control_reopens_settings_on_click() {
         let ctx = egui::Context::default();
@@ -2356,7 +2462,7 @@ mod tests {
 
     #[test]
     fn every_destination_has_a_label_in_all_four_languages() {
-        for pane in NAVIGATION {
+        for pane in destinations() {
             for lang in [
                 UiLanguage::Ja,
                 UiLanguage::En,
@@ -2839,7 +2945,7 @@ mod tests {
         let mut vm = ready_expression_view_model();
         // Without a catalog: the load-model message renders.
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            settings_page(ui, &vm, &mut state, UiLanguage::Ja);
+            expression_keys_page(ui, &vm, &mut state, UiLanguage::Ja);
         });
 
         // With a catalog: a disabled unavailable candidate and a saved
@@ -2857,7 +2963,7 @@ mod tests {
             selected: false,
         }];
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            settings_page(ui, &vm, &mut state, UiLanguage::Ja);
+            expression_keys_page(ui, &vm, &mut state, UiLanguage::Ja);
         });
     }
 

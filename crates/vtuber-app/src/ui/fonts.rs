@@ -6,6 +6,8 @@ use bevy_egui::{EguiContexts, egui};
 use std::{io, path::PathBuf, sync::Arc};
 
 const JAPANESE_FONT_NAME: &str = "LINESeedJP_A_Rg";
+const CHINESE_FONT_NAME: &str = "zh-system-font";
+const KOREAN_FONT_NAME: &str = "ko-system-font";
 static JAPANESE_FONT_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/fonts/LINESeedJP_A_TTF_Rg.ttf"
@@ -58,34 +60,81 @@ fn system_font_path(language: UiLanguage) -> io::Result<PathBuf> {
     }
 }
 
-fn font_definitions(language: UiLanguage) -> io::Result<egui::FontDefinitions> {
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
+/// The CJK system fonts the four language buttons need, in fallback order
+/// after the bundled font.
+const CJK_SYSTEM_FONTS: [(UiLanguage, &str); 2] = [
+    (UiLanguage::Zh, CHINESE_FONT_NAME),
+    (UiLanguage::Ko, KOREAN_FONT_NAME),
+];
+
+/// What the egui context gets, plus the system fonts this machine could not
+/// provide. Both are reported to the user; neither is allowed to take the
+/// bundled font down with it.
+struct LoadedFonts {
+    definitions: egui::FontDefinitions,
+    unavailable: Vec<String>,
+}
+
+fn read_system_font(language: UiLanguage) -> io::Result<Vec<u8>> {
+    let path = system_font_path(language)?;
+    std::fs::read(&path)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
+}
+
+fn load_fonts(language: UiLanguage) -> LoadedFonts {
+    load_fonts_with(language, read_system_font)
+}
+
+fn load_fonts_with(
+    language: UiLanguage,
+    read: impl Fn(UiLanguage) -> io::Result<Vec<u8>>,
+) -> LoadedFonts {
+    let mut definitions = egui::FontDefinitions::default();
+    definitions.font_data.insert(
         JAPANESE_FONT_NAME.to_owned(),
         Arc::new(egui::FontData::from_static(JAPANESE_FONT_BYTES)),
     );
-    let locale_font = match language {
-        UiLanguage::Ja | UiLanguage::En => None,
-        UiLanguage::Zh | UiLanguage::Ko => {
-            let path = system_font_path(language)?;
-            let data = std::fs::read(&path).map_err(|error| {
-                io::Error::new(error.kind(), format!("{}: {error}", path.display()))
-            })?;
-            fonts.font_data.insert(
-                "locale-system-font".to_owned(),
-                Arc::new(egui::FontData::from_owned(data)),
-            );
-            Some("locale-system-font")
-        }
-    };
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        let names = fonts.families.entry(family).or_default();
-        names.insert(0, JAPANESE_FONT_NAME.to_owned());
-        if let Some(name) = locale_font {
-            names.insert(0, name.to_owned());
+    // Every language button is visible in every language, so both CJK system
+    // fonts are read regardless of the active language. One that this machine
+    // does not provide is reported and left out of the families below.
+    let mut loaded: Vec<&str> = Vec::new();
+    let mut unavailable = Vec::new();
+    for (font_language, name) in CJK_SYSTEM_FONTS {
+        match read(font_language) {
+            Ok(data) => {
+                definitions
+                    .font_data
+                    .insert(name.to_owned(), Arc::new(egui::FontData::from_owned(data)));
+                loaded.push(name);
+            }
+            Err(error) => unavailable.push(error.to_string()),
         }
     }
-    Ok(fonts)
+    let preferred = match language {
+        UiLanguage::Zh => CHINESE_FONT_NAME,
+        UiLanguage::Ko => KOREAN_FONT_NAME,
+        UiLanguage::Ja | UiLanguage::En => JAPANESE_FONT_NAME,
+    };
+    let mut order = Vec::new();
+    if loaded.contains(&preferred) {
+        order.push(preferred);
+    }
+    order.push(JAPANESE_FONT_NAME);
+    for name in loaded {
+        if !order.contains(&name) {
+            order.push(name);
+        }
+    }
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let names = definitions.families.entry(family).or_default();
+        for name in order.iter().rev() {
+            names.insert(0, (*name).to_owned());
+        }
+    }
+    LoadedFonts {
+        definitions,
+        unavailable,
+    }
 }
 
 pub(crate) fn configure_fonts(
@@ -102,17 +151,13 @@ pub(crate) fn configure_fonts(
         ctx.set_visuals(egui::Visuals::light());
     }
     state.attempted_language = Some(language);
-    match font_definitions(language) {
-        Ok(fonts) => {
-            ctx.set_fonts(fonts);
-            state.error = None;
-        }
-        Err(error) => {
-            // Do not silently switch languages or download fonts. The studio
-            // displays this error with explicit Japanese/English recovery buttons.
-            state.error = Some(error.to_string());
-        }
-    }
+    // The bundled font is applied no matter what the system fonts did, so a
+    // missing one costs only its own language. Do not silently switch languages
+    // or download fonts; the studio reports the failure with explicit
+    // Japanese/English recovery buttons.
+    let fonts = load_fonts(language);
+    ctx.set_fonts(fonts.definitions);
+    state.error = (!fonts.unavailable.is_empty()).then(|| fonts.unavailable.join("\n"));
     Ok(())
 }
 
@@ -126,14 +171,84 @@ mod tests {
     )] // tests may panic (AGENTS.md)
     use super::*;
 
+    /// Stands in for the system font reader so a missing font can be exercised
+    /// without touching the fonts of the machine running the test.
+    fn stub_read(missing: Vec<UiLanguage>) -> impl Fn(UiLanguage) -> io::Result<Vec<u8>> {
+        move |language| {
+            if missing.contains(&language) {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("stubbed missing {language:?}"),
+                ))
+            } else {
+                Ok(vec![0_u8; 4])
+            }
+        }
+    }
+
+    fn family_names(fonts: &egui::FontDefinitions) -> &Vec<String> {
+        &fonts.families[&egui::FontFamily::Proportional]
+    }
+
     #[test]
-    fn japanese_and_english_need_no_system_font_or_network() {
-        for language in [UiLanguage::Ja, UiLanguage::En] {
-            let fonts = font_definitions(language).expect("bundled font");
+    fn both_cjk_system_fonts_render_every_language_button() {
+        for language in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            let fonts = load_fonts_with(language, stub_read(Vec::new()));
             assert_eq!(
-                fonts.font_data[JAPANESE_FONT_NAME].font.as_ref(),
+                fonts.definitions.font_data[JAPANESE_FONT_NAME]
+                    .font
+                    .as_ref(),
                 JAPANESE_FONT_BYTES
             );
+            for name in [CHINESE_FONT_NAME, KOREAN_FONT_NAME] {
+                assert!(fonts.definitions.font_data.contains_key(name));
+                assert!(family_names(&fonts.definitions).contains(&name.to_owned()));
+            }
+            assert!(fonts.unavailable.is_empty());
         }
+    }
+
+    /// The regression: one unreadable system font used to fail the whole
+    /// definition set, so even the bundled Japanese font was never applied.
+    #[test]
+    fn a_missing_system_font_keeps_the_bundled_font_and_is_reported() {
+        for language in [UiLanguage::Ja, UiLanguage::En] {
+            let fonts = load_fonts_with(language, stub_read(vec![UiLanguage::Ko]));
+            assert_eq!(
+                fonts.definitions.font_data[JAPANESE_FONT_NAME]
+                    .font
+                    .as_ref(),
+                JAPANESE_FONT_BYTES,
+                "{language:?} still renders with the bundled font"
+            );
+            let names = family_names(&fonts.definitions);
+            assert_eq!(names.first().map(String::as_str), Some(JAPANESE_FONT_NAME));
+            assert!(names.contains(&CHINESE_FONT_NAME.to_owned()));
+            assert!(!fonts.definitions.font_data.contains_key(KOREAN_FONT_NAME));
+            assert!(
+                !names.contains(&KOREAN_FONT_NAME.to_owned()),
+                "a name without font data must not be registered in a family"
+            );
+            assert_eq!(fonts.unavailable.len(), 1);
+        }
+    }
+
+    #[test]
+    fn the_active_language_leads_when_its_system_font_is_readable() {
+        let fonts = load_fonts_with(UiLanguage::Zh, stub_read(Vec::new()));
+        assert_eq!(
+            family_names(&fonts.definitions).first().map(String::as_str),
+            Some(CHINESE_FONT_NAME)
+        );
+        let fonts = load_fonts_with(UiLanguage::Ko, stub_read(Vec::new()));
+        assert_eq!(
+            family_names(&fonts.definitions).first().map(String::as_str),
+            Some(KOREAN_FONT_NAME)
+        );
     }
 }
