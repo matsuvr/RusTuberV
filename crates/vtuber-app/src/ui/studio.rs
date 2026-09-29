@@ -2286,6 +2286,58 @@ mod tests {
             );
         }
     }
+
+    /// The width the monitor card really gets, measured through the rendered
+    /// panels rather than through the width arithmetic alone.
+    fn rendered_preview_width(viewport_width: f32) -> f32 {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(viewport_width, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut vm = UiViewModel::default();
+        vm.avatar.is_ready = true;
+        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+        let mut state = UiState::default();
+        let _ = ctx.run_ui(input, |ui| {
+            render_studio(
+                ui.ctx(),
+                &vm,
+                &mut state,
+                &DiagnosticsSnapshot::default(),
+                None,
+                &PreviewState::default(),
+                &PreviewLandmarkState::default(),
+                AvatarMotionMirror::default(),
+                None,
+                Some(AvatarPreviewTexture::new(
+                    bevy::asset::Handle::default(),
+                    vtuber_core::VideoOutputProfile::default(),
+                )),
+                false,
+                None,
+                UiLanguage::Ja,
+            );
+        });
+        state.monitor_image_rect.map_or(0.0, |rect| rect.width())
+    }
+
+    #[test]
+    fn the_rendered_preview_matches_the_layout_at_each_width() {
+        assert_eq!(rendered_preview_width(1600.0), MONITOR_TARGET_WIDTH);
+        assert_eq!(rendered_preview_width(1280.0), 648.0);
+        assert_eq!(rendered_preview_width(900.0), 268.0);
+        // Below the minimum the monitor moves above the settings and keeps the
+        // same narrow preview the compact layout has always shown.
+        assert_eq!(
+            rendered_preview_width(SIDEBAR_LAYOUT_MIN_WIDTH - 1.0),
+            MIN_MONITOR_WIDTH
+        );
+    }
+
     #[test]
     fn floating_control_reopens_settings_on_click() {
         let ctx = egui::Context::default();
