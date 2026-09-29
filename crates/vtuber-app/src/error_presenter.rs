@@ -81,23 +81,29 @@ pub fn present_error(
             ),
             suggested_actions: vec![UiAction::DismissError],
         },
-        OrchestratorError::AvatarLoadRejected(_) => ErrorPresentation {
+        OrchestratorError::AvatarLoadRejected(detail) => ErrorPresentation {
             code: "AVATAR_LOAD_REJECTED",
-            user_message: message(
-                "アバターを読み込めませんでした。モデルを確認して再試行してください。",
-                "The avatar could not be loaded. Check the model and try again.",
-                "无法加载虚拟形象。请检查模型后重试。",
-                "아바타를 불러오지 못했습니다. 모델을 확인하고 다시 시도하세요.",
+            user_message: format!(
+                "{}: {detail}",
+                message(
+                    "アバターを読み込めませんでした。モデルを確認して再試行してください。",
+                    "The avatar could not be loaded. Check the model and try again.",
+                    "无法加载虚拟形象。请检查模型后重试。",
+                    "아바타를 불러오지 못했습니다. 모델을 확인하고 다시 시도하세요.",
+                )
             ),
             suggested_actions: vec![UiAction::RetryAfterError, UiAction::DismissError],
         },
-        OrchestratorError::AvatarLifecycleFailed(_) => ErrorPresentation {
+        OrchestratorError::AvatarLifecycleFailed(detail) => ErrorPresentation {
             code: "AVATAR_LIFECYCLE_FAILED",
-            user_message: message(
-                "アバターの読み込みまたはバインド中に失敗しました。再試行してください。",
-                "The avatar failed during loading or binding. Try again.",
-                "虚拟形象加载或绑定失败，请重试。",
-                "아바타를 불러오거나 바인딩하는 중 실패했습니다. 다시 시도하세요.",
+            user_message: format!(
+                "{}: {detail}",
+                message(
+                    "アバターを読み込めませんでした",
+                    "The avatar failed during loading or binding. Try again.",
+                    "虚拟形象加载或绑定失败，请重试。",
+                    "아바타를 불러오거나 바인딩하는 중 실패했습니다. 다시 시도하세요.",
+                )
             ),
             suggested_actions: vec![UiAction::RetryAfterError, UiAction::DismissError],
         },
@@ -284,6 +290,17 @@ mod tests {
                 .suggested_actions
                 .contains(&UiAction::DismissError)
         );
+    }
+    #[test]
+    fn runtime_load_failures_show_the_reason() {
+        for error in [
+            OrchestratorError::AvatarLifecycleFailed("invalid head transform".into()),
+            OrchestratorError::AvatarLoadRejected("invalid head transform".into()),
+        ] {
+            let presentation = present_error(&error, UiLanguage::Ja);
+            assert!(presentation.user_message.contains("読み込めませんでした"));
+            assert!(presentation.user_message.contains("invalid head transform"));
+        }
     }
     #[test]
     fn present_error_no_camera_has_refresh() {

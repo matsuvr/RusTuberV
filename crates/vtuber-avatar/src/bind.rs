@@ -56,9 +56,11 @@ pub(crate) fn observe_initialized(
                     "avatar load timeout: root={entity:?} had not reached Initialized before the deadline; lifecycle={:?}",
                     lifecycle.state()
                 );
-                commands.entity(entity).remove::<ActiveAvatar>();
+                commands.entity(entity).despawn();
             }
-            lifecycle.fail(AvatarLifecycleFailure::AssetLoadFailed);
+            lifecycle.fail(AvatarLifecycleFailure::AssetLoadFailed(
+                "VRM initialization timed out after 30 seconds".into(),
+            ));
             return;
         }
 
@@ -73,8 +75,8 @@ pub(crate) fn observe_initialized(
                         handle.0.path(),
                         lifecycle.state()
                     );
-                    commands.entity(entity).remove::<ActiveAvatar>();
-                    lifecycle.fail(AvatarLifecycleFailure::AssetLoadFailed);
+                    commands.entity(entity).despawn();
+                    lifecycle.fail(AvatarLifecycleFailure::AssetLoadFailed(error.to_string()));
                     return;
                 }
                 LoadState::Loaded | LoadState::Loading | LoadState::NotLoaded => {
@@ -244,6 +246,7 @@ mod tests {
     fn avatar_load_timeout_transitions_to_failed() {
         let mut app = test_app();
         let root = spawn_active_root(&mut app);
+        let child = app.world_mut().spawn(ChildOf(root)).id();
 
         {
             let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
@@ -258,7 +261,15 @@ mod tests {
         let lifecycle = app.world().resource::<AvatarLifecycle>();
         assert_eq!(lifecycle.state(), AvatarLifecycleState::Failed);
         assert!(lifecycle.active_root().is_none());
-        assert!(!app.world().entity(root).contains::<ActiveAvatar>());
+        assert!(!app.world().entities().contains(root));
+        assert!(!app.world().entities().contains(child));
+        assert!(
+            lifecycle
+                .failure()
+                .unwrap()
+                .to_string()
+                .contains("timed out")
+        );
     }
 
     #[test]

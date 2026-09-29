@@ -299,7 +299,7 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
                     path: "meshes[*].primitives[*].targets".to_string(),
                     reason: format!(
                         "{target_count} morph targets exceed the runtime limit of \
-                         {MAX_MORPH_TARGETS} and cannot be reduced without changing animation"
+                         {MAX_MORPH_TARGETS} and cannot be reduced without changing the default shape or animation"
                     ),
                 });
             }
@@ -342,10 +342,37 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
 /// Inspects a VRM file without copying it.
 pub fn inspect_vrm<P: AsRef<Path>>(path: P) -> Result<VrmInspectionSummary, ModelImportError> {
     let path = path.as_ref();
-    let (document, _, _) =
-        gltf::import(path).map_err(|e| ModelImportError::GlbParse(format!("{e}")))?;
-
+    let gltf::Gltf { document, blob } =
+        gltf::Gltf::open(path).map_err(|e| ModelImportError::GlbParse(e.to_string()))?;
     check_external_uris(&document)?;
+    let buffers = gltf::import_buffers(&document, path.parent(), blob)
+        .map_err(|e| ModelImportError::GlbParse(e.to_string()))?;
+    // gltf's image decoder slices buffer views without checking their bounds.
+    // Validate against the actual bytes before handing any view to the decoder.
+    for view in document.views() {
+        let length = buffers
+            .get(view.buffer().index())
+            .map(|buffer| buffer.0.len());
+        if view
+            .offset()
+            .checked_add(view.length())
+            .zip(length)
+            .is_none_or(|(end, length)| end > length)
+        {
+            return Err(ModelImportError::InvalidVrmField {
+                path: format!("bufferViews[{}]", view.index()),
+                reason: format!(
+                    "byte range {} + {} exceeds buffer {} ({} bytes)",
+                    view.offset(),
+                    view.length(),
+                    view.buffer().index(),
+                    length.unwrap_or(0)
+                ),
+            });
+        }
+    }
+    gltf::import_images(&document, path.parent(), &buffers)
+        .map_err(|e| ModelImportError::GlbParse(e.to_string()))?;
 
     let json = document.as_json().clone();
     let extensions = json.extensions.as_ref().map(|ext| &ext.others);
@@ -1178,12 +1205,12 @@ fn vrm0_convert_error(error: vtuber_avatar::Vrm0ConvertError) -> ModelImportErro
 /// Rewrites a GLB so that no mesh carries more than [`MAX_MORPH_TARGETS`]
 /// morph targets, which is the hard limit the Bevy runtime imposes at load.
 ///
-/// Morph targets that no VRM expression bind references are dropped from
+/// Morph targets with no VRM expression bind or nonzero default weight are dropped from
 /// meshes above the limit, and bind indices are remapped to the reduced
 /// target arrays. Returns `None` when the bytes need no rewrite or cannot be
 /// rewritten safely: non-GLB containers, GLBs without an excess mesh, models
 /// that animate morph weights, and meshes whose referenced bind set alone
-/// exceeds the limit.
+/// exceeds the limit together with the nonzero defaults.
 pub fn normalize_vrm_morph_targets(bytes: &[u8]) -> Option<Vec<u8>> {
     let (mut json, bin_chunk) = parse_glb(bytes)?;
     if has_morph_weight_animation(&json) {
@@ -1273,7 +1300,7 @@ fn has_morph_weight_animation(root: &Value) -> bool {
         })
 }
 
-/// Collects every morph target index referenced by VRM expression binds,
+/// Collects morph targets needed by VRM expression binds and authored defaults,
 /// keyed by glTF mesh index. VRM 0.x binds are mesh-indexed; VRM 1.0 binds
 /// are node-indexed and resolved through the node's mesh.
 fn collect_morph_references(root: &Value) -> BTreeMap<usize, BTreeSet<usize>> {
@@ -1315,7 +1342,39 @@ fn collect_morph_references(root: &Value) -> BTreeMap<usize, BTreeSet<usize>> {
             record(mesh, index);
         }
     }
+    // Nonzero authored defaults affect the neutral shape even without a VRM bind.
+    if let Some(meshes) = root.get("meshes").and_then(Value::as_array) {
+        for (mesh, value) in meshes.iter().enumerate() {
+            for index in morph_default_indices(value) {
+                record(mesh, index);
+            }
+        }
+    }
+    if let Some(nodes) = root.get("nodes").and_then(Value::as_array) {
+        for node in nodes {
+            if let Some(mesh) = node
+                .get("mesh")
+                .and_then(Value::as_u64)
+                .and_then(|mesh| usize::try_from(mesh).ok())
+            {
+                for index in morph_default_indices(node) {
+                    record(mesh, index);
+                }
+            }
+        }
+    }
     references
+}
+
+fn morph_default_indices(value: &Value) -> impl Iterator<Item = usize> + '_ {
+    value
+        .get("weights")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, weight)| weight.as_f64().is_some_and(|weight| weight != 0.0))
+        .map(|(index, _)| index)
 }
 
 fn node_mesh_index(root: &Value, node: usize) -> Option<usize> {
@@ -1405,6 +1464,24 @@ fn over_limit_morph_target_count(bytes: &[u8]) -> Option<usize> {
 
 fn apply_morph_reduction(root: &mut Value, plan: &BTreeMap<usize, MorphReductionPlan>) {
     reduce_meshes(root, plan);
+    if let Some(nodes) = root.get_mut("nodes").and_then(Value::as_array_mut) {
+        for node in nodes {
+            let reduction = node
+                .get("mesh")
+                .and_then(Value::as_u64)
+                .and_then(|mesh| usize::try_from(mesh).ok())
+                .and_then(|mesh| plan.get(&mesh));
+            if let Some(reduction) = reduction
+                && let Some(weights) = node.get_mut("weights").and_then(Value::as_array_mut)
+            {
+                *weights = reduction
+                    .remap
+                    .keys()
+                    .filter_map(|index| weights.get(*index).cloned())
+                    .collect();
+            }
+        }
+    }
     remap_legacy_binds(root, plan);
     remap_vrm1_binds(root, plan);
 }
@@ -2361,6 +2438,71 @@ humanoid_nodes = { hips = 0, head = 1 }
     #[test]
     fn normalization_ignores_non_glb_bytes() {
         assert_eq!(normalize_vrm_morph_targets(b"not glb"), None);
+    }
+
+    #[test]
+    fn invalid_image_range_returns_a_reason_without_panicking() {
+        let dir = TempDir::new().unwrap();
+        let mut root: Value = serde_json::from_str(VRM1_GLTF_JSON).unwrap();
+        root["buffers"] = serde_json::json!([{"byteLength": 12}]);
+        root["bufferViews"] = serde_json::json!([{"buffer": 0, "byteOffset": 12, "byteLength": 8}]);
+        root["images"] = serde_json::json!([{"bufferView": 0, "mimeType": "image/png"}]);
+        let source = write_glb_fixture(&dir, "bad-image.vrm", &root.to_string());
+        let error =
+            import_vrm(&source, dir.path().join("managed"), DEFAULT_SIZE_LIMIT).unwrap_err();
+        assert!(
+            matches!(&error, ModelImportError::InvalidVrmField { path, .. } if path == "bufferViews[0]")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("12 + 8 exceeds buffer 0 (12 bytes)")
+        );
+        assert!(!dir.path().join("managed").exists());
+    }
+
+    #[test]
+    fn reduction_preserves_mesh_and_node_default_shapes() {
+        let dir = TempDir::new().unwrap();
+        let source = over_limit_vrm0_fixture(&dir, 300, &[5]);
+        let bytes = fs::read(source).unwrap();
+        let (mut root, bin) = parse_glb(&bytes).unwrap();
+        // The fixture's mesh defaults use 5 and 250; add a node-only default.
+        let mut weights = vec![0.0_f32; 300];
+        weights[299] = 1.0;
+        root["nodes"][3]["weights"] = serde_json::json!(weights);
+        let normalized = normalize_vrm_morph_targets(&write_glb(&root, bin).unwrap()).unwrap();
+        let (after, _) = parse_glb(&normalized).unwrap();
+        assert_eq!(
+            after["meshes"][0]["weights"],
+            serde_json::json!([0.25, 0.75, 0.0])
+        );
+        assert_eq!(
+            after["nodes"][3]["weights"],
+            serde_json::json!([0.0, 0.0, 1.0])
+        );
+        assert_eq!(
+            after["meshes"][0]["primitives"][0]["targets"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn too_many_nonzero_defaults_are_rejected_without_changing_the_source() {
+        let dir = TempDir::new().unwrap();
+        let source = over_limit_vrm0_fixture(&dir, 300, &[5]);
+        let bytes = fs::read(&source).unwrap();
+        let (mut root, bin) = parse_glb(&bytes).unwrap();
+        root["meshes"][0]["weights"] = serde_json::json!(vec![1.0; 300]);
+        let bytes = write_glb(&root, bin).unwrap();
+        fs::write(&source, &bytes).unwrap();
+        let error =
+            import_vrm(&source, dir.path().join("managed"), DEFAULT_SIZE_LIMIT).unwrap_err();
+        assert!(matches!(error, ModelImportError::InvalidVrmField { .. }));
+        assert_eq!(fs::read(&source).unwrap(), bytes);
     }
 
     #[test]

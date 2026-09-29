@@ -120,8 +120,8 @@ fn no_head_model_fails_with_typed_error() {
         "no binding should exist for a headless model"
     );
     assert!(
-        !app.world().entity(root).contains::<ActiveAvatar>(),
-        "ActiveAvatar marker should be removed on failure"
+        !app.world().entities().contains(root),
+        "the failed model should be despawned"
     );
 }
 

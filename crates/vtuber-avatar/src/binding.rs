@@ -552,8 +552,7 @@ fn fail_binding(
     error: AvatarBindError,
 ) {
     if let Ok(mut entity_commands) = commands.get_entity(root) {
-        entity_commands.remove::<ActiveAvatar>();
-        entity_commands.remove::<BindingDeadline>();
+        entity_commands.despawn();
     }
 
     let failure = match &error {

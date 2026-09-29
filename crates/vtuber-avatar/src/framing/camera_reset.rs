@@ -206,9 +206,9 @@ mod tests {
             .world()
             .get::<Transform>(camera)
             .expect("camera transform");
-        app.world_mut()
-            .resource_mut::<AvatarLifecycle>()
-            .fail(crate::lifecycle::AvatarLifecycleFailure::AssetLoadFailed);
+        app.world_mut().resource_mut::<AvatarLifecycle>().fail(
+            crate::lifecycle::AvatarLifecycleFailure::AssetLoadFailed("test load failure".into()),
+        );
         send_reset(&mut app, generation);
         app.update();
 

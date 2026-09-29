@@ -168,7 +168,7 @@ pub enum AvatarLifecycleFailure {
         bone: &'static str,
     },
     /// The VRM asset failed to load.
-    AssetLoadFailed,
+    AssetLoadFailed(String),
 }
 
 impl std::fmt::Display for AvatarLifecycleFailure {
@@ -181,7 +181,7 @@ impl std::fmt::Display for AvatarLifecycleFailure {
             Self::InvalidRestOrientation { bone } => {
                 write!(f, "humanoid bone has invalid rest orientation: {bone}")
             }
-            Self::AssetLoadFailed => f.write_str("VRM asset failed to load"),
+            Self::AssetLoadFailed(reason) => write!(f, "VRM asset failed to load: {reason}"),
         }
     }
 }
@@ -676,11 +676,15 @@ mod tests {
         let root = entity(4);
 
         lifecycle.request_load(root).unwrap();
-        lifecycle.fail(AvatarLifecycleFailure::AssetLoadFailed);
+        lifecycle.fail(AvatarLifecycleFailure::AssetLoadFailed(
+            "test load failure".into(),
+        ));
         assert_eq!(lifecycle.state(), AvatarLifecycleState::Failed);
         assert_eq!(
             lifecycle.failure(),
-            Some(&AvatarLifecycleFailure::AssetLoadFailed)
+            Some(&AvatarLifecycleFailure::AssetLoadFailed(
+                "test load failure".into()
+            ))
         );
         assert!(lifecycle.active_root().is_none());
 
@@ -1056,14 +1060,12 @@ mod tests {
             .active_root()
             .expect("replacement root active");
 
-        // In real code the failing system removes the marker before calling
+        // In real code the failing system despawns the hierarchy before calling
         // fail(); simulate that here so the test reflects the cleanup contract.
-        app.world_mut()
-            .entity_mut(second_root)
-            .remove::<ActiveAvatar>();
-        app.world_mut()
-            .resource_mut::<AvatarLifecycle>()
-            .fail(AvatarLifecycleFailure::AssetLoadFailed);
+        app.world_mut().entity_mut(second_root).despawn();
+        app.world_mut().resource_mut::<AvatarLifecycle>().fail(
+            AvatarLifecycleFailure::AssetLoadFailed("test load failure".into()),
+        );
 
         let lifecycle = app.world().resource::<AvatarLifecycle>();
         assert_eq!(lifecycle.state(), AvatarLifecycleState::Failed);
@@ -1073,6 +1075,6 @@ mod tests {
 
         let world = app.world();
         assert!(!world.entities().contains(first_root));
-        assert!(!world.entity(second_root).contains::<ActiveAvatar>());
+        assert!(!world.entities().contains(second_root));
     }
 }

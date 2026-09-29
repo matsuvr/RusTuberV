@@ -95,7 +95,11 @@ fn sync_system_maps_failed_state() {
     {
         let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
         lifecycle.request_load(root).unwrap();
-        lifecycle.fail(vtuber_avatar::lifecycle::AvatarLifecycleFailure::AssetLoadFailed);
+        lifecycle.fail(
+            vtuber_avatar::lifecycle::AvatarLifecycleFailure::AssetLoadFailed(
+                "test load failure".into(),
+            ),
+        );
     }
 
     app.update();

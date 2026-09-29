@@ -573,10 +573,10 @@ where
                         s.state = CaptureServiceState::Running;
                     });
                 }
-                Err(CameraError::Disconnected) => {
+                Err(err @ (CameraError::Disconnected | CameraError::FrameReadFailed(_))) => {
                     active_stream = None;
                     clear_frame_slots(&slot, pose_slot.as_deref());
-                    metrics.last_error = Some("CAMERA_DISCONNECTED".into());
+                    metrics.last_error = Some(format!("{err:?}"));
                     metrics.reconnect_attempts = 0;
                     reconnect_plan = selected_device.as_ref().map(|_| ReconnectPlan {
                         attempts: 0,
@@ -797,11 +797,13 @@ mod tests {
     struct ScriptedReconnectBackend {
         opens: std::sync::Mutex<std::collections::VecDeque<Result<bool, &'static str>>>,
         opened: std::sync::mpsc::Sender<()>,
+        read_failure: bool,
     }
 
     struct ScriptedStream {
         disconnect: bool,
         frames: u64,
+        read_failure: bool,
     }
 
     impl crate::device::CameraBackend for ScriptedReconnectBackend {
@@ -825,6 +827,7 @@ mod tests {
             Ok(Box::new(ScriptedStream {
                 disconnect,
                 frames: 0,
+                read_failure: self.read_failure,
             }))
         }
     }
@@ -841,8 +844,15 @@ mod tests {
         }
 
         fn next_frame(&mut self, stop: &StopToken) -> Result<VideoFrame, CameraError> {
-            if stop.is_stopped() || (self.disconnect && self.frames > 0) {
+            if stop.is_stopped() {
                 return Err(CameraError::Disconnected);
+            }
+            if self.disconnect && self.frames > 0 {
+                return Err(if self.read_failure {
+                    CameraError::FrameReadFailed("device read failed".into())
+                } else {
+                    CameraError::Disconnected
+                });
             }
             self.frames += 1;
             Ok(VideoFrame {
@@ -1076,6 +1086,7 @@ mod tests {
             .start_worker(ScriptedReconnectBackend {
                 opens: std::sync::Mutex::new(opens.into()),
                 opened: tx,
+                read_failure: false,
             })
             .unwrap();
         controller
@@ -1093,6 +1104,27 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn read_failure_reopens_the_camera() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut controller = CaptureController::new();
+        controller
+            .start_worker(ScriptedReconnectBackend {
+                opens: std::sync::Mutex::new(vec![Ok(true), Ok(false)].into()),
+                opened: tx,
+                read_failure: true,
+            })
+            .unwrap();
+        controller
+            .select_and_start(test_device(), CameraRequest::default())
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("read failure must reopen the device");
+        wait_for_state(&controller, CaptureServiceState::Running);
+        controller.shutdown().unwrap();
     }
 
     /// The device descriptor the shared [`MockBackend`] actually opens.

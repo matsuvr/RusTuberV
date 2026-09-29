@@ -213,7 +213,7 @@ fn humanoid_binding_missing_head_fails() {
     let lifecycle = app.world().resource::<AvatarLifecycle>();
     assert_eq!(lifecycle.state(), AvatarLifecycleState::Failed);
     assert!(lifecycle.active_root().is_none());
-    assert!(!app.world().entity(root).contains::<ActiveAvatar>());
+    assert!(!app.world().entities().contains(root));
     assert!(
         app.world().get::<AvatarBinding>(root).is_none(),
         "no binding should be cached when the head is missing"
