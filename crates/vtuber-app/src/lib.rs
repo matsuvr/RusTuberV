@@ -35,6 +35,9 @@ pub mod inference_runtime;
 /// VRM license review extracted before an avatar import.
 pub mod license_review;
 
+/// Licenses of the crates this application is built from and the assets it ships.
+pub mod licenses;
+
 /// Manifest-driven inference model catalog.
 pub mod model_catalog;
 

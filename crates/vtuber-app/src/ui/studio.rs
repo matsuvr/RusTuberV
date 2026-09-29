@@ -9,6 +9,7 @@ use crate::diagnostics::DiagnosticsSnapshot;
 use crate::error_presenter::ErrorPresentation;
 use crate::expression_keys::ExpressionKey;
 use crate::license_review::VrmLicenseReview;
+use crate::licenses::LicenseGroup;
 use crate::preview::PreviewState;
 use crate::preview_landmarks::PreviewLandmarkState;
 use crate::settings::UiLanguage;
@@ -24,12 +25,13 @@ use vtuber_core::monotonic_now;
 
 /// Sidebar destinations in display order. There is no hierarchy: every
 /// destination shows all of its sections in the right pane at once.
-const DESTINATIONS: [Pane; 5] = [
+const DESTINATIONS: [Pane; 6] = [
     Pane::VrmCamera,
     Pane::PoseCamera,
     Pane::ExpressionKeys,
     Pane::NdiOutput,
     Pane::Diagnostics,
+    Pane::OssLicenses,
 ];
 
 /// Every sidebar destination in display order.
@@ -54,6 +56,12 @@ fn page_title(pane: Pane, lang: UiLanguage) -> &'static str {
         Pane::ExpressionKeys => lang.pick("表情設定", "Expressions", "表情设置", "표정 설정"),
         Pane::NdiOutput => lang.pick("NDI出力", "NDI output", "NDI输出", "NDI 출력"),
         Pane::Diagnostics => lang.pick("診断", "Diagnostics", "诊断", "진단"),
+        Pane::OssLicenses => lang.pick(
+            "OSSライセンス",
+            "OSS licenses",
+            "开源许可证",
+            "OSS 라이선스",
+        ),
     }
 }
 
@@ -686,6 +694,7 @@ pub(crate) fn render_studio(
                             Pane::ExpressionKeys => expression_keys_page(ui, vm, state, lang),
                             Pane::NdiOutput => output_page(ui, vm, state, lang),
                             Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
+                            Pane::OssLicenses => oss_licenses_page(ui, lang),
                         }
                         ui.add_space(16.0);
                     });
@@ -2250,6 +2259,110 @@ fn diagnostics_page(
     );
 }
 
+/// Licenses of the built application. Only the headings are localized; every
+/// license body stays in the language its author published it in.
+fn oss_licenses_page(ui: &mut Ui, lang: UiLanguage) {
+    section(
+        ui,
+        lang.pick(
+            "表示について",
+            "About this list",
+            "关于本列表",
+            "이 목록에 대하여",
+        ),
+        |ui| {
+            ui.label(lang.pick(
+                "ライセンスの本文は配布元のファイルのまま表示し、表示言語では翻訳しません。",
+                "License bodies are shown exactly as their publisher shipped them and are never translated into the display language.",
+                "许可证正文按发布方提供的原文件显示，不随界面语言翻译。",
+                "라이선스 본문은 배포된 파일 그대로 표시하며, 표시 언어로 번역하지 않습니다.",
+            ));
+        },
+    );
+    section(
+        ui,
+        lang.pick("同梱アセット", "Bundled assets", "内置资源", "번들 에셋"),
+        |ui| {
+            license_groups(ui, "bundled", crate::licenses::bundled_groups(), lang);
+        },
+    );
+    section(
+        ui,
+        lang.pick(
+            "依存パッケージ",
+            "Dependency packages",
+            "依赖包",
+            "의존 패키지",
+        ),
+        |ui| {
+            ui.label(lang.pick(
+                "Cargo.lock が記録している、このアプリのビルドに使ったすべてのパッケージです。",
+                "Every package Cargo.lock records as an input to this application's build.",
+                "Cargo.lock 记录的、构建本应用所用的全部软件包。",
+                "Cargo.lock에 기록된 이 애플리케이션 빌드에 사용된 모든 패키지입니다.",
+            ));
+            license_groups(
+                ui,
+                "dependencies",
+                crate::licenses::dependency_groups(),
+                lang,
+            );
+        },
+    );
+}
+
+fn license_groups(ui: &mut Ui, list_id: &str, groups: &[LicenseGroup], lang: UiLanguage) {
+    for (group_index, group) in groups.iter().enumerate() {
+        let heading = format!(
+            "{}  ({} {})",
+            group.expression,
+            group.items.len(),
+            lang.pick("件", "items", "项", "개")
+        );
+        egui::CollapsingHeader::new(RichText::new(heading).strong())
+            .id_salt(("oss_licenses", list_id, group_index))
+            .show(ui, |ui| {
+                let mut items = group
+                    .items
+                    .iter()
+                    .map(|item| {
+                        if item.version.is_empty() {
+                            item.name.to_string()
+                        } else {
+                            format!("{} {}", item.name, item.version)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                items.push('\n');
+                ui.label(RichText::new(items).monospace());
+                if group.texts.is_empty() {
+                    ui.label(lang.pick(
+                        "このパッケージはライセンス本文を同梱していません。上流の配布元を参照してください。",
+                        "These packages ship no license text. See their upstream distribution.",
+                        "这些包未附带许可证正文，请参阅其上游分发。",
+                        "이 패키지에는 라이선스 본문이 포함되어 있지 않습니다. 업스트림 배포를 참조하세요.",
+                    ));
+                }
+                for (text_index, text) in group.texts.iter().enumerate() {
+                    // Two crates under one expression rarely share a file, and
+                    // their copyright lines are what tells them apart.
+                    let holder = text.body.lines().next().unwrap_or_default().trim();
+                    let title = if holder.is_empty() {
+                        text.file_name.to_string()
+                    } else {
+                        format!("{} — {holder}", text.file_name)
+                    };
+                    egui::CollapsingHeader::new(RichText::new(title).monospace())
+                        .id_salt(("license_text", text_index))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(text.body).monospace());
+                        });
+                }
+            });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2258,12 +2371,13 @@ mod tests {
         assert!(!use_sidebar(720.0));
         assert!(use_sidebar(1600.0));
         let destinations: Vec<Pane> = destinations().collect();
-        assert_eq!(destinations.len(), 5);
+        assert_eq!(destinations.len(), 6);
         assert_eq!(destinations.first(), Some(&Pane::VrmCamera));
         assert!(destinations.contains(&Pane::PoseCamera));
         assert!(destinations.contains(&Pane::ExpressionKeys));
         assert!(destinations.contains(&Pane::NdiOutput));
         assert!(destinations.contains(&Pane::Diagnostics));
+        assert_eq!(destinations.last(), Some(&Pane::OssLicenses));
     }
 
     /// The regression: a 1280px window used to fall back to the compact layout
@@ -2458,6 +2572,24 @@ mod tests {
             "the transition must animate over frames"
         );
         assert_eq!(state.avatar_only_progress, 1.0);
+    }
+
+    #[test]
+    fn the_license_page_renders_every_group_in_every_language() {
+        for lang in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            let ctx = egui::Context::default();
+            let mut state = UiState::default();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                oss_licenses_page(ui, lang);
+            });
+            // The license bodies are reference material, so the page only reads.
+            assert!(state.take_actions().is_empty());
+        }
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub enum Pane {
     NdiOutput,
     /// Tracking health and technical diagnostics.
     Diagnostics,
+    /// Licenses of the built application and the packages it uses.
+    OssLicenses,
 }
 
 /// Overall application lifecycle state for UI display.
@@ -464,6 +466,7 @@ mod tests {
             Pane::ExpressionKeys,
             Pane::NdiOutput,
             Pane::Diagnostics,
+            Pane::OssLicenses,
         ] {
             vm.pane = pane;
             assert_eq!(vm.pane, pane);
