@@ -13,7 +13,7 @@ const EXTENDED_MAX_TOTAL_FLEXION_RAD: f32 = 0.45;
 /// All three non-middle fingers must exceed this value. If any one of them is
 /// opening or otherwise moving out of a folded pose, the middle finger is left
 /// untouched.
-const FOLDED_MIN_TOTAL_FLEXION_RAD: f32 = 1.20;
+const FOLDED_MIN_TOTAL_FLEXION_RAD: f32 = 1.80;
 
 /// Rewrites an isolated extended middle finger to the neighbouring folded pose.
 ///
@@ -118,13 +118,17 @@ mod tests {
     }
 
     #[test]
-    fn middle_extension_is_preserved_when_any_other_finger_is_not_folded() {
+    fn middle_extension_is_preserved_when_any_other_finger_is_moving() {
         let folded = [0.8, 0.9, 0.4];
+        let moving = [0.5, 0.6, 0.4];
         let extended = [0.05, 0.05, 0.05];
         for fingers in [
             [extended, extended, folded, folded],
             [folded, extended, extended, folded],
             [folded, extended, folded, extended],
+            [moving, extended, folded, folded],
+            [folded, extended, moving, folded],
+            [folded, extended, folded, moving],
         ] {
             let input = pose(fingers);
             assert_eq!(suppress_isolated_middle_extension_pose(input), input);
