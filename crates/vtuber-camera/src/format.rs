@@ -18,89 +18,50 @@ pub struct FormatCandidate {
     pub format: PixelFormat,
 }
 
-/// Selects a candidate using fixed preferred tiers, then a distance score.
+/// Selects the candidate closest to the caller's requested size and frame rate.
 ///
-/// The first pass checks 1280x720, then 640x480, at exactly `30/1` fps. With
-/// [`RequestedFormat::Any`], each resolution tries the MJPEG marker (`Rgb8`)
-/// before the YUYV marker (`Bgr8`). An explicit requested format replaces the
-/// format preference in every tier; it does not change the resolution order.
-///
-/// If no preferred tier matches, the lowest-scoring `30/1` fps candidate wins.
-/// If none exists, candidates at any frame rate are considered. These scoring
-/// passes use squared resolution distance plus 100 times squared integer-FPS
-/// distance from the request; they do not compare pixel-format preferences.
+/// There are no hidden resolution tiers: an exact request wins with a zero
+/// distance, and an unavailable request chooses the nearest format the camera
+/// actually reports. An explicit MJPEG or YUYV request is respected rather than
+/// silently replaced. With [`RequestedFormat::Any`], MJPEG (`Rgb8`) wins only as
+/// the final tie-breaker because it carries less USB traffic than YUYV.
 pub fn select_format(
     request: &CameraRequest,
     candidates: &[FormatCandidate],
 ) -> Result<CameraFormat, CameraError> {
-    if candidates.is_empty() {
-        return Err(CameraError::NoSuitableFormat);
-    }
-
-    let preferred = [
-        (1280, 720, RequestedFormat::Mjpeg),
-        (1280, 720, RequestedFormat::Yuyv),
-        (640, 480, RequestedFormat::Mjpeg),
-        (640, 480, RequestedFormat::Yuyv),
-    ];
-
-    // First pass: exact preferred format at 30fps.
-    for (w, h, fmt) in &preferred {
-        if let Some(c) = candidates.iter().find(|c| {
-            c.width == *w
-                && c.height == *h
-                && c.fps_numerator == 30
-                && c.fps_denominator == 1
-                && format_matches_preference(c.format, *fmt, request.format)
-        }) {
-            return Ok(candidate_to_format(*c));
-        }
-    }
-
-    // Second pass: closest 30fps format.
-    if let Some(c) = candidates
+    let candidate = candidates
         .iter()
-        .filter(|c| c.fps_numerator == 30 && c.fps_denominator == 1)
-        .min_by_key(|c| score(request, c))
-    {
-        return Ok(candidate_to_format(*c));
-    }
-
-    // Fallback: closest format at any frame rate.
-    // Invariant: `candidates` is non-empty (checked at the top), so `first`
-    // always exists.
-    let fallback = candidates.first().copied();
-    let c = candidates
-        .iter()
-        .min_by_key(|c| score(request, c))
+        .filter(|candidate| format_matches_request(candidate.format, request.format))
+        .min_by_key(|candidate| (score(request, candidate), format_rank(candidate.format)))
         .copied()
-        .or(fallback)
         .ok_or(CameraError::NoSuitableFormat)?;
-    Ok(candidate_to_format(c))
+    Ok(candidate_to_format(candidate))
 }
 
-fn format_matches_preference(
-    candidate: PixelFormat,
-    preference: RequestedFormat,
-    request: RequestedFormat,
-) -> bool {
-    let effective = if request == RequestedFormat::Any {
-        preference
-    } else {
-        request
-    };
-    match effective {
+fn format_matches_request(candidate: PixelFormat, request: RequestedFormat) -> bool {
+    match request {
         RequestedFormat::Any => true,
         RequestedFormat::Mjpeg => candidate == PixelFormat::Rgb8,
         RequestedFormat::Yuyv => candidate == PixelFormat::Bgr8,
     }
 }
 
+fn format_rank(candidate: PixelFormat) -> u8 {
+    match candidate {
+        PixelFormat::Rgb8 => 0,
+        PixelFormat::Bgr8 => 1,
+        _ => 2,
+    }
+}
+
 fn score(request: &CameraRequest, candidate: &FormatCandidate) -> u64 {
     let dx = i64::from(candidate.width) - i64::from(request.width);
     let dy = i64::from(candidate.height) - i64::from(request.height);
-    let dfps = i64::from(candidate.fps_numerator) / i64::from(candidate.fps_denominator.max(1))
-        - i64::from(request.fps_numerator) / i64::from(request.fps_denominator.max(1));
+    let candidate_fps =
+        i64::from(candidate.fps_numerator) / i64::from(candidate.fps_denominator.max(1));
+    let requested_fps =
+        i64::from(request.fps_numerator) / i64::from(request.fps_denominator.max(1));
+    let dfps = candidate_fps - requested_fps;
     (dx * dx + dy * dy) as u64 + (dfps * dfps) as u64 * 100
 }
 
@@ -124,49 +85,71 @@ mod tests {
     )] // tests may panic (AGENTS.md)
     use super::*;
 
-    #[test]
-    fn prefers_720p30_over_480p30_for_default_request() {
-        let request = CameraRequest::default();
-        let candidates = vec![
-            FormatCandidate {
-                width: 640,
-                height: 480,
-                fps_numerator: 30,
-                fps_denominator: 1,
-                format: PixelFormat::Rgb8,
-            },
-            FormatCandidate {
-                width: 1280,
-                height: 720,
-                fps_numerator: 30,
-                fps_denominator: 1,
-                format: PixelFormat::Rgb8,
-            },
-        ];
-        let format = select_format(&request, &candidates).unwrap();
-        assert_eq!(format.width, 1280);
-        assert_eq!(format.height, 720);
+    fn candidate(width: u32, height: u32, fps: u32, format: PixelFormat) -> FormatCandidate {
+        FormatCandidate {
+            width,
+            height,
+            fps_numerator: fps,
+            fps_denominator: 1,
+            format,
+        }
     }
 
     #[test]
-    fn falls_back_to_480p30() {
+    fn default_request_is_360p30() {
         let request = CameraRequest::default();
-        let candidates = vec![FormatCandidate {
-            width: 640,
-            height: 480,
-            fps_numerator: 30,
-            fps_denominator: 1,
-            format: PixelFormat::Rgb8,
-        }];
+        assert_eq!((request.width, request.height), (640, 360));
+        assert_eq!((request.fps_numerator, request.fps_denominator), (30, 1));
+    }
+
+    #[test]
+    fn exact_default_beats_the_old_720p_tier() {
+        let request = CameraRequest::default();
+        let candidates = [
+            candidate(1280, 720, 30, PixelFormat::Rgb8),
+            candidate(640, 360, 30, PixelFormat::Rgb8),
+        ];
         let format = select_format(&request, &candidates).unwrap();
-        assert_eq!(format.width, 640);
-        assert_eq!(format.height, 480);
+        assert_eq!((format.width, format.height), (640, 360));
+        assert_eq!((format.fps_numerator, format.fps_denominator), (30, 1));
+    }
+
+    #[test]
+    fn nearest_reported_format_is_used_when_360p_is_unavailable() {
+        let request = CameraRequest::default();
+        let candidates = [
+            candidate(1280, 720, 30, PixelFormat::Rgb8),
+            candidate(640, 480, 30, PixelFormat::Rgb8),
+        ];
+        let format = select_format(&request, &candidates).unwrap();
+        assert_eq!((format.width, format.height), (640, 480));
+    }
+
+    #[test]
+    fn any_uses_mjpeg_only_as_an_exact_tie_breaker() {
+        let request = CameraRequest::default();
+        let candidates = [
+            candidate(640, 360, 30, PixelFormat::Bgr8),
+            candidate(640, 360, 30, PixelFormat::Rgb8),
+        ];
+        let format = select_format(&request, &candidates).unwrap();
+        assert_eq!(format.format, PixelFormat::Rgb8);
+    }
+
+    #[test]
+    fn explicit_format_is_not_silently_replaced() {
+        let request = CameraRequest {
+            format: RequestedFormat::Mjpeg,
+            ..CameraRequest::default()
+        };
+        let candidates = [candidate(640, 360, 30, PixelFormat::Bgr8)];
+        let error = select_format(&request, &candidates).unwrap_err();
+        assert!(matches!(error, CameraError::NoSuitableFormat));
     }
 
     #[test]
     fn empty_candidates_fails() {
-        let request = CameraRequest::default();
-        let err = select_format(&request, &[]).unwrap_err();
-        assert!(matches!(err, CameraError::NoSuitableFormat));
+        let error = select_format(&CameraRequest::default(), &[]).unwrap_err();
+        assert!(matches!(error, CameraError::NoSuitableFormat));
     }
 }
