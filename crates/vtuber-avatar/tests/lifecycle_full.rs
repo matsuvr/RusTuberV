@@ -357,7 +357,8 @@ fn full_lifecycle_failure_then_recovery() {
     // --- Avatar A: missing head → binding fails ---
     // load_and_bind inserts ActiveAvatar (via load_root), then BindTriggered and
     // Initialized (via simulate_initialized_and_bind). The bind system detects
-    // the missing head in the same frame and transitions to Failed.
+    // the missing head in the same frame, despawns the half-loaded root so its
+    // subtree is released, and transitions to Failed.
     let root_a = app
         .world_mut()
         .spawn((
@@ -374,7 +375,7 @@ fn full_lifecycle_failure_then_recovery() {
     let lifecycle = app.world().resource::<AvatarLifecycle>();
     assert_eq!(lifecycle.state(), AvatarLifecycleState::Failed);
     assert!(lifecycle.active_root().is_none());
-    assert!(!app.world().entity(root_a).contains::<ActiveAvatar>());
+    assert!(app.world().get_entity(root_a).is_err());
 
     // --- Recovery: load avatar B successfully ---
     let head_b = spawn_bone(&mut app);
