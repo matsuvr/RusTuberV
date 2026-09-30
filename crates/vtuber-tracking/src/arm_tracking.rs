@@ -145,6 +145,24 @@ fn observed_finger_pose(arm: ArmLandmarks) -> Option<HandFingerPose> {
             .atan2(incoming.dot(&outgoing));
         angle.is_finite().then(|| angle.clamp(-limit, limit))
     };
+    // Thumb motion is strongly oblique to the palm. Projecting the cross
+    // product onto one guessed bend axis can therefore report almost zero for
+    // a visibly closed thumb. Keep the anatomical sign from that axis, but use
+    // the full 3D angle as the magnitude, as established MediaPipe hand solvers
+    // do for the CMC-MCP-IP and MCP-IP-tip triples. Wrist-CMC-MCP is already
+    // represented by `thumb_direction` and drives the VRM thumb metacarpal, so
+    // it must not be applied a second time to the proximal joint.
+    let thumb_bend = |incoming: Vector3<f32>, outgoing: Vector3<f32>, limit: f32| {
+        let incoming = finite_normalized(incoming)?;
+        let outgoing = finite_normalized(outgoing)?;
+        let cross = incoming.cross(&outgoing);
+        let magnitude = cross.norm().atan2(incoming.dot(&outgoing));
+        let axis = finite_normalized(incoming.cross(&normal))?;
+        let sign = if axis.dot(&cross) < 0.0 { -1.0 } else { 1.0 };
+        magnitude
+            .is_finite()
+            .then(|| (magnitude * sign).clamp(-limit, limit))
+    };
     let mut fingers = [[0.0; 3]; 4];
     let mut spread = [0.0; 4];
     for ((angles, opening), &[mcp, pip, dip, tip]) in
@@ -171,20 +189,17 @@ fn observed_finger_pose(arm: ArmLandmarks) -> Option<HandFingerPose> {
         ];
     }
     let [cmc, mcp, ip, tip] = THUMB_CHAIN;
-    let ray = finite_normalized(point(mcp)? - point(cmc)?)?;
-    let axis = finite_normalized(ray.cross(&normal))?;
+    let mcp_ray = point(mcp)? - point(cmc)?;
+    let ip_ray = point(ip)? - point(mcp)?;
+    let tip_ray = point(tip)? - point(ip)?;
+    let ray = finite_normalized(mcp_ray)?;
     let [mcp_limit, ip_limit] = THUMB_FLEXION_LIMIT_RAD;
     Some(HandFingerPose {
         fingers,
         spread,
         thumb: [
-            bend(ray, point(ip)? - point(mcp)?, axis, mcp_limit)?,
-            bend(
-                point(ip)? - point(mcp)?,
-                point(tip)? - point(ip)?,
-                axis,
-                ip_limit,
-            )?,
+            thumb_bend(mcp_ray, ip_ray, mcp_limit)?,
+            thumb_bend(ip_ray, tip_ray, ip_limit)?,
         ],
         thumb_direction: local(ray),
     })
@@ -2065,6 +2080,33 @@ mod tests {
         place(tip, ip_point + segment(tip_heading));
         hand_from(points)
     }
+
+    /// A thumb whose MCP bend is oblique to the palm-derived bend axis.
+    ///
+    /// The old scalar projection reads only a quarter of this turn even though
+    /// the full CMC-MCP-IP angle is `curl`, which is how a real opposed thumb
+    /// can remain visually extended in a fist.
+    fn oblique_thumb_mcp_hand(curl: f32) -> HandWorldLandmarks {
+        let mut hand = flat_hand([[0.0; 3]; 4], [0.0; 2]);
+        let incoming = finite_normalized(Vector3::new(0.5, 0.0, 0.8)).expect("thumb ray");
+        let normal = Vector3::y();
+        let bend_axis = finite_normalized(incoming.cross(&normal)).expect("thumb bend axis");
+        let rotation_axis = finite_normalized(bend_axis * 0.25 + normal * 0.968_245_8)
+            .expect("oblique thumb axis");
+        let outgoing = incoming * curl.cos()
+            + rotation_axis.cross(&incoming) * curl.sin()
+            + rotation_axis * rotation_axis.dot(&incoming) * (1.0 - curl.cos());
+        let cmc = incoming * 0.02;
+        let mcp = cmc + incoming * 0.02;
+        let ip = mcp + outgoing * 0.02;
+        let tip = ip + outgoing * 0.02;
+        hand.landmarks[1] = point(array(cmc));
+        hand.landmarks[2] = point(array(mcp));
+        hand.landmarks[3] = point(array(ip));
+        hand.landmarks[4] = point(array(tip));
+        hand
+    }
+
     /// A hand whose only readable landmarks are the two knuckles the palm plane
     /// is derived from, so the palm channel works and the fingers do not.
     fn palm_only_hand() -> HandWorldLandmarks {
@@ -2182,6 +2224,26 @@ mod tests {
         // and CMC-to-MCP are deliberately non-collinear.
         let expected = Vector3::new(0.013, 0.018, 0.0).normalize();
         assert!((vector(pose.thumb_direction) - expected).norm() < 1.0e-5);
+    }
+
+    #[test]
+    fn thumb_mcp_uses_the_full_3d_angle_for_oblique_closure() {
+        let curl = 0.7;
+        let pose = observed_finger_pose(ArmLandmarks {
+            hand: Some(oblique_thumb_mcp_hand(curl)),
+            ..arm()
+        })
+        .expect("the hand defines a thumb");
+        assert!(
+            (pose.thumb[0] - curl).abs() < 1.0e-4,
+            "the full oblique MCP angle must close the proximal thumb: {:?}",
+            pose.thumb
+        );
+        assert!(
+            pose.thumb[1].abs() < 1.0e-4,
+            "a straight IP joint must stay straight: {:?}",
+            pose.thumb
+        );
     }
 
     #[test]
