@@ -83,8 +83,13 @@ pub struct CameraRequest {
 impl Default for CameraRequest {
     fn default() -> Self {
         Self {
-            width: 1280,
-            height: 720,
+            // Webcam avatar trackers commonly keep inference input small and
+            // let the render loop interpolate the latest result. 640x360 at
+            // 30 fps is enough for the upper-body framing this app targets and
+            // avoids spending four times as many pixels on every face, pose,
+            // and hand inference as the previous 1280x720 request.
+            width: 640,
+            height: 360,
             fps_numerator: 30,
             fps_denominator: 1,
             format: RequestedFormat::Any,
