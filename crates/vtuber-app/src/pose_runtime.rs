@@ -439,7 +439,9 @@ pub fn read_pose_output_system(
     }
     tracked.generation = Some(lifecycle.current_generation());
     if let Some(control) = pose.read_latest() {
-        tracked.frame = Some(control);
+        tracked.frame = Some(
+            vtuber_tracking::gesture_safety::suppress_isolated_middle_extension(control),
+        );
     }
 }
 
