@@ -22,35 +22,35 @@ pub struct FormatCandidate {
 ///
 /// There are no hidden resolution tiers: an exact request wins with a zero
 /// distance, and an unavailable request chooses the nearest format the camera
-/// actually reports. An explicit MJPEG or YUYV request is respected rather than
-/// silently replaced. With [`RequestedFormat::Any`], MJPEG (`Rgb8`) wins only as
-/// the final tie-breaker because it carries less USB traffic than YUYV.
+/// actually reports. Pixel format remains a preference rather than a new
+/// compatibility gate. With [`RequestedFormat::Any`], MJPEG (`Rgb8`) wins only
+/// as the final tie-breaker because it carries less USB traffic than YUYV.
 pub fn select_format(
     request: &CameraRequest,
     candidates: &[FormatCandidate],
 ) -> Result<CameraFormat, CameraError> {
     let candidate = candidates
         .iter()
-        .filter(|candidate| format_matches_request(candidate.format, request.format))
-        .min_by_key(|candidate| (score(request, candidate), format_rank(candidate.format)))
+        .min_by_key(|candidate| {
+            (
+                score(request, candidate),
+                format_rank(candidate.format, request.format),
+            )
+        })
         .copied()
         .ok_or(CameraError::NoSuitableFormat)?;
     Ok(candidate_to_format(candidate))
 }
 
-fn format_matches_request(candidate: PixelFormat, request: RequestedFormat) -> bool {
+fn format_rank(candidate: PixelFormat, request: RequestedFormat) -> u8 {
     match request {
-        RequestedFormat::Any => true,
-        RequestedFormat::Mjpeg => candidate == PixelFormat::Rgb8,
-        RequestedFormat::Yuyv => candidate == PixelFormat::Bgr8,
-    }
-}
-
-fn format_rank(candidate: PixelFormat) -> u8 {
-    match candidate {
-        PixelFormat::Rgb8 => 0,
-        PixelFormat::Bgr8 => 1,
-        _ => 2,
+        RequestedFormat::Any => match candidate {
+            PixelFormat::Rgb8 => 0,
+            PixelFormat::Bgr8 => 1,
+            _ => 2,
+        },
+        RequestedFormat::Mjpeg => u8::from(candidate != PixelFormat::Rgb8),
+        RequestedFormat::Yuyv => u8::from(candidate != PixelFormat::Bgr8),
     }
 }
 
@@ -137,14 +137,28 @@ mod tests {
     }
 
     #[test]
-    fn explicit_format_is_not_silently_replaced() {
+    fn explicit_format_wins_an_exact_tie() {
+        let request = CameraRequest {
+            format: RequestedFormat::Yuyv,
+            ..CameraRequest::default()
+        };
+        let candidates = [
+            candidate(640, 360, 30, PixelFormat::Rgb8),
+            candidate(640, 360, 30, PixelFormat::Bgr8),
+        ];
+        let format = select_format(&request, &candidates).unwrap();
+        assert_eq!(format.format, PixelFormat::Bgr8);
+    }
+
+    #[test]
+    fn unavailable_explicit_format_keeps_the_nearest_camera_format() {
         let request = CameraRequest {
             format: RequestedFormat::Mjpeg,
             ..CameraRequest::default()
         };
         let candidates = [candidate(640, 360, 30, PixelFormat::Bgr8)];
-        let error = select_format(&request, &candidates).unwrap_err();
-        assert!(matches!(error, CameraError::NoSuitableFormat));
+        let format = select_format(&request, &candidates).unwrap();
+        assert_eq!(format.format, PixelFormat::Bgr8);
     }
 
     #[test]
