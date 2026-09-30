@@ -28,9 +28,7 @@ pub fn suppress_isolated_middle_extension(mut frame: ArmControlFrame) -> ArmCont
 }
 
 fn sanitize_target(mut target: ArmTrackingTarget) -> ArmTrackingTarget {
-    target.fingers = target
-        .fingers
-        .map(suppress_isolated_middle_extension_pose);
+    target.fingers = target.fingers.map(suppress_isolated_middle_extension_pose);
     target
 }
 
@@ -83,9 +81,7 @@ mod tests {
     )] // tests may panic (AGENTS.md)
 
     use super::*;
-    use vtuber_core::arm_tracking::{
-        ArmBlendWeight, ArmBlendWeights, ArmTrackingTargets,
-    };
+    use vtuber_core::arm_tracking::{ArmBlendWeight, ArmBlendWeights, ArmTrackingTargets};
     use vtuber_core::{FrameSeq, MonoTimeNs};
 
     fn pose(fingers: [[f32; 3]; 4]) -> HandFingerPose {
