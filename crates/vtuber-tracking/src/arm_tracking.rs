@@ -2091,8 +2091,8 @@ mod tests {
         let incoming = finite_normalized(Vector3::new(0.5, 0.0, 0.8)).expect("thumb ray");
         let normal = Vector3::y();
         let bend_axis = finite_normalized(incoming.cross(&normal)).expect("thumb bend axis");
-        let rotation_axis = finite_normalized(bend_axis * 0.25 + normal * 0.968_245_8)
-            .expect("oblique thumb axis");
+        let rotation_axis =
+            finite_normalized(bend_axis * 0.25 + normal * 0.968_245_8).expect("oblique thumb axis");
         let outgoing = incoming * curl.cos()
             + rotation_axis.cross(&incoming) * curl.sin()
             + rotation_axis * rotation_axis.dot(&incoming) * (1.0 - curl.cos());

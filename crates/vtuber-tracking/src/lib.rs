@@ -24,10 +24,10 @@ pub mod expressions;
 pub mod eye_closure;
 /// Fixed MediaPipe lid geometry features (Issue #65).
 pub mod eye_geometry;
-/// Pure hand-pose policy for isolated gestures that must not be emitted.
-pub mod gesture_safety;
 /// Tracking filters: rotation smoothing and expression filtering.
 pub mod filter;
+/// Pure hand-pose policy for isolated gestures that must not be emitted.
+pub mod gesture_safety;
 /// Unified tracking-loss hold / return / reacquire ramp.
 pub mod loss_blend;
 /// Loss hold, neutral decay, and recovery blend.

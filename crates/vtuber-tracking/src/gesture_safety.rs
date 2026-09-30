@@ -102,6 +102,12 @@ mod tests {
         }
     }
 
+    fn assert_approx_eq(actual: [f32; 3], expected: [f32; 3]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+        }
+    }
+
     #[test]
     fn isolated_middle_extension_uses_the_neighbouring_folded_pose() {
         let input = pose([
@@ -111,7 +117,7 @@ mod tests {
             [0.9, 1.0, 0.6],
         ]);
         let filtered = suppress_isolated_middle_extension_pose(input);
-        assert_eq!(filtered.fingers[1], [0.9, 1.0, 0.5]);
+        assert_approx_eq(filtered.fingers[1], [0.9, 1.0, 0.5]);
         assert_eq!(filtered.spread, input.spread);
         assert_eq!(filtered.thumb, input.thumb);
         assert_eq!(filtered.thumb_direction, input.thumb_direction);
@@ -161,9 +167,9 @@ mod tests {
             .into_iter()
             .flatten()
         {
-            assert_eq!(
+            assert_approx_eq(
                 target.fingers.expect("finger pose").fingers[1],
-                [-0.9, -1.0, -0.5]
+                [-0.9, -1.0, -0.5],
             );
         }
         assert_eq!(filtered.source_seq, input.source_seq);

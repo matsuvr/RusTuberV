@@ -832,12 +832,15 @@ mod tests {
         chain.finger_rest.ring = row([0.02, 0.042, 0.057, 0.067], -0.002);
         chain.finger_rest.little = row([0.02, 0.036, 0.048, 0.056], -0.005);
         // The thumb rests half way out from the fingers, in the +Z half plane,
-        // so the model's own rest spread is not the same as a flat hand's.
+        // so the model's own rest spread is not the same as a flat hand's. Its
+        // three segments are collinear, because this rig's thumb lies in the
+        // palm plane: an observation of it must read as straight, and an
+        // in-plane bend has no anatomical axis to take a sign from.
         chain.finger_rest.thumb = crate::arm::FingerJointRestReferences {
             metacarpal: Some(finger_binding(wrist + Vec3::new(0.012, 0.0, 0.022))),
             proximal: Some(finger_binding(wrist + Vec3::new(0.03, 0.0, 0.035))),
             intermediate: None,
-            distal: Some(finger_binding(wrist + Vec3::new(0.045, 0.0, 0.045))),
+            distal: Some(finger_binding(wrist + Vec3::new(0.048, 0.0, 0.048))),
         };
         chain
     }
