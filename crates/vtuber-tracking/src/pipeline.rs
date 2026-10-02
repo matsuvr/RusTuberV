@@ -620,12 +620,8 @@ impl TrackingPipeline {
         let calibration = expression_calibration_from_profile(&profile)
             .map_err(|_| PipelineConfigError::ExpressionCalibration)?;
         self.expression_filter = ExpressionFilter::new(calibration, self.config.expression_filter);
-        self.detailed_expression_filter.reset();
-        self.head_filter.reset();
-        self.translation_filter.reset();
-        self.gaze_filter.reset();
-        self.reset_eye_closure_state();
-        self.mediapipe_cache = None;
+        // Calibration edits preserve acquisition and loss-recovery state.
+        self.reset_temporal_filters();
         self.profile = Some(profile);
         Ok(())
     }
@@ -633,16 +629,12 @@ impl TrackingPipeline {
     /// Clears calibration and resets all smoothing state.
     pub fn reset_calibration(&mut self) {
         self.profile = None;
-        self.head_filter.reset();
-        self.translation_filter.reset();
-        self.gaze_filter.reset();
         self.expression_filter = ExpressionFilter::new(
             default_expression_calibration(),
             self.config.expression_filter,
         );
-        self.detailed_expression_filter.reset();
-        self.reset_eye_closure_state();
-        self.mediapipe_cache = None;
+        // Removing calibration preserves acquisition and loss-recovery state.
+        self.reset_temporal_filters();
     }
 
     /// Resets filters and tracking state without changing calibration.
@@ -651,6 +643,16 @@ impl TrackingPipeline {
         reason = "`self.config` was validated in `TrackingPipeline::new`, so re-deriving the sub-components cannot fail"
     )]
     pub fn reset(&mut self) {
+        self.reset_temporal_filters();
+        // A new session also drops confidence, availability and held output.
+        self.confidence_gate.reset();
+        self.state_machine = TrackingStateMachine::new(self.config.state_machine)
+            .expect("config was validated in constructor");
+        self.loss_recovery = LossRecovery::new(self.config.loss_recovery)
+            .expect("config was validated in constructor");
+    }
+
+    fn reset_temporal_filters(&mut self) {
         self.head_filter.reset();
         self.translation_filter.reset();
         self.gaze_filter.reset();
@@ -658,11 +660,6 @@ impl TrackingPipeline {
         self.detailed_expression_filter.reset();
         self.reset_eye_closure_state();
         self.mediapipe_cache = None;
-        self.confidence_gate.reset();
-        self.state_machine = TrackingStateMachine::new(self.config.state_machine)
-            .expect("config was validated in constructor");
-        self.loss_recovery = LossRecovery::new(self.config.loss_recovery)
-            .expect("config was validated in constructor");
     }
 
     /// Resets only eye-gaze smoothing after a neutral gaze baseline change.
@@ -854,12 +851,7 @@ impl TrackingPipeline {
         for action in &transition.actions {
             match action {
                 crate::state_machine::TrackingAction::ResetFilters => {
-                    self.head_filter.reset();
-                    self.translation_filter.reset();
-                    self.expression_filter.reset();
-                    self.detailed_expression_filter.reset();
-                    self.gaze_filter.reset();
-                    self.reset_eye_closure_state();
+                    self.reset_temporal_filters();
                 }
                 crate::state_machine::TrackingAction::StartHold
                 | crate::state_machine::TrackingAction::StartReturnToNeutral => {}
@@ -1847,7 +1839,9 @@ mod assembly {
         );
 
         // Re-apply the same calibration: filter state must reset.
+        let state_before = pipeline.state_machine.state();
         pipeline.apply_calibration(neutral_profile()).unwrap();
+        assert_eq!(pipeline.state_machine.state(), state_before);
         let obs2 = observation(2, neutral_profile().landmarks.clone(), relaxed_expression());
         let update = pipeline.update(
             Some(&obs2),
@@ -1856,6 +1850,18 @@ mod assembly {
         );
         let frame = update.frame.expect("should emit frame");
         assert_relative_eq!(frame.head.yaw_rad, 0.0, epsilon = 1e-3);
+
+        let state_before = pipeline.state_machine.state();
+        pipeline.reset_calibration();
+        assert!(!pipeline.is_calibrated());
+        assert_eq!(pipeline.state_machine.state(), state_before);
+        pipeline.reset();
+        assert!(
+            pipeline
+                .update(None, MonoTimeNs(99_999_999), Duration::from_millis(33))
+                .frame
+                .is_none()
+        );
     }
 
     #[test]

@@ -139,9 +139,15 @@ impl TrackingRuntime {
     /// Invalidates observations, pending output and time state together.
     /// Camera calibration is retained unless the caller explicitly clears it.
     fn invalidate_session(&mut self, now: MonoTimeNs) {
-        self.pipeline.reset();
+        self.reset_control_state();
         self.observation_gate.reset(now);
         self.held_sample = None;
+    }
+
+    // A changed neutral keeps the newly accepted observation, but old controls
+    // and filter time must not outlive the reference that produced them.
+    fn reset_control_state(&mut self) {
+        self.pipeline.reset();
         self.latest_control = None;
         self.control_active = false;
         self.last_update = None;
@@ -305,7 +311,7 @@ pub fn tracking_bridge_system(
         match neutral_update {
             Ok(update) => {
                 if update.pose_reference_changed {
-                    tracking.pipeline.reset();
+                    tracking.reset_control_state();
                 } else if update.gaze_baseline_changed {
                     tracking.pipeline.reset_gaze_filter();
                 }
