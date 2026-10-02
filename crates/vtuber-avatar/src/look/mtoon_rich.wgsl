@@ -14,6 +14,8 @@
 // Rich material keeps the upstream bind group layout unchanged. The app-side
 // outline connection selects Rich meshes explicitly.
 
+#import rustuberv::mtoon_uv::animate_uv
+
 #import bevy_pbr::{
     forward_io::{
         VertexOutput,
@@ -96,7 +98,8 @@ fn fragment(
 #endif
 
     var vertex_input = in;
-    vertex_input.uv = calc_animated_uv((material.uv_transform * vec3(in.uv, 1.0)).xy);
+    let uv = (material.uv_transform * vec3(in.uv, 1.0)).xy;
+    vertex_input.uv = animate_uv(uv, calc_uv_time(uv), vec2(material.uv_animation_scroll_speed_x, material.uv_animation_rotation_speed_y), material.uv_animation_rotation_speed);
 
     var out: FragmentOutput;
     var pbr_input = make_pbr_input(vertex_input, is_front);
@@ -166,16 +169,6 @@ fn make_mtoon_input(in: VertexOutput, pbr_input: PbrInput) -> MToonInput{
         pbr_input.N,
         pbr_input.material.base_color,
     );
-}
-
-fn calc_animated_uv(uv: vec2<f32>) -> vec2<f32>{
-    let time = calc_uv_time(uv);
-    let translate = time * vec2(material.uv_animation_scroll_speed_x, material.uv_animation_rotation_speed_y);
-    let rotate_rad = fract(time * material.uv_animation_rotation_speed);
-    let cos_rotate = cos(rotate_rad);
-    let sin_rotate = sin(rotate_rad);
-    let pivot = vec2<f32>(0.5, 0.5);
-    return mat2x2(cos_rotate, -sin_rotate, sin_rotate, cos_rotate) * (uv - pivot) + pivot + translate;
 }
 
 fn calc_uv_time(uv: vec2<f32>) -> f32{

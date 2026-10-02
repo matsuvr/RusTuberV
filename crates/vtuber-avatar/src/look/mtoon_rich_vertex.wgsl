@@ -5,7 +5,9 @@
 // bf0ec103970fdf9091134fe0f208cf3590031c80, MIT OR Apache-2.0). The Rich
 // material uses this same vertex path for both the main pass and the app-side
 // outline pass, so the base result stays identical to the upstream MToon
-// material. No app-side change is made here.
+// material. UV arithmetic is shared with the Rich fragment stage (#215).
+
+#import rustuberv::mtoon_uv::animate_uv
 
 #import bevy_pbr::{
     mesh_bindings::mesh,
@@ -66,7 +68,8 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
 #ifdef VERTEX_POSITIONS
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
 #ifdef OUTLINE_PASS
-    let animated_uv = calc_animated_uv((material.uv_transform * vec3(vertex.uv, 1.0)).xy);
+    let uv = (material.uv_transform * vec3(vertex.uv, 1.0)).xy;
+    let animated_uv = animate_uv(uv, calc_uv_time(uv), vec2(material.uv_animation_scroll_speed_x, material.uv_animation_rotation_speed_y), material.uv_animation_rotation_speed);
     let outline_width = outline_width(animated_uv);
     let outline_normal = normalize(out.world_normal.xyz);
     out.world_position = vec4(out.world_position.xyz + outline_normal * outline_width, 1.0);
@@ -113,16 +116,6 @@ fn outline_width(uv: vec2<f32>) -> f32{
     } else {
         return w;
     }
-}
-
-fn calc_animated_uv(uv: vec2<f32>) -> vec2<f32>{
-    let time = calc_uv_time(uv);
-    let translate = time * vec2(material.uv_animation_scroll_speed_x, material.uv_animation_rotation_speed_y);
-    let rotate_rad = fract(time * material.uv_animation_rotation_speed);
-    let cos_rotate = cos(rotate_rad);
-    let sin_rotate = sin(rotate_rad);
-    let pivot = vec2<f32>(0.5, 0.5);
-    return mat2x2(cos_rotate, -sin_rotate, sin_rotate, cos_rotate) * (uv - pivot) + pivot + translate;
 }
 
 fn calc_uv_time(uv: vec2<f32>) -> f32{
