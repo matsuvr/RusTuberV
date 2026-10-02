@@ -141,7 +141,7 @@ pub fn decode_detections(
         return Ok(DetectorDecodeOutcome::NoFace);
     }
 
-    candidates.sort_unstable_by(detection_order);
+    candidates.sort_unstable_by(FaceDetection::compare_rank);
     let detections = hard_nms(
         &candidates,
         config.nms_iou,
@@ -376,20 +376,13 @@ fn insert_top_candidate(
     let worst_index = candidates
         .iter()
         .enumerate()
-        .max_by(|(_, left), (_, right)| detection_order(left, right))
+        .max_by(|(_, left), (_, right)| FaceDetection::compare_rank(left, right))
         .map(|(index, _)| index);
     if let Some(worst_index) = worst_index
-        && detection_order(&candidate, &candidates[worst_index]) == Ordering::Less
+        && FaceDetection::compare_rank(&candidate, &candidates[worst_index]) == Ordering::Less
     {
         candidates[worst_index] = candidate;
     }
-}
-
-fn detection_order(left: &FaceDetection, right: &FaceDetection) -> Ordering {
-    right
-        .confidence
-        .total_cmp(&left.confidence)
-        .then_with(|| left.anchor_index.cmp(&right.anchor_index))
 }
 
 fn area(rect: &NormalizedRect) -> f32 {
