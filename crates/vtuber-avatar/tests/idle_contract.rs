@@ -41,7 +41,7 @@ struct IdleRig {
 
 /// Builds a minimal headless rig whose hips translation simulates an
 /// animation-authored base value that no runtime system may change.
-fn build_app(generation: AvatarGeneration) -> (App, IdleRig) {
+fn build_app() -> (App, IdleRig, AvatarGeneration) {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .insert_resource(TimeUpdateStrategy::ManualInstant(instant_at(0)))
@@ -91,6 +91,12 @@ fn build_app(generation: AvatarGeneration) -> (App, IdleRig) {
         ))
         .id();
 
+    let mut lifecycle = AvatarLifecycle::default();
+    lifecycle.request_load(root).expect("load request");
+    lifecycle.start_binding(root);
+    lifecycle.finish_ready();
+    let generation = lifecycle.current_generation();
+    app.insert_resource(lifecycle);
     let binding = AvatarBinding {
         root,
         head,
@@ -128,13 +134,7 @@ fn build_app(generation: AvatarGeneration) -> (App, IdleRig) {
         GlobalTransform::IDENTITY,
     ));
 
-    let mut lifecycle = AvatarLifecycle::default();
-    lifecycle.request_load(root).expect("load request");
-    lifecycle.start_binding(root);
-    lifecycle.finish_ready();
-    app.insert_resource(lifecycle);
-
-    (app, IdleRig { root, hips })
+    (app, IdleRig { root, hips }, generation)
 }
 
 fn tracked_frame(seq: u64, translation: Vec3) -> AvatarControlFrame {
@@ -187,8 +187,7 @@ fn idle_contract_uses_zero_procedural_amplitude() {
 fn hips_translation_stays_at_the_animation_base_across_fps_equivalents() {
     let base = Vec3::new(0.01, 0.55, -0.02);
     for frame_millis in [33_u64, 16, 8] {
-        let generation = AvatarGeneration(7);
-        let (mut app, rig) = build_app(generation);
+        let (mut app, rig, generation) = build_app();
 
         // The idle profile must be present and valid on a Ready avatar.
         let profile = app
@@ -212,8 +211,7 @@ fn hips_translation_stays_at_the_animation_base_across_fps_equivalents() {
 
 #[test]
 fn tracking_loss_micro_motion_keeps_hips_translation_untouched() {
-    let generation = AvatarGeneration(9);
-    let (mut app, rig) = build_app(generation);
+    let (mut app, rig, generation) = build_app();
     let mut tick_clock = 0_u64;
     let base = hips_translation(&app, &rig);
 
@@ -255,8 +253,7 @@ fn camera_silence_ramps_the_idle_episode_and_keeps_breathing_alive() {
     // stopped), the loss-idle episode must ramp in so the avatar keeps
     // breathing and swaying in its default pose instead of freezing, while
     // the hips translation stays at its authored base.
-    let generation = AvatarGeneration(13);
-    let (mut app, rig) = build_app(generation);
+    let (mut app, rig, _) = build_app();
     let mut tick_clock = 0_u64;
     let base = hips_translation(&app, &rig);
 
@@ -301,9 +298,8 @@ fn camera_silence_ramps_the_idle_episode_and_keeps_breathing_alive() {
 }
 
 #[test]
-fn replacement_starts_with_a_fresh_zero_amplitude_profile() {
-    let first = AvatarGeneration(11);
-    let (mut app, rig) = build_app(first);
+fn replacement_request_preserves_the_zero_amplitude_policy() {
+    let (mut app, rig, first) = build_app();
 
     push_frame(&mut app, first, 1, Vec3::new(0.03, 0.0, 0.0));
     let mut tick_clock = 0_u64;
@@ -316,28 +312,29 @@ fn replacement_starts_with_a_fresh_zero_amplitude_profile() {
         IDLE_PROCEDURAL_AMPLITUDE_METERS
     );
 
-    // A replacement generation re-binds to a fresh, validated profile; there
-    // is no carried-over idle state.
-    let second = AvatarGeneration(12);
+    // The replacement request preserves the existing zero-amplitude policy.
+    // This fixture does not run a new binding or claim to test its state.
     let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
     lifecycle
         .request_replace(rig.root)
         .expect("replace request");
     let _ = lifecycle;
-    let _ = second;
     app.update();
     let profile = app
         .world()
         .get::<IdleMotionProfile>(rig.root)
         .copied()
-        .expect("fresh profile after replacement request");
+        .expect("profile after replacement request");
     assert_eq!(profile.validate(), Ok(()));
+    assert_eq!(
+        profile.procedural_amplitude_meters,
+        IDLE_PROCEDURAL_AMPLITUDE_METERS
+    );
 }
 
 #[test]
 fn retired_breathing_writer_is_absent_from_the_post_update_schedule() {
-    let generation = AvatarGeneration(21);
-    let (mut app, _rig) = build_app(generation);
+    let (mut app, _rig, _) = build_app();
     app.world_mut()
         .schedule_scope(bevy::app::PostUpdate, |world, schedule| {
             schedule.initialize(world).expect("PostUpdate initializes");

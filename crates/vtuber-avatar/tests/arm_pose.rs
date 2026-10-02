@@ -137,7 +137,6 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
             mode: ArmPoseSourceKind::TrackedPose,
             ..Default::default()
         });
-        let generation = AvatarGeneration(51);
         let bone = |position, rotation| RestSpaceBonePose {
             position,
             global_rotation: rotation,
@@ -272,6 +271,12 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
         } else {
             (None, Some(chain))
         };
+        let mut lifecycle = AvatarLifecycle::default();
+        lifecycle.request_load(root).unwrap();
+        lifecycle.start_binding(root);
+        lifecycle.finish_ready();
+        let generation = lifecycle.current_generation();
+        app.insert_resource(lifecycle);
         let mut binding = AvatarBinding::head_only(root, chest, generation);
         binding.chest = Some(chest);
         binding.left_arm = left;
@@ -298,11 +303,6 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
             },
             DynamicArmTargets::default(),
         ));
-        let mut lifecycle = AvatarLifecycle::default();
-        lifecycle.request_load(root).unwrap();
-        lifecycle.start_binding(root);
-        lifecycle.finish_ready();
-        app.insert_resource(lifecycle);
         let publish = |app: &mut App, target, weight| {
             let weights = ArmBlendWeight {
                 wrist: weight,

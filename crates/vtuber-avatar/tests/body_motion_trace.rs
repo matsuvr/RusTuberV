@@ -121,8 +121,8 @@ fn build_app() -> (App, TraceRig) {
             (
                 update_body_tracking_position_input,
                 update_body_tracking_pose_input,
-                update_dynamic_arm_targets,
                 apply_direct_body_tracking,
+                update_dynamic_arm_targets,
                 apply_default_arm_pose,
             )
                 .chain(),
@@ -330,6 +330,86 @@ fn assert_all_finite(app: &App, rig: &TraceRig) {
     }
     let root_transform = app.world().get::<Transform>(rig.root).unwrap();
     assert!(root_transform.translation.is_finite());
+}
+
+#[test]
+fn virtual_hand_compensation_reads_tracked_targets_and_keeps_body_follow_separate() {
+    use bevy::ecs::system::RunSystemOnce;
+    let (mut app, rig) = build_app();
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
+    push_frame(&mut app, generation, 1, Vec3::ZERO);
+    app.update();
+    push_frame(&mut app, generation, 2, Vec3::new(0.08, 0.0, 0.03));
+    app.insert_resource(TimeUpdateStrategy::ManualInstant(instant_at(16)));
+    app.update();
+    let input = *app
+        .world()
+        .get::<BodyTrackingPositionInput>(rig.root)
+        .unwrap();
+    assert!(
+        input.tracked_head_target.distance(input.head_offset) > 0.01,
+        "tracked target must lead the existing body-follow output"
+    );
+    let before = app
+        .world()
+        .get::<DynamicArmTargets>(rig.root)
+        .unwrap()
+        .left
+        .unwrap();
+    {
+        let mut input = app
+            .world_mut()
+            .get_mut::<BodyTrackingPositionInput>(rig.root)
+            .unwrap();
+        input.head_offset = Vec3::splat(0.2);
+        input.body_offset = Vec3::splat(0.2);
+        input.weight = 0.25;
+    }
+    app.world_mut()
+        .run_system_once(update_dynamic_arm_targets)
+        .unwrap();
+    let after_display = app
+        .world()
+        .get::<DynamicArmTargets>(rig.root)
+        .unwrap()
+        .left
+        .unwrap();
+    assert!(
+        before
+            .upper_arm_delta
+            .angle_between(after_display.upper_arm_delta)
+            < EPSILON
+    );
+    assert!(
+        before
+            .lower_arm_delta
+            .angle_between(after_display.lower_arm_delta)
+            < EPSILON
+    );
+    app.world_mut()
+        .get_mut::<BodyTrackingPositionInput>(rig.root)
+        .unwrap()
+        .tracked_head_target
+        .z += 0.08;
+    app.world_mut()
+        .run_system_once(update_dynamic_arm_targets)
+        .unwrap();
+    let after_target = app
+        .world()
+        .get::<DynamicArmTargets>(rig.root)
+        .unwrap()
+        .left
+        .unwrap();
+    assert!(
+        before
+            .upper_arm_delta
+            .angle_between(after_target.upper_arm_delta)
+            > EPSILON,
+        "virtual arm must consume the published tracked target instead of recomputing the frame"
+    );
 }
 
 #[test]
@@ -562,10 +642,10 @@ fn idle_amplitude_in_the_trace_is_zero_by_policy() {
 }
 
 #[test]
-fn camera_silence_keeps_idle_rotation_and_breathing_alive_in_the_default_pose() {
+fn camera_silence_publishes_idle_inputs_and_clears_tracked_position_targets() {
     // ADR-021: when the control frame disappears entirely (camera signal
-    // gone), the avatar must relax to its default pose while the loss-idle
-    // sway (rotation) and breathing (vertical offset) keep flowing.
+    // gone), the bridge publishes idle sway and breathing inputs while
+    // clearing tracked position targets. This checks input publication.
     let (mut app, rig) = build_app();
     let generation = app
         .world()
@@ -608,6 +688,8 @@ fn camera_silence_keeps_idle_rotation_and_breathing_alive_in_the_default_pose() 
             .get::<BodyTrackingPositionInput>(rig.root)
             .copied()
             .expect("position input on the active root");
+        assert_eq!(position_input.tracked_head_target, Vec3::ZERO);
+        assert_eq!(position_input.tracked_body_target, Vec3::ZERO);
         if position_input.active && position_input.head_offset.y.abs() > 1.0e-4 {
             saw_breathing_offset = true;
         }

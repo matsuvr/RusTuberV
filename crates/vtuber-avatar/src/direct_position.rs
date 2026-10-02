@@ -56,9 +56,14 @@ const MIN_MEASURED_LEVER_METERS: f32 = 0.01;
 )]
 #[reflect(Component)]
 pub struct BodyTrackingPositionInput {
-    /// Residual translation kept at the head/neck chain, in meters.
+    /// Shaped tracked head target before idle, confidence and body-follow smoothing.
+    /// Virtual hand compensation uses this stage; it is not a displayed bone position.
+    pub tracked_head_target: Vec3,
+    /// Shaped tracked body target at the same pre-body-follow stage.
+    pub tracked_body_target: Vec3,
+    /// Body-follow head/lean offset after idle mixing, before `weight`, in meters.
     pub head_offset: Vec3,
-    /// Root/body translation compensation, in meters.
+    /// Body-follow root offset after idle mixing, before `weight`, in meters.
     pub body_offset: Vec3,
     /// Confidence multiplier in the inclusive range `0.0..=1.0`.
     pub weight: f32,
