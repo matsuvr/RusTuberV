@@ -14,9 +14,7 @@ use vtuber_core::control::CalibrationSettings;
 use vtuber_core::types::{FrameSeq, HeadPose, Landmark3, LandmarkSchemaId, MonoTimeNs};
 
 use crate::calibration::CalibrationInput;
-use crate::pose::planar::{
-    CANONICAL_FACE_TEMPLATE, PlanarCorrespondence, PlanarLandmark, solve_planar_pose,
-};
+use crate::pose::planar::{canonical_face_correspondences, solve_planar_pose};
 use crate::pose::{LandmarkSet, PoseError, solve_relative_pose};
 
 /// Why a single frame was rejected by the collector.
@@ -347,9 +345,13 @@ fn relative_head_pose(
     current: &CalibrationInput,
 ) -> Result<HeadPose, PoseError> {
     if previous.schema.0 == "peppapig-98" && current.schema == previous.schema {
-        let previous_pose = planar_absolute_pose(&previous.landmarks)
+        let previous_pose = canonical_face_correspondences(&previous.landmarks)
+            .and_then(|points| solve_planar_pose(&points))
+            .map(|alignment| alignment.pose)
             .map_err(|_| PoseError::DegeneratePointCloud)?;
-        let current_pose = planar_absolute_pose(&current.landmarks)
+        let current_pose = canonical_face_correspondences(&current.landmarks)
+            .and_then(|points| solve_planar_pose(&points))
+            .map(|alignment| alignment.pose)
             .map_err(|_| PoseError::DegeneratePointCloud)?;
         return Ok(HeadPose {
             yaw_rad: current_pose.yaw_rad - previous_pose.yaw_rad,
@@ -357,41 +359,10 @@ fn relative_head_pose(
             roll_rad: current_pose.roll_rad - previous_pose.roll_rad,
         });
     }
-    let neutral = landmarks_to_set(&previous.landmarks);
-    let current = landmarks_to_set(&current.landmarks);
+    let neutral = LandmarkSet::from_landmarks(&previous.landmarks);
+    let current = LandmarkSet::from_landmarks(&current.landmarks);
     let alignment = solve_relative_pose(&neutral, &current)?;
     Ok(alignment.pose)
-}
-
-fn planar_absolute_pose(landmarks: &[Landmark3]) -> Result<HeadPose, ()> {
-    let points = CANONICAL_FACE_TEMPLATE
-        .iter()
-        .map(|canonical| {
-            let landmark = landmarks.get(canonical.index).ok_or(())?;
-            Ok(PlanarCorrespondence {
-                canonical: *canonical,
-                reference: PlanarLandmark {
-                    x: landmark.x,
-                    y: landmark.y,
-                    confidence: landmark.visibility,
-                },
-                current: PlanarLandmark {
-                    x: landmark.x,
-                    y: landmark.y,
-                    confidence: landmark.visibility,
-                },
-            })
-        })
-        .collect::<Result<Vec<_>, ()>>()?;
-    Ok(solve_planar_pose(&points).map_err(|_| ())?.pose)
-}
-
-fn landmarks_to_set(landmarks: &[Landmark3]) -> LandmarkSet {
-    let mut set = LandmarkSet::new();
-    for lm in landmarks {
-        set.push([lm.x, lm.y, lm.z], lm.visibility);
-    }
-    set
 }
 
 fn max_euler_component(pose: HeadPose) -> f32 {
