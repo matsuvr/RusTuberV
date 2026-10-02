@@ -589,7 +589,6 @@ struct SettingsDocument {
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedDynamicArmProfile {
     schema_version: u32,
-    hand_anchor_ratio: [f32; 3],
     compensation_gains: [f32; 3],
     elbow_swivel_radians: f32,
     swivel_transition_width_ratio: f32,
@@ -600,7 +599,6 @@ impl From<DynamicArmProfileOverride> for PersistedDynamicArmProfile {
     fn from(profile: DynamicArmProfileOverride) -> Self {
         Self {
             schema_version: profile.schema_version,
-            hand_anchor_ratio: profile.hand_anchor_ratio,
             compensation_gains: profile.compensation_gains,
             elbow_swivel_radians: profile.elbow_swivel_radians,
             swivel_transition_width_ratio: profile.swivel_transition_width_ratio,
@@ -613,7 +611,6 @@ impl PersistedDynamicArmProfile {
     fn into_runtime(self) -> DynamicArmProfileOverride {
         DynamicArmProfileOverride {
             schema_version: self.schema_version,
-            hand_anchor_ratio: self.hand_anchor_ratio,
             compensation_gains: self.compensation_gains,
             elbow_swivel_radians: self.elbow_swivel_radians,
             swivel_transition_width_ratio: self.swivel_transition_width_ratio,
@@ -1250,10 +1247,10 @@ mod dynamic_profile_tests {
     }
 
     #[test]
-    fn invalid_dynamic_entry_is_ignored() {
+    fn old_hips_anchor_profile_is_ignored() {
         let directory = tempdir().expect("temporary settings directory");
         let path = directory.path().join(SETTINGS_FILE_NAME);
-        fs::write(&path, format!("schema_version = {SETTINGS_SCHEMA_VERSION}\n[dynamic_arm_profiles.\"sha256:bad\"]\nschema_version = 1\nhand_anchor_ratio = [0.0, 0.0, 0.0]\ncompensation_gains = [2.5, 0.0, 0.0]\nelbow_swivel_radians = 99.0\nswivel_transition_width_ratio = 0.15\npole_influence = 0.2\nshoulder_elevation_trim_radians = 9.9\n")).expect("write corrupt settings");
+        fs::write(&path, format!("schema_version = {SETTINGS_SCHEMA_VERSION}\n[dynamic_arm_profiles.\"sha256:bad\"]\nschema_version = 2\nhand_anchor_ratio = [0.3, -0.2, 0.0]\ncompensation_gains = [0.25, 0.0, 1.0]\nelbow_swivel_radians = 0.2\nswivel_transition_width_ratio = 0.15\npole_influence = 0.2\nshoulder_elevation_trim_radians = 0.0\n")).expect("write old settings");
         let store = load_arm_pose_overrides(&path).expect("settings reload");
         assert!(
             store

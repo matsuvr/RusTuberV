@@ -105,17 +105,13 @@ impl Default for ArmSourceSelection {
     }
 }
 
-/// Scale-aware virtual hand anchor and arm modifier parameters.
+/// Scale-aware virtual hand motion and arm modifier parameters.
 ///
 /// Values are semantic ratios of body scale meters rather than absolute
 /// model-specific lengths. Per-model tuning aggregates into this one typed
 /// profile instead of scattering constants through systems.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DynamicArmProfile {
-    /// Hips-relative hand anchor offset as fractions of body scale.
-    ///
-    /// The lateral component is mirrored per side from the magnitude.
-    pub hand_anchor_ratio: Vec3,
     /// How much of the combined head/body translation each axis of the hand
     /// target follows. Arms hang from the shoulders, so the lateral axis
     /// only gives a small natural give; established webcam trackers keep
@@ -136,13 +132,8 @@ pub struct DynamicArmProfile {
 impl Default for DynamicArmProfile {
     fn default() -> Self {
         Self {
-            hand_anchor_ratio: Vec3::new(
-                0.215 / crate::body_scale::DEFAULT_BODY_SCALE_METERS,
-                -0.150 / crate::body_scale::DEFAULT_BODY_SCALE_METERS,
-                0.0,
-            ),
             compensation_gains: Vec3::new(0.25, 0.0, 1.0),
-            elbow_swivel_radians: 15.0_f32.to_radians(),
+            elbow_swivel_radians: 0.0,
             swivel_transition_width_ratio: 0.15,
             pole_influence: 0.2,
             shoulder_elevation_trim_radians: 0.0,
@@ -154,11 +145,7 @@ impl DynamicArmProfile {
     /// Validates the bounded profile before any solve uses it.
     #[must_use]
     pub fn is_valid(self) -> bool {
-        self.hand_anchor_ratio.is_finite()
-            && self.hand_anchor_ratio.x.abs() <= 2.0
-            && self.hand_anchor_ratio.y.abs() <= 2.0
-            && self.hand_anchor_ratio.z.abs() <= 2.0
-            && self.compensation_gains.is_finite()
+        self.compensation_gains.is_finite()
             && self.compensation_gains.x >= 0.0
             && self.compensation_gains.x <= 1.0
             && self.compensation_gains.y >= 0.0
@@ -561,51 +548,17 @@ fn legacy_static_target(
     )
 }
 
-/// Stage 1 (dynamic): hips-relative virtual hand target (Issue #168).
-///
-/// The anchor base is a scale-aware ratio of body scale mirrored per side;
-/// the combined head/body translation follows each axis by the typed
-/// compensation gains. The elbow pole is subsequently refined by the dynamic
-/// swivel stage.
-/// Returns `None` when no hips-relative anchor was bound, leaving the
-/// documented fallback in charge.
-/// Canonicalizes a rest bend-plane normal into a stable rearward pole
-/// direction.
-///
-/// Cross-product normals are anti-mirrored between sides; flipping whichever
-/// hemisphere points forward makes both sides share the legacy rearward pole
-/// convention, so mirrored models get mirrored (not inverted) poles.
-fn canonical_pole_direction(normal: Vec3) -> Vec3 {
-    if normal.dot(Vec3::NEG_Z) < 0.0 {
-        -normal
-    } else {
-        normal
-    }
-}
-
 /// Stage 1b (Issue #169): dynamic elbow swivel / pole correction.
 ///
-/// The rest bend-plane normal from the binding-time elbow reference is the
-/// base bend direction. It is rotated around the shoulder -> hand axis by a
+/// The lowered arm's anatomical bend direction is the base pole. It is
+/// rotated around the shoulder -> hand axis by a
 /// side-signed swivel angle scaled by the pole influence, and continuously
 /// faded to zero as the hand target approaches the chest center over
-/// `width = ratio * body_scale`. Degenerate geometry degrades to the
-/// unmodified rest-plane pole instead of producing NaNs or flipping.
-fn swivel_adjusted_elbow_pole(
-    input: &ArmPipelineInput<'_>,
-    wrist_target: Vec3,
-    total_arm_length: f32,
-) -> Option<Vec3> {
+/// `width = ratio * body_scale`.
+fn swivel_adjusted_elbow_pole(input: &ArmPipelineInput<'_>, wrist_target: Vec3) -> Option<Vec3> {
     let profile = input.dynamic_profile;
-    let magnitude = total_arm_length * input.legacy_profile.elbow_pole_offset_ratio;
-    if !magnitude.is_finite() || magnitude < 0.0 {
-        return None;
-    }
-    let base_direction = match input.motion.elbow_reference.as_ref() {
-        Some(reference) => canonical_pole_direction(reference.normal),
-        // No usable reference plane: keep the legacy rearward pole policy.
-        None => Vec3::NEG_Z,
-    };
+    let shoulder = input.chain.rest.upper_arm.position;
+    let base_direction = crate::arm::neutral_elbow_pole(input.chain, wrist_target)? - shoulder;
     // Right-handed VRM/glTF basis: the model faces +Z and its left side is
     // +X, so mirrored swivel angles need opposite signs per side.
     let side_sign = match input.chain.side {
@@ -629,28 +582,19 @@ fn swivel_adjusted_elbow_pole(
     };
 
     let angle = side_sign * profile.elbow_swivel_radians * profile.pole_influence * fade;
-    let direction = if angle.abs() <= f32::EPSILON {
-        base_direction
-    } else {
-        let axis = (wrist_target - input.chain.rest.upper_arm.position)
-            .try_normalize()
-            .filter(|axis| axis.is_finite())?;
-        let rotated = Quat::from_axis_angle(axis, angle) * base_direction;
-        if rotated.is_finite() && rotated.length_squared() > f32::EPSILON {
-            rotated.normalize()
-        } else {
-            base_direction
-        }
-    };
-
-    let pole = input.chain.rest.elbow.position + direction * magnitude;
+    let axis = (wrist_target - shoulder).try_normalize()?;
+    let pole = shoulder + Quat::from_axis_angle(axis, angle) * base_direction;
     pole.is_finite().then_some(pole)
 }
 
 /// Version of the persisted dynamic arm profile format.
-pub const DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION: u32 = 2;
+pub const DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION: u32 = 3;
 
 /// Versioned, persisted per-model dynamic arm profile.
+///
+/// Version 3 removes the fixed hips-relative hand anchor. Neutral hand positions
+/// now come from each arm's A-pose geometry; older profiles are rejected by the
+/// existing settings policy rather than restoring their model-dependent posture.
 ///
 /// This schema replaces the legacy static-pose parameters as the center of
 /// per-model arm tuning. There is deliberately no field-level mapping from
@@ -661,8 +605,6 @@ pub const DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION: u32 = 2;
 pub struct DynamicArmProfileOverride {
     /// Persisted schema version (must be [`DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION`]).
     pub schema_version: u32,
-    /// Hips-relative hand anchor offsets as body-scale fractions.
-    pub hand_anchor_ratio: [f32; 3],
     /// Per-axis head/body follow gains for the hand target.
     pub compensation_gains: [f32; 3],
     /// Elbow swivel magnitude at the default anchor.
@@ -681,7 +623,6 @@ impl DynamicArmProfileOverride {
     pub fn from_profile(profile: DynamicArmProfile) -> Self {
         Self {
             schema_version: DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION,
-            hand_anchor_ratio: profile.hand_anchor_ratio.to_array(),
             compensation_gains: profile.compensation_gains.to_array(),
             elbow_swivel_radians: profile.elbow_swivel_radians,
             swivel_transition_width_ratio: profile.swivel_transition_width_ratio,
@@ -710,7 +651,6 @@ impl DynamicArmProfileOverride {
             });
         }
         let profile = DynamicArmProfile {
-            hand_anchor_ratio: Vec3::from_array(self.hand_anchor_ratio),
             compensation_gains: Vec3::from_array(self.compensation_gains),
             elbow_swivel_radians: self.elbow_swivel_radians,
             swivel_transition_width_ratio: self.swivel_transition_width_ratio,
@@ -769,38 +709,23 @@ fn virtual_hand_target(input: &ArmPipelineInput<'_>) -> Option<(ArmIkTarget, Arm
         return None;
     }
     let anchor = input.motion.hand_anchor.as_ref()?;
-    // Right-handed VRM/glTF basis: the model faces +Z and its left side is
-    // +X (glTF defines -X as right). Anchoring each hand with an inverted
-    // sign drives the arms across the body, so the left side must resolve to
-    // the +X lateral component.
-    let side_sign = match input.chain.side {
-        crate::arm::ArmSide::Left => 1.0,
-        crate::arm::ArmSide::Right => -1.0,
-    };
-    let scale = if input.body_scale_meters.is_finite() && input.body_scale_meters > 0.0 {
-        input.body_scale_meters
-    } else {
-        crate::body_scale::DEFAULT_BODY_SCALE_METERS
-    };
-    let base = Vec3::new(
-        side_sign * profile.hand_anchor_ratio.x.abs() * scale,
-        profile.hand_anchor_ratio.y * scale,
-        profile.hand_anchor_ratio.z * scale,
-    );
     let follow = (input.head_offset + input.body_offset) * profile.compensation_gains;
     // Recover the hips rest origin from the bound wrist/anchor pair so the
     // target stays hips-relative even though the solver works in rest space.
     let hips_rest = input.chain.rest.wrist.position - anchor.translation_from_hips;
+    // The neutral anchor is the same model-specific A-pose as the static
+    // initial pose. A fixed hips/body-scale ratio ignores shoulder width and
+    // arm lengths, forcing different models to fold their elbows or hang inward.
+    let base = crate::arm::default_arm_target(input.chain, ArmPoseProfile::default())
+        .ok()?
+        .wrist
+        - hips_rest;
     let lag = torso_lag_rotation(input.torso_delta);
     let wrist = hips_rest + lag * (base + follow);
     if !wrist.is_finite() {
         return None;
     }
-    let total = input.chain.rest.total_arm_length;
-    if !total.is_finite() || total <= 1.0e-4 {
-        return None;
-    }
-    let elbow_pole = swivel_adjusted_elbow_pole(input, wrist, total)?;
+    let elbow_pole = swivel_adjusted_elbow_pole(input, wrist)?;
     let target = ArmIkTarget { wrist, elbow_pole };
     Some((
         target,
@@ -1212,7 +1137,7 @@ fn resolve_tracked_side(
     let tracked = crate::tracked_arm::tracked_arm_ik_target(chain.rest, target, tracking_to_rest);
     let ik_input = ArmIkInput::from_chain(chain, tracked);
     let mut solution = crate::arm::solve_two_bone_arm(ik_input).ok()?;
-    if let Some((_, outcome)) = neutral.as_ref() {
+    if neutral.is_some() {
         // The pole is a conditional observation within the observed arm.
         // During a whole-arm loss both absolute weights decay together; do
         // not apply that decay twice to the shoulder's bend-plane coordinate.
@@ -1221,7 +1146,7 @@ fn resolve_tracked_side(
             let virtual_pole = crate::arm::solve_two_bone_arm(ArmIkInput::from_chain(
                 chain,
                 ArmIkTarget {
-                    elbow_pole: outcome.hand_target.elbow_pole,
+                    elbow_pole: crate::arm::neutral_elbow_pole(chain, tracked.wrist)?,
                     ..tracked
                 },
             ))
@@ -1343,7 +1268,7 @@ mod tests {
                 wrist: rest_bone(wrist),
                 upper_arm_length: upper_origin.distance(elbow),
                 forearm_length: elbow.distance(wrist),
-                total_arm_length: upper_origin.distance(wrist),
+                total_arm_length: upper_origin.distance(elbow) + elbow.distance(wrist),
             },
             capabilities: crate::arm::ArmChainCapabilities::default(),
         }
@@ -1353,6 +1278,204 @@ mod tests {
         match side {
             ArmSide::Left => 1.0,
             ArmSide::Right => -1.0,
+        }
+    }
+
+    // Rest positions from the model in the 2026-10-02 23:58 camera log.
+    // Its slightly bent T-pose and non-identity axes expose errors hidden by
+    // a perfectly straight, identity-axis synthetic arm.
+    fn logged_model_chain(side: ArmSide) -> ArmChainBinding {
+        let mut chain = sample_chain(side);
+        let point = |x, y, z| Vec3::new(side_sign(side) * x, y, z);
+        chain.rest.upper_arm = rest_bone(point(0.09431, 1.057586, -0.006573));
+        chain.rest.elbow = rest_bone(point(0.272219, 1.049302, -0.005080));
+        chain.rest.wrist = rest_bone(point(0.444790, 1.048926, 0.009165));
+        chain.rest.upper_arm.global_rotation = Quat::from_rotation_y(std::f32::consts::PI);
+        chain.rest.elbow.global_rotation = chain.rest.upper_arm.global_rotation;
+        chain.rest.wrist.global_rotation = chain.rest.upper_arm.global_rotation;
+        chain.rest.upper_arm_length = chain
+            .rest
+            .upper_arm
+            .position
+            .distance(chain.rest.elbow.position);
+        chain.rest.forearm_length = chain
+            .rest
+            .elbow
+            .position
+            .distance(chain.rest.wrist.position);
+        chain.rest.total_arm_length = chain.rest.upper_arm_length + chain.rest.forearm_length;
+        chain
+    }
+
+    fn pose_segments(
+        chain: &ArmChainBinding,
+        pose: &crate::arm_pose::ResolvedArmPose,
+    ) -> (Vec3, Vec3, Quat) {
+        let upper = chain.rest.upper_arm.global_rotation
+            * pose.upper_arm_delta
+            * chain.rest.upper_arm.global_rotation.inverse();
+        let lower = chain.rest.elbow.global_rotation
+            * pose.lower_arm_delta
+            * chain.rest.elbow.global_rotation.inverse();
+        (
+            upper * (chain.rest.elbow.position - chain.rest.upper_arm.position),
+            upper * lower * (chain.rest.wrist.position - chain.rest.elbow.position),
+            upper * lower,
+        )
+    }
+
+    #[test]
+    fn initial_and_lost_arms_share_an_a_pose_across_model_proportions() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            for (shoulder_width, upper_length, lower_length, body_scale) in [
+                (0.09, 0.18, 0.17, 0.46),
+                (0.18, 0.32, 0.22, 0.7),
+                (0.12, 0.20, 0.35, 0.85),
+            ] {
+                let mut chain = logged_model_chain(side);
+                let upper_direction =
+                    (chain.rest.elbow.position - chain.rest.upper_arm.position).normalize();
+                let lower_direction =
+                    (chain.rest.wrist.position - chain.rest.elbow.position).normalize();
+                chain.rest.upper_arm.position.x = side_sign(side) * shoulder_width;
+                chain.rest.elbow.position =
+                    chain.rest.upper_arm.position + upper_direction * upper_length;
+                chain.rest.wrist.position =
+                    chain.rest.elbow.position + lower_direction * lower_length;
+                chain.rest.upper_arm_length = upper_length;
+                chain.rest.forearm_length = lower_length;
+                chain.rest.total_arm_length = upper_length + lower_length;
+                let motion = crate::arm_motion_geometry::build_arm_motion_rest_geometry(
+                    side,
+                    &chain.rest,
+                    Some(Vec3::new(0.0, 0.705036, 0.004195)),
+                    Some(Quat::IDENTITY),
+                    None,
+                );
+                let input = ArmPipelineInput {
+                    body_scale_meters: body_scale,
+                    ..ArmPipelineInput::binding_time(&chain, &motion, ArmPoseProfile::default())
+                };
+                let expected = Vec3::new(side_sign(side), -1.0, 0.0).normalize();
+                let lost = resolve_tracked_side(
+                    Some(&chain),
+                    Some(&motion),
+                    DynamicArmProfile::default(),
+                    body_scale,
+                    None,
+                    vtuber_core::arm_tracking::ArmBlendWeight::ZERO,
+                    Quat::IDENTITY,
+                    &mut crate::tracked_arm::TrackedArmFilter::default(),
+                    1.0 / 60.0,
+                )
+                .unwrap();
+                for source in [
+                    ArmPoseSourceKind::LegacyStatic,
+                    ArmPoseSourceKind::VirtualHandAnchor,
+                ] {
+                    let (pose, _) = resolve_arm_pose(&input, source).unwrap().unwrap();
+                    let (upper, lower, hand) = pose_segments(&chain, &pose);
+                    let thumb_side =
+                        Vec3::new(side_sign(side) * 0.000532, 0.002478, 0.038959).normalize();
+                    let shown = hand * thumb_side;
+                    assert!(shown.z > 0.9, "{side:?} {source:?}: thumb side {shown:?}");
+                    assert!(upper.normalize().dot(expected) > 0.998);
+                    assert!(lower.normalize().dot(expected) > 0.998);
+                    assert!(upper.angle_between(lower) < 5.0_f32.to_radians());
+                    assert!((upper.length() - upper_length).abs() < 1.0e-5);
+                    assert!((lower.length() - lower_length).abs() < 1.0e-5);
+                    assert!(pose.upper_arm_delta.angle_between(lost.upper_arm_delta) < 1.0e-3);
+                    assert!(pose.lower_arm_delta.angle_between(lost.lower_arm_delta) < 1.0e-3);
+                    assert!(pose.hand.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lost_elbow_observation_does_not_lift_the_elbow_and_hand_loss_returns_without_a_flip() {
+        use vtuber_core::arm_tracking::{ArmBlendWeight, ArmTrackingTarget};
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let chain = logged_model_chain(side);
+            let motion = crate::arm_motion_geometry::build_arm_motion_rest_geometry(
+                side,
+                &chain.rest,
+                Some(Vec3::new(0.0, 0.705036, 0.004195)),
+                Some(Quat::IDENTITY),
+                None,
+            );
+            // seq 1204: the held observed elbow is below the shoulder, but
+            // fading its authority used to send the arm toward the T-pose pole.
+            let target = ArmTrackingTarget {
+                wrist: [-side_sign(side) * 0.09, 0.03, 0.65],
+                elbow_pole: [side_sign(side) * 0.10, -0.25, 0.08],
+                palm_normal: None,
+                fingers: None,
+            };
+            let mut filter = crate::tracked_arm::TrackedArmFilter::default();
+            let mut previous: Option<Vec3> = None;
+            let mut returned = None;
+            for tick in 0..=360 {
+                let wrist = if tick <= 180 {
+                    1.0
+                } else {
+                    1.0 - (tick - 180) as f32 / 180.0
+                };
+                let pole = (1.0 - tick as f32 / 120.0).max(0.0);
+                let pose = resolve_tracked_side(
+                    Some(&chain),
+                    Some(&motion),
+                    DynamicArmProfile::default(),
+                    crate::body_scale::DEFAULT_BODY_SCALE_METERS,
+                    Some(target),
+                    ArmBlendWeight {
+                        wrist,
+                        pole,
+                        palm: 0.0,
+                        fingers: 0.0,
+                    },
+                    Quat::IDENTITY,
+                    &mut filter,
+                    1.0 / 60.0,
+                )
+                .unwrap();
+                let (upper, lower, _) = pose_segments(&chain, &pose);
+                assert!(
+                    upper.y < -chain.rest.upper_arm_length * 0.35,
+                    "tick {tick}: {upper:?}"
+                );
+                assert!((upper.length() - chain.rest.upper_arm_length).abs() < 1.0e-5);
+                assert!((lower.length() - chain.rest.forearm_length).abs() < 1.0e-5);
+                assert!(upper.angle_between(lower) <= crate::arm::ELBOW_FLEXION_LIMIT_RAD + 1.0e-4);
+                if let Some(previous) = previous {
+                    assert!(
+                        previous.angle_between(upper) < 0.02,
+                        "tick {tick}: elbow jumped"
+                    );
+                }
+                previous = Some(upper);
+                returned = Some(pose);
+            }
+            let (neutral, _) = neutral_virtual_pose(
+                &chain,
+                &motion,
+                DynamicArmProfile::default(),
+                crate::body_scale::DEFAULT_BODY_SCALE_METERS,
+            )
+            .unwrap();
+            let returned = returned.unwrap();
+            assert!(
+                returned
+                    .upper_arm_delta
+                    .angle_between(neutral.upper_arm_delta)
+                    < 1.0e-3
+            );
+            assert!(
+                returned
+                    .lower_arm_delta
+                    .angle_between(neutral.lower_arm_delta)
+                    < 1.0e-3
+            );
         }
     }
 
@@ -1631,8 +1754,10 @@ mod tests {
     #[test]
     fn elbow_swivel_is_mirror_symmetric_between_sides() {
         let (lc, lm, rc, rm) = mirrored_pair();
-        let left_input = ArmPipelineInput::binding_time(&lc, &lm, ArmPoseProfile::default());
-        let right_input = ArmPipelineInput::binding_time(&rc, &rm, ArmPoseProfile::default());
+        let mut left_input = ArmPipelineInput::binding_time(&lc, &lm, ArmPoseProfile::default());
+        let mut right_input = ArmPipelineInput::binding_time(&rc, &rm, ArmPoseProfile::default());
+        left_input.dynamic_profile.elbow_swivel_radians = 15.0_f32.to_radians();
+        right_input.dynamic_profile = left_input.dynamic_profile;
         let (_, l_outcome) = resolve_arm_pose(&left_input, ArmPoseSourceKind::VirtualHandAnchor)
             .unwrap()
             .unwrap();
@@ -1640,9 +1765,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Pole offsets from the rest elbow must be mirror images.
-        let l_pole = l_outcome.hand_target.elbow_pole - lc.rest.elbow.position;
-        let r_pole = r_outcome.hand_target.elbow_pole - rc.rest.elbow.position;
+        // Pole offsets from the shoulders must be mirror images.
+        let l_pole = l_outcome.hand_target.elbow_pole - lc.rest.upper_arm.position;
+        let r_pole = r_outcome.hand_target.elbow_pole - rc.rest.upper_arm.position;
         assert!((l_pole.x + r_pole.x).abs() < 1e-4);
         assert!((l_pole.y - r_pole.y).abs() < 1e-5);
         assert!((l_pole.z - r_pole.z).abs() < 1e-5);
@@ -1651,7 +1776,10 @@ mod tests {
     #[test]
     fn swivel_fades_continuously_toward_the_chest_center() {
         let (chain, _) = anchored_motion(ArmSide::Right);
-        let profile = DynamicArmProfile::default();
+        let profile = DynamicArmProfile {
+            elbow_swivel_radians: 15.0_f32.to_radians(),
+            ..Default::default()
+        };
         let width =
             profile.swivel_transition_width_ratio * crate::body_scale::DEFAULT_BODY_SCALE_METERS;
         // Place the chest center just beside the hand anchor so lateral
@@ -1665,8 +1793,6 @@ mod tests {
             Some(Quat::IDENTITY),
             Some(center),
         );
-        let base =
-            canonical_pole_direction(motion_with_center.elbow_reference.as_ref().unwrap().normal);
 
         // Drive the stage directly with controlled wrist targets so the
         // measurement isolates the swivel fade. Offsets are chosen relative
@@ -1676,25 +1802,23 @@ mod tests {
         let rest_target = chain.rest.wrist.position;
         let anchor_delta_from_center = (rest_target - center).x;
         let pole_at = |lateral: f32| {
-            let input = ArmPipelineInput::binding_time(
+            let mut input = ArmPipelineInput::binding_time(
                 &chain,
                 &motion_with_center,
                 ArmPoseProfile::default(),
             );
-            swivel_adjusted_elbow_pole(
-                &input,
-                rest_target + Vec3::X * lateral,
-                chain.rest.total_arm_length,
-            )
-            .unwrap()
+            input.dynamic_profile = profile;
+            swivel_adjusted_elbow_pole(&input, rest_target + Vec3::X * lateral).unwrap()
         };
 
         let angle_at = |delta_from_center: f32| {
             // Place the target so its horizontal offset from the chest
             // center is exactly `delta_from_center`.
             let lateral = -anchor_delta_from_center + delta_from_center;
-            let offset = pole_at(lateral) - chain.rest.elbow.position;
-            let axis = ((rest_target + Vec3::X * lateral) - shoulder).normalize();
+            let wrist = rest_target + Vec3::X * lateral;
+            let base = crate::arm::neutral_elbow_pole(&chain, wrist).unwrap() - shoulder;
+            let offset = pole_at(lateral) - shoulder;
+            let axis = (wrist - shoulder).normalize();
             let proj_base = base - axis * base.dot(axis);
             let proj_off = offset - axis * offset.dot(axis);
             f32::atan2(proj_base.cross(proj_off).dot(axis), proj_base.dot(proj_off)).abs()
@@ -1719,14 +1843,13 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_elbow_reference_keeps_a_safe_finite_pole() {
+    fn missing_hips_keeps_the_legacy_pose() {
         let (chain, _motion) = anchored_motion(ArmSide::Left);
-        // Motion geometry with degenerate reference plane and no centers.
+        // Motion geometry with no hips anchor or torso center.
         let motion = crate::arm_motion_geometry::ArmMotionRestGeometry {
             side: ArmSide::Left,
             hand_anchor: None,
             torso_center: None,
-            elbow_reference: None,
         };
         let input = ArmPipelineInput::binding_time(&chain, &motion, ArmPoseProfile::default());
         let (pose, outcome) = resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
@@ -2042,7 +2165,7 @@ mod tests {
     #[test]
     fn clamp_is_a_noop_while_the_descent_stays_within_the_limit() {
         let chain = sample_chain(ArmSide::Left);
-        // The legacy default drop (70 degrees from the T-pose) must never be
+        // The default A-pose (45 degrees below horizontal) must never be
         // touched by the 85-degree limit.
         let target = crate::arm::default_arm_target(&chain, ArmPoseProfile::default())
             .expect("legacy target");

@@ -220,7 +220,7 @@ pub struct ArmChainBinding {
     pub capabilities: ArmChainCapabilities,
 }
 
-/// Initial geometry-derived parameters for the default relaxed arm pose.
+/// Initial geometry-derived parameters for the default A-pose.
 ///
 /// The values are intentionally kept in one typed profile so later per-model
 /// tuning can validate and replace them without scattering pose constants
@@ -228,7 +228,7 @@ pub struct ArmChainBinding {
 /// forward basis; therefore -Z is the small rearward elbow-pole offset.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArmPoseProfile {
-    /// Angle by which the rest lateral arm direction is lowered toward -Y.
+    /// Angle below the model's horizontal lateral axis, toward -Y.
     pub arm_drop_radians: f32,
     /// Desired wrist reach as a fraction of the total arm length.
     pub reach_ratio: f32,
@@ -243,10 +243,10 @@ pub struct ArmPoseProfile {
 impl Default for ArmPoseProfile {
     fn default() -> Self {
         Self {
-            arm_drop_radians: 70.0_f32.to_radians(),
-            reach_ratio: 0.99,
-            forward_hand_offset_ratio: 0.081,
-            elbow_pole_offset_ratio: 0.05,
+            arm_drop_radians: 45.0_f32.to_radians(),
+            reach_ratio: 1.0,
+            forward_hand_offset_ratio: 0.0,
+            elbow_pole_offset_ratio: 0.0,
             finger_curl_radians: 10.0_f32.to_radians(),
         }
     }
@@ -394,15 +394,17 @@ pub struct ArmIkInput {
 
 impl ArmIkInput {
     /// Creates solver input from cached immutable arm geometry.
+    ///
+    /// Bent rest segments define the elbow hinge. For a straight VRM T-pose,
+    /// positive flexion bends toward the model's +Z anterior direction. Palm
+    /// winding and forearm pronation do not choose the elbow's flexion axis.
     #[must_use]
     pub fn from_geometry(geometry: ArmRestGeometry, target: ArmIkTarget) -> Self {
         let upper = geometry.elbow.position - geometry.upper_arm.position;
         let lower = geometry.wrist.position - geometry.elbow.position;
-        let elbow_axis = upper
-            .cross(lower)
-            .try_normalize()
-            .or_else(|| upper.cross(Vec3::Y).try_normalize())
-            .unwrap_or(Vec3::ZERO);
+        let elbow_axis =
+            crate::skeleton::rest_hinge_axis(upper, lower, finite_normalized(upper.cross(Vec3::Z)))
+                .unwrap_or(Vec3::ZERO);
         Self {
             shoulder: geometry.upper_arm.position,
             rest_elbow: geometry.elbow.position,
@@ -421,23 +423,10 @@ impl ArmIkInput {
     /// Creates solver input using the bound rig's fixed anatomical bend frame.
     #[must_use]
     pub fn from_chain(chain: &ArmChainBinding, target: ArmIkTarget) -> Self {
-        Self {
-            elbow_axis: elbow_hinge_axis(chain).unwrap_or(Vec3::ZERO),
-            ..Self::from_geometry(chain.rest, target)
-        }
+        Self::from_geometry(chain.rest, target)
     }
 }
 
-/// A bent rest arm defines its elbow axis. For the straight VRM T-pose, the
-/// authored palm plane defines the neutral flexion plane instead. Joint axes
-/// live in this immutable rest frame and are carried by the parent through FK.
-pub(crate) fn elbow_hinge_axis(chain: &ArmChainBinding) -> Option<Vec3> {
-    crate::skeleton::rest_hinge_axis(
-        chain.rest.elbow.position - chain.rest.upper_arm.position,
-        chain.rest.wrist.position - chain.rest.elbow.position,
-        rest_palm_normal(chain),
-    )
-}
 /// Pure solver output for a two-bone arm.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArmIkSolution {
@@ -484,7 +473,7 @@ impl std::fmt::Display for ArmIkError {
 
 impl std::error::Error for ArmIkError {}
 
-/// Builds the default hand-down target from one side's rest geometry.
+/// Builds the default A-pose target from the shoulder and that arm's bone lengths.
 pub fn default_arm_target(
     chain: &ArmChainBinding,
     profile: ArmPoseProfile,
@@ -492,31 +481,51 @@ pub fn default_arm_target(
     if !profile.is_valid() {
         return Err(ArmIkError::InvalidProfile);
     }
-    let rest_direction =
-        finite_normalized(chain.rest.elbow.position - chain.rest.upper_arm.position)
-            .ok_or(ArmIkError::DegenerateGeometry)?;
-    let down = -Vec3::Y;
-    let angle_to_down = rest_direction.dot(down).clamp(-1.0, 1.0).acos();
-    let drop = profile.arm_drop_radians.min(angle_to_down);
-    let drop_axis =
-        stable_perpendicular(rest_direction, down).ok_or(ArmIkError::DegenerateGeometry)?;
-    let dropped_direction = Quat::from_axis_angle(drop_axis, drop) * rest_direction;
+    let side_sign = match chain.side {
+        ArmSide::Left => 1.0,
+        ArmSide::Right => -1.0,
+    };
+    let (down, lateral) = profile.arm_drop_radians.sin_cos();
+    let dropped_direction = Vec3::new(side_sign * lateral, -down, 0.0);
     let total = chain.rest.total_arm_length;
     if !total.is_finite() || total <= ARM_IK_EPSILON {
         return Err(ArmIkError::DegenerateGeometry);
     }
 
+    let wrist = chain.rest.upper_arm.position
+        + dropped_direction * (total * profile.reach_ratio)
+        + Vec3::Z * (total * profile.forward_hand_offset_ratio);
     let target = ArmIkTarget {
-        wrist: chain.rest.upper_arm.position
-            + dropped_direction * (total * profile.reach_ratio)
-            + Vec3::Z * (total * profile.forward_hand_offset_ratio),
-        elbow_pole: chain.rest.elbow.position
+        wrist,
+        elbow_pole: neutral_elbow_pole(chain, wrist).ok_or(ArmIkError::DegenerateGeometry)?
             + Vec3::NEG_Z * (total * profile.elbow_pole_offset_ratio),
     };
     if !target.wrist.is_finite() || !target.elbow_pole.is_finite() {
         return Err(ArmIkError::NonFiniteInput);
     }
     Ok(target)
+}
+
+/// Carry the elbow's rest hinge from an arm lowered at the side toward the
+/// wrist. VRM's attention pose lowers only the upper arm from its T-pose;
+/// transporting that frame avoids a lateral T-pose pole twisting the humerus.
+/// The pole is a point in the bend plane, never the plane's normal.
+pub(crate) fn neutral_elbow_pole(chain: &ArmChainBinding, wrist: Vec3) -> Option<Vec3> {
+    let rest = chain.rest;
+    let upper = finite_normalized(rest.elbow.position - rest.upper_arm.position)?;
+    let direction = finite_normalized(wrist - rest.upper_arm.position)?;
+    let input = ArmIkInput::from_chain(
+        chain,
+        ArmIkTarget {
+            wrist,
+            elbow_pole: rest.elbow.position,
+        },
+    );
+    let lowered = rotation_arc(upper, Vec3::NEG_Y);
+    let aimed = rotation_arc(Vec3::NEG_Y, direction);
+    let hinge = aimed * lowered * input.elbow_axis;
+    let bend = finite_normalized(direction.cross(hinge))?;
+    Some(rest.upper_arm.position + bend * rest.upper_arm_length)
 }
 
 /// Solves a deterministic constant-time analytic two-bone arm IK problem.

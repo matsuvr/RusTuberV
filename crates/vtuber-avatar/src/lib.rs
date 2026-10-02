@@ -53,8 +53,7 @@ pub use arm::{
     RestSpaceBonePose, default_arm_target, solve_two_bone_arm,
 };
 pub use arm_motion_geometry::{
-    ArmMotionGeometry, ArmMotionRestGeometry, ElbowSwivelReference, HipsAnchorFrame,
-    build_arm_motion_rest_geometry,
+    ArmMotionGeometry, ArmMotionRestGeometry, HipsAnchorFrame, build_arm_motion_rest_geometry,
 };
 pub use arm_pipeline::{
     ArmPipelineError, ArmPipelineInput, ArmPipelineOutcome, ArmPoseSourceKind, ArmPoseSourceUsed,

@@ -4,8 +4,7 @@
 //! dynamic arm solve needs beyond [`crate::arm::ArmRestGeometry`]:
 //!
 //! - the hips-relative virtual hand anchor frame,
-//! - a chest/torso center reference position,
-//! - a stable elbow pole/swivel reference plane expressed in model space.
+//! - a chest/torso center reference position.
 //!
 //! Everything is built from immutable `RestGlobalTransform` data; rendered
 //! or current transforms are never consulted, and no VRM0/VRM1 branch
@@ -15,12 +14,6 @@
 use bevy::prelude::*;
 
 use crate::arm::{ArmRestGeometry, ArmSide};
-
-/// Segments shorter than this cannot define a swivel reference.
-const MIN_SEGMENT_METERS: f32 = 0.01;
-
-/// Cross-product magnitude below this marks degenerate plane construction.
-const MIN_CROSS_MAGNITUDE: f32 = 1.0e-4;
 
 /// Hips-relative virtual hand anchor frame.
 ///
@@ -35,15 +28,6 @@ pub struct HipsAnchorFrame {
     pub rotation_from_hips: Quat,
 }
 
-/// Stable elbow pole/swivel reference plane in rest global space.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ElbowSwivelReference {
-    /// Plane normal (unit length).
-    pub normal: Vec3,
-    /// A point on the plane (the elbow origin).
-    pub point: Vec3,
-}
-
 /// Per-side arm motion rest geometry resolved once at bind time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArmMotionRestGeometry {
@@ -53,8 +37,6 @@ pub struct ArmMotionRestGeometry {
     pub hand_anchor: Option<HipsAnchorFrame>,
     /// Chest/torso center reference; `None` when no usable reference exists.
     pub torso_center: Option<Vec3>,
-    /// Elbow swivel reference plane; `None` when even fallbacks degenerate.
-    pub elbow_reference: Option<ElbowSwivelReference>,
 }
 
 /// Component holding both sides' resolved motion geometry.
@@ -70,9 +52,6 @@ pub struct ArmMotionGeometry {
 ///
 /// * `hand_anchor` requires a hips rest reference (`hips_position`,
 ///   `hips_rotation`) and is otherwise `None`.
-/// * `elbow_reference.normal` is the rest bend-plane normal (cross of the
-///   upper-arm and forearm axes); straight arms fall back to an orthogonal
-///   of the upper-arm axis around model up, keeping the value deterministic.
 ///
 /// All outputs are finite or `None`; nothing here depends on animated state.
 #[must_use]
@@ -103,51 +82,10 @@ pub fn build_arm_motion_rest_geometry(
 
     let torso_center = torso_center.and_then(finite_or_none);
 
-    let forearm_delta = rest.wrist.position - rest.elbow.position;
-    let upper_arm_delta = rest.elbow.position - rest.upper_arm.position;
-    let elbow_reference = if !upper_arm_delta.is_finite() || !forearm_delta.is_finite() {
-        None
-    } else {
-        let upper_length = upper_arm_delta.length();
-        let upper_axis = if upper_length > MIN_SEGMENT_METERS && upper_length.is_finite() {
-            Some(upper_arm_delta / upper_length)
-        } else {
-            None
-        };
-
-        let bend_normal = match upper_axis {
-            Some(axis) => {
-                let normal = axis.cross(forearm_delta);
-                if normal.length_squared() > MIN_CROSS_MAGNITUDE * MIN_CROSS_MAGNITUDE {
-                    normal.normalize_or_zero()
-                } else {
-                    let candidate = axis.cross(Vec3::Y);
-                    if candidate.length_squared() > MIN_CROSS_MAGNITUDE * MIN_CROSS_MAGNITUDE {
-                        candidate.normalize_or_zero()
-                    } else {
-                        axis.cross(Vec3::Z).normalize_or_zero()
-                    }
-                }
-            }
-            None => Vec3::ZERO,
-        };
-
-        match (upper_axis, bend_normal) {
-            (Some(_), normal) if normal.is_finite() && normal != Vec3::ZERO => {
-                Some(ElbowSwivelReference {
-                    normal,
-                    point: rest.elbow.position,
-                })
-            }
-            _ => None,
-        }
-    };
-
     ArmMotionRestGeometry {
         side,
         hand_anchor,
         torso_center,
-        elbow_reference,
     }
 }
 
@@ -271,22 +209,6 @@ mod tests {
         assert_scalar_close(l.translation_from_hips.x, -r.translation_from_hips.x);
         assert_scalar_close(l.translation_from_hips.y, r.translation_from_hips.y);
         assert_scalar_close(l.translation_from_hips.z, r.translation_from_hips.z);
-    }
-
-    #[test]
-    fn elbow_reference_uses_bend_plane_and_survives_straight_arms() {
-        let bent = build_arm_motion_rest_geometry(ArmSide::Left, &sample_rest(), None, None, None);
-        let reference = bent.elbow_reference.expect("reference");
-        assert_close(reference.point, sample_rest().elbow.position);
-        assert!((reference.normal.length() - 1.0).abs() < 1e-5);
-
-        let straight = rest_geometry(Vec3::new(0.0, -0.26, 0.0), Vec3::ZERO);
-        let straight_geometry =
-            build_arm_motion_rest_geometry(ArmSide::Left, &straight, None, None, None);
-        let straight_ref = straight_geometry
-            .elbow_reference
-            .expect("fallback reference");
-        assert_scalar_close(straight_ref.normal.length(), 1.0);
     }
 
     #[test]

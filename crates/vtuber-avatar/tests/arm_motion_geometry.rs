@@ -242,13 +242,6 @@ fn binding_resolves_mirrored_motion_geometry_for_both_sides() {
             < 1e-5
     );
 
-    // Elbow references sit on the elbow origins with unit normals.
-    let le = left.elbow_reference.as_ref().unwrap();
-    let re = right.elbow_reference.as_ref().unwrap();
-    assert!((le.normal.length() - 1.0).abs() < 1e-5);
-    assert!((re.normal.length() - 1.0).abs() < 1e-5);
-    assert_relative_vec(le.point, Vec3::new(0.42, 1.38, 0.0));
-
     // Torso center prefers the upperChest reference.
     assert_relative_vec(left.torso_center.unwrap(), Vec3::new(0.0, 1.25, 0.0));
     assert_relative_vec(right.torso_center.unwrap(), Vec3::new(0.0, 1.25, 0.0));
