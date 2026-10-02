@@ -2,63 +2,9 @@
 
 use std::collections::HashSet;
 
-use bevy::camera::primitives::MeshAabb;
-use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
-/// A finite world-space axis-aligned bounding box.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct WorldBounds {
-    min: Vec3,
-    max: Vec3,
-}
-
-impl WorldBounds {
-    pub(crate) fn new(min: Vec3, max: Vec3) -> Option<Self> {
-        if !min.is_finite() || !max.is_finite() || min.x > max.x || min.y > max.y || min.z > max.z {
-            return None;
-        }
-        Some(Self { min, max })
-    }
-
-    pub(crate) fn min(self) -> Vec3 {
-        self.min
-    }
-
-    pub(crate) fn max(self) -> Vec3 {
-        self.max
-    }
-
-    pub(crate) fn center(self) -> Vec3 {
-        (self.min + self.max) * 0.5
-    }
-
-    pub(crate) fn corners(self) -> [Vec3; 8] {
-        let min = self.min;
-        let max = self.max;
-        [
-            Vec3::new(min.x, min.y, min.z),
-            Vec3::new(min.x, min.y, max.z),
-            Vec3::new(min.x, max.y, min.z),
-            Vec3::new(min.x, max.y, max.z),
-            Vec3::new(max.x, min.y, min.z),
-            Vec3::new(max.x, min.y, max.z),
-            Vec3::new(max.x, max.y, min.z),
-            Vec3::new(max.x, max.y, max.z),
-        ]
-    }
-
-    pub(crate) fn union(self, other: Self) -> Self {
-        Self {
-            min: self.min.min(other.min),
-            max: self.max.max(other.max),
-        }
-    }
-
-    fn include(&mut self, other: Self) {
-        *self = self.union(other);
-    }
-}
+use super::mesh_bounds::{WorldBounds, mesh_world_bounds};
 
 /// Status of the renderable geometry below a head bone.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -108,27 +54,13 @@ pub(crate) fn collect_head_subtree_bounds(
                 pending = true;
                 continue;
             };
-            let Some(local_bounds) = mesh.compute_aabb() else {
-                invalid = true;
-                continue;
-            };
-            if !mesh_positions_are_finite(mesh) {
-                invalid = true;
-                continue;
-            }
-            let Some(local_bounds) =
-                WorldBounds::new(local_bounds.min().into(), local_bounds.max().into())
-            else {
-                invalid = true;
-                continue;
-            };
-            let Some(world_bounds) = world_bounds(local_bounds, global_transform) else {
+            let Some(world_bounds) = mesh_world_bounds(mesh, global_transform) else {
                 invalid = true;
                 continue;
             };
 
             if let Some(total) = &mut bounds {
-                total.include(world_bounds);
+                *total = total.union(world_bounds);
             } else {
                 bounds = Some(world_bounds);
             }
@@ -150,40 +82,6 @@ pub(crate) fn collect_head_subtree_bounds(
     } else {
         HeadSubtreeBounds::Invalid
     }
-}
-
-fn mesh_positions_are_finite(mesh: &Mesh) -> bool {
-    let Some(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
-        return true;
-    };
-    match positions {
-        VertexAttributeValues::Float32x3(values) => {
-            values.iter().flatten().all(|value| value.is_finite())
-        }
-        _ => false,
-    }
-}
-
-fn world_bounds(
-    local_bounds: WorldBounds,
-    global_transform: &GlobalTransform,
-) -> Option<WorldBounds> {
-    let mut corners = local_bounds.corners().into_iter();
-    let first = global_transform.transform_point(corners.next()?);
-    if !first.is_finite() {
-        return None;
-    }
-    let mut min = first;
-    let mut max = first;
-    for local_corner in corners {
-        let world_corner = global_transform.transform_point(local_corner);
-        if !world_corner.is_finite() {
-            return None;
-        }
-        min = min.min(world_corner);
-        max = max.max(world_corner);
-    }
-    WorldBounds::new(min, max)
 }
 
 #[cfg(test)]
