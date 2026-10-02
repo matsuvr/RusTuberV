@@ -847,18 +847,18 @@ pub fn process_ui_actions_system(
                 }
             }
             UiAction::SetArmPoseProfile { profile } => {
-                apply_arm_pose_profile_action(
+                edit_arm_pose_profile_action(
                     &mut orchestrator,
-                    *profile,
+                    Some(*profile),
                     &mut arm_pose_overrides,
                     arm_pose_settings.as_deref(),
                     &mut arm_pose_changes,
-                    false,
                 );
             }
             UiAction::ResetArmPoseProfile => {
-                reset_arm_pose_profile_action(
+                edit_arm_pose_profile_action(
                     &mut orchestrator,
+                    None,
                     &mut arm_pose_overrides,
                     arm_pose_settings.as_deref(),
                     &mut arm_pose_changes,
@@ -1298,43 +1298,9 @@ pub fn sync_expression_view_model(
     };
 }
 
-fn apply_arm_pose_profile_action(
+fn edit_arm_pose_profile_action(
     orchestrator: &mut Orchestrator,
-    profile: ArmPoseProfileOverride,
-    overrides: &mut Option<ResMut<ArmPoseOverrideStore>>,
-    settings: Option<&AppSettings>,
-    changes: &mut Option<MessageWriter<ArmPoseProfileChange>>,
-    return_to_default: bool,
-) {
-    let Some(model_id) = orchestrator.active_model_id().map(str::to_owned) else {
-        return;
-    };
-    let Some(store) = overrides.as_deref_mut() else {
-        return;
-    };
-    if let Err(error) = store.set(model_id.clone(), profile) {
-        orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
-            error.to_string(),
-        )));
-        return;
-    }
-    if let Some(settings) = settings
-        && let Err(error) = settings.save(store)
-    {
-        orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
-            error.to_string(),
-        )));
-    }
-    if let Some(changes) = changes.as_mut() {
-        changes.write(ArmPoseProfileChange {
-            model_id: AvatarAssetId::new(model_id),
-            return_to_default,
-        });
-    }
-}
-
-fn reset_arm_pose_profile_action(
-    orchestrator: &mut Orchestrator,
+    profile: Option<ArmPoseProfileOverride>,
     overrides: &mut Option<ResMut<ArmPoseOverrideStore>>,
     settings: Option<&AppSettings>,
     changes: &mut Option<MessageWriter<ArmPoseProfileChange>>,
@@ -1345,18 +1311,30 @@ fn reset_arm_pose_profile_action(
     let Some(store) = overrides.as_deref_mut() else {
         return;
     };
-    store.reset(&AvatarAssetId::new(&model_id));
+    let mut candidate = store.clone();
+    if let Some(profile) = profile {
+        if let Err(error) = candidate.set(model_id.clone(), profile) {
+            orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
+                error.to_string(),
+            )));
+            return;
+        }
+    } else {
+        candidate.reset(&AvatarAssetId::new(&model_id));
+    }
     if let Some(settings) = settings
-        && let Err(error) = settings.save(store)
+        && let Err(error) = settings.save(&candidate)
     {
         orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
             error.to_string(),
         )));
+        return;
     }
+    *store = candidate;
     if let Some(changes) = changes.as_mut() {
         changes.write(ArmPoseProfileChange {
             model_id: AvatarAssetId::new(model_id),
-            return_to_default: true,
+            return_to_default: profile.is_none(),
         });
     }
 }
@@ -2226,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn arm_pose_settings_action_updates_runtime_store_and_persists_reset() {
+    fn arm_pose_settings_edits_commit_and_notify_only_after_a_successful_save() {
         let directory = tempfile::tempdir().expect("temporary settings directory");
         let path = directory.path().join("settings.toml");
         let model_id = "sha256:active".to_string();
@@ -2273,6 +2251,57 @@ mod tests {
             app.world().resource::<UiViewModel>().arm_pose.profile,
             profile
         );
+        assert_eq!(
+            crate::settings::load_arm_pose_overrides(&path)
+                .unwrap()
+                .profile_for(&id),
+            Some(profile)
+        );
+        let notifications: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ArmPoseProfileChange>>()
+            .drain()
+            .collect();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].model_id, id);
+        assert!(!notifications[0].return_to_default);
+
+        let saved = std::fs::read(&path).unwrap();
+        let foreign = "schema_version = 99\n";
+        std::fs::write(&path, foreign).unwrap();
+        for action in [
+            UiAction::SetArmPoseProfile {
+                profile: ArmPoseProfileOverride::from_profile(vtuber_avatar::ArmPoseProfile {
+                    arm_drop_radians: 0.7,
+                    ..profile
+                }),
+            },
+            UiAction::ResetArmPoseProfile,
+        ] {
+            app.world_mut().resource_mut::<UiState>().emit(action);
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<ArmPoseOverrideStore>()
+                    .profile_for(&id),
+                Some(profile)
+            );
+            assert_eq!(
+                app.world().resource::<UiViewModel>().arm_pose.profile,
+                profile
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+            assert!(
+                app.world()
+                    .resource::<Messages<ArmPoseProfileChange>>()
+                    .is_empty()
+            );
+            assert!(matches!(
+                app.world().resource::<Orchestrator>().last_error(),
+                Some(OrchestratorError::ArmPoseSettingsFailed(_))
+            ));
+        }
+        std::fs::write(&path, saved).unwrap();
 
         app.world_mut()
             .resource_mut::<UiState>()
@@ -2287,6 +2316,14 @@ mod tests {
         );
         let restored = crate::settings::load_arm_pose_overrides(&path).expect("reset file");
         assert!(restored.profile_for(&id).is_none());
+        let notifications: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ArmPoseProfileChange>>()
+            .drain()
+            .collect();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].model_id, id);
+        assert!(notifications[0].return_to_default);
     }
 
     /// Minimal app that runs the UI action processor with a real settings
