@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use vtuber_avatar::{ArmSourceSelection, TrackedArmControl};
+use vtuber_avatar::{ArmSourceSelection, AvatarGeneration, TrackedArmControl};
 use vtuber_core::arm_tracking::{ArmControlFrame, PoseArmFrame};
-use vtuber_core::{LatestSlot, ReadResult, VideoFrame, WorkerHandle, monotonic_now};
+use vtuber_core::{LatestSlot, MonoTimeNs, ReadResult, VideoFrame, WorkerHandle, monotonic_now};
 use vtuber_inference::{
     FailureStage, InferenceError, InferenceWorkerResult, InferenceWorkerState, MediaPipeTaskSource,
     SharedStatus, WorkerFailure, run_pose_worker,
@@ -48,6 +48,8 @@ pub struct PoseRuntime {
     hand_task_path: std::path::PathBuf,
     output_generation: u64,
     held_frame: Option<PoseArmFrame>,
+    last_avatar_generation: AvatarGeneration,
+    observations_after: MonoTimeNs,
     /// Debug-build raw observation log, opened lazily on the first frame.
     #[cfg(debug_assertions)]
     debug_log: Option<std::fs::File>,
@@ -77,6 +79,8 @@ impl PoseRuntime {
                 .join(HAND_TASK_FILE),
             output_generation: 0,
             held_frame: None,
+            last_avatar_generation: AvatarGeneration::default(),
+            observations_after: MonoTimeNs(0),
             #[cfg(debug_assertions)]
             debug_log: None,
         }
@@ -110,7 +114,7 @@ impl PoseRuntime {
     /// Drops calibration and observation state for a fresh calibration.
     pub fn recalibrate(&mut self) {
         self.tracking.reset();
-        self.held_frame = None;
+        self.invalidate_session(monotonic_now());
     }
 
     /// Whether the Pose worker thread is currently running.
@@ -129,7 +133,7 @@ impl PoseRuntime {
         else {
             return Ok(());
         };
-        self.reset_observations();
+        self.recalibrate();
         result.map(|_| ())
     }
 
@@ -216,15 +220,17 @@ impl PoseRuntime {
         } else {
             vtuber_core::WorkerResult::Completed(InferenceWorkerResult::default())
         };
-        self.reset_observations();
+        self.recalibrate();
         vtuber_inference::completion::finish_worker_join(result, &self.status).map(|_| ())
     }
 
-    fn reset_observations(&mut self) {
-        self.tracking.reset();
+    fn invalidate_session(&mut self, now: MonoTimeNs) {
+        self.tracking.reset_temporal();
         self.output_generation = 0;
         self.held_frame = None;
         self.output_slot.clear();
+        // A worker can finish an in-flight camera frame after the slot is cleared.
+        self.observations_after = now;
     }
 
     /// Advances the pure tracking state by one render tick.
@@ -232,24 +238,30 @@ impl PoseRuntime {
     /// Like the face pipeline, the latest completed inference is retained and
     /// re-fed while no new result exists, so the arm smoother advances on the
     /// render clock and the hands move continuously between camera frames.
-    fn read_latest(&mut self) -> Option<ArmControlFrame> {
+    fn read_latest(
+        &mut self,
+        generation: AvatarGeneration,
+        now: MonoTimeNs,
+    ) -> Option<ArmControlFrame> {
+        if generation != self.last_avatar_generation {
+            self.last_avatar_generation = generation;
+            self.invalidate_session(now);
+        }
         if let Some(ReadResult::New {
             generation,
             value: frame,
         }) = self.output_slot.try_read_after(self.output_generation)
         {
             self.output_generation = generation;
-            #[cfg(debug_assertions)]
-            log_pose_frame(&frame, &mut self.debug_log);
-            self.held_frame = Some(frame);
+            if frame.captured_at >= self.observations_after {
+                #[cfg(debug_assertions)]
+                log_pose_frame(&frame, &mut self.debug_log);
+                self.held_frame = Some(frame);
+            }
         }
         let profile = self.profile;
-        let (next, control) = step_arm_tracking(
-            &self.tracking,
-            self.held_frame.as_ref(),
-            monotonic_now(),
-            &profile,
-        );
+        let (next, control) =
+            step_arm_tracking(&self.tracking, self.held_frame.as_ref(), now, &profile);
         self.tracking = next;
         control
     }
@@ -455,11 +467,11 @@ pub fn read_pose_output_system(
         tracked.generation = None;
         return;
     }
-    tracked.generation = Some(lifecycle.current_generation());
-    if let Some(control) = pose.read_latest() {
-        tracked.frame =
-            Some(vtuber_tracking::gesture_safety::suppress_isolated_middle_extension(control));
-    }
+    let generation = lifecycle.current_generation();
+    tracked.frame = pose
+        .read_latest(generation, monotonic_now())
+        .map(vtuber_tracking::gesture_safety::suppress_isolated_middle_extension);
+    tracked.generation = tracked.frame.as_ref().map(|_| generation);
 }
 
 /// Selects tracked authority only while the Pose worker is actually running.
@@ -574,6 +586,50 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn pose_session_reset_waits_for_new_capture_and_never_relabels_a_held_frame() {
+        let mut pose = PoseRuntime::default();
+        let first = AvatarGeneration(1);
+        let second = AvatarGeneration(2);
+        assert!(pose.read_latest(first, MonoTimeNs(10)).is_none());
+        let frame = PoseArmFrame {
+            source_seq: vtuber_core::FrameSeq(7),
+            captured_at: MonoTimeNs(11),
+            inference_finished_at: MonoTimeNs(12),
+            observation: None,
+        };
+        assert!(pose.output_slot.publish(frame));
+        let control = pose.read_latest(first, MonoTimeNs(13)).unwrap();
+        assert_eq!(control.source_seq, frame.source_seq);
+        assert_eq!(
+            pose.read_latest(first, MonoTimeNs(14)).unwrap().captured_at,
+            frame.captured_at
+        );
+        assert!(pose.read_latest(second, MonoTimeNs(15)).is_none());
+        // An old camera frame finishes after the replacement reset.
+        assert!(pose.output_slot.publish(PoseArmFrame {
+            inference_finished_at: MonoTimeNs(16),
+            ..frame
+        }));
+        assert!(pose.read_latest(second, MonoTimeNs(17)).is_none());
+        assert!(pose.output_slot.publish(PoseArmFrame {
+            captured_at: MonoTimeNs(18),
+            ..frame
+        }));
+        assert!(pose.read_latest(second, MonoTimeNs(19)).is_some());
+
+        pose.recalibrate();
+        assert!(pose.read_latest(second, monotonic_now()).is_none());
+        let captured_at = monotonic_now();
+        assert!(pose.output_slot.publish(PoseArmFrame {
+            captured_at,
+            ..frame
+        }));
+        assert!(pose.read_latest(second, monotonic_now()).is_some());
+        pose.stop().unwrap();
+        assert!(pose.read_latest(second, monotonic_now()).is_none());
     }
 
     #[test]

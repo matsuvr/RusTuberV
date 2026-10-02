@@ -1,13 +1,10 @@
 //! Main-thread bridge from inference observations to the pure tracking core.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::prelude::*;
 use vtuber_core::metrics::RateCounter;
-use vtuber_core::{
-    AvatarControlFrame, FaceTrackingSample, FrameSeq, LatestSlot, MonoTimeNs, TrackingState,
-};
+use vtuber_core::{AvatarControlFrame, FaceTrackingSample, FrameSeq, MonoTimeNs, TrackingState};
 use vtuber_tracking::{AutoNeutralCollector, AutoNeutralState, PipelineConfig, TrackingPipeline};
 
 use crate::diagnostics::DiagnosticsSnapshot;
@@ -38,6 +35,7 @@ enum ObservationDispatch {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ObservationGate {
     last_source_seq: Option<FrameSeq>,
+    observations_after: Option<MonoTimeNs>,
 }
 
 impl ObservationGate {
@@ -46,8 +44,9 @@ impl ObservationGate {
     /// Capture sequence numbers are owned by the capture session. A new
     /// session may legally start at the same sequence as the previous one,
     /// so retaining the old value would suppress its first face observation.
-    fn reset(&mut self) {
+    fn reset(&mut self, now: MonoTimeNs) {
         self.last_source_seq = None;
+        self.observations_after = Some(now);
     }
 
     fn dispatch(
@@ -58,6 +57,12 @@ impl ObservationGate {
         let Some(observation) = latest else {
             return ObservationDispatch::NoFace;
         };
+        if self
+            .observations_after
+            .is_some_and(|boundary| observation.captured_at < boundary)
+        {
+            return ObservationDispatch::NoFace;
+        }
 
         let age = Duration::from_nanos(now.0.saturating_sub(observation.inference_finished_at.0));
         let fresh = age <= INFERENCE_SILENCE_TIMEOUT;
@@ -99,10 +104,8 @@ pub struct TrackingRuntime {
     /// Whether the avatar bridge may retain the most recently published
     /// control frame for the current capture session.
     pub control_active: bool,
-    /// Latest-only control frame for the avatar bridge.
-    pub control_slot: Arc<LatestSlot<AvatarControlFrame>>,
-    /// Most recent frame consumed by the avatar bridge.
-    pub latest_control: Option<AvatarControlFrame>,
+    /// Pending control paired with the avatar generation it was produced for.
+    pub latest_control: Option<(vtuber_avatar::AvatarGeneration, AvatarControlFrame)>,
     /// Diagnostic string caches, rebuilt only when their source value changes.
     diagnostics_cache: TrackingDiagnosticsCache,
 }
@@ -126,7 +129,6 @@ impl Default for TrackingRuntime {
             observation_gate: ObservationGate::default(),
             held_sample: None,
             control_active: false,
-            control_slot: Arc::new(LatestSlot::new()),
             latest_control: None,
             diagnostics_cache: TrackingDiagnosticsCache::default(),
         }
@@ -134,10 +136,15 @@ impl Default for TrackingRuntime {
 }
 
 impl TrackingRuntime {
-    /// Returns the latest-only control frame slot.
-    #[must_use]
-    pub fn control_slot(&self) -> Arc<LatestSlot<AvatarControlFrame>> {
-        Arc::clone(&self.control_slot)
+    /// Invalidates observations, pending output and time state together.
+    /// Camera calibration is retained unless the caller explicitly clears it.
+    fn invalidate_session(&mut self, now: MonoTimeNs) {
+        self.pipeline.reset();
+        self.observation_gate.reset(now);
+        self.held_sample = None;
+        self.latest_control = None;
+        self.control_active = false;
+        self.last_update = None;
     }
 }
 
@@ -207,18 +214,13 @@ pub fn tracking_bridge_system(
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
     mut tracking_rate: Local<Option<RateCounter>>,
 ) {
+    let now = vtuber_core::monotonic_now();
     if lifecycle.current_generation() != tracking.last_avatar_generation {
         tracking.last_avatar_generation = lifecycle.current_generation();
         // The camera neutral is independent of the avatar model. Preserve it
         // across replacement, but always reset the smoothing and recovery
         // state so a new avatar cannot receive a stale frame.
-        tracking.pipeline.reset();
-        tracking.observation_gate.reset();
-        tracking.held_sample = None;
-        tracking.control_slot.clear();
-        tracking.latest_control = None;
-        tracking.control_active = false;
-        tracking.last_update = None;
+        tracking.invalidate_session(now);
     }
 
     let pipeline_state = orchestrator.pipeline_state();
@@ -229,13 +231,7 @@ pub fn tracking_bridge_system(
         );
     let pipeline_failed = pipeline_state == crate::orchestrator::PipelineState::Failed;
     if capture_inactive || pipeline_failed {
-        tracking.pipeline.reset();
-        tracking.observation_gate.reset();
-        tracking.held_sample = None;
-        tracking.control_slot.clear();
-        tracking.latest_control = None;
-        tracking.control_active = false;
-        tracking.last_update = None;
+        tracking.invalidate_session(now);
         view_model.tracking = tracking_view(TrackingState::Starting, 0.0);
         view_model.calibration = calibration_view(&tracking);
         set_debug_cached(
@@ -270,6 +266,8 @@ pub fn tracking_bridge_system(
             CalibrationRequest::Begin | CalibrationRequest::Retry => {
                 // Calibration is instant in the MediaPipe path: the next
                 // valid face becomes the new neutral reference.
+                tracking.auto_neutral.reset();
+                tracking.invalidate_session(now);
                 tracking.recenter_requested = true;
                 tracking.last_recenter_error = None;
             }
@@ -277,7 +275,6 @@ pub fn tracking_bridge_system(
         }
     }
 
-    let now = vtuber_core::monotonic_now();
     let dt = tracking
         .last_update
         .map(|last| Duration::from_nanos(now.0.saturating_sub(last.0).min(250_000_000)))
@@ -332,8 +329,7 @@ pub fn tracking_bridge_system(
         .update_mediapipe(held.as_ref(), neutral, gaze_baseline, now, dt);
     tracking.held_sample = held;
     if let Some(frame) = update.frame {
-        let _ = tracking.control_slot.publish(frame.clone());
-        tracking.latest_control = Some(frame);
+        tracking.latest_control = Some((lifecycle.current_generation(), frame));
         tracking.control_active = true;
         let rate = tracking_rate.get_or_insert_with(|| RateCounter::new(1_000_000_000));
         rate.record(now.0);
@@ -490,11 +486,41 @@ mod tests {
             gate.dispatch(Some(&face), MonoTimeNs(1_050_000_000)),
             ObservationDispatch::Face(_)
         ));
-        gate.reset();
+        gate.reset(MonoTimeNs(1_050_000_000));
+        assert_eq!(
+            gate.dispatch(Some(&face), MonoTimeNs(1_100_000_000)),
+            ObservationDispatch::NoFace
+        );
+        let face = sample(7, 1_100_000_000);
         assert!(matches!(
-            gate.dispatch(Some(&face), MonoTimeNs(1_050_000_000)),
+            gate.dispatch(Some(&face), MonoTimeNs(1_150_000_000)),
             ObservationDispatch::Face(_)
         ));
+    }
+
+    #[test]
+    fn session_reset_rejects_in_flight_observations_and_preserves_camera_neutral() {
+        let mut runtime = TrackingRuntime::default();
+        let mut face = sample(7, 1_000_000_000);
+        assert!(runtime.auto_neutral.recenter(&face).is_ok());
+        let neutral = runtime.auto_neutral.reference();
+        runtime.held_sample = Some(face.clone());
+        runtime.control_active = true;
+        runtime.last_update = Some(MonoTimeNs(1_000_000_000));
+
+        runtime.invalidate_session(MonoTimeNs(1_050_000_000));
+        assert_eq!(runtime.auto_neutral.reference(), neutral);
+        assert!(runtime.held_sample.is_none());
+        assert!(runtime.latest_control.is_none());
+        assert!(!runtime.control_active);
+        assert!(runtime.last_update.is_none());
+        face.inference_finished_at = MonoTimeNs(1_100_000_000);
+        assert_eq!(
+            runtime
+                .observation_gate
+                .dispatch(Some(&face), MonoTimeNs(1_150_000_000)),
+            ObservationDispatch::NoFace
+        );
     }
 
     #[test]

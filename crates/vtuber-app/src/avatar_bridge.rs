@@ -1,4 +1,4 @@
-//! Bridge from tracking's latest control slot to the active avatar generation.
+//! Bridge from tracking's pending control to the active avatar generation.
 
 use bevy::prelude::*;
 use vtuber_avatar::{
@@ -11,7 +11,7 @@ use crate::tracking_runtime::TrackingRuntime;
 
 /// Publishes the latest tracking frame only while the active avatar is ready.
 ///
-/// The avatar generation is attached on the Bevy side, so an old frame cannot
+/// The avatar generation was attached at production, so an old frame cannot
 /// be applied to a replacement avatar. Frames produced while loading,
 /// unloading, or failed are dropped and counted by the avatar apply systems.
 pub fn publish_control_frame_system(
@@ -23,30 +23,13 @@ pub fn publish_control_frame_system(
         active.frame = None;
         return;
     }
-    let slot = tracking.control_slot();
-    let generation = slot.generation();
-    if generation == 0 {
-        return;
+    if active.generation != lifecycle.current_generation() {
+        active.frame = None;
     }
-    // `TrackingRuntime` retains the last value, but this generation check
-    // ensures the bridge publishes at most one copy per latest-slot advance.
-    if active.frame.as_ref().is_some_and(|frame| {
-        tracking
-            .latest_control
-            .as_ref()
-            .is_some_and(|value| frame.produced_at == value.produced_at)
-    }) {
-        return;
-    }
-    let Some(frame) = tracking.latest_control.take() else {
+    let Some((generation, frame)) = tracking.latest_control.take() else {
         return;
     };
-    let _ = set_active_control_frame(
-        &lifecycle,
-        lifecycle.current_generation(),
-        frame,
-        &mut active,
-    );
+    let _ = set_active_control_frame(&lifecycle, generation, frame, &mut active);
 }
 
 /// Mirrors real avatar binding/apply metrics into the application diagnostics.
@@ -132,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_avatar_receives_the_latest_real_tracking_frame() {
+    fn ready_avatar_accepts_its_generation_and_rejects_a_pending_old_frame() {
         let mut app = App::new();
         app.init_resource::<TrackingRuntime>()
             .init_resource::<AvatarLifecycle>()
@@ -169,8 +152,7 @@ mod tests {
         {
             let mut tracking = app.world_mut().resource_mut::<TrackingRuntime>();
             tracking.control_active = true;
-            tracking.latest_control = Some(frame.clone());
-            assert!(tracking.control_slot.publish(frame));
+            tracking.latest_control = Some((expected_generation, frame.clone()));
         }
 
         app.update();
@@ -181,5 +163,25 @@ mod tests {
             active.frame.as_ref().map(|frame| frame.source_seq.0),
             Some(4)
         );
+
+        let new_root = app.world_mut().spawn_empty().id();
+        {
+            let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
+            lifecycle.request_replace(new_root).unwrap();
+            lifecycle.finish_unload();
+            lifecycle.start_binding(new_root);
+            lifecycle.finish_ready();
+        }
+        assert_ne!(
+            app.world()
+                .resource::<AvatarLifecycle>()
+                .current_generation(),
+            expected_generation
+        );
+        app.world_mut()
+            .resource_mut::<TrackingRuntime>()
+            .latest_control = Some((expected_generation, frame));
+        app.update();
+        assert!(app.world().resource::<ActiveControlFrame>().frame.is_none());
     }
 }
