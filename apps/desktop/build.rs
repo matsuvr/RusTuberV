@@ -7,11 +7,19 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
+// The same dependency-free source is used by runtime and packaging. No SDK dependency here.
+#[path = "../../crates/vtuber-ndi/src/runtime_identity.rs"]
+#[allow(
+    dead_code,
+    reason = "the build script uses binary identity; directory discovery is used by runtime and tools, and NDI calls are feature-gated"
+)]
+mod runtime_identity;
+use runtime_identity::runtime_name_in_binary;
 
 fn main() {
     embed_app_icon();
 
+    println!("cargo:rerun-if-changed=../../crates/vtuber-ndi/src/runtime_identity.rs");
     println!("cargo:rerun-if-env-changed=NDI_SDK_DIR");
     println!("cargo:rerun-if-env-changed=NDI_RUNTIME_DLL");
 
@@ -71,9 +79,9 @@ fn stage_runtime_dll() -> Result<(), String> {
             import_library.display()
         )
     })?;
-    let runtime_name = detect_runtime_name(&import_library_bytes).ok_or_else(|| {
+    let runtime_name = runtime_name_in_binary(&import_library_bytes).map_err(|error| {
         format!(
-            "NDI x64 import library {} does not name a supported runtime DLL",
+            "NDI x64 import library {} {error}",
             import_library.display()
         )
     })?;
@@ -106,14 +114,6 @@ fn stage_runtime_dll() -> Result<(), String> {
     Ok(())
 }
 
-fn detect_runtime_name(import_library: &[u8]) -> Option<&'static str> {
-    RUNTIME_FILE_NAMES.iter().copied().find(|name| {
-        import_library
-            .windows(name.len())
-            .any(|window| window == name.as_bytes())
-    })
-}
-
 fn target_profile_directory() -> Result<PathBuf, String> {
     let out_dir = PathBuf::from(
         env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR is not set by Cargo".to_string())?,
@@ -142,33 +142,4 @@ fn require_file(path: &Path, description: &str) -> Result<(), String> {
         return Err(format!("{description} does not exist: {}", path.display()));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::detect_runtime_name;
-
-    #[test]
-    fn detects_current_standard_sdk_runtime_name() {
-        assert_eq!(
-            detect_runtime_name(b"Processing.NDI.Lib.x64.dll\0"),
-            Some("Processing.NDI.Lib.x64.dll")
-        );
-    }
-
-    #[test]
-    fn detects_legacy_standard_sdk_runtime_name() {
-        assert_eq!(
-            detect_runtime_name(b"Processing.NDI.Lib_x64.dll\0"),
-            Some("Processing.NDI.Lib_x64.dll")
-        );
-    }
-
-    #[test]
-    fn rejects_unrelated_runtime_name() {
-        assert_eq!(
-            detect_runtime_name(b"Processing.NDI.Lib.UWP.x64.dll\0"),
-            None
-        );
-    }
 }
