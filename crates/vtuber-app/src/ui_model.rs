@@ -115,10 +115,8 @@ pub struct ExpressionKeyBindingViewModel {
 /// Expression catalog and assignment snapshot for the UI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExpressionViewModel {
-    /// Stable model ID the snapshot was built for.
-    pub model_id: Option<String>,
-    /// Avatar generation the snapshot was built for.
-    pub generation: Option<vtuber_avatar::AvatarGeneration>,
+    /// Model and instance the catalog snapshot was built for.
+    pub target: Option<crate::actions::ModelActionTarget>,
     /// Whether the active model exposes an expression catalog.
     pub has_catalog: bool,
     /// Every catalog entry, including not-ready definitions.
@@ -276,6 +274,8 @@ impl Default for RichLookViewModel {
 /// Complete UI snapshot.
 #[derive(Clone, Debug, Default, Resource)]
 pub struct UiViewModel {
+    /// Ready model and instance displayed by model-specific settings.
+    pub model_target: Option<crate::actions::ModelActionTarget>,
     /// Selected destination.
     pub pane: Pane,
     /// Application lifecycle.

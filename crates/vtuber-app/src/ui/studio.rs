@@ -1447,9 +1447,9 @@ fn display_framing_section(
 
 /// Per-model default arm pose sliders, shown on the calibration page.
 fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
-    if vm.avatar.imported_model.is_none() {
+    let Some(target) = vm.model_target.as_ref() else {
         return;
-    }
+    };
     section(
         ui,
         lang.pick("腕の姿勢", "Arm pose", "手臂姿势", "팔 자세"),
@@ -1515,6 +1515,7 @@ fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                 profile.arm_drop_radians = drop_degrees.to_radians();
                 profile.finger_curl_radians = curl_degrees.to_radians();
                 state.emit(UiAction::SetArmPoseProfile {
+                    target: target.clone(),
                     profile: ArmPoseProfileOverride::from_profile(profile),
                 });
             }
@@ -1528,7 +1529,9 @@ fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                     ))
                     .clicked()
             {
-                state.emit(UiAction::ResetArmPoseProfile);
+                state.emit(UiAction::ResetArmPoseProfile {
+                    target: target.clone(),
+                });
             }
         },
     );
@@ -1790,11 +1793,17 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
 /// systems read, so the change is visible without a reload; the save button
 /// persists the same values for the loaded model.
 fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+    let Some(target) = vm.model_target.as_ref() else {
+        return;
+    };
     let switch = lang.pick("リッチ表示", "Enhanced look", "增强显示", "고급 렌더링");
     section(ui, switch, |ui| {
         let mut enabled = vm.look.enabled;
         if ui.checkbox(&mut enabled, switch).changed() {
-            state.emit(UiAction::ChangeRichLook(RichLookChange::Enabled(enabled)));
+            state.emit(UiAction::ChangeRichLook {
+                target: target.clone(),
+                change: RichLookChange::Enabled(enabled),
+            });
         }
         let mut percent = vm.look.strength * 100.0;
         if ui
@@ -1805,9 +1814,10 @@ fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
             )
             .changed()
         {
-            state.emit(UiAction::ChangeRichLook(RichLookChange::Strength(
-                percent / 100.0,
-            )));
+            state.emit(UiAction::ChangeRichLook {
+                target: target.clone(),
+                change: RichLookChange::Strength(percent / 100.0),
+            });
         }
         if vm.avatar.imported_model.is_some()
             && ui
@@ -1819,7 +1829,9 @@ fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
                 ))
                 .clicked()
         {
-            state.emit(UiAction::SaveRichLook);
+            state.emit(UiAction::SaveRichLook {
+                target: target.clone(),
+            });
         }
     });
 }
@@ -1925,7 +1937,7 @@ fn expression_settings_section(
             }
             // Every assignment action carries the exact model/generation this
             // snapshot was built for.
-            let target = vm.expression.model_id.clone().zip(vm.expression.generation);
+            let target = vm.expression.target.clone();
             ui.label(lang.pick(
                 "最大36個のキーに割り当てられます。自動割り当てに含まれなかった表情も、ここで選択できます。",
                 "Up to 36 keys can be assigned. You can also choose expressions that were not assigned automatically.",
@@ -1971,11 +1983,10 @@ fn expression_settings_section(
                                 )
                                 .clicked()
                                 && row.expression.is_some()
-                                && let Some((model_id, generation)) = target.clone()
+                                && let Some(target) = target.clone()
                             {
                                 state.emit(UiAction::AssignExpressionKey {
-                                    model_id,
-                                    generation,
+                                    target,
                                     key: row.key,
                                     expression: None,
                                 });
@@ -2019,11 +2030,10 @@ fn expression_settings_section(
                                         egui::Button::selectable(selected, label),
                                     )
                                     .clicked()
-                                    && let Some((model_id, generation)) = target.clone()
+                                    && let Some(target) = target.clone()
                                 {
                                     state.emit(UiAction::AssignExpressionKey {
-                                        model_id,
-                                        generation,
+                                        target,
                                         key: row.key,
                                         expression: Some(entry.id.clone()),
                                     });
@@ -2045,7 +2055,11 @@ fn expression_settings_section(
                 if ui
                     .button(lang.pick("表情を解除", "Clear Expression", "取消表情", "표정 해제"))
                     .clicked()
-                    && let Some(generation) = vm.expression.generation
+                    && let Some(generation) = vm
+                        .expression
+                        .target
+                        .as_ref()
+                        .map(|target| target.generation)
                 {
                     state.emit(UiAction::ClearManualExpression { generation });
                 }
@@ -2057,12 +2071,9 @@ fn expression_settings_section(
                         "기본 키 할당 복원",
                     ))
                     .clicked()
-                    && let Some((model_id, generation)) = target.clone()
+                    && let Some(target) = target.clone()
                 {
-                    state.emit(UiAction::ResetExpressionBindings {
-                        model_id,
-                        generation,
-                    });
+                    state.emit(UiAction::ResetExpressionBindings { target });
                 }
             });
             ui.label(
@@ -2085,7 +2096,12 @@ fn expression_status_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
     if !vm.expression.has_catalog {
         return;
     }
-    let Some(generation) = vm.expression.generation else {
+    let Some(generation) = vm
+        .expression
+        .target
+        .as_ref()
+        .map(|target| target.generation)
+    else {
         return;
     };
     section(
@@ -2207,7 +2223,12 @@ pub(crate) fn expression_key_input(
     if ctx.egui_wants_keyboard_input() || ctx.any_popup_open() {
         return;
     }
-    let Some(generation) = vm.expression.generation else {
+    let Some(generation) = vm
+        .expression
+        .target
+        .as_ref()
+        .map(|target| target.generation)
+    else {
         return;
     };
     let actions: Vec<UiAction> = ctx.input(|input| {
@@ -2704,8 +2725,10 @@ mod tests {
         let mut vm = UiViewModel::default();
         vm.avatar.is_ready = true;
         vm.avatar.lifecycle = AvatarLifecycleState::Ready;
-        vm.expression.model_id = Some("model".into());
-        vm.expression.generation = Some(test_generation());
+        vm.expression.target = Some(crate::actions::ModelActionTarget {
+            model_id: "model".into(),
+            generation: test_generation(),
+        });
         vm
     }
 
@@ -3086,6 +3109,10 @@ mod tests {
             let ctx = egui::Context::default();
             let mut state = UiState::default();
             let mut vm = UiViewModel::default();
+            vm.model_target = Some(crate::actions::ModelActionTarget {
+                model_id: "model".into(),
+                generation: test_generation(),
+            });
             vm.look.enabled = true;
             vm.look.strength = 0.5;
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {

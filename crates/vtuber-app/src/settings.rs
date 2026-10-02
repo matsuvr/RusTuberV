@@ -57,8 +57,6 @@ impl UiLanguage {
 pub struct AppSettings {
     path: Option<PathBuf>,
     restored: ArmPoseOverrideStore,
-    /// Model whose look was restored, including CLI startup loads.
-    pub(crate) look_model_id: Option<String>,
     restored_expression_bindings: ExpressionBindingStore,
     language: UiLanguage,
     arm_tracking_enabled: bool,
@@ -69,7 +67,6 @@ impl Default for AppSettings {
         Self {
             path: default_settings_path(),
             restored: ArmPoseOverrideStore::default(),
-            look_model_id: None,
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
             arm_tracking_enabled: false,
@@ -124,7 +121,6 @@ impl AppSettings {
         Self {
             path: Some(path.into()),
             restored: ArmPoseOverrideStore::default(),
-            look_model_id: None,
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
             arm_tracking_enabled: false,
@@ -477,7 +473,6 @@ fn restore_settings_document(
     Ok(AppSettings {
         path: Some(path),
         restored,
-        look_model_id: None,
         restored_expression_bindings,
         language,
         arm_tracking_enabled,

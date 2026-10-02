@@ -8,6 +8,15 @@ use std::path::PathBuf;
 
 use vtuber_avatar::ArmPoseProfileOverride;
 
+/// Model identity and avatar instance displayed when an edit was issued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelActionTarget {
+    /// Stable imported-model identity.
+    pub model_id: String,
+    /// Avatar instance generation.
+    pub generation: vtuber_avatar::AvatarGeneration,
+}
+
 /// An independent edit to the look switch or strength.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RichLookChange {
@@ -109,11 +118,16 @@ pub enum UiAction {
     // --- Avatar pose settings ---
     /// Store a bounded per-model default-arm profile and re-resolve it.
     SetArmPoseProfile {
+        /// Model and instance the UI displayed.
+        target: ModelActionTarget,
         /// The six validated profile parameters edited by the settings UI.
         profile: ArmPoseProfileOverride,
     },
     /// Remove the active model's override and return to geometry-derived pose.
-    ResetArmPoseProfile,
+    ResetArmPoseProfile {
+        /// Model and instance the UI displayed.
+        target: ModelActionTarget,
+    },
 
     // --- Expression key bindings ---
     /// Assign or unassign a fixed expression key for a specific model
@@ -123,10 +137,8 @@ pub enum UiAction {
     /// are captured when the UI issues the action, so a swap that happens
     /// before processing cannot apply the operation to the new model.
     AssignExpressionKey {
-        /// Model ID the UI displayed when the action was issued.
-        model_id: String,
-        /// Avatar generation the UI displayed when the action was issued.
-        generation: vtuber_avatar::AvatarGeneration,
+        /// Model and instance the UI displayed.
+        target: ModelActionTarget,
         /// Fixed physical key.
         key: crate::expression_keys::ExpressionKey,
         /// Exact runtime expression ID, or `None` to unassign.
@@ -134,10 +146,8 @@ pub enum UiAction {
     },
     /// Restore the initial assignment for a specific model generation.
     ResetExpressionBindings {
-        /// Model ID the UI displayed when the action was issued.
-        model_id: String,
-        /// Avatar generation the UI displayed when the action was issued.
-        generation: vtuber_avatar::AvatarGeneration,
+        /// Model and instance the UI displayed.
+        target: ModelActionTarget,
     },
     /// Toggle the expression currently assigned to a key.
     ToggleExpressionKey {
@@ -164,12 +174,32 @@ pub enum UiAction {
 
     // --- Rich look ---
     /// Change the live look without writing the settings file.
-    ChangeRichLook(RichLookChange),
+    ChangeRichLook {
+        /// Model and instance the UI displayed.
+        target: ModelActionTarget,
+        /// Live edit, independent of explicit saving.
+        change: RichLookChange,
+    },
     /// Persist the look when a checkbox or slider edit is complete.
-    SaveRichLook,
+    SaveRichLook {
+        /// Model and instance the UI displayed.
+        target: ModelActionTarget,
+    },
 }
 
 impl UiAction {
+    /// Returns the issuance target of a model-specific edit.
+    pub(crate) fn model_target(&self) -> Option<&ModelActionTarget> {
+        match self {
+            Self::SetArmPoseProfile { target, .. }
+            | Self::ResetArmPoseProfile { target }
+            | Self::AssignExpressionKey { target, .. }
+            | Self::ResetExpressionBindings { target }
+            | Self::ChangeRichLook { target, .. }
+            | Self::SaveRichLook { target } => Some(target),
+            _ => None,
+        }
+    }
     /// Check if this action requires a running pipeline.
     #[must_use]
     pub fn requires_running_pipeline(&self) -> bool {
@@ -281,20 +311,21 @@ mod tests {
         let key = crate::expression_keys::ExpressionKey::Digit1;
         let generation = vtuber_avatar::AvatarGeneration(3);
         let assign = UiAction::AssignExpressionKey {
-            model_id: "model-a".into(),
-            generation,
+            target: crate::actions::ModelActionTarget {
+                model_id: "model-a".into(),
+                generation,
+            },
             key,
             expression: Some("happy".into()),
         };
         match assign {
             UiAction::AssignExpressionKey {
-                model_id,
-                generation: g,
+                target,
                 key: k,
                 expression,
             } => {
-                assert_eq!(model_id, "model-a");
-                assert_eq!(g, generation);
+                assert_eq!(target.model_id, "model-a");
+                assert_eq!(target.generation, generation);
                 assert_eq!(k, key);
                 assert_eq!(expression.as_deref(), Some("happy"));
             }
@@ -326,22 +357,28 @@ mod tests {
 
     #[test]
     fn rich_look_actions_carry_their_value() {
+        let action = |change| UiAction::ChangeRichLook {
+            target: ModelActionTarget {
+                model_id: "model-a".into(),
+                generation: vtuber_avatar::AvatarGeneration(3),
+            },
+            change,
+        };
+
         assert_eq!(
-            UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
-            UiAction::ChangeRichLook(RichLookChange::Enabled(true))
+            action(RichLookChange::Enabled(true)),
+            action(RichLookChange::Enabled(true))
         );
         assert_ne!(
-            UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
-            UiAction::ChangeRichLook(RichLookChange::Enabled(false))
+            action(RichLookChange::Enabled(true)),
+            action(RichLookChange::Enabled(false))
         );
         assert_eq!(
-            UiAction::ChangeRichLook(RichLookChange::Strength(0.25)),
-            UiAction::ChangeRichLook(RichLookChange::Strength(0.25))
+            action(RichLookChange::Strength(0.25)),
+            action(RichLookChange::Strength(0.25))
         );
-        assert!(!UiAction::ChangeRichLook(RichLookChange::Enabled(true)).is_navigation());
-        assert!(
-            !UiAction::ChangeRichLook(RichLookChange::Strength(1.0)).requires_running_pipeline()
-        );
+        assert!(!action(RichLookChange::Enabled(true)).is_navigation());
+        assert!(!action(RichLookChange::Strength(1.0)).requires_running_pipeline());
     }
 
     #[test]

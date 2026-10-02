@@ -817,6 +817,15 @@ pub fn process_ui_actions_system(
 ) {
     let actions = ui_state.take_actions();
     for action in &actions {
+        if let Some(target) = action.model_target()
+            && lifecycle
+                .as_deref()
+                .and_then(|lifecycle| current_model_target(&orchestrator, lifecycle))
+                .as_ref()
+                != Some(target)
+        {
+            continue;
+        }
         match action {
             UiAction::TogglePreview => preview.toggle_visible(),
             UiAction::ToggleMirror => preview.toggle_mirrored(),
@@ -846,18 +855,20 @@ pub fn process_ui_actions_system(
                     pose.recalibrate();
                 }
             }
-            UiAction::SetArmPoseProfile { profile } => {
+            UiAction::SetArmPoseProfile { target, profile } => {
                 edit_arm_pose_profile_action(
                     &mut orchestrator,
+                    target,
                     Some(*profile),
                     &mut arm_pose_overrides,
                     arm_pose_settings.as_deref(),
                     &mut arm_pose_changes,
                 );
             }
-            UiAction::ResetArmPoseProfile => {
+            UiAction::ResetArmPoseProfile { target } => {
                 edit_arm_pose_profile_action(
                     &mut orchestrator,
+                    target,
                     None,
                     &mut arm_pose_overrides,
                     arm_pose_settings.as_deref(),
@@ -900,9 +911,6 @@ pub fn process_ui_actions_system(
             }
             UiAction::UnloadAvatar => {
                 orchestrator.process_action(action);
-                if let Some(persistent) = arm_pose_settings.as_deref_mut() {
-                    persistent.look_model_id = None;
-                }
                 if let (Some(look), Some(changes)) = (
                     look.look_settings.as_deref_mut(),
                     look.look_changes.as_mut(),
@@ -911,7 +919,7 @@ pub fn process_ui_actions_system(
                     changes.write(vtuber_avatar::LookSettingsChanged(look.0));
                 }
             }
-            UiAction::ChangeRichLook(change) => {
+            UiAction::ChangeRichLook { change, .. } => {
                 if let Err(error) = apply_rich_look_action(
                     look.look_settings.as_deref_mut(),
                     look.look_changes.as_mut(),
@@ -922,20 +930,14 @@ pub fn process_ui_actions_system(
                     )));
                 }
             }
-            UiAction::SaveRichLook => {
+            UiAction::SaveRichLook { target } => {
                 if let (Some(persistent), Some(look)) =
                     (arm_pose_settings.as_deref(), look.look_settings.as_deref())
                 {
                     let result = persistent
-                        .look_model_id
-                        .as_ref()
-                        .ok_or(OrchestratorError::NoAvatarLoaded)
-                        .and_then(|id| {
-                            persistent
-                                .save_rich_look(id.clone(), look.0)
-                                .map_err(|error| {
-                                    OrchestratorError::ArmPoseSettingsFailed(error.to_string())
-                                })
+                        .save_rich_look(target.model_id.clone(), look.0)
+                        .map_err(|error| {
+                            OrchestratorError::ArmPoseSettingsFailed(error.to_string())
                         });
                     if let Err(error) = result {
                         orchestrator.set_last_error(Some(error));
@@ -943,18 +945,14 @@ pub fn process_ui_actions_system(
                 }
             }
             UiAction::AssignExpressionKey {
-                model_id,
-                generation,
+                target,
                 key,
                 expression,
             } => {
                 apply_expression_binding_action(
                     &mut orchestrator,
                     ExpressionBindingAction::Assign {
-                        target: ExpressionTarget {
-                            model_id: model_id.clone(),
-                            generation: *generation,
-                        },
+                        target: target.clone(),
                         key: *key,
                         expression: expression.clone(),
                     },
@@ -964,17 +962,11 @@ pub fn process_ui_actions_system(
                     &mut manual_requests,
                 );
             }
-            UiAction::ResetExpressionBindings {
-                model_id,
-                generation,
-            } => {
+            UiAction::ResetExpressionBindings { target } => {
                 apply_expression_binding_action(
                     &mut orchestrator,
                     ExpressionBindingAction::Reset {
-                        target: ExpressionTarget {
-                            model_id: model_id.clone(),
-                            generation: *generation,
-                        },
+                        target: target.clone(),
                     },
                     &mut expression_store,
                     arm_pose_settings.as_deref(),
@@ -999,11 +991,10 @@ pub fn process_ui_actions_system(
         }
     }
     orchestrator.update_view_model(&mut view_model);
-    sync_arm_pose_view_model(
-        &orchestrator,
-        &mut view_model,
-        arm_pose_overrides.as_deref(),
-    );
+    view_model.model_target = lifecycle
+        .as_deref()
+        .and_then(|lifecycle| current_model_target(&orchestrator, lifecycle));
+    sync_arm_pose_view_model(&mut view_model, arm_pose_overrides.as_deref());
     view_model.preview_visible = preview.visible;
     view_model.mirror_preview = preview.mirrored;
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
@@ -1035,55 +1026,47 @@ fn apply_rich_look_action(
     Ok(())
 }
 
-/// Returns the one catalog that expression operations may use right now.
-///
-/// The imported-model ID and the render-side catalog can disagree while a
-/// pending load has not reached the lifecycle yet. Only a `Ready` avatar whose
-/// catalog generation matches the lifecycle generation and whose catalog
-/// model matches the orchestrator's imported model yields a consistent
-/// snapshot; otherwise expression operations are unavailable.
+/// Pairs the accepted model owner with the ready lifecycle instance.
+fn current_model_target(
+    orchestrator: &Orchestrator,
+    lifecycle: &AvatarLifecycle,
+) -> Option<crate::actions::ModelActionTarget> {
+    if lifecycle.state() != vtuber_avatar::AvatarLifecycleState::Ready {
+        return None;
+    }
+    Some(crate::actions::ModelActionTarget {
+        model_id: orchestrator.active_model_id()?.to_owned(),
+        generation: lifecycle.current_generation(),
+    })
+}
+
+/// Returns only a catalog consistent with the current model target.
 fn current_expression_catalog<'a>(
     orchestrator: &Orchestrator,
     lifecycle: &'a AvatarLifecycle,
 ) -> Option<&'a AvatarExpressionCatalog> {
+    let target = current_model_target(orchestrator, lifecycle)?;
     let catalog = lifecycle.expression_catalog()?;
-    (lifecycle.state() == vtuber_avatar::AvatarLifecycleState::Ready
-        && catalog.generation == lifecycle.current_generation().0
-        && orchestrator.active_model_id() == Some(catalog.model_id.as_str()))
-    .then_some(catalog)
-}
-
-/// Model and generation captured when the UI issued an action.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ExpressionTarget {
-    model_id: String,
-    generation: AvatarGeneration,
-}
-
-impl ExpressionTarget {
-    /// Returns `true` when the consistent catalog still matches the target
-    /// captured at issuance.
-    fn is_current(&self, orchestrator: &Orchestrator, lifecycle: &AvatarLifecycle) -> bool {
-        current_expression_catalog(orchestrator, lifecycle).is_some_and(|catalog| {
-            catalog.model_id == self.model_id && catalog.generation == self.generation.0
-        })
-    }
+    (catalog.generation == target.generation.0 && catalog.model_id == target.model_id)
+        .then_some(catalog)
 }
 
 /// Expression key mutation requested by the UI.
 enum ExpressionBindingAction {
     /// Assign an expression (or unassign with `None`) to one key.
     Assign {
-        target: ExpressionTarget,
+        target: crate::actions::ModelActionTarget,
         key: ExpressionKey,
         expression: Option<String>,
     },
     /// Restore the target model's deterministic default assignment.
-    Reset { target: ExpressionTarget },
+    Reset {
+        target: crate::actions::ModelActionTarget,
+    },
 }
 
 impl ExpressionBindingAction {
-    fn target(&self) -> &ExpressionTarget {
+    fn target(&self) -> &crate::actions::ModelActionTarget {
         match self {
             Self::Assign { target, .. } | Self::Reset { target } => target,
         }
@@ -1109,22 +1092,21 @@ fn apply_expression_binding_action(
         return;
     };
     let target = action.target().clone();
-    if !target.is_current(orchestrator, lifecycle) {
+    let Some(catalog) = current_expression_catalog(orchestrator, lifecycle) else {
         return;
-    }
-    let catalog = lifecycle.expression_catalog();
+    };
     let model_id = target.model_id;
     let Some(store) = store.as_deref_mut() else {
         return;
     };
-    let current = effective_bindings(store, &model_id, catalog);
+    let current = effective_bindings(store, &model_id, Some(catalog));
     let mut candidate = current.clone();
     match action {
         ExpressionBindingAction::Assign {
             expression, key, ..
         } => match expression {
             Some(expression) => {
-                if !can_assign_expression(catalog, &expression) {
+                if !can_assign_expression(Some(catalog), &expression) {
                     return;
                 }
                 candidate.assign(key, expression);
@@ -1132,9 +1114,6 @@ fn apply_expression_binding_action(
             None => candidate.unassign(key),
         },
         ExpressionBindingAction::Reset { .. } => {
-            let Some(catalog) = catalog else {
-                return;
-            };
             candidate.reset_to_defaults(catalog);
         }
     }
@@ -1254,8 +1233,10 @@ pub fn sync_expression_view_model(
     let selected = manual.as_deref().and_then(|manual| manual.selected.clone());
     // Actions emitted from this snapshot carry exactly the model/generation
     // shown here so a later swap cannot apply them to the new avatar.
-    let snapshot_model_id = catalog.map(|catalog| catalog.model_id.clone());
-    let snapshot_generation = catalog.map(|catalog| AvatarGeneration(catalog.generation));
+    let target = catalog.map(|catalog| crate::actions::ModelActionTarget {
+        model_id: catalog.model_id.clone(),
+        generation: AvatarGeneration(catalog.generation),
+    });
     let bindings = match (catalog, store.as_deref()) {
         (Some(catalog), Some(store)) => effective_bindings(store, &catalog.model_id, Some(catalog)),
         (Some(catalog), None) => ExpressionBindings::default_for(catalog),
@@ -1289,8 +1270,7 @@ pub fn sync_expression_view_model(
         })
         .collect();
     view_model.expression = ExpressionViewModel {
-        model_id: snapshot_model_id,
-        generation: snapshot_generation,
+        target,
         has_catalog: catalog.is_some(),
         entries,
         bindings: binding_rows,
@@ -1300,14 +1280,13 @@ pub fn sync_expression_view_model(
 
 fn edit_arm_pose_profile_action(
     orchestrator: &mut Orchestrator,
+    target: &crate::actions::ModelActionTarget,
     profile: Option<ArmPoseProfileOverride>,
     overrides: &mut Option<ResMut<ArmPoseOverrideStore>>,
     settings: Option<&AppSettings>,
     changes: &mut Option<MessageWriter<ArmPoseProfileChange>>,
 ) {
-    let Some(model_id) = orchestrator.active_model_id().map(str::to_owned) else {
-        return;
-    };
+    let model_id = target.model_id.clone();
     let Some(store) = overrides.as_deref_mut() else {
         return;
     };
@@ -1340,15 +1319,14 @@ fn edit_arm_pose_profile_action(
 }
 
 fn sync_arm_pose_view_model(
-    orchestrator: &Orchestrator,
     view_model: &mut UiViewModel,
     overrides: Option<&ArmPoseOverrideStore>,
 ) {
-    let Some(model_id) = orchestrator.active_model_id() else {
+    let Some(target) = view_model.model_target.as_ref() else {
         view_model.arm_pose = ArmPoseViewModel::default();
         return;
     };
-    let id = AvatarAssetId::new(model_id);
+    let id = AvatarAssetId::new(&target.model_id);
     let Some(overrides) = overrides else {
         view_model.arm_pose = ArmPoseViewModel::default();
         return;
@@ -1407,19 +1385,6 @@ fn prepare_avatar_load(
     ))
 }
 
-/// Applies already-read settings only after the model load is accepted.
-fn restore_model_look(
-    model_id: &str,
-    restored: vtuber_avatar::RichLookSettings,
-    persistent: &mut AppSettings,
-    look: &mut vtuber_avatar::AvatarLookSettings,
-    changes: &mut MessageWriter<vtuber_avatar::LookSettingsChanged>,
-) {
-    persistent.look_model_id = Some(model_id.to_owned());
-    look.0 = restored;
-    changes.write(vtuber_avatar::LookSettingsChanged(restored));
-}
-
 /// Converts the avatar lifecycle's internal state to the UI model's state.
 fn map_avatar_lifecycle_state(
     state: vtuber_avatar::lifecycle::AvatarLifecycleState,
@@ -1456,7 +1421,7 @@ pub fn sync_avatar_lifecycle_system(
     mut load_requests: MessageWriter<vtuber_avatar::LoadImportedAvatarRequest>,
     mut load_results: MessageReader<vtuber_avatar::LoadImportedAvatarResult>,
     mut unload_requests: MessageWriter<vtuber_avatar::lifecycle::UnloadAvatarRequest>,
-    mut persistent: Option<ResMut<AppSettings>>,
+    persistent: Option<Res<AppSettings>>,
     mut look: Option<ResMut<vtuber_avatar::AvatarLookSettings>>,
     mut changes: Option<MessageWriter<vtuber_avatar::LookSettingsChanged>>,
     mut view_model: Option<ResMut<UiViewModel>>,
@@ -1472,19 +1437,11 @@ pub fn sync_avatar_lifecycle_system(
         match result {
             vtuber_avatar::LoadImportedAvatarResult::Accepted { request_id, .. } => {
                 if let Some(submitted) = orchestrator.submitted_loads.remove(request_id) {
-                    if let (Some(restored), Some(persistent), Some(look), Some(changes)) = (
-                        submitted.look,
-                        persistent.as_deref_mut(),
-                        look.as_deref_mut(),
-                        changes.as_mut(),
-                    ) {
-                        restore_model_look(
-                            &submitted.model.id,
-                            restored,
-                            persistent,
-                            look,
-                            changes,
-                        );
+                    if let (Some(restored), Some(look), Some(changes)) =
+                        (submitted.look, look.as_deref_mut(), changes.as_mut())
+                    {
+                        look.0 = restored;
+                        changes.write(vtuber_avatar::LookSettingsChanged(restored));
                     }
                     orchestrator.imported_model = Some(submitted.model);
                 }
@@ -1539,6 +1496,7 @@ pub fn sync_avatar_lifecycle_system(
     }
     if let Some(view_model) = view_model.as_deref_mut() {
         orchestrator.update_view_model(view_model);
+        view_model.model_target = current_model_target(&orchestrator, &lifecycle);
         if let Some(look) = look.as_deref() {
             view_model.look.enabled = look.0.enabled();
             view_model.look.strength = look.0.strength();
@@ -1613,6 +1571,29 @@ mod tests {
         app.update(); // submit; the caller's next update receives acceptance/rejection.
     }
 
+    fn model_action_target(app: &App) -> crate::actions::ModelActionTarget {
+        current_model_target(
+            app.world().resource::<Orchestrator>(),
+            app.world().resource::<AvatarLifecycle>(),
+        )
+        .unwrap()
+    }
+
+    fn look_change(app: &mut App, change: crate::actions::RichLookChange) {
+        let action = UiAction::ChangeRichLook {
+            target: model_action_target(app),
+            change,
+        };
+        look_action(app, action);
+    }
+
+    fn save_look(app: &mut App) {
+        let action = UiAction::SaveRichLook {
+            target: model_action_target(app),
+        };
+        look_action(app, action);
+    }
+
     fn look_action(app: &mut App, action: UiAction) {
         app.world_mut().resource_mut::<UiState>().emit(action);
         app.update();
@@ -1638,15 +1619,9 @@ mod tests {
         finish_look_model(&mut app);
         let preview = app.world().resource::<PreviewState>().visible;
         let ndi_generation = app.world().resource::<NdiOutputIntent>().generation();
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
-        );
+        look_change(&mut app, RichLookChange::Enabled(true));
         for strength in [1.0, 0.5, 0.0] {
-            look_action(
-                &mut app,
-                UiAction::ChangeRichLook(RichLookChange::Strength(strength)),
-            );
+            look_change(&mut app, RichLookChange::Strength(strength));
             assert_eq!(
                 app.world().resource::<AvatarLookSettings>().0,
                 RichLookSettings::try_new(true, strength).unwrap()
@@ -1657,22 +1632,13 @@ mod tests {
             );
             assert!(!path.exists(), "live edits must not write files");
         }
-        look_action(&mut app, UiAction::SaveRichLook);
+        save_look(&mut app);
         let zero = RichLookSettings::try_new(true, 0.0).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Strength(0.5)),
-        );
+        look_change(&mut app, RichLookChange::Strength(0.5));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Enabled(false)),
-        );
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
-        );
+        look_change(&mut app, RichLookChange::Enabled(false));
+        look_change(&mut app, RichLookChange::Enabled(true));
         assert_eq!(
             app.world().resource::<AvatarLookSettings>().0.strength(),
             0.5
@@ -1690,11 +1656,8 @@ mod tests {
             app.world().resource::<AvatarLookSettings>().0,
             RichLookSettings::default()
         );
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Strength(0.5)),
-        );
-        look_action(&mut app, UiAction::SaveRichLook);
+        look_change(&mut app, RichLookChange::Strength(0.5));
+        save_look(&mut app);
         select_look_model(&mut app, 'a');
         app.update();
         finish_look_model(&mut app);
@@ -1711,12 +1674,7 @@ mod tests {
             app.world().resource::<AvatarLookSettings>().0,
             RichLookSettings::default()
         );
-        assert!(
-            app.world()
-                .resource::<AppSettings>()
-                .look_model_id
-                .is_none()
-        );
+        assert!(app.world().resource::<UiViewModel>().model_target.is_none());
         drop(app);
         let mut restarted = rich_look_app(&path);
         select_look_model(&mut restarted, 'a');
@@ -1735,18 +1693,12 @@ mod tests {
         select_look_model(&mut app, 'a');
         app.update();
         finish_look_model(&mut app);
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Strength(0.5)),
-        );
-        look_action(&mut app, UiAction::SaveRichLook);
+        look_change(&mut app, RichLookChange::Strength(0.5));
+        save_look(&mut app);
         let previous = app.world().resource::<AvatarLookSettings>().0;
         let bytes = std::fs::read(&path).unwrap();
         for strength in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            look_action(
-                &mut app,
-                UiAction::ChangeRichLook(RichLookChange::Strength(strength)),
-            );
+            look_change(&mut app, RichLookChange::Strength(strength));
             assert_eq!(app.world().resource::<AvatarLookSettings>().0, previous);
             assert_eq!(
                 app.world().resource::<UiViewModel>().look.strength,
@@ -1787,12 +1739,10 @@ mod tests {
         let mut app = rich_look_app(&path);
         select_look_model(&mut app, 'a');
         app.update();
+        finish_look_model(&mut app);
         std::fs::create_dir(&path).unwrap();
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Enabled(true)),
-        );
-        look_action(&mut app, UiAction::SaveRichLook);
+        look_change(&mut app, RichLookChange::Enabled(true));
+        save_look(&mut app);
         assert!(
             app.world()
                 .resource::<vtuber_avatar::AvatarLookSettings>()
@@ -1857,11 +1807,6 @@ mod tests {
             world.resource::<Orchestrator>().active_model_id(),
             Some(model.id.as_str()),
             "UI model owner"
-        );
-        assert_eq!(
-            world.resource::<AppSettings>().look_model_id.as_deref(),
-            Some(model.id.as_str()),
-            "save owner"
         );
         assert_eq!(
             world.resource::<vtuber_avatar::AvatarLookSettings>().0,
@@ -1947,11 +1892,8 @@ mod tests {
             app.world().resource::<Orchestrator>().last_error(),
             Some(OrchestratorError::AvatarLoadRejected(_))
         ));
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Strength(0.5)),
-        );
-        look_action(&mut app, UiAction::SaveRichLook);
+        look_change(&mut app, RichLookChange::Strength(0.5));
+        save_look(&mut app);
         assert_eq!(settings.rich_look_for(&a.id).unwrap().strength(), 0.5);
         assert_eq!(settings.rich_look_for(&b.id).unwrap(), b_look);
     }
@@ -2042,11 +1984,8 @@ mod tests {
         finish_look_model(&mut app);
         assert!(app.world().get_entity(old_root).is_err());
         assert_model_look(&app, &b, b_look);
-        look_action(
-            &mut app,
-            UiAction::ChangeRichLook(RichLookChange::Strength(0.5)),
-        );
-        look_action(&mut app, UiAction::SaveRichLook);
+        look_change(&mut app, RichLookChange::Strength(0.5));
+        save_look(&mut app);
         assert_eq!(settings.rich_look_for(&a.id).unwrap(), a_look);
         assert_eq!(
             settings.rich_look_for(&b.id).unwrap(),
@@ -2219,9 +2158,18 @@ mod tests {
             .init_resource::<PreviewState>()
             .init_resource::<AvatarMotionMirror>()
             .init_resource::<vtuber_avatar::ArmPoseOverrideStore>()
+            .init_resource::<AvatarLifecycle>()
             .insert_resource(AppSettings::empty_at(&path))
             .add_message::<ArmPoseProfileChange>()
             .add_systems(Update, process_ui_actions_system);
+
+        let root = app.world_mut().spawn_empty().id();
+        {
+            let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
+            lifecycle.request_load(root).unwrap();
+            lifecycle.start_binding(root);
+            lifecycle.finish_ready();
+        }
 
         app.world_mut()
             .resource_mut::<Orchestrator>()
@@ -2234,9 +2182,11 @@ mod tests {
             original_path: directory.path().join("original.vrm"),
             size: 1,
         });
+        let target = model_action_target(&app);
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::SetArmPoseProfile {
+                target: target.clone(),
                 profile: ArmPoseProfileOverride::from_profile(profile),
             });
         app.update();
@@ -2271,12 +2221,15 @@ mod tests {
         std::fs::write(&path, foreign).unwrap();
         for action in [
             UiAction::SetArmPoseProfile {
+                target: target.clone(),
                 profile: ArmPoseProfileOverride::from_profile(vtuber_avatar::ArmPoseProfile {
                     arm_drop_radians: 0.7,
                     ..profile
                 }),
             },
-            UiAction::ResetArmPoseProfile,
+            UiAction::ResetArmPoseProfile {
+                target: target.clone(),
+            },
         ] {
             app.world_mut().resource_mut::<UiState>().emit(action);
             app.update();
@@ -2305,7 +2258,9 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<UiState>()
-            .emit(UiAction::ResetArmPoseProfile);
+            .emit(UiAction::ResetArmPoseProfile {
+                target: target.clone(),
+            });
         app.update();
 
         assert!(
@@ -3116,8 +3071,10 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
-                model_id,
-                generation,
+                target: crate::actions::ModelActionTarget {
+                    model_id,
+                    generation,
+                },
                 key: ExpressionKey::Digit1,
                 expression: Some("custom49".into()),
             });
@@ -3161,8 +3118,10 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
-                model_id,
-                generation,
+                target: crate::actions::ModelActionTarget {
+                    model_id,
+                    generation,
+                },
                 key: ExpressionKey::Digit1,
                 expression: Some("angry".into()),
             });
@@ -3187,8 +3146,10 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
-                model_id,
-                generation,
+                target: crate::actions::ModelActionTarget {
+                    model_id,
+                    generation,
+                },
                 key: ExpressionKey::Digit1,
                 expression: None,
             });
@@ -3206,8 +3167,10 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::ResetExpressionBindings {
-                model_id,
-                generation,
+                target: crate::actions::ModelActionTarget {
+                    model_id,
+                    generation,
+                },
             });
         app.update();
         assert_eq!(
@@ -3239,8 +3202,10 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
-                model_id,
-                generation,
+                target: crate::actions::ModelActionTarget {
+                    model_id,
+                    generation,
+                },
                 key: ExpressionKey::Digit1,
                 expression: Some("smile".into()),
             });
@@ -3302,7 +3267,19 @@ mod tests {
     fn stale_model_actions_never_reach_the_replacement_model() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.toml");
-        let mut app = expression_action_app(path);
+        let mut app = expression_action_app(path.clone());
+        app.init_resource::<ArmPoseOverrideStore>()
+            .init_resource::<vtuber_avatar::AvatarLookSettings>()
+            .add_message::<vtuber_avatar::LookSettingsChanged>();
+        let b_profile = ArmPoseProfileOverride::from_profile(vtuber_avatar::ArmPoseProfile {
+            arm_drop_radians: 0.4,
+            ..Default::default()
+        });
+        app.world_mut()
+            .resource_mut::<ArmPoseOverrideStore>()
+            .set("model-b", b_profile)
+            .unwrap();
+        let arms_before = app.world().resource::<ArmPoseOverrideStore>().clone();
         let (model_a, generation_a) = expression_target(&app);
 
         // Actions issued from model A's snapshot are already queued.
@@ -3320,17 +3297,43 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
-                model_id: model_a.clone(),
-                generation: generation_a,
+                target: crate::actions::ModelActionTarget {
+                    model_id: model_a.clone(),
+                    generation: generation_a,
+                },
                 key: ExpressionKey::Digit1,
                 expression: Some("smile".into()),
             });
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::ResetExpressionBindings {
-                model_id: model_a.clone(),
-                generation: generation_a,
+                target: crate::actions::ModelActionTarget {
+                    model_id: model_a.clone(),
+                    generation: generation_a,
+                },
             });
+        let target_a = crate::actions::ModelActionTarget {
+            model_id: model_a.clone(),
+            generation: generation_a,
+        };
+        for action in [
+            UiAction::SetArmPoseProfile {
+                target: target_a.clone(),
+                profile: ArmPoseProfileOverride::from_profile(
+                    vtuber_avatar::ArmPoseProfile::default(),
+                ),
+            },
+            UiAction::ResetArmPoseProfile {
+                target: target_a.clone(),
+            },
+            UiAction::ChangeRichLook {
+                target: target_a.clone(),
+                change: crate::actions::RichLookChange::Enabled(true),
+            },
+            UiAction::SaveRichLook { target: target_a },
+        ] {
+            app.world_mut().resource_mut::<UiState>().emit(action);
+        }
 
         // Replace model A with model B before the orchestrator consumes them.
         let root_b = app.world_mut().spawn_empty().id();
@@ -3364,6 +3367,16 @@ mod tests {
             .resource_mut::<Orchestrator>()
             .set_imported_model_for_tests(Some(stub_imported_model_with_id("model-b")));
 
+        // A matching model ID also cannot authorize an old instance generation.
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .emit(UiAction::ResetArmPoseProfile {
+                target: crate::actions::ModelActionTarget {
+                    model_id: "model-b".into(),
+                    generation: generation_a,
+                },
+            });
+
         app.update();
 
         let requests = take_manual_requests(&mut app);
@@ -3391,6 +3404,27 @@ mod tests {
             store.bindings_for("model-a").is_none(),
             "a stale assignment must not be saved at all"
         );
+        assert_eq!(app.world().resource::<ArmPoseOverrideStore>(), &arms_before);
+        assert!(
+            app.world()
+                .resource::<Messages<ArmPoseProfileChange>>()
+                .is_empty()
+        );
+        assert!(
+            !app.world()
+                .resource::<vtuber_avatar::AvatarLookSettings>()
+                .0
+                .enabled()
+        );
+        assert!(
+            app.world()
+                .resource::<Messages<vtuber_avatar::LookSettingsChanged>>()
+                .is_empty()
+        );
+        assert!(
+            !path.exists(),
+            "stale operations must not save either model"
+        );
     }
 
     #[test]
@@ -3412,8 +3446,7 @@ mod tests {
             !vm.expression.has_catalog,
             "a mixed B/gA/A snapshot must not be operable"
         );
-        assert!(vm.expression.model_id.is_none());
-        assert!(vm.expression.generation.is_none());
+        assert!(vm.expression.target.is_none());
         assert!(vm.expression.entries.is_empty());
         assert!(vm.expression.selected.is_none());
     }
@@ -3449,16 +3482,20 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
-                model_id: "model-b".into(),
-                generation: generation_a,
+                target: crate::actions::ModelActionTarget {
+                    model_id: "model-b".into(),
+                    generation: generation_a,
+                },
                 key: ExpressionKey::Digit1,
                 expression: Some("smile".into()),
             });
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::ResetExpressionBindings {
-                model_id: "model-b".into(),
-                generation: generation_a,
+                target: crate::actions::ModelActionTarget {
+                    model_id: "model-b".into(),
+                    generation: generation_a,
+                },
             });
         app.update();
 
@@ -3534,8 +3571,10 @@ mod tests {
         app.world_mut()
             .resource_mut::<UiState>()
             .emit(UiAction::AssignExpressionKey {
-                model_id,
-                generation,
+                target: crate::actions::ModelActionTarget {
+                    model_id,
+                    generation,
+                },
                 key: ExpressionKey::Digit1,
                 expression: Some("custom49".into()),
             });
@@ -3553,8 +3592,20 @@ mod tests {
             Some("custom49")
         );
         assert!(vm.expression.has_catalog);
-        assert_eq!(vm.expression.model_id.as_deref(), Some("model-a"));
-        assert_eq!(vm.expression.generation, Some(generation));
+        assert_eq!(
+            vm.expression
+                .target
+                .as_ref()
+                .map(|target| target.model_id.as_str()),
+            Some("model-a")
+        );
+        assert_eq!(
+            vm.expression
+                .target
+                .as_ref()
+                .map(|target| target.generation),
+            Some(generation)
+        );
         assert_eq!(vm.expression.selected.as_deref(), Some("smile"));
         let smile_row = vm
             .expression
