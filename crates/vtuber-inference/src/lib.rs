@@ -15,6 +15,8 @@ pub use pose_decode::{PoseDecodeError, decode_pose_result};
 
 /// MediaPipe Tasks and optional Rust inference backends.
 pub mod backend;
+/// Face and Pose worker completion and typed join handling.
+pub mod completion;
 /// Composite detector-to-landmark runtime with ROI recovery.
 #[cfg(feature = "onnx")]
 pub mod composite;

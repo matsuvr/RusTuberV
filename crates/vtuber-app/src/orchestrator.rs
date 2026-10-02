@@ -173,8 +173,8 @@ pub enum OrchestratorError {
     CameraFailed(String),
     /// Inference model load, execution, or worker failure.
     InferenceFailed(String),
-    /// The observed-arm Pose worker thread could not be started.
-    PoseWorkerStartFailed(String),
+    /// Observed-arm inference failed to start, load, or process frames.
+    PoseInferenceFailed(String),
 }
 
 impl fmt::Display for OrchestratorError {
@@ -192,8 +192,8 @@ impl fmt::Display for OrchestratorError {
             Self::LicenseReviewFailed(msg) => write!(f, "License review failed: {msg}"),
             Self::CameraFailed(msg) => write!(f, "Camera failed: {msg}"),
             Self::InferenceFailed(msg) => write!(f, "Inference failed: {msg}"),
-            Self::PoseWorkerStartFailed(msg) => {
-                write!(f, "Pose worker start failed: {msg}")
+            Self::PoseInferenceFailed(msg) => {
+                write!(f, "Pose inference failed: {msg}")
             }
         }
     }
