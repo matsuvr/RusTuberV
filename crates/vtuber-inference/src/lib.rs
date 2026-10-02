@@ -50,18 +50,19 @@ pub mod runtime;
 pub mod schema;
 /// Inference worker state and status.
 pub mod state;
+/// Manifest-defined MediaPipe tasks and source loading.
+pub mod task;
+pub use task::{MediaPipeTask, MediaPipeTaskSource};
 /// Inference worker loop.
 pub mod worker;
 
-pub use backend::mediapipe::{
-    MediaPipePoseRuntime, POSE_TASK_BUNDLE_FILE, POSE_TASK_BUNDLE_SHA256, embedded_pose_task_bundle,
-};
+pub use backend::mediapipe::MediaPipePoseRuntime;
 #[cfg(feature = "onnx")]
 pub use composite::{
     CompositeFrameInference, CompositeRuntime, DetectorStage, LandmarkStage,
     ProductionDetectorStage, ProductionLandmarkStage,
 };
-pub use controller::{InferenceController, InferenceWorkerResult, MediaPipeTaskSource};
+pub use controller::{InferenceController, InferenceWorkerResult};
 pub use crop::{
     CropError, FaceCropPreprocessBuffers, FaceCropTransform, LandmarkCoordinateEncoding,
 };

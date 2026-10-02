@@ -20,12 +20,6 @@ use vtuber_tracking::arm_tracking::{ArmTrackingProfile, ArmTrackingState, step_a
 use crate::capture_runtime::CaptureRuntime;
 use crate::orchestrator::{Orchestrator, OrchestratorError};
 
-/// The packaged Pose task filename.
-const POSE_TASK_FILE: &str = "pose_landmarker_full.task";
-
-/// The packaged Hand Landmarker task filename.
-const HAND_TASK_FILE: &str = "hand_landmarker.task";
-
 /// The Hand Landmarker world landmarks written to the debug CSV.
 ///
 /// The whole hand is logged rather than only the three points the palm plane
@@ -72,11 +66,11 @@ impl PoseRuntime {
             task_path: project_root
                 .join("assets")
                 .join("models")
-                .join(POSE_TASK_FILE),
+                .join(vtuber_inference::MediaPipeTask::Pose.file()),
             hand_task_path: project_root
                 .join("assets")
                 .join("models")
-                .join(HAND_TASK_FILE),
+                .join(vtuber_inference::MediaPipeTask::Hand.file()),
             output_generation: 0,
             held_frame: None,
             last_avatar_generation: AvatarGeneration::default(),
@@ -149,16 +143,8 @@ impl PoseRuntime {
         if self.worker.is_some() {
             return Ok(());
         }
-        let task = if self.task_path.is_file() {
-            MediaPipeTaskSource::Path(self.task_path.clone())
-        } else {
-            MediaPipeTaskSource::Embedded
-        };
-        let hand_task = if self.hand_task_path.is_file() {
-            MediaPipeTaskSource::Path(self.hand_task_path.clone())
-        } else {
-            MediaPipeTaskSource::Embedded
-        };
+        let task = MediaPipeTaskSource::from_packaged_path(self.task_path.clone());
+        let hand_task = MediaPipeTaskSource::from_packaged_path(self.hand_task_path.clone());
         let status = Arc::clone(&self.status);
         let frame_slot = Arc::clone(&self.frame_slot);
         let output_slot = Arc::clone(&self.output_slot);

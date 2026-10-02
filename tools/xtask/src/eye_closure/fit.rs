@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use vtuber_core::{FrameSeq, MonoTimeNs};
-use vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256;
+use vtuber_inference::MediaPipeTask;
 use vtuber_tracking::{
     EYE_CLOSURE_ALGORITHM_VERSION, EYE_CLOSURE_FEATURE, EYE_CLOSURE_PROFILE_SCHEMA_VERSION,
     EYE_CLOSURE_SAMPLE_GAP_NS, EyeClosureFeatures, EyeClosureFingerprints, EyeClosureObservation,
@@ -842,7 +842,7 @@ pub(crate) fn run_fit(options: &Options) -> Result<(), String> {
             left: values(*left),
             right: values(*right),
             fingerprints: EyeClosureFingerprints {
-                task_bundle_sha256: Some(TASK_BUNDLE_SHA256.to_owned()),
+                task_bundle_sha256: Some(MediaPipeTask::Face.sha256().to_owned()),
                 feature: EYE_CLOSURE_FEATURE.into(),
                 preprocess: Some("mediapipe face landmarker landmarks and raw blendshapes".into()),
             },
@@ -1620,7 +1620,7 @@ mod end_to_end {
                 "left": { "close_at": 0.4, "reopen_at": 0.6 },
                 "right": { "close_at": 0.4, "reopen_at": 0.6 },
                 "fingerprints": {
-                    "task_bundle_sha256": vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256,
+                    "task_bundle_sha256": vtuber_inference::MediaPipeTask::Face.sha256(),
                     "feature": "mediapipe_raw_eye_blink_openness_v1",
                     "preprocess": null
                 }

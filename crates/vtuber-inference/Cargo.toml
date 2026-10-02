@@ -27,6 +27,9 @@ default = []
 legacy-face-stack = ["onnx"]
 onnx = ["dep:tract-onnx", "dep:tract-core"]
 
+[build-dependencies]
+toml = "0.9"
+
 [dev-dependencies]
 
 [lints]

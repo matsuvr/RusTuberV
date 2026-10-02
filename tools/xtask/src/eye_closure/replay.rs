@@ -24,9 +24,8 @@ use vtuber_core::{
     PixelFormat, VideoFrame,
 };
 use vtuber_inference::FaceTrackingInference;
-use vtuber_inference::backend::mediapipe::{
-    MediaPipeRuntime, TASK_BUNDLE_FILE, TASK_BUNDLE_SHA256,
-};
+use vtuber_inference::MediaPipeTask;
+use vtuber_inference::backend::mediapipe::MediaPipeRuntime;
 use vtuber_tracking::{
     EYE_CLOSURE_FEATURE, EYE_CLOSURE_SAMPLE_GAP_NS, EyeClosureFeatures, EyeSide, LidPoints,
     eye_closure_features, max_lid_gap_ratio, mediapipe_lid_points,
@@ -315,7 +314,7 @@ pub(crate) fn run_extract(options: &Options) -> Result<(), String> {
         .project_root
         .join("assets")
         .join("models")
-        .join(TASK_BUNDLE_FILE);
+        .join(MediaPipeTask::Face.file());
     let mut frames = Vec::new();
     let mut reports = Vec::new();
     for input in &document.inputs {
@@ -341,7 +340,7 @@ pub(crate) fn run_extract(options: &Options) -> Result<(), String> {
         feature: EYE_CLOSURE_FEATURE,
         xtask_version: env!("CARGO_PKG_VERSION"),
         tool_commit: current_git_commit(),
-        task_bundle_sha256_current: TASK_BUNDLE_SHA256,
+        task_bundle_sha256_current: MediaPipeTask::Face.sha256(),
         totals,
         inputs: reports,
     };
@@ -1144,8 +1143,10 @@ fn pair_raw_records(
 
 fn extract_raw(input: &InputTake, task_path: &Path) -> Result<TakeExtraction, String> {
     let raw = read_raw_pairs(input)?;
-    let mut runtime = MediaPipeRuntime::from_task_path(task_path)
-        .map_err(|error| format!("MediaPipe runtime init failed: {error}"))?;
+    let mut runtime = MediaPipeRuntime::from_task_source(
+        &vtuber_inference::MediaPipeTaskSource::Path(task_path.to_path_buf()),
+    )
+    .map_err(|error| format!("MediaPipe runtime init failed: {error}"))?;
     let rotation = input.rotation_degrees.unwrap_or(0);
     let mirrored = input.mirrored.unwrap_or(false);
     let mut frames = Vec::new();
@@ -1203,7 +1204,7 @@ fn extract_raw(input: &InputTake, task_path: &Path) -> Result<TakeExtraction, St
         declared_mirrored: raw.declared_mirrored,
         input_hashes: raw.input_hashes,
         trace_sha256: None,
-        task_bundle_sha256: Some(TASK_BUNDLE_SHA256.to_owned()),
+        task_bundle_sha256: Some(MediaPipeTask::Face.sha256().to_owned()),
         mediapipe_observation_source: "current_mediapipe",
         counts,
         excluded: raw.counts,

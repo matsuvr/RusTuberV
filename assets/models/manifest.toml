@@ -14,6 +14,7 @@ notes = [
 
 [[artifacts]]
 file = "pose_landmarker_full.task"
+mediapipe_task = "Pose"
 sha256 = "4EAA5EB7A98365221087693FCC286334CF0858E2EB6E15B506AA4A7ECDCEC4AD"
 purpose = "Official MediaPipe Pose Landmarker Full task bundle (float16)"
 source = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
@@ -28,6 +29,7 @@ notes = [
 
 [[artifacts]]
 file = "hand_landmarker.task"
+mediapipe_task = "Hand"
 sha256 = "FBC2A30080C3C557093B5DDFC334698132EB341044CCEE322CCF8BCF3607CDE1"
 purpose = "Official MediaPipe Hand Landmarker task bundle (float16)"
 source = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
@@ -42,6 +44,7 @@ notes = [
 
 [[artifacts]]
 file = "face_landmarker.task"
+mediapipe_task = "Face"
 sha256 = "64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF"
 purpose = "Official MediaPipe Face Landmarker task bundle (ZIP-like archive)"
 source = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"

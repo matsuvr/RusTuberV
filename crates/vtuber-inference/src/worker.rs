@@ -7,7 +7,7 @@ use vtuber_core::arm_tracking::PoseArmFrame;
 use vtuber_core::types::{FrameSeq, RawFaceObservation, VideoFrame};
 use vtuber_core::{FaceTrackingOutcome, LatestSlot, ReadResult, StopToken};
 
-use crate::controller::{ControlCommand, InferenceWorkerResult, MediaPipeTaskSource};
+use crate::controller::{ControlCommand, InferenceWorkerResult};
 use crate::descriptor::{FacePipelineDescriptor, ModelDescriptor, RuntimeSettings};
 use crate::error::{InferenceError, Result};
 use crate::metrics::InferenceStage;
@@ -18,6 +18,7 @@ use crate::runtime::{
     InferenceOutcome,
 };
 use crate::state::{FailureStage, InferenceWorkerState, SharedStatus};
+use crate::task::{MediaPipeTask, MediaPipeTaskSource};
 
 /// Maximum consecutive recoverable per-frame errors before the worker halts.
 const MAX_CONSECUTIVE_RECOVERABLE_ERRORS: u32 = 10;
@@ -137,7 +138,7 @@ pub(crate) fn run_inference_worker(
                     update_status(&status, |s| {
                         s.set_pipeline_info(
                             Some("mediapipe-face-landmarker".into()),
-                            Some(crate::backend::mediapipe::TASK_BUNDLE_SHA256.into()),
+                            Some(MediaPipeTask::Face.sha256().into()),
                             None,
                         );
                         s.transition_to(InferenceWorkerState::LoadingModel);
@@ -145,7 +146,9 @@ pub(crate) fn run_inference_worker(
 
                     // A failed replacement must not retain the previous model.
                     loaded = None;
-                    match load_mediapipe_runtime(&task) {
+                    match crate::backend::mediapipe::MediaPipeRuntime::from_task_source(&task)
+                        .map(|runtime| Box::new(runtime) as Box<dyn FaceTrackingInference>)
+                    {
                         Ok(runtime) => {
                             loaded = Some(LoadedRuntime::MediaPipe(runtime));
                             failed = false;
@@ -753,20 +756,6 @@ fn load_composite_runtime(
     }
 }
 
-fn load_mediapipe_runtime(task: &MediaPipeTaskSource) -> Result<Box<dyn FaceTrackingInference>> {
-    let runtime = match task {
-        MediaPipeTaskSource::Path(path) => {
-            crate::backend::mediapipe::MediaPipeRuntime::from_task_path(path)?
-        }
-        MediaPipeTaskSource::Embedded => {
-            crate::backend::mediapipe::MediaPipeRuntime::from_task_bytes(
-                crate::backend::mediapipe::embedded_task_bundle(),
-            )?
-        }
-    };
-    Ok(Box::new(runtime))
-}
-
 /// Runs the Pose inference worker loop.
 ///
 /// The worker is independent of the face worker: it owns a single
@@ -785,26 +774,27 @@ pub fn run_pose_worker(
     update_status(&status, |s| {
         s.set_pipeline_info(
             Some("mediapipe-pose+hand-landmarker".into()),
-            Some(crate::backend::mediapipe::POSE_TASK_BUNDLE_SHA256.into()),
-            Some(crate::backend::mediapipe::HAND_TASK_BUNDLE_SHA256.into()),
+            Some(MediaPipeTask::Pose.sha256().into()),
+            Some(MediaPipeTask::Hand.sha256().into()),
         );
         s.transition_to(InferenceWorkerState::LoadingModel);
     });
 
-    let mut runtime = match load_pose_runtime(task, hand_task) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            update_status(&status, |s| {
-                s.record_failure(FailureStage::ModelLoad, error);
-            });
-            return InferenceWorkerResult {
-                final_metrics: status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .metrics(),
-            };
-        }
-    };
+    let mut runtime =
+        match crate::backend::mediapipe::MediaPipePoseRuntime::from_task_sources(task, hand_task) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                update_status(&status, |s| {
+                    s.record_failure(FailureStage::ModelLoad, error);
+                });
+                return InferenceWorkerResult {
+                    final_metrics: status
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .metrics(),
+                };
+            }
+        };
 
     update_status(&status, |s| {
         s.transition_to(InferenceWorkerState::Running);
@@ -886,23 +876,6 @@ pub fn run_pose_worker(
     InferenceWorkerResult { final_metrics }
 }
 
-fn load_pose_runtime(
-    task: &MediaPipeTaskSource,
-    hand_task: &MediaPipeTaskSource,
-) -> Result<crate::backend::mediapipe::MediaPipePoseRuntime> {
-    let source = |task: &MediaPipeTaskSource, embedded: &'static [u8]| match task {
-        MediaPipeTaskSource::Path(path) => mediapipe::ModelSource::path(path),
-        MediaPipeTaskSource::Embedded => mediapipe::ModelSource::bytes(embedded),
-    };
-    crate::backend::mediapipe::MediaPipePoseRuntime::from_task_sources(
-        source(task, crate::backend::mediapipe::embedded_pose_task_bundle()),
-        source(
-            hand_task,
-            crate::backend::mediapipe::embedded_hand_task_bundle(),
-        ),
-    )
-}
-
 fn update_status<F, R>(status: &SharedStatus, f: F) -> R
 where
     F: FnOnce(&mut crate::state::InferenceWorkerStatus) -> R,
@@ -966,7 +939,7 @@ mod tests {
         InferenceContext, MAX_CONSECUTIVE_RECOVERABLE_ERRORS, run_pose_worker, update_status,
         validate_observation,
     };
-    use crate::controller::{InferenceController, InferenceWorkerResult, MediaPipeTaskSource};
+    use crate::controller::{InferenceController, InferenceWorkerResult};
     use crate::descriptor::{
         ChannelOrder, ModelDescriptor, ModelFormat, Normalization, RuntimeSettings,
     };
@@ -976,6 +949,7 @@ mod tests {
     use crate::preprocess::{PreprocessBuffers, PreprocessParams, preprocess_frame};
     use crate::runtime::FaceInference;
     use crate::state::{FailureStage, InferenceWorkerState, InferenceWorkerStatus, SharedStatus};
+    use crate::task::MediaPipeTaskSource;
     use vtuber_core::types::NormalizedRect;
     use vtuber_core::{StopToken, WorkerHandle, WorkerResult};
 

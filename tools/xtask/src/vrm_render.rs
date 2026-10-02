@@ -195,31 +195,31 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     }
     let off = take_frame(&mut app, deadline)?;
 
-    set_look(&mut app, true, 1.0);
+    set_look(&mut app, true, 1.0)?;
     for _ in 0..SETTLE_FRAMES {
         app.update();
     }
     let on = take_frame(&mut app, deadline)?;
 
-    set_look(&mut app, true, 0.5);
+    set_look(&mut app, true, 0.5)?;
     for _ in 0..SETTLE_FRAMES {
         app.update();
     }
     let half = take_frame(&mut app, deadline)?;
 
-    set_look(&mut app, false, 1.0);
+    set_look(&mut app, false, 1.0)?;
     for _ in 0..SETTLE_FRAMES {
         app.update();
     }
     let off_restored = take_frame(&mut app, deadline)?;
 
-    set_look(&mut app, true, 1.0);
+    set_look(&mut app, true, 1.0)?;
     for _ in 0..SETTLE_FRAMES {
         app.update();
     }
     let on_again = take_frame(&mut app, deadline)?;
 
-    set_look(&mut app, true, 0.0);
+    set_look(&mut app, true, 0.0)?;
     for _ in 0..SETTLE_FRAMES {
         app.update();
     }
@@ -345,11 +345,24 @@ fn activate_output(
     }
 }
 
-fn set_look(app: &mut App, enabled: bool, strength: f32) {
+fn set_look(app: &mut App, enabled: bool, strength: f32) -> Result<(), RenderError> {
     use vtuber_app::actions::{RichLookChange, UiAction};
+    let target = app
+        .world()
+        .resource::<vtuber_app::ui_model::UiViewModel>()
+        .model_target
+        .clone()
+        .ok_or_else(|| RenderError::Failed("ready avatar has no UI action target".into()))?;
     let mut ui = app.world_mut().resource_mut::<vtuber_app::ui::UiState>();
-    ui.emit(UiAction::ChangeRichLook(RichLookChange::Enabled(enabled)));
-    ui.emit(UiAction::ChangeRichLook(RichLookChange::Strength(strength)));
+    ui.emit(UiAction::ChangeRichLook {
+        target: target.clone(),
+        change: RichLookChange::Enabled(enabled),
+    });
+    ui.emit(UiAction::ChangeRichLook {
+        target,
+        change: RichLookChange::Strength(strength),
+    });
+    Ok(())
 }
 
 fn exited(app: &mut App) -> bool {

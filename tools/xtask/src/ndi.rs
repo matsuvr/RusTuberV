@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use vtuber_inference::MediaPipeTask;
 
 const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
 const LICENSE_FILE: &str = "NDI_SDK_LICENSE_AGREEMENT.pdf";
@@ -18,7 +19,6 @@ const NOTICES_FILE: &str = "THIRD_PARTY_NOTICES.md";
 const MANIFEST_FILE: &str = "NDI_RUNTIME_MANIFEST.txt";
 const EXECUTABLE_FILE: &str = "RusTuberV.exe";
 const MODEL_MANIFEST_FILE: &str = "assets/models/manifest.toml";
-const MODEL_TASK_FILE: &str = "assets/models/face_landmarker.task";
 const MODEL_LICENSE_FILE: &str = "assets/models/LICENSE.mediapipe.txt";
 
 /// Dispatch an NDI package command.
@@ -60,7 +60,12 @@ fn package(args: &[String]) -> TaskResult {
     }
 }
 
+fn model_task_file() -> String {
+    format!("assets/models/{}", MediaPipeTask::Face.file())
+}
+
 fn stage_package(options: PackageOptions) -> Result<(), String> {
+    let model_task_file = model_task_file();
     let notices_path = workspace_root().join(NOTICES_FILE);
     let notices = fs::read_to_string(&notices_path)
         .map_err(|error| format!("cannot read {NOTICES_FILE}: {error}"))?;
@@ -106,7 +111,7 @@ fn stage_package(options: PackageOptions) -> Result<(), String> {
         options.output.join(NOTICES_FILE),
         options.output.join(MANIFEST_FILE),
         options.output.join(MODEL_MANIFEST_FILE),
-        options.output.join(MODEL_TASK_FILE),
+        options.output.join(&model_task_file),
         options.output.join(MODEL_LICENSE_FILE),
         options.output.join(RUNTIME_LICENSES_FILE),
         options.output.join(USAGE_FILE),
@@ -147,7 +152,7 @@ fn stage_package(options: PackageOptions) -> Result<(), String> {
          runtime_licenses_file={RUNTIME_LICENSES_FILE}\n\
          runtime_licenses_sha256={}\n\
          usage_file={USAGE_FILE}\n\
-         face_task_file={MODEL_TASK_FILE}\n\
+         face_task_file={model_task_file}\n\
          face_task_sha256={}\n\
          face_model_license_file={MODEL_LICENSE_FILE}\n\
          face_model_license_sha256={}\n\
@@ -268,12 +273,12 @@ fn verify_package(package_dir: &Path) -> Result<(), String> {
     if license_hash != &sha256_file(&package_dir.join(LICENSE_FILE))? {
         return Err("packaged license SHA-256 does not match the manifest".to_string());
     }
-    require_manifest(&manifest, "face_task_file", MODEL_TASK_FILE)?;
+    require_manifest(&manifest, "face_task_file", &model_task_file())?;
     require_manifest(&manifest, "face_model_license_file", MODEL_LICENSE_FILE)?;
     let task_hash = manifest
         .get("face_task_sha256")
         .ok_or_else(|| "manifest is missing face_task_sha256".to_string())?;
-    if task_hash != &sha256_file(&package_dir.join(MODEL_TASK_FILE))? {
+    if task_hash != &sha256_file(&package_dir.join(model_task_file()))? {
         return Err("packaged face task SHA-256 does not match the manifest".to_string());
     }
     let model_license_hash = manifest
@@ -322,7 +327,10 @@ fn verify_package(package_dir: &Path) -> Result<(), String> {
 fn verify_model_resources(assets_dir: &Path) -> Result<(), String> {
     let model_dir = assets_dir.join("models");
     require_file(&model_dir.join("manifest.toml"), MODEL_MANIFEST_FILE)?;
-    require_file(&model_dir.join("face_landmarker.task"), MODEL_TASK_FILE)?;
+    require_file(
+        &model_dir.join(MediaPipeTask::Face.file()),
+        &model_task_file(),
+    )?;
     require_file(&model_dir.join("LICENSE.mediapipe.txt"), MODEL_LICENSE_FILE)?;
 
     let assets_entries = fs::read_dir(assets_dir)
@@ -349,7 +357,7 @@ fn verify_model_resources(assets_dir: &Path) -> Result<(), String> {
 
     let expected = [
         "manifest.toml",
-        "face_landmarker.task",
+        MediaPipeTask::Face.file(),
         "LICENSE.mediapipe.txt",
     ];
     for entry in fs::read_dir(model_dir)
@@ -634,7 +642,7 @@ impl PackageOptions {
             usage,
             zip,
             model_manifest: workspace_root.join(MODEL_MANIFEST_FILE),
-            model_task: workspace_root.join(MODEL_TASK_FILE),
+            model_task: workspace_root.join(model_task_file()),
             model_license: workspace_root.join(MODEL_LICENSE_FILE),
             force,
         }))
@@ -873,7 +881,7 @@ mod tests {
         )
         .expect("notices");
         fs::write(model_dir.join("manifest.toml"), "[metadata]\n").expect("model manifest");
-        fs::write(model_dir.join("face_landmarker.task"), b"task").expect("task bundle");
+        fs::write(model_dir.join(MediaPipeTask::Face.file()), b"task").expect("task bundle");
         fs::write(model_dir.join("LICENSE.mediapipe.txt"), b"Apache-2.0").expect("model license");
 
         let manifest = format!(
@@ -906,8 +914,8 @@ mod tests {
             RUNTIME_LICENSES_FILE,
             sha256_file(&directory.join(RUNTIME_LICENSES_FILE)).expect("runtime licenses hash"),
             USAGE_FILE,
-            MODEL_TASK_FILE,
-            sha256_file(&model_dir.join("face_landmarker.task")).expect("task hash"),
+            model_task_file(),
+            sha256_file(&model_dir.join(MediaPipeTask::Face.file())).expect("task hash"),
             MODEL_LICENSE_FILE,
             sha256_file(&model_dir.join("LICENSE.mediapipe.txt")).expect("model license hash"),
         );

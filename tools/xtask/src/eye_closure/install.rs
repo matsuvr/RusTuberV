@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256;
+use vtuber_inference::MediaPipeTask;
 use vtuber_tracking::{
     EYE_CLOSURE_FEATURE, EyeClosureProfileDocument, EyeClosureVerificationStatus,
 };
@@ -72,7 +72,7 @@ fn ensure_installable(document: &EyeClosureProfileDocument, path: &Path) -> Resu
             .fingerprints
             .task_bundle_sha256
             .as_deref()
-            .is_some_and(|hash| hash.eq_ignore_ascii_case(TASK_BUNDLE_SHA256))
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(MediaPipeTask::Face.sha256()))
     {
         return Err(format!(
             "{}: inference fingerprints do not match the current runtime",

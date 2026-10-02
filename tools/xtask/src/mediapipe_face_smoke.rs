@@ -20,18 +20,14 @@ use mediapipe::{
     MEDIAPIPE_VERSION, ModelSource, Size, Timestamp,
 };
 #[cfg(target_os = "windows")]
-use sha2::{Digest, Sha256};
-#[cfg(target_os = "windows")]
 use vtuber_core::FrameSeq;
 #[cfg(target_os = "windows")]
 use vtuber_core::{LatestSlot, ReadResult};
 #[cfg(any(target_os = "windows", test))]
 use vtuber_core::{MonoTimeNs, PixelFormat, VideoFrame};
+#[cfg(target_os = "windows")]
+use vtuber_inference::{MediaPipeTask, MediaPipeTaskSource};
 
-#[cfg(target_os = "windows")]
-const TASK_BUNDLE_FILE: &str = "face_landmarker.task";
-#[cfg(target_os = "windows")]
-const TASK_BUNDLE_SHA256: &str = "64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF";
 const MAX_TASK_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(target_os = "windows")]
 const FRAME_WAIT: Duration = Duration::from_millis(100);
@@ -175,8 +171,10 @@ fn run_windows(options: Options) -> Result<(), String> {
         .project_root
         .join("assets")
         .join("models")
-        .join(TASK_BUNDLE_FILE);
-    verify_task_bundle(&task_path)?;
+        .join(MediaPipeTask::Face.file());
+    MediaPipeTask::Face
+        .read(&MediaPipeTaskSource::Path(task_path.clone()))
+        .map_err(|error| error.to_string())?;
 
     let devices = MsmfBackend::new()
         .enumerate()
@@ -198,7 +196,7 @@ fn run_windows(options: Options) -> Result<(), String> {
         println!("backend=mediapipe-face-landmarker");
         println!("mediapipe_version={MEDIAPIPE_VERSION}");
         println!("camera={device}");
-        println!("task_bundle={TASK_BUNDLE_FILE}");
+        println!("task_bundle={}", MediaPipeTask::Face.file());
     }
 
     let frame_slot = capture.frame_slot();
@@ -555,22 +553,6 @@ fn frame_rgb<'a>(frame: &'a VideoFrame, staging: &'a mut Vec<u8>) -> Result<&'a 
 }
 
 #[cfg(target_os = "windows")]
-fn verify_task_bundle(path: &Path) -> Result<(), String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("task bundle read failed: {error}"))?;
-    let digest = Sha256::digest(&bytes);
-    let actual = digest
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<String>();
-    if actual != TASK_BUNDLE_SHA256 {
-        return Err(format!(
-            "INFERENCE_MODEL_HASH_MISMATCH: expected {TASK_BUNDLE_SHA256}, got {actual}"
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
 fn choose_camera(
     devices: &[vtuber_camera::CameraDescriptor],
     requested: Option<&str>,
@@ -663,6 +645,8 @@ fn validate_gate(
 
 #[cfg(target_os = "windows")]
 fn print_summary(stats: &SmokeStats, capture: &vtuber_camera::CaptureMetrics, json: bool) {
+    let task_bundle_file = MediaPipeTask::Face.file();
+    let task_bundle_sha256 = MediaPipeTask::Face.sha256();
     let durations = &stats.inference_durations;
     let p50_ms = percentile_ms(durations, 0.50);
     let p95_ms = percentile_ms(durations, 0.95);
@@ -680,7 +664,7 @@ fn print_summary(stats: &SmokeStats, capture: &vtuber_camera::CaptureMetrics, js
             .matrix_orthogonality_error
             .map_or_else(|| "null".into(), |value| format!("{value:.6}"));
         println!(
-            "{{\"backend\":\"mediapipe-face-landmarker\",\"mediapipe_version\":\"{MEDIAPIPE_VERSION}\",\"native_library_source\":\"{source}\",\"task_bundle\":\"{TASK_BUNDLE_FILE}\",\"task_bundle_sha256\":\"{TASK_BUNDLE_SHA256}\",\"face_count\":{},\"no_face_count\":{},\"result_hz\":{result_hz:.3},\"p50_inference_ms\":{p50_ms:.3},\"p95_inference_ms\":{p95_ms:.3},\"landmarks\":{landmarks},\"blendshapes\":{blendshapes},\"matrices\":{matrices},\"determinant\":{determinant},\"orthogonality_error\":{orthogonality_error},\"contract_failures\":{},\"last_source_seq\":{last_seq},\"capture_frames\":{},\"capture_publish_rejected_frames\":{},\"latest_slot_capacity\":1}}",
+            "{{\"backend\":\"mediapipe-face-landmarker\",\"mediapipe_version\":\"{MEDIAPIPE_VERSION}\",\"native_library_source\":\"{source}\",\"task_bundle\":\"{task_bundle_file}\",\"task_bundle_sha256\":\"{task_bundle_sha256}\",\"face_count\":{},\"no_face_count\":{},\"result_hz\":{result_hz:.3},\"p50_inference_ms\":{p50_ms:.3},\"p95_inference_ms\":{p95_ms:.3},\"landmarks\":{landmarks},\"blendshapes\":{blendshapes},\"matrices\":{matrices},\"determinant\":{determinant},\"orthogonality_error\":{orthogonality_error},\"contract_failures\":{},\"last_source_seq\":{last_seq},\"capture_frames\":{},\"capture_publish_rejected_frames\":{},\"latest_slot_capacity\":1}}",
             stats.face_count,
             stats.no_face_count,
             stats.contract_failures,
@@ -695,7 +679,7 @@ fn print_summary(stats: &SmokeStats, capture: &vtuber_camera::CaptureMetrics, js
             .matrix_orthogonality_error
             .map_or_else(|| "n/a".into(), |value| format!("{value:.6}"));
         println!("native_library_source={source}");
-        println!("task_bundle_sha256={TASK_BUNDLE_SHA256}");
+        println!("task_bundle_sha256={task_bundle_sha256}");
         println!("face_count={}", stats.face_count);
         println!("no_face_count={}", stats.no_face_count);
         println!("result_hz={result_hz:.3}");

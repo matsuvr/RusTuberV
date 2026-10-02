@@ -16,8 +16,6 @@ use crate::capture_runtime::CaptureRuntime;
 use crate::diagnostics::DiagnosticsSnapshot;
 use crate::orchestrator::{Orchestrator, OrchestratorError, PipelineState};
 
-const MEDIAPIPE_TASK_FILE: &str = "face_landmarker.task";
-
 /// Filesystem root containing the packaged `assets/models/manifest.toml`.
 ///
 /// Desktop applications provide this from their resource locator. Tests and
@@ -82,15 +80,9 @@ impl InferenceRuntime {
                 .project_root
                 .join("assets")
                 .join("models")
-                .join(MEDIAPIPE_TASK_FILE);
-            // Prefer the packaged resource bundle (dev runs and resource
-            // packages); release builds started without the resource tree
-            // fall back to the SHA-256-verified bundle embedded in the binary.
-            let load_result = if task_path.is_file() {
-                self.controller.load_mediapipe(task_path)
-            } else {
-                self.controller.load_mediapipe_embedded()
-            };
+                .join(vtuber_inference::MediaPipeTask::Face.file());
+            let source = vtuber_inference::MediaPipeTaskSource::from_packaged_path(task_path);
+            let load_result = self.controller.load_mediapipe_task(source);
             load_result.map_err(|error| error.to_string())?;
             self.model_requested = true;
         }
@@ -283,7 +275,7 @@ pub(crate) fn read_inference_output_system(
         (status.pipeline_id.as_deref() == Some("mediapipe-face-landmarker")).then(|| {
             format!(
                 "task:{}",
-                short_hash(vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256)
+                short_hash(vtuber_inference::MediaPipeTask::Face.sha256())
             )
         })
     });
