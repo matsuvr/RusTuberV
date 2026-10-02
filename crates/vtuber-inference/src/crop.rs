@@ -8,7 +8,7 @@ use crate::descriptor::{
     TensorContract, TensorLayout,
 };
 use crate::error::InferenceError;
-use crate::preprocess::{read_rgb_pixel, validate_frame};
+use vtuber_core::frame::FramePixels;
 
 /// Coordinate encoding emitted by a landmark model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -309,7 +309,7 @@ impl FaceCropPreprocessBuffers {
                 "preprocess buffers and transform output sizes differ",
             ));
         }
-        validate_frame(frame)?;
+        let pixels = frame.pixels().map_err(InferenceError::from)?;
         validate_tensor_contract(transform, input, crop_config)?;
         let fill = match crop_config.outside_fill {
             CropOutsideFill::NormalizationMean => input.normalization.mean,
@@ -322,7 +322,7 @@ impl FaceCropPreprocessBuffers {
             let source_y = top_px + ((y as f32 + 0.5) * side_px / output_h as f32) - 0.5;
             for x in 0..output_w {
                 let source_x = left_px + ((x as f32 + 0.5) * side_px / output_w as f32) - 0.5;
-                let rgb = bilinear_rgb(frame, source_x, source_y, fill);
+                let rgb = bilinear_rgb(pixels, source_x, source_y, fill)?;
                 let index = (y * output_w + x) * 3;
                 self.rgb[index..index + 3].copy_from_slice(&rgb);
             }
@@ -431,7 +431,12 @@ fn validate_tensor_contract(
     clippy::indexing_slicing,
     reason = "the output is a fixed three-channel array and the channel loop is bounded by 3"
 )]
-fn bilinear_rgb(frame: &VideoFrame, x: f32, y: f32, fill: [f32; 3]) -> [f32; 3] {
+fn bilinear_rgb(
+    pixels: FramePixels<'_>,
+    x: f32,
+    y: f32,
+    fill: [f32; 3],
+) -> Result<[f32; 3], CropError> {
     let x0 = x.floor();
     let y0 = y.floor();
     let tx = x - x0;
@@ -439,10 +444,10 @@ fn bilinear_rgb(frame: &VideoFrame, x: f32, y: f32, fill: [f32; 3]) -> [f32; 3] 
     let x0 = x0 as i64;
     let y0 = y0 as i64;
 
-    let top_left = sample_rgb(frame, x0, y0, fill);
-    let top_right = sample_rgb(frame, x0 + 1, y0, fill);
-    let bottom_left = sample_rgb(frame, x0, y0 + 1, fill);
-    let bottom_right = sample_rgb(frame, x0 + 1, y0 + 1, fill);
+    let top_left = sample_rgb(pixels, x0, y0, fill)?;
+    let top_right = sample_rgb(pixels, x0 + 1, y0, fill)?;
+    let bottom_left = sample_rgb(pixels, x0, y0 + 1, fill)?;
+    let bottom_right = sample_rgb(pixels, x0 + 1, y0 + 1, fill)?;
 
     let mut output = [0.0; 3];
     for channel in 0..3 {
@@ -450,13 +455,20 @@ fn bilinear_rgb(frame: &VideoFrame, x: f32, y: f32, fill: [f32; 3]) -> [f32; 3] 
         let bottom = bottom_left[channel] * (1.0 - tx) + bottom_right[channel] * tx;
         output[channel] = top * (1.0 - ty) + bottom * ty;
     }
-    output
+    Ok(output)
 }
 
-fn sample_rgb(frame: &VideoFrame, x: i64, y: i64, fill: [f32; 3]) -> [f32; 3] {
-    if x < 0 || y < 0 || x >= i64::from(frame.width) || y >= i64::from(frame.height) {
-        return fill;
+fn sample_rgb(
+    pixels: FramePixels<'_>,
+    x: i64,
+    y: i64,
+    fill: [f32; 3],
+) -> Result<[f32; 3], CropError> {
+    if x < 0 || y < 0 || x >= pixels.width() as i64 || y >= pixels.height() as i64 {
+        return Ok(fill);
     }
-    let [r, g, b] = read_rgb_pixel(frame, x as u32, y as u32);
-    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+    let [r, g, b, _] = pixels
+        .rgba(x as usize, y as usize)
+        .map_err(InferenceError::from)?;
+    Ok([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
 }

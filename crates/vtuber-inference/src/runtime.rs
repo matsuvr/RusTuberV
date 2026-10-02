@@ -182,8 +182,9 @@ pub trait FaceTrackingInference: Send {
     ///
     /// The stage determines the variant. The canonical MediaPipe
     /// implementation returns `MediaPipeTimestampOutOfRange` when the capture
-    /// time cannot be represented in VIDEO mode, `MediaPipeFrameConversion`
-    /// when the frame cannot be packed into RGB pixels, `MediaPipeFrameInference`
+    /// time cannot be represented in VIDEO mode, `Frame` when decoded pixels
+    /// cannot be read, `MediaPipeFrameConversion` when native image creation fails,
+    /// `MediaPipeFrameInference`
     /// when the runtime rejects the frame, and `MediaPipeOutputContract` when a
     /// result leaves the canonical face contract: a landmark, blendshape or
     /// transformation count that differs from the contract, a non-finite

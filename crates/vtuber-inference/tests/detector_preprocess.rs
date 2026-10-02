@@ -51,7 +51,7 @@ fn detector_preprocess_rgb_stride_normalization_and_nchw_order_are_exact() {
         PixelFormat::Rgb8,
         vec![
             1, 2, 3, 10, 20, 30, 200, 201, // row 0 plus padding
-            40, 50, 60, 70, 80, 90, 202, 203, // row 1 plus padding
+            40, 50, 60, 70, 80, 90, // final row needs no trailing padding
         ],
     );
     let mut buffers =
@@ -141,13 +141,17 @@ fn detector_preprocess_malformed_frames_and_normalization_are_typed_errors() {
     let mut buffers = UltraFacePreprocessBuffers::new();
     assert!(matches!(
         buffers.preprocess(&zero),
-        Err(DetectorPreprocessError::ZeroDimension { .. })
+        Err(DetectorPreprocessError::Frame(
+            vtuber_core::frame::FrameLayoutError::ZeroDimension
+        ))
     ));
 
     let short = frame(2, 2, 6, PixelFormat::Rgb8, vec![0; 6]);
     assert!(matches!(
         buffers.preprocess(&short),
-        Err(DetectorPreprocessError::FrameBufferTooSmall { .. })
+        Err(DetectorPreprocessError::Frame(
+            vtuber_core::frame::FrameLayoutError::BufferTooSmall { .. }
+        ))
     ));
 
     let non_finite = frame(1, 1, 3, PixelFormat::Rgb8, vec![0, 0, 0]);

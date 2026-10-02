@@ -43,22 +43,9 @@ pub enum InferenceError {
     /// The tracked face ROI is invalid or out of bounds.
     #[error("invalid face ROI: {0}")]
     InvalidRoi(String),
-    /// The video frame stride does not match its width and pixel format.
-    #[error("frame stride mismatch: expected at least {expected} bytes, got {actual}")]
-    FrameStrideMismatch {
-        /// Minimum stride required.
-        expected: usize,
-        /// Actual stride in bytes.
-        actual: usize,
-    },
-    /// The video frame buffer is too small for the declared resolution.
-    #[error("frame buffer too small: expected at least {expected} bytes, got {actual}")]
-    FrameBufferTooSmall {
-        /// Minimum buffer size required.
-        expected: usize,
-        /// Actual buffer size.
-        actual: usize,
-    },
+    /// Decoded frame layout or pixel read failure.
+    #[error(transparent)]
+    Frame(#[from] vtuber_core::frame::FrameLayoutError),
     /// The model input tensor layout is not supported.
     #[error("unsupported input layout: {shape:?}")]
     UnsupportedInputLayout {

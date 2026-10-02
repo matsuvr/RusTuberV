@@ -21,6 +21,8 @@
 /// Engine-neutral pose-arm observations and targets.
 pub mod arm_tracking;
 
+/// Decoded image layout and pixel reading.
+pub mod frame;
 /// Re-export core types used across worker boundaries.
 pub mod types;
 
