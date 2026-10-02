@@ -1797,7 +1797,7 @@ dependencies = [
 [[package]]
 name = "bevy_vrm1"
 version = "0.9.3"
-source = "git+https://github.com/matsuvr/bevy_vrm1?rev=6ee2f610d6c95b542a3317028da10aba26c9e8de#6ee2f610d6c95b542a3317028da10aba26c9e8de"
+source = "git+https://github.com/matsuvr/bevy_vrm1?rev=be60f99d35c4d786b0d17c93aef07e60aa31f34d#be60f99d35c4d786b0d17c93aef07e60aa31f34d"
 dependencies = [
  "anyhow",
  "bevy",
