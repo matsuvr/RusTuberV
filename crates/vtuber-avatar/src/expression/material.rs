@@ -11,9 +11,8 @@
 //!   with its glTF material index (`VrmMaterialIndex`) at load time.
 //! - Binding inserts `ExpressionMaterialBinds` (parsed source facts) on each
 //!   expression entity and `AvatarMaterialExpressionState` on the avatar root.
-//! - [`apply_expression_materials`] evaluates, per frame, the same effective
-//!   weight the upstream morph pass uses (raw override/transform weight,
-//!   binary snapping, category suppression) and writes `base + Σ (target -
+//! - [`apply_expression_materials`] reads the upstream morph pass's published
+//!   `EffectiveExpressionWeight` and writes `base + Σ (target -
 //!   base) · weight` into each resolved scene material asset. The base is the
 //!   author's expression-free value captured once per asset before the first
 //!   write, so a weight of 0 restores it exactly and nothing accumulates frame
@@ -28,10 +27,7 @@ use bevy::gltf::extensions::GltfExtensionHandlers;
 use bevy::math::{Affine2, Vec2};
 use bevy::prelude::*;
 
-use bevy_vrm1::prelude::{
-    BinaryExpression, ExpressionEntityMap, ExpressionOverride, ExpressionOverrideSettings,
-    MToonMaterial,
-};
+use bevy_vrm1::prelude::{EffectiveExpressionWeight, ExpressionEntityMap, MToonMaterial};
 
 use crate::expression::source::{MaterialColorTarget, SourceExpressions};
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
@@ -233,47 +229,6 @@ pub fn register_gltf_material_index_handler(app: &mut App) {
     app.register_type::<VrmMaterialIndex>();
 }
 
-/// How a name-driven expression is classified for suppression, matching the
-/// upstream category table (`ExpressionCategory::from_preset_name`) exactly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExpressionCategory {
-    Mouth,
-    Blink,
-    LookAt,
-    Other,
-}
-
-fn category_of(name: &str) -> ExpressionCategory {
-    match name {
-        "aa" | "ih" | "ou" | "ee" | "oh" => ExpressionCategory::Mouth,
-        "blink" | "blinkLeft" | "blinkRight" => ExpressionCategory::Blink,
-        "lookUp" | "lookDown" | "lookLeft" | "lookRight" => ExpressionCategory::LookAt,
-        _ => ExpressionCategory::Other,
-    }
-}
-
-fn output_weight(raw_weight: f32, is_binary: bool) -> f32 {
-    if is_binary {
-        if raw_weight > 0.5 { 1.0 } else { 0.0 }
-    } else {
-        raw_weight.clamp(0.0, 1.0)
-    }
-}
-
-/// Final expression weight for one expression, in the same computation order
-/// as the adopted upstream `bind_expressions`: the raw weight is binary-snapped
-/// or clamped first, and a binary expression is fully suppressed (weight 0)
-/// whenever its category multiplier is below 1. Non-binary expressions keep
-/// the ordinary `output * multiplier` product.
-fn effective_expression_weight(raw_weight: f32, is_binary: bool, category_multiplier: f32) -> f32 {
-    let output_weight = output_weight(raw_weight, is_binary);
-    if is_binary && category_multiplier < 1.0 {
-        0.0
-    } else {
-        output_weight * category_multiplier
-    }
-}
-
 /// Applies material binds for the active avatar root each frame.
 ///
 /// Runs in `PostUpdate` after the upstream `Expressions` set so the weights
@@ -287,14 +242,7 @@ fn effective_expression_weight(raw_weight: f32, is_binary: bool, category_multip
 pub fn apply_expression_materials(
     lifecycle: Res<AvatarLifecycle>,
     mut roots: Query<(&ExpressionEntityMap, &mut AvatarMaterialExpressionState)>,
-    expressions: Query<(
-        &Name,
-        &Transform,
-        &ExpressionOverrideSettings,
-        Option<&ExpressionOverride>,
-        Option<&BinaryExpression>,
-        Option<&ExpressionMaterialBinds>,
-    )>,
+    expressions: Query<(&EffectiveExpressionWeight, &ExpressionMaterialBinds)>,
     parents: Query<&ChildOf>,
     meshes: Query<(
         Entity,
@@ -322,61 +270,13 @@ pub fn apply_expression_materials(
     };
     let is_descendant = |entity: Entity| crate::binding::is_descendant(entity, root, &parents);
 
-    struct ExpressionEntry<'a> {
-        raw_weight: f32,
-        is_binary: bool,
-        category: ExpressionCategory,
-        binds: Option<&'a ExpressionMaterialBinds>,
-    }
-    let mut entries: Vec<ExpressionEntry<'_>> = Vec::with_capacity(map.0.len());
-    let mut mouth_rate = 0.0_f32;
-    let mut blink_rate = 0.0_f32;
-    let mut look_at_rate = 0.0_f32;
-    for (_name, entity) in map.0.iter() {
-        let Ok((expression_name, transform, settings, override_weight, binary, binds)) =
-            expressions.get(*entity)
-        else {
-            continue;
-        };
-        let raw_weight = override_weight.map_or(transform.translation.x, |w| w.0);
-        let is_binary = binary.is_some();
-        let output_weight = output_weight(raw_weight, is_binary);
-        let category = category_of(expression_name.as_str());
-        mouth_rate += settings.override_mouth.rate(output_weight);
-        blink_rate += settings.override_blink.rate(output_weight);
-        look_at_rate += settings.override_look_at.rate(output_weight);
-        entries.push(ExpressionEntry {
-            raw_weight,
-            is_binary,
-            category,
-            binds: binds.filter(|binds| !binds.is_empty()),
-        });
-    }
-    let mouth_mul = 1.0 - mouth_rate.clamp(0.0, 1.0);
-    let blink_mul = 1.0 - blink_rate.clamp(0.0, 1.0);
-    let look_at_mul = 1.0 - look_at_rate.clamp(0.0, 1.0);
-
-    // One weighted bind set per expression. `evaluate_material_values`
-    // selects the binds that target the material it is evaluating, so a set
-    // must be listed exactly once; listing it once per bind in the set would
-    // apply the whole set once per bind.
-    let mut weighted: Vec<(&ExpressionMaterialBinds, f32)> = Vec::new();
-    for entry in &entries {
-        let Some(binds) = entry.binds else {
-            continue;
-        };
-        let multiplier = match entry.category {
-            ExpressionCategory::Mouth => mouth_mul,
-            ExpressionCategory::Blink => blink_mul,
-            ExpressionCategory::LookAt => look_at_mul,
-            ExpressionCategory::Other => 1.0,
-        };
-        let final_weight =
-            effective_expression_weight(entry.raw_weight, entry.is_binary, multiplier);
-        if final_weight > 0.0 {
-            weighted.push((binds, final_weight));
-        }
-    }
+    let weighted: Vec<(&ExpressionMaterialBinds, f32)> = map
+        .0
+        .values()
+        .filter_map(|entity| expressions.get(*entity).ok())
+        .filter(|(weight, binds)| weight.0 > 0.0 && !binds.is_empty())
+        .map(|(weight, binds)| (binds, weight.0))
+        .collect();
 
     let mut visited_mtoon: HashSet<AssetId<MToonMaterial>> = HashSet::new();
     let mut visited_standard: HashSet<AssetId<StandardMaterial>> = HashSet::new();
@@ -781,37 +681,6 @@ mod tests {
     }
 
     #[test]
-    fn binary_weights_snap_at_one_half() {
-        assert_eq!(output_weight(0.3, true), 0.0);
-        assert_eq!(output_weight(0.7, true), 1.0);
-        assert_eq!(output_weight(0.3, false), 0.3);
-    }
-
-    #[test]
-    fn effective_weight_matches_the_upstream_binary_and_suppression_order() {
-        // Binary entries snap at 0.5 and are fully suppressed by any category
-        // multiplier below 1, exactly like upstream `bind_expressions`:
-        // blink=1 with a 0.25 suppression rate yields 0 for the morph pass
-        // and therefore 0 for the material/UV pass here.
-        assert_eq!(effective_expression_weight(1.0, true, 0.25), 0.0);
-        assert_eq!(effective_expression_weight(0.4, true, 1.0), 0.0);
-        assert_eq!(effective_expression_weight(0.6, true, 1.0), 1.0);
-        // Non-binary entries keep the ordinary multiplication.
-        assert_eq!(effective_expression_weight(1.0, false, 0.25), 0.25);
-        assert_eq!(effective_expression_weight(0.5, false, 1.0), 0.5);
-        assert_eq!(effective_expression_weight(1.5, false, 1.0), 1.0);
-    }
-
-    #[test]
-    fn categories_match_the_upstream_name_table() {
-        assert_eq!(category_of("aa"), ExpressionCategory::Mouth);
-        assert_eq!(category_of("blinkRight"), ExpressionCategory::Blink);
-        assert_eq!(category_of("lookUp"), ExpressionCategory::LookAt);
-        assert_eq!(category_of("happy"), ExpressionCategory::Other);
-        assert_eq!(category_of("custom_smile"), ExpressionCategory::Other);
-    }
-
-    #[test]
     fn binds_are_built_from_source_facts_by_name() {
         let facts = SourceExpressions {
             entries: vec![SourceExpressionEntry {
@@ -838,7 +707,7 @@ mod tests {
 
     use bevy::platform::collections::HashMap as BevyHashMap;
 
-    use bevy_vrm1::prelude::{ExpressionOverrideType, VrmExpression};
+    use bevy_vrm1::prelude::{ExpressionOverrideSettings, ExpressionOverrideType, VrmExpression};
 
     fn writer_app() -> App {
         let mut app = App::new();
@@ -873,7 +742,13 @@ mod tests {
         binds: ExpressionMaterialBinds,
     ) -> Entity {
         app.world_mut()
-            .spawn((Name::new(name), Transform::default(), settings, binds))
+            .spawn((
+                Name::new(name),
+                Transform::default(),
+                settings,
+                binds,
+                EffectiveExpressionWeight::default(),
+            ))
             .id()
     }
 
@@ -940,7 +815,7 @@ mod tests {
         // the target 0.8 or a double-applied value.
         app.world_mut()
             .entity_mut(expression)
-            .insert(ExpressionOverride(0.5));
+            .insert(EffectiveExpressionWeight(0.5));
         app.update();
         let written = app
             .world()
@@ -960,7 +835,7 @@ mod tests {
         // Releasing the expression restores the author's base exactly.
         app.world_mut()
             .entity_mut(expression)
-            .insert(ExpressionOverride(0.0));
+            .insert(EffectiveExpressionWeight(0.0));
         app.update();
         app.update();
         let restored = app
@@ -1044,7 +919,7 @@ mod tests {
         // 0.65.
         app.world_mut()
             .entity_mut(expression)
-            .insert(ExpressionOverride(0.5));
+            .insert(EffectiveExpressionWeight(0.5));
         app.update();
         let written = app
             .world()
@@ -1061,7 +936,7 @@ mod tests {
         // Both meshes return to the author's base once the weight is 0.
         app.world_mut()
             .entity_mut(expression)
-            .insert(ExpressionOverride(0.0));
+            .insert(EffectiveExpressionWeight(0.0));
         app.update();
         app.update();
         let restored = app
@@ -1125,7 +1000,7 @@ mod tests {
         // strong handle held here outlives the root.
         app.world_mut()
             .entity_mut(expression)
-            .insert(ExpressionOverride(0.5));
+            .insert(EffectiveExpressionWeight(0.5));
         app.update();
         let applied = app
             .world()
@@ -1221,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_suppresses_a_binary_expressions_material_and_uv_binds_like_upstream() {
+    fn writer_restores_material_and_uv_for_published_zero_weight() {
         let mut app = writer_app();
         let material_handle = {
             let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
@@ -1247,7 +1122,7 @@ mod tests {
                 }],
             },
         );
-        app.world_mut().entity_mut(blink).insert(BinaryExpression);
+
         let mut blend_settings = none_settings();
         blend_settings.override_blink = ExpressionOverrideType::Blend;
         let happy = spawn_expression(
@@ -1264,14 +1139,14 @@ mod tests {
             MeshMaterial3d(material_handle.clone()),
         ));
 
-        // binary blink=1 with a 0.25 blink suppression rate: upstream's morph
-        // pass yields 0, and the material/UV pass must yield 0 as well.
+        // The upstream pass publishes zero for a suppressed expression.
+        // The material writer consumes that result without recalculating it.
         app.world_mut()
             .entity_mut(blink)
-            .insert(ExpressionOverride(1.0));
+            .insert(EffectiveExpressionWeight(0.0));
         app.world_mut()
             .entity_mut(happy)
-            .insert(ExpressionOverride(0.25));
+            .insert(EffectiveExpressionWeight(0.25));
         app.update();
 
         let written = app

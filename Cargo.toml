@@ -32,10 +32,10 @@ rfd = { version = "=0.17.2", default-features = false }
 [patch."https://github.com/nikicat/mediapipe-rs"]
 mediapipe = { path = "vendor/mediapipe-rs" }
 
-# Temporary upstream-bound MToon transparency fix (#94). Remove this patch
-# when the same fix is available from the official bevy_vrm1 repository.
+# Temporary upstream-bound fixes: MToon transparency (#94) and published
+# expression weights (#212). Remove when both APIs/fixes are available upstream.
 [patch."https://github.com/not-elm/bevy_vrm1"]
-bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "6ee2f610d6c95b542a3317028da10aba26c9e8de" }
+bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "be60f99d35c4d786b0d17c93aef07e60aa31f34d" }
 
 # Build artifact disk policy (AGENTS.md): full debug info in dev builds is
 # the single largest contributor to target/ size (tens of GiB). Line tables
