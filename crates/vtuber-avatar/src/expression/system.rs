@@ -562,8 +562,10 @@ mod tests {
             );
             let detailed = crate::expression::command::build_detailed_face_commands(
                 &detailed.unwrap(),
-                &PerfectSyncCapabilities::from_names(
-                    ArkitBlendshape::ALL.map(ArkitBlendshape::canonical_name),
+                &PerfectSyncCapabilities::from_named_statuses(
+                    (ArkitBlendshape::ALL.map(ArkitBlendshape::canonical_name))
+                        .into_iter()
+                        .map(|name| (name, true)),
                 ),
                 |channel| Some(channel.canonical_name()),
             );
@@ -878,10 +880,12 @@ mod tests {
         );
         capabilities.gaze_backend = SelectedGazeBackend::Expression;
         capabilities.declared_look_at = DeclaredLookAtType::Expression;
-        capabilities.perfect_sync = PerfectSyncCapabilities::from_names(
-            vtuber_core::ArkitBlendshape::ALL
+        capabilities.perfect_sync = PerfectSyncCapabilities::from_named_statuses(
+            (vtuber_core::ArkitBlendshape::ALL
                 .into_iter()
-                .map(vtuber_core::ArkitBlendshape::canonical_name),
+                .map(vtuber_core::ArkitBlendshape::canonical_name))
+            .into_iter()
+            .map(|name| (name, true)),
         );
         let catalog = AvatarExpressionCatalog::build(
             "model".into(),

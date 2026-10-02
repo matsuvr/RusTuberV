@@ -1,7 +1,7 @@
 //! VRM expression and avatar capability discovery.
 //!
-//! This module inspects the expression map that `bevy_vrm1` builds during VRM
-//! initialization and classifies the available presets into the categories
+//! This module inspects resolved expression binds after VRM initialization
+//! and classifies the effective presets into the categories
 //! used by the VTuber adapter. It does not touch morph targets directly and
 //! does not apply expression weights.
 //!
@@ -14,6 +14,8 @@ use bevy::prelude::*;
 use bevy_vrm1::prelude::ExpressionEntityMap;
 use std::collections::BTreeSet;
 use vtuber_core::{ARKIT52_CHANNEL_COUNT, ArkitBlendshape};
+
+use crate::expression::status::ExpressionBindingStatus;
 
 const BLINK_LEFT: &str = "blinkLeft";
 const BLINK_RIGHT: &str = "blinkRight";
@@ -166,32 +168,32 @@ pub struct ExpressionCapabilities {
 }
 
 impl ExpressionCapabilities {
-    /// Builds capabilities from the `bevy_vrm1` expression map.
-    ///
-    /// Passing `None` produces an empty capability set, which is the correct
-    /// treatment for models that do not expose an expression map.
-    #[must_use]
-    pub fn from_map(map: Option<&ExpressionEntityMap>) -> Self {
-        let names: BTreeSet<String> = map
-            .map(|m| m.0.keys().map(|expr| expr.0.clone()).collect())
-            .unwrap_or_default();
-        Self::from_names(&names)
-    }
-
-    /// Builds capabilities from a set of expression names.
+    /// Builds capabilities from the runtime names and resolved binding facts.
     ///
     /// The input order does not affect the result. Names are matched against
-    /// the VRM 1.0 expression preset names exactly.
+    /// VRM presets exactly. Morph and supported material binds can both make
+    /// a standard expression effective; an empty preset cannot.
     #[must_use]
-    pub fn from_names(names: &BTreeSet<String>) -> Self {
-        let mut caps = Self::default();
-        let mut unknown = Vec::new();
-
-        for name in names {
-            let known = classify_known(name, &mut caps);
-            if !known {
-                unknown.push(name.clone());
+    pub fn from_bindings<I, S>(bindings: I) -> Self
+    where
+        I: IntoIterator<Item = (S, ExpressionBindingStatus)>,
+        S: AsRef<str>,
+    {
+        let mut names = BTreeSet::new();
+        let mut unknown = BTreeSet::new();
+        for (name, status) in bindings {
+            let name = name.as_ref();
+            if !classify_known(name, &mut Self::default()) {
+                unknown.insert(name.to_owned());
             }
+            if status.has_effective_bind() {
+                names.insert(name.to_owned());
+            }
+        }
+        let mut caps = Self::default();
+
+        for name in &names {
+            classify_known(name, &mut caps);
         }
 
         // Blink priority: per-eye beats combined.
@@ -208,7 +210,7 @@ impl ExpressionCapabilities {
             caps.mouth = MouthMode::AaOnly;
         }
 
-        caps.unknown = unknown;
+        caps.unknown = unknown.into_iter().collect();
         caps
     }
 
@@ -253,17 +255,6 @@ impl Default for PerfectSyncCapabilities {
 }
 
 impl PerfectSyncCapabilities {
-    /// Builds a synthetic capability snapshot where every known name is
-    /// treated as effective.  This is useful for pure contract tests.
-    #[must_use]
-    pub fn from_names<I, S>(names: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        Self::from_named_statuses(names.into_iter().map(|name| (name, true)))
-    }
-
     /// Builds capabilities from known names and their resolved-bind status.
     ///
     /// Unknown extra expressions are retained but ignored by the 52-channel
@@ -671,9 +662,28 @@ mod tests {
         ExpressionEntityMap(map)
     }
 
+    fn resolved_bindings(map: &ExpressionEntityMap) -> Vec<(String, ExpressionBindingStatus)> {
+        map.0
+            .keys()
+            .map(|name| {
+                (
+                    name.0.clone(),
+                    ExpressionBindingStatus {
+                        declared_morph_bind_count: 1,
+                        resolved_morph_bind_count: 1,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn expression_capabilities_empty_when_map_missing() {
-        let caps = ExpressionCapabilities::from_map(None);
+        let caps = ExpressionCapabilities::from_bindings(std::iter::empty::<(
+            &str,
+            ExpressionBindingStatus,
+        )>());
         assert_eq!(caps.blink, BlinkMode::None);
         assert_eq!(caps.mouth, MouthMode::None);
         assert!(!caps.look.any());
@@ -684,7 +694,7 @@ mod tests {
     #[test]
     fn expression_capabilities_empty_when_no_expressions() {
         let map = make_map(&[]);
-        let caps = ExpressionCapabilities::from_map(Some(&map));
+        let caps = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         assert_eq!(caps.blink, BlinkMode::None);
         assert_eq!(caps.mouth, MouthMode::None);
         assert!(caps.unknown.is_empty());
@@ -693,7 +703,7 @@ mod tests {
     #[test]
     fn expression_capabilities_per_eye_blink() {
         let map = make_map(&["blinkLeft", "blinkRight"]);
-        let caps = ExpressionCapabilities::from_map(Some(&map));
+        let caps = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         assert_eq!(caps.blink, BlinkMode::PerEye);
         assert!(caps.has_blink());
     }
@@ -701,28 +711,28 @@ mod tests {
     #[test]
     fn expression_capabilities_combined_blink() {
         let map = make_map(&["blink"]);
-        let caps = ExpressionCapabilities::from_map(Some(&map));
+        let caps = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         assert_eq!(caps.blink, BlinkMode::Combined);
     }
 
     #[test]
     fn expression_capabilities_per_eye_beats_combined_blink() {
         let map = make_map(&["blink", "blinkLeft", "blinkRight"]);
-        let caps = ExpressionCapabilities::from_map(Some(&map));
+        let caps = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         assert_eq!(caps.blink, BlinkMode::PerEye);
     }
 
     #[test]
     fn expression_capabilities_full_mouth() {
         let map = make_map(&["aa", "ih", "ou", "ee", "oh"]);
-        let caps = ExpressionCapabilities::from_map(Some(&map));
+        let caps = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         assert_eq!(caps.mouth, MouthMode::Full);
     }
 
     #[test]
     fn expression_capabilities_aa_only_mouth() {
         let map = make_map(&["aa"]);
-        let caps = ExpressionCapabilities::from_map(Some(&map));
+        let caps = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         assert_eq!(caps.mouth, MouthMode::AaOnly);
     }
 
@@ -731,25 +741,27 @@ mod tests {
         let a = make_map(&["oh", "aa", "ee", "ih", "ou"]);
         let b = make_map(&["aa", "ih", "ou", "ee", "oh"]);
         assert_eq!(
-            ExpressionCapabilities::from_map(Some(&a)),
-            ExpressionCapabilities::from_map(Some(&b))
+            ExpressionCapabilities::from_bindings(resolved_bindings(&a)),
+            ExpressionCapabilities::from_bindings(resolved_bindings(&b))
         );
     }
 
     #[test]
     fn expression_capabilities_custom_is_unknown() {
         let map = make_map(&["customExpression", "aa"]);
-        let caps = ExpressionCapabilities::from_map(Some(&map));
+        let caps = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         assert_eq!(caps.mouth, MouthMode::AaOnly);
         assert_eq!(caps.unknown, vec!["customExpression"]);
     }
 
     #[test]
     fn perfect_sync_full_52_names_are_complete() {
-        let caps = PerfectSyncCapabilities::from_names(
-            ArkitBlendshape::ALL
+        let caps = PerfectSyncCapabilities::from_named_statuses(
+            (ArkitBlendshape::ALL
                 .into_iter()
-                .map(ArkitBlendshape::canonical_name),
+                .map(ArkitBlendshape::canonical_name))
+            .into_iter()
+            .map(|name| (name, true)),
         );
         assert_eq!(caps.present_count(), 52);
         assert_eq!(caps.effective_count(), 52);
@@ -797,20 +809,28 @@ mod tests {
 
     #[test]
     fn perfect_sync_requires_all_51_channels_except_tongue_out() {
-        let all_52 = PerfectSyncCapabilities::from_names(
-            ArkitBlendshape::ALL
+        let all_52 = PerfectSyncCapabilities::from_named_statuses(
+            (ArkitBlendshape::ALL
                 .into_iter()
-                .map(ArkitBlendshape::canonical_name),
+                .map(ArkitBlendshape::canonical_name))
+            .into_iter()
+            .map(|name| (name, true)),
         );
         assert!(all_52.supports_perfect_sync());
 
         // TongueOut is not required: a model without a tongue expression is
         // still a complete Perfect Sync model.
-        let without_tongue = PerfectSyncCapabilities::from_names(required_perfect_sync_names());
+        let without_tongue = PerfectSyncCapabilities::from_named_statuses(
+            (required_perfect_sync_names())
+                .into_iter()
+                .map(|name| (name, true)),
+        );
         assert!(without_tongue.supports_perfect_sync());
 
-        let missing_one = PerfectSyncCapabilities::from_names(
-            required_perfect_sync_names().filter(|name| *name != "JawOpen"),
+        let missing_one = PerfectSyncCapabilities::from_named_statuses(
+            (required_perfect_sync_names().filter(|name| *name != "JawOpen"))
+                .into_iter()
+                .map(|name| (name, true)),
         );
         assert!(!missing_one.supports_perfect_sync());
     }
@@ -831,19 +851,25 @@ mod tests {
 
     #[test]
     fn perfect_sync_partial_channel_sets_are_not_supported() {
-        let eye_look = PerfectSyncCapabilities::from_names([
-            "EyeLookDownLeft",
-            "EyeLookDownRight",
-            "EyeLookInLeft",
-            "EyeLookInRight",
-            "EyeLookOutLeft",
-            "EyeLookOutRight",
-            "EyeLookUpLeft",
-            "EyeLookUpRight",
-        ]);
+        let eye_look = PerfectSyncCapabilities::from_named_statuses(
+            ([
+                "EyeLookDownLeft",
+                "EyeLookDownRight",
+                "EyeLookInLeft",
+                "EyeLookInRight",
+                "EyeLookOutLeft",
+                "EyeLookOutRight",
+                "EyeLookUpLeft",
+                "EyeLookUpRight",
+            ])
+            .into_iter()
+            .map(|name| (name, true)),
+        );
         assert!(!eye_look.supports_perfect_sync());
 
-        let tongue_only = PerfectSyncCapabilities::from_names(["TongueOut"]);
+        let tongue_only = PerfectSyncCapabilities::from_named_statuses(
+            (["TongueOut"]).into_iter().map(|name| (name, true)),
+        );
         assert!(!tongue_only.supports_perfect_sync());
     }
 
@@ -896,7 +922,7 @@ mod tests {
             "lookUp",
             "lookDown",
         ]);
-        let expressions = ExpressionCapabilities::from_map(Some(&map));
+        let expressions = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         let bones = BonePresence {
             head: true,
             neck: true,
@@ -925,7 +951,7 @@ mod tests {
     #[test]
     fn avatar_capability_snapshot_unknown() {
         let map = make_map(&["customA", "aa", "customB"]);
-        let expressions = ExpressionCapabilities::from_map(Some(&map));
+        let expressions = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         let bones = BonePresence {
             head: true,
             ..BonePresence::default()
@@ -941,7 +967,7 @@ mod tests {
     #[test]
     fn avatar_capability_snapshot_summary() {
         let map = make_map(&["blinkLeft", "blinkRight", "aa", "lookLeft"]);
-        let expressions = ExpressionCapabilities::from_map(Some(&map));
+        let expressions = ExpressionCapabilities::from_bindings(resolved_bindings(&map));
         let bones = BonePresence {
             head: true,
             neck: true,

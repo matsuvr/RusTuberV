@@ -36,3 +36,11 @@ pub struct ExpressionBindingStatus {
     /// `false` for author-defined custom expressions.
     pub declared_as_preset: bool,
 }
+
+impl ExpressionBindingStatus {
+    /// Whether at least one morph or supported material bind can affect the model.
+    #[must_use]
+    pub const fn has_effective_bind(self) -> bool {
+        self.resolved_morph_bind_count > 0 || self.resolved_material_bind_count > 0
+    }
+}
