@@ -27,6 +27,8 @@ pub(crate) const RICH_MTOON_FRAGMENT_SHADER_HANDLE: Handle<Shader> =
 pub(crate) const RICH_MTOON_VERTEX_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("b48d1e07-3c95-4a26-8f71-2d6b9c4a7e05");
 
+const MTOON_UV_SHADER_HANDLE: Handle<Shader> = uuid_handle!("1f6f4388-e204-4b0a-a6c6-157e045a6ee1");
+
 /// Shader override with no additional material bindings.
 #[derive(Asset, AsBindGroup, Clone, Debug, Reflect)]
 pub struct RichMtoonExtension {}
@@ -46,6 +48,12 @@ pub type RichMtoonMaterial = ExtendedMaterial<MToonMaterial, RichMtoonExtension>
 /// Registers the Rich material, its shaders, the switch and the sync.
 pub(crate) fn register_rich_mtoon(app: &mut App) {
     app.add_plugins(MaterialPlugin::<RichMtoonMaterial>::default());
+    load_internal_asset!(
+        app,
+        MTOON_UV_SHADER_HANDLE,
+        "mtoon_uv.wgsl",
+        Shader::from_wgsl
+    );
     load_internal_asset!(
         app,
         RICH_MTOON_FRAGMENT_SHADER_HANDLE,
