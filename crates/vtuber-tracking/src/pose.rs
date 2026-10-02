@@ -7,7 +7,7 @@
 use nalgebra::{Dyn, OMatrix, OVector, Rotation3, SVD, U3, UnitQuaternion};
 use thiserror::Error;
 
-use vtuber_core::types::HeadPose;
+use vtuber_core::types::{HeadPose, Landmark3};
 
 /// MediaPipe face-transform pose adapter.
 pub mod mediapipe;
@@ -78,6 +78,15 @@ impl LandmarkSet {
     #[must_use]
     pub fn new() -> Self {
         Self { points: Vec::new() }
+    }
+
+    /// Copies landmark coordinates and visibility into weighted solver input.
+    pub(crate) fn from_landmarks(landmarks: &[Landmark3]) -> Self {
+        let mut set = Self::new();
+        for landmark in landmarks {
+            set.push([landmark.x, landmark.y, landmark.z], landmark.visibility);
+        }
+        set
     }
 
     /// Adds a weighted point.

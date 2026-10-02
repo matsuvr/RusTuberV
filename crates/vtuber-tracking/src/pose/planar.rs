@@ -11,7 +11,34 @@
 use nalgebra::{SMatrix, SVector};
 use thiserror::Error;
 
-use vtuber_core::types::HeadPose;
+use vtuber_core::types::{HeadPose, Landmark3};
+
+/// Builds the existing WFLW-98 template input for calibration and tracking.
+pub(crate) fn canonical_face_correspondences(
+    landmarks: &[Landmark3],
+) -> Result<Vec<PlanarCorrespondence>, PlanarPoseError> {
+    CANONICAL_FACE_TEMPLATE
+        .iter()
+        .map(|canonical| {
+            let landmark = landmarks.get(canonical.index).ok_or(
+                PlanarPoseError::InsufficientCorrespondences(landmarks.len()),
+            )?;
+            Ok(PlanarCorrespondence {
+                canonical: *canonical,
+                reference: PlanarLandmark {
+                    x: landmark.x,
+                    y: landmark.y,
+                    confidence: landmark.visibility,
+                },
+                current: PlanarLandmark {
+                    x: landmark.x,
+                    y: landmark.y,
+                    confidence: landmark.visibility,
+                },
+            })
+        })
+        .collect()
+}
 
 /// A canonical 3D face point paired with one model-output index.
 #[derive(Clone, Copy, Debug, PartialEq)]

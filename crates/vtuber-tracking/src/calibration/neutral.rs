@@ -166,7 +166,7 @@ impl NeutralReference {
             return Err(CalibrationError::InsufficientLandmarks(landmarks.len()));
         }
 
-        let median_set = landmarks_to_set(&landmarks);
+        let median_set = LandmarkSet::from_landmarks(&landmarks);
         let is_planar = schema.0 == "peppapig-98";
         if !is_planar && is_degenerate(&median_set) {
             return Err(CalibrationError::DegeneratePointCloud);
@@ -298,7 +298,7 @@ fn head_pose_spread(
     let mut pitch_max = 0.0f32;
     let mut roll_max = 0.0f32;
     for s in samples {
-        let current = landmarks_to_set(&s.landmarks);
+        let current = LandmarkSet::from_landmarks(&s.landmarks);
         let alignment = solve_relative_pose(median_set, &current)
             .map_err(map_pose_error_to_calibration_error)?;
         yaw_max = yaw_max.max(alignment.pose.yaw_rad.abs());
@@ -321,7 +321,7 @@ fn median_head_pose(
     let mut pitches: Vec<f32> = Vec::with_capacity(samples.len());
     let mut rolls: Vec<f32> = Vec::with_capacity(samples.len());
     for s in samples {
-        let current = landmarks_to_set(&s.landmarks);
+        let current = LandmarkSet::from_landmarks(&s.landmarks);
         let alignment = solve_relative_pose(median_set, &current)
             .map_err(map_pose_error_to_calibration_error)?;
         yaws.push(alignment.pose.yaw_rad);
@@ -390,15 +390,6 @@ fn estimate_face_scale(landmarks: &[Landmark3]) -> f32 {
     } else {
         (sum / count as f64) as f32
     }
-}
-
-/// Converts a collected landmark vector into the Kabsch input set.
-fn landmarks_to_set(landmarks: &[Landmark3]) -> LandmarkSet {
-    let mut set = LandmarkSet::new();
-    for lm in landmarks {
-        set.push([lm.x, lm.y, lm.z], lm.visibility);
-    }
-    set
 }
 
 /// Returns `true` if the point cloud lacks enough volume for pose solving.
