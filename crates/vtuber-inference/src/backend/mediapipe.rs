@@ -17,7 +17,7 @@ use vtuber_core::arm_tracking::PoseArmFrame;
 use vtuber_core::{
     CameraFaceTransform, FaceBlendshapeSet, FaceLandmark, FaceTrackingOutcome, FaceTrackingQuality,
     FaceTrackingSample, FrameSeq, MEDIAPIPE_FACE_BLENDSHAPE_COUNT, MEDIAPIPE_FACE_LANDMARK_COUNT,
-    MonoTimeNs, PixelFormat, VideoFrame,
+    MonoTimeNs, VideoFrame,
 };
 
 use crate::error::{InferenceError, Result};
@@ -146,7 +146,7 @@ impl MediaPipePoseRuntime {
     /// its landmarks are attached to the Pose arms.
     pub fn infer(&mut self, frame: &VideoFrame) -> Result<PoseArmFrame> {
         let timestamp_ms = video_timestamp_ms(frame.captured_at, &mut self.last_timestamp_ms)?;
-        let image_data = frame_rgb(frame, &mut self.staging)?;
+        let image_data = frame.pixels()?.packed_rgb(&mut self.staging)?;
         let image = Image::from_rgb(
             Size {
                 width: frame.width,
@@ -235,7 +235,7 @@ impl MediaPipeRuntime {
 impl FaceTrackingInference for MediaPipeRuntime {
     fn infer_face_tracking(&mut self, frame: &VideoFrame) -> Result<FaceTrackingOutcome> {
         let timestamp_ms = video_timestamp_ms(frame.captured_at, &mut self.last_timestamp_ms)?;
-        let image_data = frame_rgb(frame, &mut self.staging)?;
+        let image_data = frame.pixels()?.packed_rgb(&mut self.staging)?;
         let image = Image::from_rgb(
             Size {
                 width: frame.width,
@@ -622,75 +622,6 @@ fn video_timestamp_ms(captured_at: MonoTimeNs, last_timestamp_ms: &mut Option<i6
     Ok(timestamp_ms)
 }
 
-#[expect(
-    clippy::indexing_slicing,
-    reason = "every row and column index is checked against the frame dimensions just above, so the staging writes stay inside the resized buffer"
-)]
-fn frame_rgb<'a>(frame: &'a VideoFrame, staging: &'a mut Vec<u8>) -> Result<&'a [u8]> {
-    let width = usize::try_from(frame.width)
-        .map_err(|_| InferenceError::MediaPipeFrameConversion("frame width is too large".into()))?;
-    let height = usize::try_from(frame.height).map_err(|_| {
-        InferenceError::MediaPipeFrameConversion("frame height is too large".into())
-    })?;
-    let channels = match frame.format {
-        PixelFormat::Rgb8 | PixelFormat::Bgr8 => 3,
-        PixelFormat::Rgba8 => 4,
-        PixelFormat::Gray8 => 1,
-    };
-    let row_bytes = width.checked_mul(channels).ok_or_else(|| {
-        InferenceError::MediaPipeFrameConversion("frame row size overflow".into())
-    })?;
-    if frame.stride_bytes < row_bytes {
-        return Err(InferenceError::MediaPipeFrameConversion(format!(
-            "frame stride {} is smaller than row size {row_bytes}",
-            frame.stride_bytes
-        )));
-    }
-    let required = frame.stride_bytes.checked_mul(height).ok_or_else(|| {
-        InferenceError::MediaPipeFrameConversion("frame buffer size overflow".into())
-    })?;
-    if frame.data.len() < required {
-        return Err(InferenceError::MediaPipeFrameConversion(format!(
-            "frame buffer has {} bytes but requires {required}",
-            frame.data.len()
-        )));
-    }
-    if frame.format == PixelFormat::Rgb8 && frame.stride_bytes == row_bytes {
-        return Ok(frame.data.as_ref());
-    }
-
-    let rgb_row_bytes = width
-        .checked_mul(3)
-        .ok_or_else(|| InferenceError::MediaPipeFrameConversion("RGB row size overflow".into()))?;
-    let staging_len = rgb_row_bytes.checked_mul(height).ok_or_else(|| {
-        InferenceError::MediaPipeFrameConversion("RGB frame size overflow".into())
-    })?;
-    staging.resize(staging_len, 0);
-    for row in 0..height {
-        let source = &frame.data[row * frame.stride_bytes..row * frame.stride_bytes + row_bytes];
-        let destination = &mut staging[row * rgb_row_bytes..(row + 1) * rgb_row_bytes];
-        match frame.format {
-            PixelFormat::Rgb8 => destination.copy_from_slice(source),
-            PixelFormat::Bgr8 => {
-                for (src, dst) in source.chunks_exact(3).zip(destination.chunks_exact_mut(3)) {
-                    dst.copy_from_slice(&[src[2], src[1], src[0]]);
-                }
-            }
-            PixelFormat::Rgba8 => {
-                for (src, dst) in source.chunks_exact(4).zip(destination.chunks_exact_mut(3)) {
-                    dst.copy_from_slice(&src[..3]);
-                }
-            }
-            PixelFormat::Gray8 => {
-                for (value, dst) in source.iter().zip(destination.chunks_exact_mut(3)) {
-                    dst.fill(*value);
-                }
-            }
-        }
-    }
-    Ok(staging)
-}
-
 fn verify_task_bundle(path: &Path) -> Result<()> {
     let bytes = std::fs::read(path).map_err(|error| {
         InferenceError::MediaPipeLoadFailed(format!("task bundle read failed: {error}"))
@@ -773,7 +704,7 @@ mod tests {
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
     use super::{
-        embedded_hand_task_bundle, embedded_pose_task_bundle, embedded_task_bundle, frame_rgb,
+        embedded_hand_task_bundle, embedded_pose_task_bundle, embedded_task_bundle,
         matrix_from_column_major, verify_hand_task_bundle_bytes, verify_pose_task_bundle_bytes,
         verify_task_bundle_bytes, video_timestamp_ms,
     };
@@ -832,10 +763,13 @@ mod tests {
 
     #[test]
     fn bgr_and_stride_are_converted_to_packed_rgb() {
-        let source = frame(PixelFormat::Bgr8, 2, 1, 8, &[3, 2, 1, 6, 5, 4, 0, 0]);
+        let source = frame(PixelFormat::Bgr8, 2, 1, 8, &[3, 2, 1, 6, 5, 4]);
         let mut staging = Vec::new();
         assert_eq!(
-            frame_rgb(&source, &mut staging).unwrap(),
+            source
+                .pixels()
+                .and_then(|pixels| pixels.packed_rgb(&mut staging))
+                .unwrap(),
             &[1, 2, 3, 4, 5, 6]
         );
     }
@@ -844,7 +778,12 @@ mod tests {
     fn undersized_stride_is_rejected() {
         let source = frame(PixelFormat::Rgb8, 2, 1, 5, &[0; 5]);
         let mut staging = Vec::new();
-        assert!(frame_rgb(&source, &mut staging).is_err());
+        assert!(
+            source
+                .pixels()
+                .and_then(|pixels| pixels.packed_rgb(&mut staging))
+                .is_err()
+        );
     }
 
     #[test]

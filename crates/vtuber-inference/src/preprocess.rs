@@ -4,7 +4,7 @@
 //! expected by the face model. Buffers are allocated once and reused so that
 //! normal frames do not trigger allocations in the resize or normalize stages.
 
-use vtuber_core::types::{PixelFormat, VideoFrame};
+use vtuber_core::{VideoFrame, frame::FramePixels};
 
 use crate::descriptor::{ChannelOrder, ModelDescriptor, Normalization};
 use crate::error::{InferenceError, Result};
@@ -125,10 +125,10 @@ pub fn preprocess_frame<'b>(
     let (target_h, target_w) = spatial_size(&params.input_shape)?;
     buffers.ensure_size(target_w, target_h);
 
-    validate_frame(frame)?;
+    let pixels = frame.pixels()?;
     let (crop_size, offset_x, offset_y) = crop_rect(frame.width, frame.height);
 
-    resize_to_rgb(buffers, frame, crop_size, offset_x, offset_y);
+    resize_to_rgb(buffers, pixels, crop_size, offset_x, offset_y)?;
     normalize_and_layout(buffers, params);
 
     Ok(&mut buffers.tensor)
@@ -141,45 +141,6 @@ fn spatial_size(input_shape: &[usize; 4]) -> Result<(usize, usize)> {
         _ => Err(InferenceError::UnsupportedInputLayout {
             shape: input_shape.to_vec(),
         }),
-    }
-}
-
-pub(crate) fn validate_frame(frame: &VideoFrame) -> Result<()> {
-    if frame.width == 0 || frame.height == 0 {
-        return Err(InferenceError::InvalidInput("zero frame dimension".into()));
-    }
-
-    let bpp = bytes_per_pixel(frame.format);
-    let expected_stride = (frame.width as usize)
-        .checked_mul(bpp)
-        .ok_or_else(|| InferenceError::InvalidInput("frame dimension overflow".into()))?;
-    if frame.stride_bytes < expected_stride {
-        return Err(InferenceError::FrameStrideMismatch {
-            expected: expected_stride,
-            actual: frame.stride_bytes,
-        });
-    }
-
-    let expected_len = frame
-        .stride_bytes
-        .checked_mul((frame.height as usize).saturating_sub(1))
-        .and_then(|base| base.checked_add(expected_stride))
-        .ok_or_else(|| InferenceError::InvalidInput("frame size overflow".into()))?;
-    if frame.data.len() < expected_len {
-        return Err(InferenceError::FrameBufferTooSmall {
-            expected: expected_len,
-            actual: frame.data.len(),
-        });
-    }
-
-    Ok(())
-}
-
-fn bytes_per_pixel(format: PixelFormat) -> usize {
-    match format {
-        PixelFormat::Rgb8 | PixelFormat::Bgr8 => 3,
-        PixelFormat::Rgba8 => 4,
-        PixelFormat::Gray8 => 1,
     }
 }
 
@@ -196,11 +157,11 @@ fn crop_rect(width: u32, height: u32) -> (u32, u32, u32) {
 )]
 fn resize_to_rgb(
     buffers: &mut PreprocessBuffers,
-    frame: &VideoFrame,
+    pixels: FramePixels<'_>,
     crop_size: u32,
     offset_x: u32,
     offset_y: u32,
-) {
+) -> Result<()> {
     let target_w = buffers.target_w;
     let target_h = buffers.target_h;
 
@@ -208,37 +169,15 @@ fn resize_to_rgb(
         let src_y = offset_y + (y as u32 * crop_size / target_h as u32);
         for x in 0..target_w {
             let src_x = offset_x + (x as u32 * crop_size / target_w as u32);
-            let rgb = read_rgb_pixel(frame, src_x, src_y);
+            let [r, g, b, _] = pixels.rgba(src_x as usize, src_y as usize)?;
+            let rgb = [r, g, b];
             let dst_idx = (y * target_w + x) * 3;
             buffers.resized_rgb[dst_idx] = rgb[0];
             buffers.resized_rgb[dst_idx + 1] = rgb[1];
             buffers.resized_rgb[dst_idx + 2] = rgb[2];
         }
     }
-}
-
-#[expect(
-    clippy::indexing_slicing,
-    reason = "`x` and `y` come from the crop window this caller clamps to the frame dimensions, so the row and pixel offsets stay inside `data`"
-)]
-pub(crate) fn read_rgb_pixel(frame: &VideoFrame, x: u32, y: u32) -> [u8; 3] {
-    let stride = frame.stride_bytes;
-    let base = y as usize * stride
-        + match frame.format {
-            PixelFormat::Rgb8 | PixelFormat::Bgr8 => x as usize * 3,
-            PixelFormat::Rgba8 => x as usize * 4,
-            PixelFormat::Gray8 => x as usize,
-        };
-
-    match frame.format {
-        PixelFormat::Rgb8 => [frame.data[base], frame.data[base + 1], frame.data[base + 2]],
-        PixelFormat::Bgr8 => [frame.data[base + 2], frame.data[base + 1], frame.data[base]],
-        PixelFormat::Rgba8 => [frame.data[base], frame.data[base + 1], frame.data[base + 2]],
-        PixelFormat::Gray8 => {
-            let v = frame.data[base];
-            [v, v, v]
-        }
-    }
+    Ok(())
 }
 
 #[expect(
@@ -305,6 +244,7 @@ mod tests {
     )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_core::types::{FrameSeq, MonoTimeNs};
+    use vtuber_core::{PixelFormat, frame::FrameLayoutError};
 
     fn make_frame(
         width: u32,
@@ -465,7 +405,10 @@ mod tests {
         let mut buffers = PreprocessBuffers::for_shape(&params.input_shape).unwrap();
         let err = preprocess_frame(&mut buffers, &frame, &params).unwrap_err();
         assert!(
-            matches!(err, InferenceError::FrameStrideMismatch { .. }),
+            matches!(
+                err,
+                InferenceError::Frame(FrameLayoutError::StrideTooSmall { .. })
+            ),
             "expected stride mismatch, got {err:?}"
         );
     }
@@ -478,7 +421,10 @@ mod tests {
         let mut buffers = PreprocessBuffers::for_shape(&params.input_shape).unwrap();
         let err = preprocess_frame(&mut buffers, &frame, &params).unwrap_err();
         assert!(
-            matches!(err, InferenceError::FrameBufferTooSmall { .. }),
+            matches!(
+                err,
+                InferenceError::Frame(FrameLayoutError::BufferTooSmall { .. })
+            ),
             "expected buffer too small, got {err:?}"
         );
     }

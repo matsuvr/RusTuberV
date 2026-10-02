@@ -1,7 +1,7 @@
 //! UltraFace's fixed RGB/NCHW input preprocessing.
 
 use thiserror::Error;
-use vtuber_core::types::{PixelFormat, VideoFrame};
+use vtuber_core::VideoFrame;
 
 /// Width of the fixed UltraFace RFB-320 input.
 pub const ULTRAFACE_INPUT_WIDTH: usize = 320;
@@ -29,39 +29,12 @@ impl Default for DetectorNormalization {
 /// Typed failures from detector-frame preprocessing.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum DetectorPreprocessError {
-    /// The source frame has no pixels.
-    #[error("source frame has a zero dimension: width={width} height={height}")]
-    ZeroDimension {
-        /// Source width.
-        width: u32,
-        /// Source height.
-        height: u32,
-    },
-    /// The source pixel format is not one of the canonical decoded formats.
-    #[error("unsupported detector pixel format: {format}")]
-    UnsupportedPixelFormat {
-        /// Debug name of the unsupported format.
-        format: String,
-    },
-    /// The source stride cannot contain one complete row.
-    #[error("source stride is too small: stride={actual} required={expected}")]
-    StrideTooSmall {
-        /// Actual source row stride.
-        actual: usize,
-        /// Minimum row stride for the selected format.
-        expected: usize,
-    },
-    /// The owned frame buffer does not contain all rows described by its layout.
-    #[error("source frame buffer is too short: length={actual} required={required}")]
-    FrameBufferTooSmall {
-        /// Actual buffer length.
-        actual: usize,
-        /// Required buffer length including row padding.
-        required: usize,
-    },
-    /// A checked frame-layout multiplication overflowed.
-    #[error("source frame layout is too large")]
-    FrameLayoutOverflow,
+    /// Decoded frame layout or pixel read failure.
+    #[error(transparent)]
+    Frame(#[from] vtuber_core::frame::FrameLayoutError),
+    /// The detector tensor size cannot be represented.
+    #[error("detector tensor size overflow")]
+    TensorSizeOverflow,
     /// A normalization mean or scale is not finite.
     #[error("normalization setting is not finite at channel {channel}: mean={mean} scale={scale}")]
     NonFiniteNormalization {
@@ -158,35 +131,9 @@ impl UltraFacePreprocessBuffers {
     )]
     pub fn preprocess(&mut self, frame: &VideoFrame) -> Result<&[f32], DetectorPreprocessError> {
         self.validate_normalization()?;
-        let bytes_per_pixel = bytes_per_pixel(frame.format)?;
-        if frame.width == 0 || frame.height == 0 {
-            return Err(DetectorPreprocessError::ZeroDimension {
-                width: frame.width,
-                height: frame.height,
-            });
-        }
-
-        let source_width = frame.width as usize;
-        let source_height = frame.height as usize;
-        let expected_stride = source_width
-            .checked_mul(bytes_per_pixel)
-            .ok_or(DetectorPreprocessError::FrameLayoutOverflow)?;
-        if frame.stride_bytes < expected_stride {
-            return Err(DetectorPreprocessError::StrideTooSmall {
-                actual: frame.stride_bytes,
-                expected: expected_stride,
-            });
-        }
-        let required_len = frame
-            .stride_bytes
-            .checked_mul(source_height)
-            .ok_or(DetectorPreprocessError::FrameLayoutOverflow)?;
-        if frame.data.len() < required_len {
-            return Err(DetectorPreprocessError::FrameBufferTooSmall {
-                actual: frame.data.len(),
-                required: required_len,
-            });
-        }
+        let pixels = frame.pixels()?;
+        let source_width = pixels.width();
+        let source_height = pixels.height();
 
         if self.source_width != source_width || self.source_height != source_height {
             self.x_samples.clear();
@@ -201,38 +148,20 @@ impl UltraFacePreprocessBuffers {
         let plane_len = self
             .output_width
             .checked_mul(self.output_height)
-            .ok_or(DetectorPreprocessError::FrameLayoutOverflow)?;
+            .ok_or(DetectorPreprocessError::TensorSizeOverflow)?;
         let expected_tensor_len = plane_len
             .checked_mul(3)
-            .ok_or(DetectorPreprocessError::FrameLayoutOverflow)?;
+            .ok_or(DetectorPreprocessError::TensorSizeOverflow)?;
         if self.tensor.len() != expected_tensor_len {
-            return Err(DetectorPreprocessError::FrameLayoutOverflow);
+            return Err(DetectorPreprocessError::TensorSizeOverflow);
         }
 
         for (output_y, y_sample) in self.y_samples.iter().copied().enumerate() {
-            let row0 = y_sample.low * frame.stride_bytes;
-            let row1 = y_sample.high * frame.stride_bytes;
             for (output_x, x_sample) in self.x_samples.iter().copied().enumerate() {
-                let top_left = rgb_at(
-                    &frame.data,
-                    row0 + x_sample.low * bytes_per_pixel,
-                    frame.format,
-                );
-                let top_right = rgb_at(
-                    &frame.data,
-                    row0 + x_sample.high * bytes_per_pixel,
-                    frame.format,
-                );
-                let bottom_left = rgb_at(
-                    &frame.data,
-                    row1 + x_sample.low * bytes_per_pixel,
-                    frame.format,
-                );
-                let bottom_right = rgb_at(
-                    &frame.data,
-                    row1 + x_sample.high * bytes_per_pixel,
-                    frame.format,
-                );
+                let top_left = pixels.rgba(x_sample.low, y_sample.low)?.map(f32::from);
+                let top_right = pixels.rgba(x_sample.high, y_sample.low)?.map(f32::from);
+                let bottom_left = pixels.rgba(x_sample.low, y_sample.high)?.map(f32::from);
+                let bottom_right = pixels.rgba(x_sample.high, y_sample.high)?.map(f32::from);
                 let tensor_index = output_y * self.output_width + output_x;
                 for channel in 0..3 {
                     let top = lerp(top_left[channel], top_right[channel], x_sample.fraction);
@@ -281,14 +210,6 @@ impl Default for UltraFacePreprocessBuffers {
     }
 }
 
-fn bytes_per_pixel(format: PixelFormat) -> Result<usize, DetectorPreprocessError> {
-    match format {
-        PixelFormat::Rgb8 | PixelFormat::Bgr8 => Ok(3),
-        PixelFormat::Rgba8 => Ok(4),
-        PixelFormat::Gray8 => Ok(1),
-    }
-}
-
 fn axis_samples(source_len: usize, output_len: usize) -> Vec<AxisSample> {
     (0..output_len)
         .map(|output| {
@@ -303,34 +224,6 @@ fn axis_samples(source_len: usize, output_len: usize) -> Vec<AxisSample> {
             }
         })
         .collect()
-}
-
-#[expect(
-    clippy::indexing_slicing,
-    reason = "`offset` is a whole-pixel offset from `axis_samples`, which stays inside the source dimensions the caller validated"
-)]
-fn rgb_at(data: &[u8], offset: usize, format: PixelFormat) -> [f32; 3] {
-    match format {
-        PixelFormat::Rgb8 => [
-            data[offset] as f32,
-            data[offset + 1] as f32,
-            data[offset + 2] as f32,
-        ],
-        PixelFormat::Bgr8 => [
-            data[offset + 2] as f32,
-            data[offset + 1] as f32,
-            data[offset] as f32,
-        ],
-        PixelFormat::Rgba8 => [
-            data[offset] as f32,
-            data[offset + 1] as f32,
-            data[offset + 2] as f32,
-        ],
-        PixelFormat::Gray8 => {
-            let value = data[offset] as f32;
-            [value, value, value]
-        }
-    }
 }
 
 fn lerp(left: f32, right: f32, fraction: f32) -> f32 {

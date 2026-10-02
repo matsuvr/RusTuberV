@@ -537,7 +537,9 @@ fn process_mediapipe_frame(
 
 fn mediapipe_failure_stage(error: &InferenceError) -> FailureStage {
     match error {
-        InferenceError::MediaPipeFrameConversion(_) => FailureStage::Preprocess,
+        InferenceError::MediaPipeFrameConversion(_) | InferenceError::Frame(_) => {
+            FailureStage::Preprocess
+        }
         InferenceError::MediaPipeOutputContract(_) => FailureStage::Decode,
         InferenceError::MediaPipeFrameInference(_) => FailureStage::Runtime,
         _ => FailureStage::FrameInference,
