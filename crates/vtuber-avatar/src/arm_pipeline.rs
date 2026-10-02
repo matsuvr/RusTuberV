@@ -76,7 +76,7 @@ pub enum ArmPoseSourceKind {
     /// The tracked target is produced outside the virtual-hand generator by
     /// [`crate::tracked_arm`] and blended with the virtual target by explicit
     /// per-channel weights. The virtual post-solve modifiers (torso lag,
-    /// swivel, shoulder trim, twist relaxation) are never re-applied to the
+    /// swivel, shoulder trim) are never re-applied to the
     /// observed target, because that would move a measured hand off its target.
     TrackedPose,
 }
@@ -128,10 +128,6 @@ pub struct DynamicArmProfile {
     pub swivel_transition_width_ratio: f32,
     /// Weak bend/pole influence of the swivel correction.
     pub pole_influence: f32,
-    /// Fraction of the solved forearm twist removed by the relaxer.
-    pub twist_relax_weight: f32,
-    /// Share of the removed twist kept off the parent bone.
-    pub twist_parent_child_crossfade: f32,
     /// Optional per-model shoulder elevation trim (negative lowers the
     /// shoulder). Neutral default 0; bounded to +/- 15 degrees.
     pub shoulder_elevation_trim_radians: f32,
@@ -149,8 +145,6 @@ impl Default for DynamicArmProfile {
             elbow_swivel_radians: 15.0_f32.to_radians(),
             swivel_transition_width_ratio: 0.15,
             pole_influence: 0.2,
-            twist_relax_weight: 0.7,
-            twist_parent_child_crossfade: 0.9,
             shoulder_elevation_trim_radians: 0.0,
         }
     }
@@ -180,12 +174,6 @@ impl DynamicArmProfile {
             && self.pole_influence.is_finite()
             && self.pole_influence >= 0.0
             && self.pole_influence <= 1.0
-            && self.twist_relax_weight.is_finite()
-            && self.twist_relax_weight >= 0.0
-            && self.twist_relax_weight <= 1.0
-            && self.twist_parent_child_crossfade.is_finite()
-            && self.twist_parent_child_crossfade >= 0.0
-            && self.twist_parent_child_crossfade <= 1.0
             && self.shoulder_elevation_trim_radians.is_finite()
             && self.shoulder_elevation_trim_radians.abs() <= 15.0_f32.to_radians()
     }
@@ -330,22 +318,7 @@ pub fn resolve_arm_pose(
     } else {
         input.legacy_profile
     };
-    let relax_params = if dynamic_authority {
-        Some(TwistRelaxParams {
-            chain: input.chain,
-            motion: input.motion,
-            weight: input.dynamic_profile.twist_relax_weight,
-            crossfade: input.dynamic_profile.twist_parent_child_crossfade,
-        })
-    } else {
-        None
-    };
-    let pose = super::arm_pose::solve_stage(
-        input.chain,
-        effective_legacy_profile,
-        &target,
-        relax_params.as_ref(),
-    )?;
+    let pose = super::arm_pose::solve_stage(input.chain, effective_legacy_profile, &target)?;
     let mut result = pose.map(|pose| (pose, outcome));
     if let Some((pose, _)) = result.as_mut() {
         apply_shoulder_elevation_trim(pose, input);
@@ -406,137 +379,8 @@ fn apply_shoulder_elevation_trim(
             delta: trim_delta,
         }),
     };
-    // Downstream propagation: the trim's model-space rotation also reaches
-    // the elbow and wrist in small decaying shares so the arm bends with the
-    // shoulder instead of rotating as a rigid stick.
-    (pose.upper_arm_delta, pose.lower_arm_delta) = crate::arm_pose::propagate_shoulder_downstream(
-        model_delta,
-        input.chain.rest.upper_arm.global_rotation,
-        input.chain.rest.elbow.global_rotation,
-        pose.upper_arm_delta,
-        pose.lower_arm_delta,
-    );
-}
-
-/// Parameters for the post-solve forearm twist relaxer (Issue #170).
-#[derive(Debug, Clone, Copy)]
-pub struct TwistRelaxParams<'a> {
-    /// Bound arm chain providing immutable rest orientations.
-    pub chain: &'a ArmChainBinding,
-    /// Binding-time motion geometry carrying the forearm twist axis.
-    pub motion: &'a ArmMotionRestGeometry,
-    /// Fraction of the solved relative twist removed from the forearm.
-    pub weight: f32,
-    /// Share of the removed twist kept off the parent bone.
-    pub crossfade: f32,
-}
-
-/// Rest-relative swing/twist decomposition of a quaternion around an axis.
-///
-/// Returns `(swing, twist)` with `q ~= swing * twist`, both finite normalized
-/// quaternions and the twist angle taken on the shortest arc. Returns `None`
-/// for degenerate input instead of producing NaNs.
-#[must_use]
-pub fn decompose_swing_twist(q: Quat, axis: Vec3) -> Option<(Quat, Quat)> {
-    let q = if q.w < 0.0 { -q } else { q };
-    let axis = axis.try_normalize()?;
-    if !q.is_finite() || axis.length_squared() < 0.5 {
-        return None;
-    }
-    let d = q.xyz().dot(axis);
-    let angle = 2.0 * f32::atan2(d, q.w);
-    let twist = Quat::from_axis_angle(axis, angle);
-    let swing = q * twist.inverse();
-    if swing.is_finite() && twist.is_finite() && swing.length_squared() > f32::EPSILON {
-        Some((swing.normalize(), twist.normalize()))
-    } else {
-        None
-    }
-}
-
-/// Stage 3 (Issue #170): forearm swing-twist relaxer.
-///
-/// Decomposes the solved lower-arm rotation relative to its parent into
-/// swing and twist around the rest-space forearm axis, removes
-/// `weight * crossfade` of the relative twist from the forearm, and
-/// redistributes `weight * (1 - crossfade)` onto the upper arm as bounded
-/// compensation. Both corrections roll around the respective bone's own
-/// axis and preserve the solved elbow and wrist positions.
-/// Weight 0 leaves the solution untouched; missing or
-/// degenerate twist geometry is a safe no-op.
-pub fn relax_forearm_twist(
-    solution: &mut crate::arm::ArmIkSolution,
-    params: &TwistRelaxParams<'_>,
-) -> Result<(), ArmPipelineError> {
-    let profile_valid = params.weight.is_finite()
-        && (0.0..=1.0).contains(&params.weight)
-        && params.crossfade.is_finite()
-        && (0.0..=1.0).contains(&params.crossfade);
-    let Some(twist_info) = params.motion.forearm_twist.as_ref().filter(|t| t.usable()) else {
-        return Ok(());
-    };
-    if !profile_valid || params.weight <= f32::EPSILON {
-        return Ok(());
-    }
-    let axis_model = twist_info.direction;
-
-    let rest = &params.chain.rest;
-    // Model-space deltas of upper arm and of the lower arm relative to it.
-    let upper_model_delta =
-        solution.upper_arm_global_rotation * rest.upper_arm.global_rotation.inverse();
-    let lower_model_delta =
-        solution.lower_arm_global_rotation * rest.elbow.global_rotation.inverse();
-    let relative = upper_model_delta.inverse() * lower_model_delta;
-
-    let Some((_, _twist)) = decompose_swing_twist(relative, axis_model) else {
-        return Ok(());
-    };
-    // Signed relative twist angle around the axis (shortest arc).
-    let r = if relative.w < 0.0 {
-        -relative
-    } else {
-        relative
-    };
-    let signed_angle = 2.0 * f32::atan2(r.xyz().dot(axis_model), r.w);
-
-    let reduce = signed_angle * params.weight * params.crossfade;
-    let compensate = signed_angle * params.weight * (1.0 - params.crossfade);
-    if !reduce.is_finite() || !compensate.is_finite() {
-        return Err(ArmPipelineError::DegenerateSolvedPose);
-    }
-
-    let reduce_q = Quat::from_axis_angle(axis_model, -reduce);
-    let upper_axis = (rest.elbow.position - rest.upper_arm.position)
-        .try_normalize()
-        .ok_or(ArmPipelineError::DegenerateSolvedPose)?;
-    let compensate_q = Quat::from_axis_angle(upper_axis, compensate);
-
-    // Post-multiply in the bone's rest frame: pre-multiplying rotates the
-    // lowered arm around the T-pose axis and swings the elbow like a pendulum.
-    let upper_corrected = upper_model_delta * compensate_q;
-    let lower_corrected = lower_model_delta * reduce_q;
-    // Cancel the parent's added roll so its children keep the solved reach.
-    let lower_relative_corrected = upper_corrected.inverse() * lower_corrected;
-
-    let upper_rest = rest.upper_arm.global_rotation;
-    let lower_rest = rest.elbow.global_rotation;
-    let normalize = |q: Quat| {
-        if q.is_finite() && q.length_squared() > f32::EPSILON {
-            Ok(q.normalize())
-        } else {
-            Err(ArmPipelineError::DegenerateSolvedPose)
-        }
-    };
-    solution.upper_arm_global_rotation = normalize(upper_corrected * upper_rest)?;
-    solution.lower_arm_global_rotation = normalize(lower_corrected * lower_rest)?;
-    solution.upper_arm_delta = crate::arm::conjugated_rest_delta(upper_corrected, upper_rest)
-        .map_err(ArmPipelineError::Solve)?;
-    solution.lower_arm_delta =
-        crate::arm::conjugated_rest_delta(lower_relative_corrected, lower_rest)
-            .map_err(ArmPipelineError::Solve)?;
-    solution.upper_arm_local_rotation = rest.upper_arm.local_rotation * solution.upper_arm_delta;
-    solution.lower_arm_local_rotation = rest.elbow.local_rotation * solution.lower_arm_delta;
-    Ok(())
+    // FK propagates this clavicle rotation to its descendants exactly once.
+    // Do not add a second rotation to the upper-arm or elbow local joints.
 }
 
 /// Coronal descent limit for the upper arm, measured from the authored
@@ -546,6 +390,12 @@ pub fn relax_forearm_twist(
 /// pose. The bound is 85 degrees instead of 90 so clothing thickness cannot
 /// push the arm into the torso mesh when body-follow translation or hand
 /// target compensation pulls the arm across the body.
+///
+/// This bounds the *solved* arm, whose pose comes from the shortest arc off the
+/// authored rest pose. It is not applied to an observed arm: there the descent
+/// is a measurement, and the limit's own signed angle wraps at a half turn, so
+/// applying it made an arm crossing the body jump. See
+/// [`resolve_tracked_side`].
 pub const MAX_ARM_DROP_RADIANS: f32 = 85.0_f32.to_radians();
 
 /// Stage 3b: bounded upper-arm coronal descent.
@@ -618,44 +468,31 @@ pub fn clamp_upper_arm_swing(
     };
     let swing = crate::arm::rotation_arc(upper_direction, new_upper_direction);
 
-    // Carry the solved chain rigidly: compose the swing onto the existing
-    // model-space deltas so the elbow bend and twist allocation survive
-    // exactly, then rebuild the rest-relative local deltas.
-    let upper_rest_global = input.upper_arm_rest_global_rotation;
-    let lower_rest_global = input.lower_arm_rest_global_rotation;
-    let upper_model = solution.upper_arm_global_rotation * upper_rest_global.inverse();
-    let lower_model = solution.lower_arm_global_rotation * lower_rest_global.inverse();
-    let upper_model_new = (swing * upper_model).normalize();
-    let lower_model_new = (swing * lower_model).normalize();
-    let Ok(upper_delta) = crate::arm::conjugated_rest_delta(upper_model_new, upper_rest_global)
-    else {
+    let rest = input.skeleton_rest();
+    let Some(joints) = crate::skeleton::joint_coordinates(rest, solution.skeleton_pose()) else {
         return false;
     };
-    let lower_local_model = upper_model_new.inverse() * lower_model_new;
-    let Ok(lower_delta) = crate::arm::conjugated_rest_delta(lower_local_model, lower_rest_global)
-    else {
+    let Some(pose) = crate::skeleton::from_joints(
+        rest,
+        (swing * solution.upper_arm_global_rotation).normalize(),
+        joints.x,
+        joints.y,
+    ) else {
         return false;
     };
-
-    solution.elbow = input.shoulder + swing * (solution.elbow - input.shoulder);
-    solution.wrist = input.shoulder + swing * (solution.wrist - input.shoulder);
-    solution.upper_arm_global_rotation = upper_model_new * upper_rest_global;
-    solution.lower_arm_global_rotation = lower_model_new * lower_rest_global;
-    solution.upper_arm_delta = upper_delta;
-    solution.lower_arm_delta = lower_delta;
-    solution.upper_arm_local_rotation = input.upper_arm_rest_rotation * upper_delta;
-    solution.lower_arm_local_rotation = input.lower_arm_rest_rotation * lower_delta;
+    *solution = input.solution_from_skeleton(pose);
     true
 }
 
 /// Signed coronal descent of a solved upper-arm direction from the authored
 /// T-pose, in radians. Positive values descend toward the body side; 90
 /// degrees is the fully lowered arm and larger values cross under the torso.
+///
+/// Takes the two directions so a probe can read the same quantity off the
+/// composed bone, not only off a live solve.
 #[must_use]
-pub fn upper_arm_descent_radians(input: &ArmIkInput, solution: &ArmIkSolution) -> Option<f32> {
+pub fn coronal_descent_radians(rest_direction: Vec3, upper_direction: Vec3) -> Option<f32> {
     let forward = Vec3::Z;
-    let rest_direction = crate::arm::finite_normalized(input.rest_elbow - input.shoulder)?;
-    let upper_direction = crate::arm::finite_normalized(solution.elbow - input.shoulder)?;
     let rest_coronal =
         crate::arm::finite_normalized(rest_direction - forward * rest_direction.dot(forward))?;
     let coronal =
@@ -665,6 +502,16 @@ pub fn upper_arm_descent_radians(input: &ArmIkInput, solution: &ArmIkSolution) -
         rest_coronal.cross(coronal).dot(swing_axis),
         rest_coronal.dot(coronal),
     ))
+}
+
+/// Signed coronal descent of a solved upper-arm direction from the authored
+/// T-pose, in radians.
+#[must_use]
+pub fn upper_arm_descent_radians(input: &ArmIkInput, solution: &ArmIkSolution) -> Option<f32> {
+    coronal_descent_radians(
+        crate::arm::finite_normalized(input.rest_elbow - input.shoulder)?,
+        crate::arm::finite_normalized(solution.elbow - input.shoulder)?,
+    )
 }
 
 /// Stage 1: hand target generation with documented source selection.
@@ -776,8 +623,7 @@ fn swivel_adjusted_elbow_pole(
     let fade = match input.motion.torso_center {
         Some(center) if width > 1.0e-4 && wrist_target.is_finite() && center.is_finite() => {
             let distance = (wrist_target - center).length();
-            let t = (distance / width).clamp(0.0, 1.0);
-            t * t * (3.0 - 2.0 * t)
+            vtuber_tracking::filter::time::smoothstep(distance / width)
         }
         _ => 1.0,
     };
@@ -825,10 +671,6 @@ pub struct DynamicArmProfileOverride {
     pub swivel_transition_width_ratio: f32,
     /// Weak pole influence of the swivel correction.
     pub pole_influence: f32,
-    /// Forearm twist relax weight.
-    pub twist_relax_weight: f32,
-    /// Twist redistribution crossfade between parent and child.
-    pub twist_parent_child_crossfade: f32,
     /// Optional shoulder elevation trim (negative lowers).
     pub shoulder_elevation_trim_radians: f32,
 }
@@ -844,8 +686,6 @@ impl DynamicArmProfileOverride {
             elbow_swivel_radians: profile.elbow_swivel_radians,
             swivel_transition_width_ratio: profile.swivel_transition_width_ratio,
             pole_influence: profile.pole_influence,
-            twist_relax_weight: profile.twist_relax_weight,
-            twist_parent_child_crossfade: profile.twist_parent_child_crossfade,
             shoulder_elevation_trim_radians: profile.shoulder_elevation_trim_radians,
         }
     }
@@ -875,8 +715,6 @@ impl DynamicArmProfileOverride {
             elbow_swivel_radians: self.elbow_swivel_radians,
             swivel_transition_width_ratio: self.swivel_transition_width_ratio,
             pole_influence: self.pole_influence,
-            twist_relax_weight: self.twist_relax_weight,
-            twist_parent_child_crossfade: self.twist_parent_child_crossfade,
             shoulder_elevation_trim_radians: self.shoulder_elevation_trim_radians,
         };
         if !profile.is_valid() {
@@ -1005,6 +843,7 @@ pub fn resolve_side(
 /// only arm Transform writer. When lifecycle is not Ready, the selected
 /// source is not the virtual hand, or no control frame is available, targets
 /// clear so the compositor falls back to its static default pose.
+/// In tracked mode the observed stage owns and clears its own targets.
 #[expect(
     clippy::too_many_arguments,
     reason = "Bevy injects this system's resources and message streams, so the parameter list is the declared ECS contract and has no call site to restructure"
@@ -1025,6 +864,12 @@ pub fn update_dynamic_arm_targets(
     )>,
     torso_rotations: Query<(&GlobalTransform, &RestGlobalTransform)>,
 ) {
+    // The observed stage owns these targets in tracked mode. Clearing them
+    // here erased its generation/previous pose every tick and reseeded all
+    // joint filters immediately before they could advance.
+    if selection.mode == ArmPoseSourceKind::TrackedPose {
+        return;
+    }
     let Ok((binding, model_id, motion, scale, targets)) = roots.single_mut() else {
         return;
     };
@@ -1054,12 +899,6 @@ pub fn update_dynamic_arm_targets(
         *targets = DynamicArmTargets::default();
         return;
     };
-    if targets.generation == Some(binding.generation)
-        && targets.source_seq == Some(frame.source_seq)
-    {
-        // Same input frame: keep the existing resolution (idempotent).
-        return;
-    }
     let default_profiles = crate::body_motion::BodyMotionProfiles::default();
     let body_profiles = body_profiles.as_deref().unwrap_or(&default_profiles);
     let mirrored = mirror.as_deref().is_none_or(|mirror| mirror.is_enabled());
@@ -1139,7 +978,7 @@ impl Default for TrackedArmControl {
 /// weights are reflected and side-swapped exactly once here so the observed
 /// arms follow the same mirror as the face.
 ///
-/// Runs after [`update_dynamic_arm_targets`] (which clears the virtual targets
+/// Runs after [`update_dynamic_arm_targets`] (which yields target ownership
 /// while tracked mode is selected) and before `apply_default_arm_pose`. It only
 /// reads the current parent pose and immutable rest geometry; native handles,
 /// the camera, and the clock stay outside.
@@ -1151,6 +990,7 @@ pub fn update_tracked_arm_targets(
     lifecycle: Res<AvatarLifecycle>,
     selection: Res<ArmSourceSelection>,
     control: Res<TrackedArmControl>,
+    time: Res<Time>,
     mirror: Option<Res<crate::mirror::AvatarMotionMirror>>,
     overrides: Option<Res<crate::arm_pose::ArmPoseOverrideStore>>,
     mut roots: Query<(
@@ -1161,9 +1001,11 @@ pub fn update_tracked_arm_targets(
         Option<&mut DynamicArmTargets>,
     )>,
     torso_rotations: Query<(&GlobalTransform, &RestGlobalTransform)>,
+    mut filters: Local<TrackedArmFilters>,
     #[cfg(debug_assertions)] mut debug_frame: Local<u32>,
 ) {
     if selection.mode != ArmPoseSourceKind::TrackedPose {
+        filters.clear();
         return;
     }
     let Ok((binding, model_id, motion, scale, targets)) = roots.single_mut() else {
@@ -1176,9 +1018,13 @@ pub fn update_tracked_arm_targets(
         .frame
         .filter(|_| control.generation == Some(binding.generation))
     else {
+        filters.clear();
+        *targets = DynamicArmTargets::default();
         return;
     };
     if lifecycle.state() != crate::lifecycle::AvatarLifecycleState::Ready {
+        filters.clear();
+        *targets = DynamicArmTargets::default();
         return;
     }
 
@@ -1210,10 +1056,17 @@ pub fn update_tracked_arm_targets(
         control.view_to_model,
     );
 
+    // A replaced model has its own joint frames and lengths.
+    if targets.generation != Some(binding.generation) {
+        filters.clear();
+    }
+    let dt_sec = time.delta_secs();
+
     let resolve = |chain: Option<&ArmChainBinding>,
                    geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>,
                    target: Option<vtuber_core::arm_tracking::ArmTrackingTarget>,
-                   weights: vtuber_core::arm_tracking::ArmBlendWeight| {
+                   weights: vtuber_core::arm_tracking::ArmBlendWeight,
+                   filter: &mut crate::tracked_arm::TrackedArmFilter| {
         resolve_tracked_side(
             chain,
             geometry,
@@ -1222,6 +1075,8 @@ pub fn update_tracked_arm_targets(
             target,
             weights,
             tracking_to_rest,
+            filter,
+            dt_sec,
         )
     };
     // A tick whose blend or solve is degenerate keeps the last resolved pose
@@ -1237,27 +1092,25 @@ pub fn update_tracked_arm_targets(
             None
         })
     };
+    let left = resolve(
+        binding.left_arm.as_ref(),
+        motion.left.as_ref(),
+        frame_targets.left,
+        frame_weights.left,
+        &mut filters.left,
+    );
+    let right = resolve(
+        binding.right_arm.as_ref(),
+        motion.right.as_ref(),
+        frame_targets.right,
+        frame_weights.right,
+        &mut filters.right,
+    );
     *targets = DynamicArmTargets {
         generation: Some(binding.generation),
         source_seq: Some(frame.source_seq),
-        left: hold(
-            previous.left,
-            resolve(
-                binding.left_arm.as_ref(),
-                motion.left.as_ref(),
-                frame_targets.left,
-                frame_weights.left,
-            ),
-        ),
-        right: hold(
-            previous.right,
-            resolve(
-                binding.right_arm.as_ref(),
-                motion.right.as_ref(),
-                frame_targets.right,
-                frame_weights.right,
-            ),
-        ),
+        left: hold(previous.left, left),
+        right: hold(previous.right, right),
     };
     #[cfg(debug_assertions)]
     log_tracked_arm_frame(
@@ -1267,6 +1120,19 @@ pub fn update_tracked_arm_targets(
         &targets,
         &mut debug_frame,
     );
+}
+
+/// Per-side render-clock joint state, cleared with its tracked source/model.
+#[derive(Default)]
+pub struct TrackedArmFilters {
+    left: crate::tracked_arm::TrackedArmFilter,
+    right: crate::tracked_arm::TrackedArmFilter,
+}
+
+impl TrackedArmFilters {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Debug-build trace of one tracked-arm resolution every 30 render ticks.
@@ -1311,6 +1177,10 @@ fn log_tracked_arm_frame(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument is one stage input: the bound chain and rest geometry, the virtual blend profile and scale, the observation and weights, the basis fixup, and the render-clock joint state"
+)]
 fn resolve_tracked_side(
     chain: Option<&ArmChainBinding>,
     geometry: Option<&crate::arm_motion_geometry::ArmMotionRestGeometry>,
@@ -1319,57 +1189,108 @@ fn resolve_tracked_side(
     target: Option<vtuber_core::arm_tracking::ArmTrackingTarget>,
     weights: vtuber_core::arm_tracking::ArmBlendWeight,
     tracking_to_rest: Quat,
+    filter: &mut crate::tracked_arm::TrackedArmFilter,
+    dt_sec: f32,
 ) -> Option<crate::arm_pose::ResolvedArmPose> {
     let chain = chain?;
+    if !weights.wrist.is_finite() || !weights.pole.is_finite() {
+        return None;
+    }
+    let wrist_weight = weights.wrist.clamp(0.0, 1.0);
+    let neutral = geometry
+        .and_then(|geometry| neutral_virtual_pose(chain, geometry, profile, body_scale_meters));
+    if wrist_weight <= f32::EPSILON || target.is_none() {
+        let (mut pose, _) = neutral?;
+        // Virtual hands normally leave the authored wrist untouched. After
+        // tracking, explicitly restore it through the same single writer.
+        pose.hand = Some(crate::arm_pose::ResolvedBoneDelta {
+            entity: chain.hand,
+            delta: Quat::IDENTITY,
+        });
+        *filter = Default::default();
+        return Some(pose);
+    }
     let target = target?;
     let tracked = crate::tracked_arm::tracked_arm_ik_target(chain.rest, target, tracking_to_rest);
-    let blended = match geometry
-        .and_then(|geometry| neutral_virtual_target(chain, geometry, profile, body_scale_meters))
-    {
-        Some(virtual_target) => {
-            crate::tracked_arm::blend_arm_targets(virtual_target, tracked, weights).ok()?
-        }
-        None => tracked,
-    };
-    let ik_input = ArmIkInput::from_geometry(chain.rest, blended);
+    let ik_input = ArmIkInput::from_chain(chain, tracked);
     let mut solution = crate::arm::solve_two_bone_arm(ik_input).ok()?;
-    // Stage 3b applies to every source, including an observation: an observed
-    // wrist that crosses the body otherwise wraps the upper arm past the
-    // shoulder's range (the recorded trace reached 154 degrees), because the
-    // analytic solve only takes the shortest arc from rest. The limit rotates
-    // the whole solved chain rigidly, so the elbow bend and reach are kept.
-    clamp_upper_arm_swing(&mut solution, &ik_input, MAX_ARM_DROP_RADIANS);
-    // The observed palm roll is split between the forearm (written into the
-    // solution) and the hand (returned as the local delta) so neither joint
-    // carries the whole pronation.
-    let hand_delta = target.palm_normal.and_then(|palm_normal| {
+    if let Some((_, outcome)) = neutral.as_ref() {
+        // The pole is a conditional observation within the observed arm.
+        // During a whole-arm loss both absolute weights decay together; do
+        // not apply that decay twice to the shoulder's bend-plane coordinate.
+        let pole_weight = (weights.pole / wrist_weight).clamp(0.0, 1.0);
+        if pole_weight < 1.0 {
+            let virtual_pole = crate::arm::solve_two_bone_arm(ArmIkInput::from_chain(
+                chain,
+                ArmIkTarget {
+                    elbow_pole: outcome.hand_target.elbow_pole,
+                    ..tracked
+                },
+            ))
+            .ok()?;
+            solution.upper_arm_global_rotation = virtual_pole
+                .upper_arm_global_rotation
+                .slerp(solution.upper_arm_global_rotation, pole_weight)
+                .normalize();
+        }
+    }
+    // The shared IK preserves the bound rig's elbow hinge and rigid bone
+    // lengths. Tracking and virtual targets use the same anatomical chain.
+    // IK can amplify a small wrist-distance error into an elbow-angle error.
+    // Damp the joint intent after that conversion, then retain it through all
+    // downstream stages. No later stage may solve toward the raw wrist again.
+    filter.stabilize(chain, &mut solution, tracking_to_rest, dt_sec)?;
+    // Measure pronation against the observed skeleton, before returning its
+    // shoulder/elbow toward neutral. A held camera-space palm must not become
+    // a new twist target as the returning arm changes its orientation.
+    let twist = target.palm_normal.and_then(|palm_normal| {
         crate::tracked_arm::align_palm_twist(
             chain,
             &mut solution,
             palm_normal,
             tracking_to_rest,
-            weights.palm,
+            weights.palm.min(wrist_weight),
+            &mut filter.roll,
+            dt_sec,
         )
     });
-    // Finger articulation is already hand-local, so neither share of the
-    // solved palm twist can change a finger's local rotation.
+    if let Some((pose, _)) = neutral.as_ref() {
+        solution = crate::tracked_arm::blend_arm_joints(chain, &solution, pose, wrist_weight)?;
+        if let Some(twist) = twist {
+            crate::tracked_arm::roll_forearm(chain, &mut solution, twist.forearm_roll);
+        }
+    }
+    // Finger articulation is hand-local; forearm pronation changes no finger
+    // local joint coordinate.
     let fingers = target.fingers.and_then(|fingers| {
         crate::tracked_arm::observed_finger_deltas(chain, fingers, weights.fingers)
     });
-    crate::tracked_arm::resolved_tracked_arm_pose(chain, solution, hand_delta, fingers).ok()
+    let mut pose = crate::tracked_arm::resolved_tracked_arm_pose(chain, solution, fingers).ok()?;
+    if let Some((neutral, _)) = neutral {
+        pose.shoulder = neutral
+            .shoulder
+            .map(|shoulder| crate::arm_pose::ResolvedBoneDelta {
+                delta: shoulder
+                    .delta
+                    .slerp(Quat::IDENTITY, wrist_weight)
+                    .normalize(),
+                ..shoulder
+            });
+    }
+    Some(pose)
 }
 
-/// The virtual target used as the blend source for observed arms.
+/// The resolved initial skeleton used as the blend source for observed arms.
 ///
 /// Head/body offsets are zero here: with tracked authority the observed frame
 /// is the authority, and the virtual fallback is the neutral anchor the
 /// compositor returns to. That keeps the arm alive when the face is lost.
-fn neutral_virtual_target(
+fn neutral_virtual_pose(
     chain: &ArmChainBinding,
     motion: &crate::arm_motion_geometry::ArmMotionRestGeometry,
     profile: DynamicArmProfile,
     body_scale_meters: f32,
-) -> Option<ArmIkTarget> {
+) -> Option<(crate::arm_pose::ResolvedArmPose, ArmPipelineOutcome)> {
     let input = ArmPipelineInput {
         chain,
         motion,
@@ -1383,7 +1304,6 @@ fn neutral_virtual_target(
     resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
         .ok()
         .flatten()
-        .map(|(_, outcome)| outcome.hand_target)
 }
 
 #[cfg(test)]
@@ -1436,6 +1356,10 @@ mod tests {
             ArmSide::Left => 1.0,
             ArmSide::Right => -1.0,
         }
+    }
+
+    fn near(a: Vec3, b: Vec3) {
+        assert!((a - b).length() < 1.0e-4, "{a:?} != {b:?}");
     }
 
     fn sample_motion() -> ArmMotionRestGeometry {
@@ -1804,7 +1728,6 @@ mod tests {
             side: ArmSide::Left,
             hand_anchor: None,
             torso_center: None,
-            forearm_twist: None,
             elbow_reference: None,
         };
         let input = ArmPipelineInput::binding_time(&chain, &motion, ArmPoseProfile::default());
@@ -1814,160 +1737,6 @@ mod tests {
         // No anchor -> legacy fallback path; output stays finite.
         assert!(outcome.hand_target.elbow_pole.is_finite());
         assert!(pose.upper_arm_delta.is_finite());
-    }
-
-    // ---- Issue #170: swing-twist decomposition and forearm relaxer ----
-
-    #[test]
-    fn swing_twist_decomposition_handles_pure_and_mixed_rotations() {
-        let axis = Vec3::X;
-        // Pure swing around Y.
-        let pure_swing = Quat::from_rotation_y(0.6);
-        let (s, t) = decompose_swing_twist(pure_swing, axis).unwrap();
-        assert!(t.angle_between(Quat::IDENTITY) < 1e-4, "no twist component");
-        assert!(pure_swing.angle_between(s * t) < 1e-5);
-        // Pure twist around the axis.
-        let pure_twist = Quat::from_axis_angle(axis, 0.8);
-        let (_, t2) = decompose_swing_twist(pure_twist, axis).unwrap();
-        assert!(pure_twist.angle_between(t2) < 1e-5);
-        // Mixed rotation reconstructs exactly.
-        let mixed = Quat::from_rotation_z(-0.4) * Quat::from_axis_angle(axis, 0.9);
-        let (s3, t3) = decompose_swing_twist(mixed, axis).unwrap();
-        assert!(mixed.angle_between(s3 * t3) < 1e-5);
-        for q in [s, t, t2, s3, t3] {
-            assert!(q.is_finite(), "finite normalized outputs");
-            assert!((q.length() - 1.0).abs() < 1e-4);
-        }
-        // Near +/-180 degree twist stays on the shortest arc and finite.
-        let flip = Quat::from_axis_angle(axis, std::f32::consts::PI - 1e-3);
-        let (_, tf) = decompose_swing_twist(flip, axis).unwrap();
-        assert!(tf.is_finite());
-        assert!(flip.angle_between(tf) < 1e-3);
-        // Degenerate inputs are rejected instead of producing NaNs.
-        assert!(decompose_swing_twist(Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0), axis).is_none());
-        assert!(decompose_swing_twist(Quat::IDENTITY, Vec3::ZERO).is_none());
-    }
-
-    #[test]
-    fn zero_twist_relax_weight_reproduces_the_plain_solution() {
-        let (chain, motion) = anchored_motion(ArmSide::Right);
-        let target = crate::arm::ArmIkTarget {
-            wrist: chain.rest.wrist.position + Vec3::new(0.05, -0.08, 0.06),
-            elbow_pole: chain.rest.elbow.position + Vec3::NEG_Z * 0.03,
-        };
-        let plain = crate::arm_pose::solve_stage(&chain, ArmPoseProfile::default(), &target, None)
-            .unwrap()
-            .unwrap();
-        let zero_params = TwistRelaxParams {
-            chain: &chain,
-            motion: &motion,
-            weight: 0.0,
-            crossfade: 0.9,
-        };
-        let relaxed_zero = crate::arm_pose::solve_stage(
-            &chain,
-            ArmPoseProfile::default(),
-            &target,
-            Some(&zero_params),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(plain, relaxed_zero, "weight=0 must be a no-op");
-    }
-
-    #[test]
-    fn twist_relaxation_preserves_solved_elbow_and_wrist_positions() {
-        for side in [ArmSide::Left, ArmSide::Right] {
-            for basis in [Quat::IDENTITY, Quat::from_rotation_z(0.6)] {
-                let (mut chain, motion) = anchored_motion(side);
-                chain.rest.upper_arm.global_rotation = basis;
-                chain.rest.elbow.global_rotation = basis;
-                let sign = if side == ArmSide::Left { 1.0 } else { -1.0 };
-                let origin = chain.rest.upper_arm.position;
-                let target = ArmIkTarget {
-                    wrist: origin + Vec3::new(sign * 0.2, -0.4, 0.12),
-                    elbow_pole: chain.rest.elbow.position + Vec3::NEG_Z * 0.1,
-                };
-                let mut solution =
-                    crate::arm::solve_two_bone_arm(ArmIkInput::from_geometry(chain.rest, target))
-                        .unwrap();
-                let params = TwistRelaxParams {
-                    chain: &chain,
-                    motion: &motion,
-                    weight: 0.65,
-                    crossfade: 0.5,
-                };
-                relax_forearm_twist(&mut solution, &params).unwrap();
-                // Reconstruct the positions the actual parent/child rotations
-                // produce. A twist-only correction must not swing the elbow
-                // or move the wrist away from the solved hand target.
-                let upper = basis * solution.upper_arm_delta * basis.inverse();
-                let lower = basis * solution.lower_arm_delta * basis.inverse();
-                let elbow = origin + upper * (chain.rest.elbow.position - origin);
-                let wrist =
-                    elbow + upper * lower * (chain.rest.wrist.position - chain.rest.elbow.position);
-                assert!(
-                    elbow.distance(solution.elbow) < 1.0e-5,
-                    "twist moved elbow by {} m",
-                    elbow.distance(solution.elbow)
-                );
-                assert!(
-                    wrist.distance(solution.wrist) < 1.0e-5,
-                    "twist moved wrist by {} m",
-                    wrist.distance(solution.wrist)
-                );
-                let lower_global = upper * lower * basis;
-                assert!(lower_global.dot(solution.lower_arm_global_rotation).abs() > 0.99999);
-            }
-        }
-    }
-
-    #[test]
-    fn twist_relaxer_reduces_relative_forearm_twist_without_nan() {
-        let (chain, motion) = anchored_motion(ArmSide::Right);
-        let profile = DynamicArmProfile::default();
-        let mut input = ArmPipelineInput::binding_time(&chain, &motion, ArmPoseProfile::default());
-        input.dynamic_profile = profile;
-        // A strongly twisted hand target via compensation offsets exercises
-        // the relaxer on a large solved twist.
-        input.head_offset = Vec3::new(0.12, -0.05, 0.18);
-        let pose = resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
-            .unwrap()
-            .unwrap()
-            .0;
-        assert!(pose.upper_arm_delta.is_finite() && pose.lower_arm_delta.is_finite());
-        assert!((pose.upper_arm_delta.length() - 1.0).abs() < 1e-4);
-        assert!((pose.lower_arm_delta.length() - 1.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn twist_relaxer_is_mirror_symmetric_across_sides() {
-        let (lc, lm, rc, rm) = mirrored_pair();
-        let left_input = ArmPipelineInput::binding_time(&lc, &lm, ArmPoseProfile::default());
-        let right_input = ArmPipelineInput::binding_time(&rc, &rm, ArmPoseProfile::default());
-        let l = resolve_arm_pose(&left_input, ArmPoseSourceKind::VirtualHandAnchor)
-            .unwrap()
-            .unwrap()
-            .0;
-        let r = resolve_arm_pose(&right_input, ArmPoseSourceKind::VirtualHandAnchor)
-            .unwrap()
-            .unwrap()
-            .0;
-        // Mirrored solutions must have equal twist magnitude on the forearm:
-        // compare lower-arm delta angles to their respective rest axes.
-        let angle_of = |chain: &ArmChainBinding, delta: Quat| {
-            let axis_local = chain.rest.elbow.global_rotation.inverse() * chain_motion_axis(chain);
-            decompose_swing_twist(delta, axis_local).map(|(_, t)| t.angle_between(Quat::IDENTITY))
-        };
-        let l_angle = angle_of(&lc, l.lower_arm_delta).expect("twist");
-        let r_angle = angle_of(&rc, r.lower_arm_delta).expect("twist");
-        assert!((l_angle - r_angle).abs() < 1e-3, "{l_angle} vs {r_angle}");
-    }
-
-    fn chain_motion_axis(chain: &ArmChainBinding) -> Vec3 {
-        (chain.rest.wrist.position - chain.rest.elbow.position)
-            .try_normalize()
-            .unwrap_or(Vec3::X)
     }
 
     // ---- Issue #171: per-model shoulder elevation trim ----
@@ -2011,7 +1780,7 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_trim_propagates_weakly_to_the_elbow_and_wrist() {
+    fn clavicle_trim_is_carried_by_fk_without_changing_elbow_articulation() {
         let chain = chain_with_shoulder(ArmSide::Right);
         let motion = crate::arm_motion_geometry::build_arm_motion_rest_geometry(
             ArmSide::Right,
@@ -2041,22 +1810,8 @@ mod tests {
         let sh_after = after.shoulder.expect("shoulder present").delta;
         assert!(sh_before.angle_between(sh_after) > 1e-4, "trim applied");
         assert!(sh_after.is_finite());
-        // The trim reaches the terminal bones in small decaying shares: the
-        // elbow follows weakly and the wrist follows even more weakly, so the
-        // arm bends with the shoulder instead of rotating as a rigid stick.
-        let upper_change = before.upper_arm_delta.angle_between(after.upper_arm_delta);
-        let lower_change = before.lower_arm_delta.angle_between(after.lower_arm_delta);
-        let shoulder_change = sh_before.angle_between(sh_after);
-        assert!(upper_change > 1e-4, "upper arm inherits part of the trim");
-        assert!(lower_change > 1e-4, "forearm inherits part of the trim");
-        assert!(
-            upper_change < shoulder_change,
-            "downstream share stays smaller than the shoulder change"
-        );
-        assert!(
-            lower_change < upper_change,
-            "motion decays toward the terminal bones"
-        );
+        assert_eq!(before.upper_arm_delta, after.upper_arm_delta);
+        assert_eq!(before.lower_arm_delta, after.lower_arm_delta);
         // Bounded: the trim contribution is exactly the requested angle in
         // the shoulder's rest frame.
         let axis_local = chain
@@ -2190,6 +1945,7 @@ mod tests {
             intermediate: Some(joint(31, base + Vec3::X * 0.05)),
             distal: None,
         };
+        chain.finger_rest.little.proximal = Some(joint(33, base + Vec3::new(0.03, 0.0, -0.02)));
         chain
     }
 
@@ -2506,7 +2262,7 @@ mod tests {
                 fingers: [[0.9, 0.9, 0.4]; 4],
                 spread: [0.0; 4],
                 thumb: [0.3, 0.3],
-                thumb_direction: [1.0, 0.0, 0.0],
+                thumb_spread: 0.0,
             }),
         };
         let resolve = |fingers: f32| {
@@ -2523,6 +2279,8 @@ mod tests {
                     fingers,
                 },
                 Quat::IDENTITY,
+                &mut crate::tracked_arm::TrackedArmFilter::default(),
+                1.0,
             )
         };
         let curled = resolve(1.0).expect("a curled hand resolves");
@@ -2543,12 +2301,27 @@ mod tests {
         assert_eq!(rest.upper_arm_delta, curled.upper_arm_delta);
     }
 
+    /// The observed upper-arm direction this target solves to, in model space.
+    fn observed_upper_direction(
+        chain: &ArmChainBinding,
+        pose: &crate::arm_pose::ResolvedArmPose,
+    ) -> Vec3 {
+        let rest = &chain.rest.upper_arm;
+        let model_delta =
+            rest.global_rotation * pose.upper_arm_delta * rest.global_rotation.inverse();
+        crate::arm::finite_normalized(
+            model_delta
+                * crate::arm::finite_normalized(chain.rest.elbow.position - rest.position).unwrap(),
+        )
+        .expect("solved upper-arm direction")
+    }
+
     #[test]
-    fn tracked_side_respects_the_coronal_descent_limit() {
-        // An observed hand that crossed the body: the analytic shortest-arc
-        // solve alone wraps the upper arm past the shoulder's range (the
-        // recorded trace reached 154 degrees on the mirrored side). The
-        // tracked path must apply the same Stage 3b limit as the virtual path.
+    fn tracked_side_shows_the_measured_arm_rather_than_clamping_it() {
+        // Stage 3b bounds the *solved* arm, whose pose is the shortest arc off
+        // the authored rest pose. An observation is a measurement, so it is
+        // shown as measured even where it crosses the body and the limit would
+        // otherwise pull the arm back.
         let chain = sample_chain(ArmSide::Left);
         let target = vtuber_core::arm_tracking::ArmTrackingTarget {
             wrist: [-0.55, 0.10, 0.55],
@@ -2563,7 +2336,7 @@ mod tests {
         let raw_descent = upper_arm_descent_radians(&raw_input, &raw).expect("descent");
         assert!(
             raw_descent.abs() > MAX_ARM_DROP_RADIANS,
-            "the raw solve must exceed the limit for this target, got {} deg",
+            "this target must exceed the limit for the test to mean anything, got {} deg",
             raw_descent.to_degrees()
         );
 
@@ -2575,30 +2348,114 @@ mod tests {
             Some(target),
             vtuber_core::arm_tracking::ArmBlendWeight::ONE,
             Quat::IDENTITY,
+            &mut crate::tracked_arm::TrackedArmFilter::default(),
+            1.0,
         )
         .expect("tracked pose");
 
-        let rest = &chain.rest.upper_arm;
-        let model_delta =
-            rest.global_rotation * pose.upper_arm_delta * rest.global_rotation.inverse();
-        let solved_direction =
-            model_delta * (chain.rest.elbow.position - chain.rest.upper_arm.position).normalize();
-        let rest_coronal = (chain.rest.elbow.position - chain.rest.upper_arm.position).normalize();
-        let coronal =
-            crate::arm::finite_normalized(solved_direction - Vec3::Z * solved_direction.z)
-                .expect("coronal component");
-        let swing_axis =
-            crate::arm::finite_normalized(rest_coronal.cross(-Vec3::Y)).expect("swing axis");
-        let descent = f32::atan2(
-            rest_coronal.cross(coronal).dot(swing_axis),
-            rest_coronal.dot(coronal),
+        near(
+            observed_upper_direction(&chain, &pose),
+            crate::arm::finite_normalized(raw.elbow - chain.rest.upper_arm.position)
+                .expect("raw upper-arm direction"),
         );
+    }
+
+    #[test]
+    fn tracked_loss_reaches_neutral_after_joint_damping() {
+        let chain = sample_chain(ArmSide::Left);
+        let geometry = crate::arm_motion_geometry::build_arm_motion_rest_geometry(
+            chain.side,
+            &chain.rest,
+            Some(Vec3::new(0.0, 0.92, 0.0)),
+            Some(Quat::IDENTITY),
+            None,
+        );
+        let input = ArmPipelineInput {
+            body_scale_meters: 0.7,
+            ..ArmPipelineInput::binding_time(&chain, &geometry, ArmPoseProfile::default())
+        };
+        let (neutral, outcome) = resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
+            .unwrap()
+            .unwrap();
+        let initial =
+            crate::arm::solve_two_bone_arm(ArmIkInput::from_chain(&chain, outcome.hand_target))
+                .unwrap();
+        let origin = chain.rest.upper_arm.position;
+        // Raise the same arm on the opposite side of its shoulder. Cartesian
+        // wrist interpolation crosses the shoulder and folds the elbow even
+        // though both endpoint skeletons have the same flexion.
+        let turn = Quat::from_rotation_z(std::f32::consts::PI);
+        let target = vtuber_core::arm_tracking::ArmTrackingTarget {
+            wrist: (turn * (initial.wrist - origin) / chain.rest.total_arm_length).to_array(),
+            elbow_pole: (turn * (initial.elbow - origin) / chain.rest.total_arm_length).to_array(),
+            palm_normal: None,
+            fingers: None,
+        };
+        let resolve = |weights, filter: &mut crate::tracked_arm::TrackedArmFilter| {
+            resolve_tracked_side(
+                Some(&chain),
+                Some(&geometry),
+                DynamicArmProfile::default(),
+                0.7,
+                Some(target),
+                weights,
+                Quat::IDENTITY,
+                filter,
+                1.0 / 60.0,
+            )
+            .unwrap()
+        };
+        let mut filter = crate::tracked_arm::TrackedArmFilter::default();
+        let tracked = resolve(vtuber_core::arm_tracking::ArmBlendWeight::ONE, &mut filter);
+        let zero = vtuber_core::arm_tracking::ArmBlendWeight {
+            wrist: 0.0,
+            pole: 0.0,
+            palm: 0.0,
+            fingers: 0.0,
+        };
+        let expected = neutral;
         assert!(
-            descent <= MAX_ARM_DROP_RADIANS + 1.0e-3,
-            "tracked descent {} deg exceeds the {} deg limit",
-            descent.to_degrees(),
-            MAX_ARM_DROP_RADIANS.to_degrees()
+            tracked
+                .upper_arm_delta
+                .angle_between(expected.upper_arm_delta)
+                > 0.1
         );
+        let mut returned = tracked;
+        let flexion = |pose: crate::arm_pose::ResolvedArmPose| {
+            let upper = chain.rest.upper_arm.global_rotation
+                * pose.upper_arm_delta
+                * chain.rest.upper_arm.global_rotation.inverse();
+            let lower = chain.rest.elbow.global_rotation
+                * pose.lower_arm_delta
+                * chain.rest.elbow.global_rotation.inverse();
+            (upper * (chain.rest.elbow.position - origin)).angle_between(
+                upper * lower * (chain.rest.wrist.position - chain.rest.elbow.position),
+            )
+        };
+        let max_flexion = flexion(tracked).max(flexion(expected));
+        for tick in 0..=300 {
+            let weight = 1.0 - tick as f32 / 300.0;
+            returned = resolve(
+                vtuber_core::arm_tracking::ArmBlendWeight {
+                    wrist: weight,
+                    pole: weight,
+                    palm: weight,
+                    fingers: weight,
+                },
+                &mut filter,
+            );
+            assert!(
+                flexion(returned) <= max_flexion + 0.001,
+                "return must not fold the elbow beyond either endpoint: tick {tick}, {} deg vs {} deg",
+                flexion(returned).to_degrees(),
+                max_flexion.to_degrees()
+            );
+        }
+        for _ in 0..240 {
+            returned = resolve(zero, &mut filter);
+        }
+        assert!(returned.upper_arm_delta.dot(expected.upper_arm_delta).abs() > 1.0 - 1.0e-6);
+        assert!(returned.lower_arm_delta.dot(expected.lower_arm_delta).abs() > 1.0 - 1.0e-6);
     }
 
     #[test]
@@ -2648,6 +2505,10 @@ mod tests {
                 Some(target),
                 weights(palm),
                 Quat::IDENTITY,
+                // A single tick with a full step: this test is about the
+                // channel's authority, not the filter's response.
+                &mut crate::tracked_arm::TrackedArmFilter::default(),
+                1.0,
             )
         };
 
@@ -2662,13 +2523,10 @@ mod tests {
         )
         .expect("tracked pose");
 
-        assert!(
-            tracked.hand.is_some(),
-            "the hand must receive its share of the roll"
-        );
-        assert!(default_twist.hand.is_none());
+        assert_eq!(tracked.hand.unwrap().delta, Quat::IDENTITY);
+        assert_eq!(default_twist.hand.unwrap().delta, Quat::IDENTITY);
         assert_eq!(no_palm, default_twist);
-        // The roll is split: the forearm takes its share and the hand the rest.
+        // Pronation changes the forearm, without an axial wrist correction.
         assert_ne!(tracked.lower_arm_delta, default_twist.lower_arm_delta);
     }
 }

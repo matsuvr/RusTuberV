@@ -87,7 +87,6 @@ impl UiState {
             action,
             UiAction::SwitchPane(_)
                 | UiAction::SelectCamera { .. }
-                | UiAction::Stop
                 | UiAction::UnloadAvatar
                 | UiAction::RequestAvatarImportReview { .. }
         ) {
@@ -223,7 +222,9 @@ impl Plugin for UiShellPlugin {
         )
         .add_systems(
             Update,
-            auto_start_tracking_system.after(sync_avatar_lifecycle_system),
+            auto_start_tracking_system
+                .after(sync_avatar_lifecycle_system)
+                .before(inference_bridge_system),
         )
         .add_systems(
             Update,
@@ -525,9 +526,15 @@ mod tests {
     fn ui_state_emit_and_take() {
         let mut state = UiState::default();
         assert!(state.pending_actions.is_empty());
-        state.emit(UiAction::Start);
-        state.emit(UiAction::Stop);
-        assert_eq!(state.take_actions(), vec![UiAction::Start, UiAction::Stop]);
+        state.emit(UiAction::RefreshCameras);
+        state.emit(UiAction::SelectCamera { index: 0 });
+        assert_eq!(
+            state.take_actions(),
+            vec![
+                UiAction::RefreshCameras,
+                UiAction::SelectCamera { index: 0 }
+            ]
+        );
         assert!(state.pending_actions.is_empty());
     }
 
@@ -557,12 +564,8 @@ mod tests {
     }
 
     #[test]
-    fn camera_change_stop_and_unload_revoke_preview() {
-        for action in [
-            UiAction::SelectCamera { index: 1 },
-            UiAction::Stop,
-            UiAction::UnloadAvatar,
-        ] {
+    fn camera_change_and_unload_revoke_preview() {
+        for action in [UiAction::SelectCamera { index: 1 }, UiAction::UnloadAvatar] {
             let mut state = UiState {
                 camera_consent: CameraPreviewConsent::Visible,
                 ..Default::default()
@@ -629,15 +632,15 @@ mod tests {
     }
 
     #[test]
-    fn ui_state_emit_deduplicates_toggles_not_start() {
+    fn ui_state_emit_deduplicates_toggles_not_camera_refresh() {
         let mut state = UiState::default();
         state.emit(UiAction::ToggleMirror);
         state.emit(UiAction::ToggleMirror);
         state.emit(UiAction::ToggleAvatarMotionMirror);
         state.emit(UiAction::ToggleAvatarMotionMirror);
         assert_eq!(state.take_actions().len(), 2);
-        state.emit(UiAction::Start);
-        state.emit(UiAction::Start);
+        state.emit(UiAction::RefreshCameras);
+        state.emit(UiAction::RefreshCameras);
         assert_eq!(state.take_actions().len(), 2);
     }
 
@@ -665,11 +668,11 @@ mod tests {
             .init_resource::<DiagnosticsSnapshot>()
             .init_resource::<AppSettings>()
             .add_systems(Update, sync_error_presenter);
-        // Exercise the existing public action boundary; Start without a
-        // selected camera produces NoCameraSelected without camera/file I/O.
         app.world_mut()
             .resource_mut::<Orchestrator>()
-            .process_action(&UiAction::Start);
+            .set_last_error(Some(
+                crate::orchestrator::OrchestratorError::NoCameraSelected,
+            ));
         app.update();
         assert_eq!(
             app.world()

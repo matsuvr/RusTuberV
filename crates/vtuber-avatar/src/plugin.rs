@@ -210,7 +210,8 @@ impl Plugin for VtuberAvatarPlugin {
             )
             .add_systems(Update, reset_pose_metrics_on_lifecycle_change)
             .add_systems(Update, reset_position_metrics_on_lifecycle_change)
-            .add_systems(Update, crate::pose::debug_propagation_probe);
+            .add_systems(Update, crate::pose::debug_propagation_probe)
+            .add_systems(Update, crate::pose::debug_arm_frame_probe);
         crate::look::register_look_lighting(app);
         crate::look::register_rich_mtoon(app);
         crate::look::register_rich_standard(app);

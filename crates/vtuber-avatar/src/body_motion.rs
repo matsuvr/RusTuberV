@@ -23,6 +23,9 @@ use bevy::prelude::*;
 
 use vtuber_core::types::AvatarControlFrame;
 use vtuber_core::types::MonoTimeNs;
+use vtuber_tracking::filter::{
+    damped::DEFAULT_MAX_DT_SEC, exponential::time_constant_alpha, time::bounded_dt,
+};
 use vtuber_tracking::micro_motion::{MicroMotionBlender, is_tracked_state};
 use vtuber_tracking::{
     IdleTarget, MicroMotionProfile, TranslationShapingProfile, VirtualBodyProfile,
@@ -92,9 +95,9 @@ impl BodyFollowFilter {
             self.body_offset = body_target;
             return (head_target, body_target);
         }
-        let dt = dt_sec.clamp(0.0, 0.5);
+        let dt = bounded_dt(dt_sec, DEFAULT_MAX_DT_SEC);
         let step = |current: Vec3, target: Vec3, time_constant: f32, rate_ratio: f32| {
-            let alpha = 1.0 - (-dt / time_constant).exp();
+            let alpha = time_constant_alpha(time_constant, dt);
             let max_step = rate_ratio * body_scale_meters.max(0.0) * dt;
             let correction = (target - current) * alpha;
             let length = correction.length();

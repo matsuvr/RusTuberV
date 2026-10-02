@@ -309,18 +309,6 @@ pub struct UiViewModel {
 }
 
 impl UiViewModel {
-    /// Whether Start is available.
-    #[must_use]
-    pub fn can_start(&self) -> bool {
-        self.lifecycle == AppLifecycle::Idle
-            && self.avatar.is_ready
-            && self.camera.selected_index.is_some()
-    }
-    /// Whether Stop is available.
-    #[must_use]
-    pub fn can_stop(&self) -> bool {
-        self.lifecycle == AppLifecycle::Running
-    }
     /// Whether neutral calibration can begin.
     #[must_use]
     pub fn can_calibrate(&self) -> bool {
@@ -362,39 +350,6 @@ mod tests {
         let vm = UiViewModel::default();
         assert_eq!(vm.lifecycle, AppLifecycle::Idle);
         assert_eq!(vm.pane, Pane::VrmCamera);
-        assert!(!vm.can_start());
-        assert!(!vm.can_stop());
-    }
-    #[test]
-    fn ui_model_can_start_when_ready() {
-        let mut vm = UiViewModel::default();
-        vm.avatar.is_ready = true;
-        vm.camera.selected_index = Some(0);
-        assert!(vm.can_start());
-    }
-    #[test]
-    fn ui_model_cannot_start_without_camera() {
-        let mut vm = UiViewModel::default();
-        vm.avatar.is_ready = true;
-        assert!(!vm.can_start());
-    }
-    #[test]
-    fn ui_model_cannot_start_without_avatar() {
-        let mut vm = UiViewModel::default();
-        vm.camera.selected_index = Some(0);
-        assert!(!vm.can_start());
-    }
-    #[test]
-    fn ui_model_can_stop_when_running() {
-        let vm = UiViewModel {
-            lifecycle: AppLifecycle::Running,
-            ..Default::default()
-        };
-        assert!(vm.can_stop());
-    }
-    #[test]
-    fn ui_model_cannot_stop_when_idle() {
-        assert!(!UiViewModel::default().can_stop());
     }
     #[test]
     fn ui_model_ndi_start_requires_ready_avatar_but_not_tracking() {

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::filter::time::{smoothstep, transition_progress};
 use vtuber_core::types::MonoTimeNs;
 
 /// Minimum duration for the loss hold.
@@ -129,12 +130,6 @@ impl LossBlendProfile {
     }
 }
 
-/// Smoothstep easing on `0.0..=1.0` with zero slope at both ends.
-pub(crate) fn smoothstep(value: f32) -> f32 {
-    let value = value.clamp(0.0, 1.0);
-    value * value * (3.0 - 2.0 * value)
-}
-
 /// Loss-ease factor in `[0, 1]` for `elapsed` since the channel was lost.
 ///
 /// `1.0` during the hold, then `1 - smoothstep((elapsed - hold) / return)`,
@@ -145,16 +140,11 @@ pub fn loss_return_factor(elapsed: Duration, profile: &LossBlendProfile) -> f32 
     if elapsed <= profile.hold {
         1.0
     } else {
-        let return_ms = profile.return_duration.as_secs_f32();
-        if return_ms <= 0.0 {
-            return 0.0;
-        }
         let past = elapsed.saturating_sub(profile.hold).as_secs_f32();
-        if past >= return_ms {
-            0.0
-        } else {
-            1.0 - smoothstep(past / return_ms)
-        }
+        1.0 - smoothstep(transition_progress(
+            past,
+            profile.return_duration.as_secs_f32(),
+        ))
     }
 }
 
@@ -162,11 +152,10 @@ pub fn loss_return_factor(elapsed: Duration, profile: &LossBlendProfile) -> f32 
 /// reacquired. Smoothstep-shaped so the ramp accelerates and settles.
 #[must_use]
 pub fn acquire_factor(elapsed: Duration, profile: &LossBlendProfile) -> f32 {
-    let acquire_secs = profile.acquire.as_secs_f32();
-    if acquire_secs <= 0.0 {
-        return 1.0;
-    }
-    smoothstep(elapsed.as_secs_f32() / acquire_secs)
+    smoothstep(transition_progress(
+        elapsed.as_secs_f32(),
+        profile.acquire.as_secs_f32(),
+    ))
 }
 
 /// A per-channel display blend that advances on render ticks and observations.

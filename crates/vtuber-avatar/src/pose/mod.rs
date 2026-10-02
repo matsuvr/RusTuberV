@@ -6,8 +6,8 @@
 
 pub mod system;
 pub use system::{
-    PoseApplyMetrics, debug_propagation_probe, reset_pose_metrics_on_lifecycle_change,
-    update_body_tracking_pose_input,
+    PoseApplyMetrics, debug_arm_frame_probe, debug_propagation_probe,
+    reset_pose_metrics_on_lifecycle_change, update_body_tracking_pose_input,
 };
 
 use crate::direct_pose::{

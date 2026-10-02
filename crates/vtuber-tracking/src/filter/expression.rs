@@ -290,6 +290,17 @@ pub struct ExpressionFilterParams {
 }
 
 impl ExpressionFilterParams {
+    /// Shared attack/release response for standard and ARKit expression channels.
+    pub(super) fn alpha(&self, current: f32, target: f32, dt_sec: f32) -> f32 {
+        let tau = if target > current {
+            self.attack_time_constant_sec
+        } else {
+            self.release_time_constant_sec
+        }
+        .max(f32::EPSILON);
+        super::exponential::time_constant_alpha(tau, dt_sec).clamp(0.0, 1.0)
+    }
+
     /// Returns parameters with the given attack/release time constants and
     /// otherwise default values.
     #[must_use]
@@ -531,21 +542,12 @@ impl ChannelState {
             return target;
         }
 
-        let dt_ns = now.0 - last_time.0;
-        let dt_sec = (dt_ns as f32 / 1_000_000_000.0)
-            .min(params.max_dt_sec)
-            .max(0.0);
+        let dt_sec = super::time::elapsed_seconds(now, last_time, params.max_dt_sec);
         if dt_sec <= 0.0 {
             return self.value;
         }
 
-        let tau = if target > self.value {
-            params.attack_time_constant_sec
-        } else {
-            params.release_time_constant_sec
-        }
-        .max(f32::EPSILON);
-        let alpha = (1.0 - (-dt_sec / tau).exp()).clamp(0.0, 1.0);
+        let alpha = params.alpha(self.value, target, dt_sec);
 
         self.value = (self.value + alpha * (target - self.value)).clamp(0.0, 1.0);
         self.last_time = Some(now);

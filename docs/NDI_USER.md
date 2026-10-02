@@ -11,7 +11,7 @@ NDI® is a registered trademark of Vizrt NDI AB.
 
 Windows x64 release ZIP には、ライセンス上同梱可能な範囲で次を入れています。
 
-- `vtuber-desktop.exe`
+- `RusTuberV.exe`
 - `Processing.NDI.Lib.x64.dll`（NDI Standard SDK の application-local runtime）
 - `NDI_SDK_LICENSE_AGREEMENT.pdf`（exact SDK License Agreement）
 - `Processing.NDI.Lib.Licenses.txt`（runtime 同梱時に SDK が要求する 3rd-party notices）
@@ -25,7 +25,7 @@ runtime DLL は application フォルダへ置き、System32 や PATH へは入�
 ## 2. 起動
 
 1. ZIP を任意のフォルダへ展開する。
-2. `vtuber-desktop.exe` を起動する。
+2. `RusTuberV.exe` を起動する。
 3. VRM アバターを import し、Ready になるまで待つ。
 4. 「NDI 出力」ペインで「開始」を押す。
 5. 既定の source 名は `RusTuberV` です。
@@ -69,7 +69,7 @@ Z X C V B N M
 
 「NDIランタイムがインストールされていません」と出る場合:
 
-- `Processing.NDI.Lib.x64.dll` が `vtuber-desktop.exe` と同じフォルダにあるか確認する。
+- `Processing.NDI.Lib.x64.dll` が `RusTuberV.exe` と同じフォルダにあるか確認する。
 - それでも失敗する場合のみ、公式の NDI Runtime を導入する。
   - https://ndi.video/for-developers/
   - redistributable の案内: http://ndi.link/NDIRedistV6

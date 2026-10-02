@@ -4,6 +4,7 @@
 //! sole). Keeping both the ankle position and orientation preserves that sole
 //! contact without requiring a mesh-dependent ankle-to-floor offset.
 
+use crate::skeleton::{self, TwoBoneRest, parent_global, refresh_subtree};
 use bevy::app::AnimationSystems;
 use bevy::ecs::world::EntityRef;
 use bevy::prelude::*;
@@ -19,6 +20,7 @@ struct PlantedLeg {
     lower: Entity,
     foot: Entity,
     contact: GlobalTransform,
+    rest: TwoBoneRest,
 }
 
 #[derive(Component)]
@@ -37,12 +39,35 @@ impl GroundedFeet {
         rest: impl Fn(Entity) -> Option<GlobalTransform>,
     ) -> Option<Self> {
         let hips = root.get::<HipsBoneEntity>()?.0;
+        let forward = root.get::<GlobalTransform>()?.rotation() * Vec3::Z;
         let leg = |upper, lower, foot| {
+            let start = rest(upper)?;
+            let middle = rest(lower)?;
+            let end = rest(foot)?;
+            let upper_direction = (middle.translation() - start.translation()).try_normalize()?;
             Some(PlantedLeg {
                 upper,
                 lower,
                 foot,
-                contact: rest(foot)?,
+                contact: end,
+                rest: TwoBoneRest {
+                    start: start.translation(),
+                    middle: middle.translation(),
+                    end: end.translation(),
+                    lengths: Vec2::new(
+                        start.translation().distance(middle.translation()),
+                        middle.translation().distance(end.translation()),
+                    ),
+                    start_rotation: start.rotation(),
+                    middle_rotation: middle.rotation(),
+                    hinge_axis: skeleton::rest_hinge_axis(
+                        middle.translation() - start.translation(),
+                        end.translation() - middle.translation(),
+                        Some(forward.cross(upper_direction)),
+                    )?,
+                    // Flexion extent of the OpenSim Gait2392 knee coordinate.
+                    flexion_limit: 120.0_f32.to_radians(),
+                },
             })
         };
         Some(Self {
@@ -59,7 +84,7 @@ impl GroundedFeet {
                     root.get::<RightFootBoneEntity>()?.0,
                 )?,
             ],
-            forward: root.get::<GlobalTransform>()?.rotation() * Vec3::Z,
+            forward,
             originals: Vec::with_capacity(7),
         })
     }
@@ -71,7 +96,9 @@ pub(crate) fn register_grounding(app: &mut App) {
             PostUpdate,
             plant_feet
                 .after(crate::direct_position::apply_direct_body_position)
-                .after(crate::arm_pose::apply_default_arm_pose)
+                .before(crate::arm_pipeline::update_dynamic_arm_targets)
+                .before(crate::arm_pipeline::update_tracked_arm_targets)
+                .before(crate::arm_pose::apply_default_arm_pose)
                 .before(crate::gaze::update_direct_look_at_input)
                 .before(VrmSystemSets::GazeControl)
                 .before(VrmSystemSets::Constraints)
@@ -102,8 +129,8 @@ fn plant_feet(
         if apply_contact(&mut feet, &mut transforms, &parents).is_none() {
             warn!("standing foot contact could not be solved for avatar {root:?}");
         }
-        if let Some(global) = current_global(root, &transforms, &parents) {
-            refresh_descendants(root, global, &mut transforms, &children);
+        if let Some(global) = skeleton::current_global(root, &transforms, &parents, None) {
+            refresh_subtree(root, global, &mut transforms, &children);
         }
     }
 }
@@ -126,12 +153,12 @@ fn apply_contact(
     let mut translation_error = Vec3::ZERO;
     let mut rotation_error = Quat::IDENTITY;
     for (index, leg) in feet.legs.iter().enumerate() {
-        let free = current_global(leg.foot, transforms, parents)?;
+        let free = skeleton::current_global(leg.foot, transforms, parents, None)?;
         translation_error += (leg.contact.translation() - free.translation()) * 0.5;
         let error = leg.contact.rotation() * free.rotation().inverse();
         rotation_error = rotation_error.slerp(error, 1.0 / (index + 1) as f32);
     }
-    let hips = current_global(feet.hips, transforms, parents)?;
+    let hips = skeleton::current_global(feet.hips, transforms, parents, None)?;
     set_world_rotation(
         feet.hips,
         Quat::IDENTITY.slerp(rotation_error, PELVIS_REACTION) * hips.rotation(),
@@ -150,10 +177,8 @@ fn apply_contact(
     // rather than stretching bones or letting the higher foot float.
     let mut lowering = 0.0_f32;
     for leg in feet.legs {
-        let upper = current_global(leg.upper, transforms, parents)?.translation();
-        let knee = current_global(leg.lower, transforms, parents)?.translation();
-        let ankle = current_global(leg.foot, transforms, parents)?.translation();
-        let reach = upper.distance(knee) + knee.distance(ankle);
+        let upper = skeleton::current_global(leg.upper, transforms, parents, None)?.translation();
+        let reach = leg.rest.lengths.element_sum();
         let offset = upper - leg.contact.translation();
         let height_squared = reach * reach - offset.x * offset.x - offset.z * offset.z;
         if height_squared < 0.0 {
@@ -164,81 +189,29 @@ fn apply_contact(
     translate_world(feet.hips, Vec3::Y * lowering, transforms, parents)?;
 
     for leg in feet.legs {
-        let upper = current_global(leg.upper, transforms, parents)?;
-        let lower = current_global(leg.lower, transforms, parents)?;
-        let foot = current_global(leg.foot, transforms, parents)?;
-        let knee = knee_position(
-            upper.translation(),
-            leg.contact.translation(),
-            upper.translation().distance(lower.translation()),
-            lower.translation().distance(foot.translation()),
-            feet.forward,
-        )?;
-        let swing = align_segment(
-            lower.translation() - upper.translation(),
-            knee - upper.translation(),
-        )?;
-        set_world_rotation(leg.upper, swing * upper.rotation(), transforms, parents)?;
-        // Refresh via the real parent path, including any intermediary nodes.
-        let lower = current_global(leg.lower, transforms, parents)?;
-        let foot = current_global(leg.foot, transforms, parents)?;
-        let swing = align_segment(
-            foot.translation() - lower.translation(),
-            leg.contact.translation() - lower.translation(),
-        )?;
-        set_world_rotation(leg.lower, swing * lower.rotation(), transforms, parents)?;
+        let upper = skeleton::current_global(leg.upper, transforms, parents, None)?;
+        // Carry the immutable rest geometry into the current upper-joint
+        // frame. The solver owns knee flexion; independent rotation arcs
+        // must not introduce a second axis at the knee.
+        let carry = upper.rotation() * leg.rest.start_rotation.inverse();
+        let origin = upper.translation();
+        let rest = TwoBoneRest {
+            start: origin,
+            middle: origin + carry * (leg.rest.middle - leg.rest.start),
+            end: origin + carry * (leg.rest.end - leg.rest.start),
+            start_rotation: upper.rotation(),
+            middle_rotation: carry * leg.rest.middle_rotation,
+            hinge_axis: carry * leg.rest.hinge_axis,
+            ..leg.rest
+        };
+        let solved =
+            skeleton::solve_two_bone(rest, leg.contact.translation(), origin + feet.forward, 0.0)
+                .ok()?;
+        set_world_rotation(leg.upper, solved.start_rotation, transforms, parents)?;
+        set_world_rotation(leg.lower, solved.middle_rotation, transforms, parents)?;
         set_world_rotation(leg.foot, leg.contact.rotation(), transforms, parents)?;
     }
     Some(())
-}
-
-fn knee_position(hip: Vec3, ankle: Vec3, thigh: f32, shin: f32, forward: Vec3) -> Option<Vec3> {
-    let offset = ankle - hip;
-    let distance = offset.length();
-    let axis = offset.try_normalize()?;
-    let bend = (forward - axis * forward.dot(axis)).try_normalize()?;
-    let along = (thigh * thigh + distance * distance - shin * shin) / (2.0 * distance);
-    let height = (thigh * thigh - along * along).max(0.0).sqrt();
-    Some(hip + axis * along + bend * height)
-}
-
-fn align_segment(from: Vec3, to: Vec3) -> Option<Quat> {
-    // f32 rotation_arc rounds small rotations to identity (~0.001 radians),
-    // leaving visible contact drift when the legs are nearly straight.
-    Some(
-        bevy::math::DQuat::from_rotation_arc(
-            from.as_dvec3().try_normalize()?,
-            to.as_dvec3().try_normalize()?,
-        )
-        .as_quat(),
-    )
-}
-
-// Cached GlobalTransforms precede this frame's writers. Compose current local
-// transforms instead, including model placement and non-humanoid parent nodes.
-fn current_global(
-    entity: Entity,
-    transforms: &Query<(&mut Transform, &mut GlobalTransform)>,
-    parents: &Query<&ChildOf>,
-) -> Option<GlobalTransform> {
-    let local = *transforms.get(entity).ok()?.0;
-    match parents.get(entity) {
-        Ok(parent) => {
-            Some(current_global(parent.parent(), transforms, parents)?.mul_transform(local))
-        }
-        Err(_) => Some(GlobalTransform::from(local)),
-    }
-}
-
-fn parent_global(
-    entity: Entity,
-    transforms: &Query<(&mut Transform, &mut GlobalTransform)>,
-    parents: &Query<&ChildOf>,
-) -> Option<GlobalTransform> {
-    match parents.get(entity) {
-        Ok(parent) => current_global(parent.parent(), transforms, parents),
-        Err(_) => Some(GlobalTransform::IDENTITY),
-    }
 }
 
 fn set_world_rotation(
@@ -263,26 +236,6 @@ fn translate_world(
     transforms.get_mut(entity).ok()?.0.translation +=
         parent.affine().inverse().transform_vector3(offset);
     Some(())
-}
-
-fn refresh_descendants(
-    entity: Entity,
-    global: GlobalTransform,
-    transforms: &mut Query<(&mut Transform, &mut GlobalTransform)>,
-    children: &Query<&Children>,
-) {
-    if let Ok((_, mut cached)) = transforms.get_mut(entity) {
-        *cached = global;
-    }
-    if let Ok(children_of_entity) = children.get(entity) {
-        for child in children_of_entity.iter() {
-            let Ok((local, _)) = transforms.get(child) else {
-                continue;
-            };
-            let child_global = global.mul_transform(*local);
-            refresh_descendants(child, child_global, transforms, children);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -310,7 +263,7 @@ mod tests {
             .id()
     }
 
-    fn standing_app(yaw: f32, scale: f32) -> (App, Entity, Entity, [Entity; 2]) {
+    fn standing_app(yaw: f32, scale: f32, rest_flexion: f32) -> (App, Entity, Entity, [Entity; 2]) {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin));
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -354,7 +307,9 @@ mod tests {
             let lower = bone(
                 &mut app,
                 helper,
-                Transform::from_xyz(0.0, -0.45, 0.0).with_rotation(Quat::from_rotation_y(-0.1)),
+                Transform::from_xyz(0.0, -0.45, 0.0).with_rotation(
+                    Quat::from_rotation_y(-0.1) * Quat::from_rotation_x(rest_flexion),
+                ),
             );
             let foot = bone(&mut app, lower, Transform::from_xyz(0.0, -0.45, 0.0));
             let toe = bone(&mut app, foot, Transform::from_xyz(0.0, -0.1, 0.15));
@@ -384,8 +339,14 @@ mod tests {
 
     #[test]
     fn standing_contacts_survive_tracking_translation_and_return_without_drift() {
-        for (yaw, scale) in [(0.0, 1.0), (std::f32::consts::PI, 0.75), (0.6, 1.4)] {
-            let (mut app, root, hips, toes) = standing_app(yaw, scale);
+        for (yaw, scale, rest_flexion) in [
+            (0.0, 1.0, 0.0),
+            (std::f32::consts::PI, 0.75, 0.0),
+            (0.6, 1.4, 0.0),
+            (0.0, 1.0, 0.2),
+            (0.6, 1.4, 0.2),
+        ] {
+            let (mut app, root, hips, toes) = standing_app(yaw, scale, rest_flexion);
             for frame in 0..360 {
                 let phase = if frame < 180 {
                     frame as f32 / 30.0
@@ -422,6 +383,31 @@ mod tests {
                 }
                 // Bone lengths/local offsets are never stretched to fake contact.
                 for leg in feet.legs {
+                    let upper = app.world().get::<GlobalTransform>(leg.upper).unwrap();
+                    let lower = app.world().get::<GlobalTransform>(leg.lower).unwrap();
+                    let foot = app.world().get::<GlobalTransform>(leg.foot).unwrap();
+                    assert!(
+                        (upper.translation().distance(lower.translation()) - leg.rest.lengths.x)
+                            .abs()
+                            < 2.0e-5
+                    );
+                    assert!(
+                        (lower.translation().distance(foot.translation()) - leg.rest.lengths.y)
+                            .abs()
+                            < 2.0e-5
+                    );
+                    let knee_delta = app
+                        .world()
+                        .get::<RestTransform>(leg.lower)
+                        .unwrap()
+                        .rotation
+                        .inverse()
+                        * app.world().get::<Transform>(leg.lower).unwrap().rotation;
+                    let knee_axis = leg.rest.middle_rotation.inverse() * leg.rest.hinge_axis;
+                    assert!(
+                        (knee_delta * knee_axis).distance(knee_axis) < 2.0e-5,
+                        "knee acquired another axis at frame {frame}"
+                    );
                     for entity in [leg.upper, leg.lower, leg.foot] {
                         assert_eq!(
                             app.world().get::<Transform>(entity).unwrap().translation,
@@ -442,7 +428,7 @@ mod tests {
 
     #[test]
     fn contact_returns_a_weak_reaction_to_the_torso() {
-        let (mut app, root, hips, _) = standing_app(0.0, 1.0);
+        let (mut app, root, hips, _) = standing_app(0.0, 1.0, 0.0);
         let spine = app.world().get::<SpineBoneEntity>(root).unwrap().0;
         let ungrounded = Quat::from_rotation_z(0.12);
         app.world_mut().get_mut::<Transform>(hips).unwrap().rotation = ungrounded;

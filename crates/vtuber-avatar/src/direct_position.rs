@@ -14,7 +14,25 @@ use bevy_vrm1::prelude::{
     SpineBoneEntity, UpperChestBoneEntity, Vrm, VrmSystemSets,
 };
 
-use crate::direct_pose::refresh_parent_global;
+use crate::skeleton::refresh_parent_global;
+
+/// Additive torso bases restored before the next animation evaluation.
+/// Custom schedules using the direct-position writer must initialize this
+/// resource and schedule [`restore_torso_lean`] before animation.
+#[derive(Resource, Default)]
+pub struct TorsoLeanBases(HashMap<Entity, Quat>);
+
+/// Remove the previous additive lean before another writer captures its base.
+pub fn restore_torso_lean(
+    mut bases: ResMut<TorsoLeanBases>,
+    mut transforms: Query<&mut Transform>,
+) {
+    for (entity, base) in bases.0.drain() {
+        if let Ok(mut transform) = transforms.get_mut(entity) {
+            transform.rotation = base;
+        }
+    }
+}
 
 /// Minimum lever-arm height (meters) used for the bounded lean solve when the
 /// rest chain is too degenerate to measure one.
@@ -166,6 +184,8 @@ pub fn lean_angles_model_space(
 }
 
 pub(crate) fn register_direct_position(app: &mut App) {
+    app.init_resource::<TorsoLeanBases>()
+        .add_systems(PostUpdate, restore_torso_lean.before(AnimationSystems));
     app.register_type::<BodyTrackingPositionInput>()
         .register_type::<BodyTrackingPositionProfile>()
         .add_systems(
@@ -222,8 +242,8 @@ pub fn apply_direct_body_position(
     mut transforms: Query<(&mut Transform, &mut GlobalTransform), Without<Vrm>>,
     rests: Query<&RestGlobalTransform>,
     time: Res<Time>,
-    mut lean_bases: Local<HashMap<Entity, Quat>>,
-    mut root_rest_data: Local<HashMap<Entity, (Quat, Vec3)>>,
+    mut lean_bases: ResMut<TorsoLeanBases>,
+    mut root_rest_data: Local<HashMap<Entity, (Quat, Vec3, Quat)>>,
     mut frame_stamp: Local<Option<Duration>>,
 ) {
     let now = time.elapsed();
@@ -239,7 +259,9 @@ pub fn apply_direct_body_position(
 
     // State keyed by entity is dropped as soon as entities despawn so avatar
     // replacement cannot retain stale snapshots indefinitely.
-    lean_bases.retain(|entity, _| transforms.contains(*entity));
+    lean_bases
+        .0
+        .retain(|entity, _| transforms.contains(*entity));
     root_rest_data.retain(|entity, _| root_transforms.contains(*entity));
 
     for (root, input, profile, head, neck, upper_chest, chest, spine) in vrms.iter() {
@@ -252,7 +274,7 @@ pub fn apply_direct_body_position(
         let Ok((mut root_transform, mut root_global)) = root_transforms.get_mut(root) else {
             continue;
         };
-        let (root_rest_rotation, root_rest_translation) =
+        let (root_rest_rotation, root_rest_translation, root_rest_world_rotation) =
             *root_rest_data.entry(root).or_insert_with(|| {
                 let rotation = if root_transform.rotation.is_finite()
                     && root_transform.rotation.length_squared() > f32::EPSILON
@@ -266,7 +288,7 @@ pub fn apply_direct_body_position(
                 } else {
                     Vec3::ZERO
                 };
-                (rotation, translation)
+                (rotation, translation, root_global.rotation())
             });
 
         // --- Channel 1: root/body translation offset ---------------------
@@ -279,10 +301,7 @@ pub fn apply_direct_body_position(
         };
 
         let parent_global_before = child_ofs.get(root).ok().and_then(|child_of| {
-            transforms
-                .get(child_of.parent())
-                .ok()
-                .map(|(_, global)| *global)
+            crate::skeleton::current_global(child_of.parent(), &transforms, &child_ofs, None)
         });
         root_transform.translation = root_rest_translation + body_offset_model;
         *root_global = match parent_global_before {
@@ -293,7 +312,7 @@ pub fn apply_direct_body_position(
 
         // --- Channel 2: bounded torso lean --------------------------------
         let head_offset_model = match sanitized {
-            Some((head_residual, _)) => semantic_offset_to_model(head_residual, root_rest_rotation),
+            Some((head_residual, _)) => semantic_offset_to_model(head_residual, Quat::IDENTITY),
             None => Vec3::ZERO,
         };
 
@@ -332,8 +351,8 @@ pub fn apply_direct_body_position(
 
         // World-space axes conjugated by the root rest rotation keep the lean
         // aligned with the model basis regardless of scene placement.
-        let forward_world = (root_rest_rotation * Vec3::Z).normalize_or_zero();
-        let right_world = (root_rest_rotation * Vec3::X).normalize_or_zero();
+        let forward_world = (root_rest_world_rotation * Vec3::Z).normalize_or_zero();
+        let right_world = (root_rest_world_rotation * Vec3::X).normalize_or_zero();
 
         let mut computed_globals = HashMap::with_capacity(chain.len() + 2);
         for entity in chain {
@@ -354,7 +373,7 @@ pub fn apply_direct_body_position(
                 continue;
             };
 
-            let base = if frame_advanced {
+            let base = if frame_advanced || !lean_bases.0.contains_key(&entity) {
                 // Fresh evaluation: the direct-pose writer produced a new
                 // rotation this frame; adopt it as the additive base.
                 let entry = transform.rotation;
@@ -366,14 +385,15 @@ pub fn apply_direct_body_position(
             } else {
                 // Same-frame re-evaluation: reuse the recorded base so the
                 // output is bit-for-bit stable and deltas never accumulate.
-                lean_bases.get(&entity).copied().unwrap_or(Quat::IDENTITY)
+                lean_bases.0.get(&entity).copied().unwrap_or(Quat::IDENTITY)
             };
 
             let alpha = alpha_total * share;
             let beta = beta_total * share;
             let lean_world = Quat::from_axis_angle(forward_world, alpha)
                 * Quat::from_axis_angle(right_world, beta);
-            let candidate = lean_world * base;
+            let candidate =
+                crate::skeleton::world_delta_to_local(lean_world, parent_global.rotation()) * base;
             let output = if candidate.is_finite()
                 && candidate.length_squared().is_finite()
                 && candidate.length_squared() > f32::EPSILON
@@ -385,7 +405,7 @@ pub fn apply_direct_body_position(
 
             transform.rotation = output;
             *global = parent_global.mul_transform(*transform);
-            lean_bases.insert(entity, base);
+            lean_bases.0.insert(entity, base);
             computed_globals.insert(entity, *global);
         }
 

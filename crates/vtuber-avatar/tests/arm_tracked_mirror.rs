@@ -20,7 +20,7 @@ use vtuber_avatar::{
     ArmPoseSourceKind, ArmRestGeometry, ArmSide, ArmSourceSelection, AvatarAssetId, AvatarBinding,
     AvatarGeneration, AvatarLifecycle, AvatarMotionMirror, DynamicArmProfile, DynamicArmTargets,
     RestSpaceBonePose, TrackedArmControl, build_arm_motion_rest_geometry, resolve_arm_pose,
-    update_tracked_arm_targets,
+    update_dynamic_arm_targets, update_tracked_arm_targets,
 };
 use vtuber_core::arm_tracking::{
     ArmBlendWeight, ArmBlendWeights, ArmControlFrame, ArmTrackingTarget, ArmTrackingTargets,
@@ -79,7 +79,11 @@ fn build_app(mirror_enabled: bool, generation: AvatarGeneration) -> (App, Mirror
         .init_resource::<AvatarLifecycle>()
         .init_resource::<ArmSourceSelection>()
         .init_resource::<TrackedArmControl>()
-        .add_systems(Update, update_tracked_arm_targets);
+        .init_resource::<vtuber_avatar::ActiveControlFrame>()
+        .add_systems(
+            Update,
+            (update_dynamic_arm_targets, update_tracked_arm_targets).chain(),
+        );
 
     let mut mirror = AvatarMotionMirror::default();
     if !mirror_enabled {
@@ -203,6 +207,108 @@ fn observed_target() -> ArmTrackingTarget {
 }
 
 #[test]
+fn the_live_stage_order_keeps_palm_roll_state_and_returns_from_a_turn() {
+    let generation = AvatarGeneration(31);
+    let (mut app, rig) = build_app(false, generation);
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f64(1.0 / 60.0),
+    ));
+    let chain = {
+        let mut binding = app.world_mut().get_mut::<AvatarBinding>(rig.root).unwrap();
+        let chain = binding.left_arm.as_mut().unwrap();
+        let wrist = chain.rest.wrist.position;
+        chain.finger_rest.index.proximal = Some(vtuber_avatar::FingerJointRestBinding {
+            entity: chain.upper_arm,
+            rest: rest_bone(wrist + Vec3::new(0.05, 0.0, 0.005)),
+        });
+        chain.finger_rest.little.proximal = Some(vtuber_avatar::FingerJointRestBinding {
+            entity: chain.lower_arm,
+            rest: rest_bone(wrist + Vec3::new(0.05, 0.0, -0.005)),
+        });
+        *chain
+    };
+    let publish = |app: &mut App, seq, palm_normal| {
+        let target = ArmTrackingTarget {
+            palm_normal,
+            ..observed_target()
+        };
+        set_control(
+            app,
+            generation,
+            control_frame(
+                seq,
+                ArmTrackingTargets {
+                    left: Some(target),
+                    right: None,
+                },
+                ArmBlendWeights {
+                    left: ArmBlendWeight::ONE,
+                    right: ArmBlendWeight::ZERO,
+                },
+            ),
+        );
+    };
+    let palm = |pose: vtuber_avatar::ResolvedArmPose| {
+        let upper = chain.rest.upper_arm.global_rotation
+            * pose.upper_arm_delta
+            * chain.rest.upper_arm.global_rotation.inverse();
+        let lower = upper * chain.rest.elbow.global_rotation * pose.lower_arm_delta;
+        let hand = lower
+            * chain.rest.elbow.global_rotation.inverse()
+            * chain.rest.wrist.global_rotation
+            * pose.hand.map_or(Quat::IDENTITY, |h| h.delta);
+        let rest_normal = (chain.finger_rest.index.proximal.unwrap().rest.position
+            - chain.rest.wrist.position)
+            .cross(
+                chain.finger_rest.little.proximal.unwrap().rest.position
+                    - chain.rest.wrist.position,
+            )
+            .normalize();
+        (hand * (chain.rest.wrist.global_rotation.inverse() * rest_normal)).normalize()
+    };
+    publish(&mut app, 1, None);
+    app.update();
+    let baseline = resolved_targets(&app, &rig).left.unwrap();
+    let normal = palm(baseline);
+    let u = chain.rest.upper_arm.global_rotation
+        * baseline.upper_arm_delta
+        * chain.rest.upper_arm.global_rotation.inverse();
+    let l = chain.rest.elbow.global_rotation
+        * baseline.lower_arm_delta
+        * chain.rest.elbow.global_rotation.inverse();
+    let axis = (u * l * (chain.rest.wrist.position - chain.rest.elbow.position)).normalize();
+    let turned = Quat::from_axis_angle(axis, 60.0_f32.to_radians()) * normal;
+    publish(&mut app, 2, Some(turned.to_array()));
+    for _ in 0..120 {
+        app.update();
+    }
+    let pose = resolved_targets(&app, &rig).left.unwrap();
+    assert!(
+        palm(pose).dot(turned) > 0.999,
+        "the composed hand must reach the observed palm, got {:?}",
+        palm(pose)
+    );
+    assert_eq!(
+        pose.hand.unwrap().delta,
+        Quat::IDENTITY,
+        "pronation belongs to the forearm"
+    );
+    assert!(pose.upper_arm_delta.dot(baseline.upper_arm_delta).abs() > 1.0 - 1.0e-6);
+    publish(&mut app, 3, Some(normal.to_array()));
+    for _ in 0..120 {
+        app.update();
+    }
+    let returned = resolved_targets(&app, &rig).left.unwrap();
+    assert!(
+        palm(returned).dot(normal) > 0.999,
+        "the back of the hand must not remain reversed"
+    );
+    app.world_mut().resource_mut::<TrackedArmControl>().frame = None;
+    app.update();
+    assert_eq!(resolved_targets(&app, &rig), DynamicArmTargets::default());
+}
+
+#[test]
 fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
     let generation = AvatarGeneration(7);
     let weight = ArmBlendWeight {
@@ -233,10 +339,9 @@ fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
     let mirrored = resolved_targets(&app, &rig);
     assert_eq!(mirrored.generation, Some(generation));
     assert_eq!(mirrored.source_seq, Some(FrameSeq(1)));
-    assert!(
-        mirrored.left.is_none(),
-        "the observed left arm must resolve on the avatar's right arm"
-    );
+    let neutral_left = mirrored
+        .left
+        .expect("the unobserved arm keeps its initial pose");
     let mirrored_right = mirrored.right.expect("right arm resolved");
 
     app.world_mut()
@@ -260,7 +365,7 @@ fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
     app.update();
 
     let manual = resolved_targets(&app, &rig);
-    assert!(manual.left.is_none());
+    assert_eq!(manual.left, Some(neutral_left));
     assert_eq!(
         manual.right,
         Some(mirrored_right),
@@ -273,9 +378,12 @@ fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
 }
 
 #[test]
-fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
+fn opposed_bend_planes_resolve_and_return_instead_of_freezing() {
     let generation = AvatarGeneration(23);
     let (mut app, rig) = build_app(false, generation);
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_secs_f64(1.0 / 60.0),
+    ));
 
     set_control(
         &mut app,
@@ -299,10 +407,9 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
 
     // The virtual blend source, computed exactly as the system does, then a
     // tracked target whose converted pole is reflected through the converted
-    // wrist, so the two planes are opposed and blending at an intermediate
-    // weight is degenerate. Endpoint weights reproduce their side exactly, so
-    // the weight stays in the middle to exercise the hold.
-    let opposed = {
+    // wrist. Cartesian pole blending used to treat the whole return as
+    // degenerate and freeze; shoulder joint interpolation remains defined.
+    let (opposed, neutral) = {
         let binding = app.world().get::<AvatarBinding>(rig.root).expect("binding");
         let chain = binding.left_arm.as_ref().expect("left chain");
         let motion = app
@@ -322,19 +429,21 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
             torso_delta: Quat::IDENTITY,
             body_scale_meters: 0.7,
         };
-        let virtual_target = resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
+        let (neutral, outcome) = resolve_arm_pose(&input, ArmPoseSourceKind::VirtualHandAnchor)
             .expect("pipeline error")
-            .expect("virtual target")
-            .1
-            .hand_target;
+            .expect("virtual target");
+        let virtual_target = outcome.hand_target;
         let total = chain.rest.total_arm_length;
         let to_tracking = |p: Vec3| ((p - chain.rest.upper_arm.position) / total).to_array();
-        ArmTrackingTarget {
-            wrist: to_tracking(virtual_target.wrist),
-            elbow_pole: to_tracking(virtual_target.wrist * 2.0 - virtual_target.elbow_pole),
-            palm_normal: None,
-            fingers: None,
-        }
+        (
+            ArmTrackingTarget {
+                wrist: to_tracking(virtual_target.wrist),
+                elbow_pole: to_tracking(virtual_target.wrist * 2.0 - virtual_target.elbow_pole),
+                palm_normal: None,
+                fingers: None,
+            },
+            neutral,
+        )
     };
 
     set_control(
@@ -349,7 +458,7 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
             ArmBlendWeights {
                 left: ArmBlendWeight {
                     wrist: 0.5,
-                    pole: 0.5,
+                    pole: 0.25,
                     palm: 0.0,
                     fingers: 0.0,
                 },
@@ -357,16 +466,31 @@ fn a_degenerate_tick_holds_the_previous_pose_instead_of_snapping() {
             },
         ),
     );
-    app.update();
-    let held = resolved_targets(&app, &rig);
-    assert_eq!(held.source_seq, Some(FrameSeq(2)));
-    assert_eq!(
-        held.left,
-        Some(first),
-        "a degenerate tick must hold the previous pose, not drop to the default: held={:?} first={:?}",
-        held.left,
-        first
+    for _ in 0..120 {
+        app.update();
+    }
+    let middle = resolved_targets(&app, &rig);
+    assert_eq!(middle.source_seq, Some(FrameSeq(2)));
+    let middle = middle.left.unwrap();
+    assert!(middle.upper_arm_delta.is_finite());
+    assert!(middle.lower_arm_delta.is_finite());
+    assert!(middle.upper_arm_delta.angle_between(first.upper_arm_delta) > 0.01);
+    set_control(
+        &mut app,
+        generation,
+        control_frame(
+            3,
+            ArmTrackingTargets {
+                left: Some(opposed),
+                right: None,
+            },
+            ArmBlendWeights::default(),
+        ),
     );
+    app.update();
+    let returned = resolved_targets(&app, &rig).left.unwrap();
+    assert!(returned.upper_arm_delta.dot(neutral.upper_arm_delta).abs() > 0.999999);
+    assert!(returned.lower_arm_delta.dot(neutral.lower_arm_delta).abs() > 0.999999);
 }
 
 #[test]
@@ -396,5 +520,8 @@ fn disabled_mirror_keeps_the_canonical_side_assignment() {
         targets.left.is_some(),
         "without the mirror the observed left arm stays on the left"
     );
-    assert!(targets.right.is_none());
+    let right = targets
+        .right
+        .expect("the unobserved right arm keeps its initial pose");
+    assert_eq!(right.upper_arm, rig.right_upper);
 }

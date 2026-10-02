@@ -5,7 +5,9 @@
 // module owns bone distribution, rest-space conversion, filtering, and
 // additive composition against the unmodified upstream runtime.
 use std::collections::HashMap;
+use vtuber_tracking::filter::exponential::smooth_angle_half_life;
 
+use crate::skeleton::refresh_parent_global;
 use bevy::app::{AnimationSystems, App};
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{
@@ -279,8 +281,7 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     if !edge0.is_finite() || !edge1.is_finite() || !value.is_finite() || edge1 <= edge0 {
         return 0.0;
     }
-    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    vtuber_tracking::filter::time::smoothstep((value - edge0) / (edge1 - edge0))
 }
 
 fn lerp_weights(a: BodyBoneWeights, b: BodyBoneWeights, factor: f32) -> BodyBoneWeights {
@@ -319,33 +320,6 @@ fn normalize_available_weights(
         return BodyBoneWeights::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
     BodyBoneWeights::from_array(values.map(|value| value / sum))
-}
-
-fn half_life_alpha(half_life_seconds: f32, delta_seconds: f32) -> f32 {
-    if !half_life_seconds.is_finite() || half_life_seconds <= 0.0 {
-        return 1.0;
-    }
-    if !delta_seconds.is_finite() || delta_seconds <= 0.0 {
-        return 0.0;
-    }
-    1.0 - (-std::f32::consts::LN_2 * delta_seconds / half_life_seconds).exp()
-}
-
-fn shortest_angle_delta(current: f32, target: f32) -> f32 {
-    let current = if current.is_finite() { current } else { 0.0 };
-    let target = if target.is_finite() { target } else { 0.0 };
-    (target - current + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-        - std::f32::consts::PI
-}
-
-fn smooth_angle_half_life(current: f32, target: f32, half_life: f32, dt: f32) -> f32 {
-    let current = if current.is_finite() { current } else { 0.0 };
-    let target = if target.is_finite() { target } else { 0.0 };
-    let alpha = half_life_alpha(half_life, dt);
-    if alpha >= 1.0 {
-        return target;
-    }
-    current + shortest_angle_delta(current, target) * alpha
 }
 
 fn clamp_angle(angle: f32, limit: f32) -> f32 {
@@ -415,51 +389,8 @@ fn direct_tracking_target(
 ) -> Quat {
     let model_delta = Quat::from_euler(EulerRot::YXZ, angles.x, -angles.y, -angles.z);
     let bone_rest_model = root_rest_rotation.inverse() * rest_gtf.rotation();
-    let local_delta = bone_rest_model.inverse() * model_delta * bone_rest_model;
+    let local_delta = crate::skeleton::rest_delta(model_delta, bone_rest_model);
     finite_normalized_or(rest_tf.rotation * local_delta, rest_tf.rotation)
-}
-
-pub(crate) fn refresh_parent_global(
-    root: Entity,
-    parent: Entity,
-    root_global: GlobalTransform,
-    transforms: &mut Query<(&mut Transform, &mut GlobalTransform), Without<Vrm>>,
-    child_ofs: &Query<&ChildOf>,
-    computed: &mut HashMap<Entity, GlobalTransform>,
-) -> Option<GlobalTransform> {
-    if parent == root {
-        return Some(root_global);
-    }
-    if let Some(global) = computed.get(&parent) {
-        return Some(*global);
-    }
-
-    let mut path = Vec::new();
-    let mut cursor = parent;
-    let base = loop {
-        if cursor == root {
-            break root_global;
-        }
-        if let Some(global) = computed.get(&cursor) {
-            break *global;
-        }
-        path.push(cursor);
-        let Ok(child_of) = child_ofs.get(cursor) else {
-            return transforms.get(parent).ok().map(|(_, global)| *global);
-        };
-        cursor = child_of.parent();
-    };
-
-    let mut parent_global = base;
-    for entity in path.into_iter().rev() {
-        let Ok((transform, mut global)) = transforms.get_mut(entity) else {
-            return None;
-        };
-        *global = parent_global.mul_transform(*transform);
-        parent_global = *global;
-        computed.insert(entity, parent_global);
-    }
-    Some(parent_global)
 }
 
 /// Applies direct pose input to the humanoid upper-body chain and hips.

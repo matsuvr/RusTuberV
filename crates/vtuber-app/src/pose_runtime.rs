@@ -26,6 +26,14 @@ const POSE_TASK_FILE: &str = "pose_landmarker_full.task";
 /// The packaged Hand Landmarker task filename.
 const HAND_TASK_FILE: &str = "hand_landmarker.task";
 
+/// The Hand Landmarker world landmarks written to the debug CSV.
+///
+/// The whole hand is logged rather than only the three points the palm plane
+/// is built from, because the four finger chains are landmarks 5 through 20
+/// and a middle-finger gesture cannot be diagnosed from the palm alone.
+#[cfg(debug_assertions)]
+const DEBUG_HAND_LANDMARKS: std::ops::RangeInclusive<usize> = 0..=20;
+
 /// Owns the Pose worker and the pure observed-arm tracking state.
 #[derive(Resource)]
 pub struct PoseRuntime {
@@ -256,9 +264,10 @@ impl Default for PoseRuntime {
 /// working directory. Comparing those rows with `propagation_debug.log` frame
 /// by frame separates a bad MediaPipe observation from a tracking reaction:
 /// each row is `seq,captured_ns,side,role,x,y,z,visibility,presence,handedness`
-/// with one row per shoulder/elbow/wrist plus a handedness row per side. The
-/// handedness column is the left/right label confidence, not a detection
-/// quality, so it is logged for diagnosis only and never gates tracking.
+/// with one row per shoulder/elbow/wrist, one per Hand Landmarker landmark as
+/// `hand_NN`, and a handedness row per side. The handedness column is the
+/// left/right label confidence, not a detection quality, so it is logged for
+/// diagnosis only and never gates tracking.
 #[cfg(debug_assertions)]
 fn log_pose_frame(frame: &PoseArmFrame, file: &mut Option<std::fs::File>) {
     use std::fmt::Write as _;
@@ -332,22 +341,20 @@ fn log_pose_frame(frame: &PoseArmFrame, file: &mut Option<std::fs::File>) {
             frame.captured_at.0,
             number(arm.hand.and_then(|hand| hand.handedness_score)),
         );
-        // The palm-plane source: wrist, index MCP, and pinky MCP world points
-        // from the Hand Landmarker, so the observed normal can be recomputed
-        // offline against the avatar trace.
+        // The Hand Landmarker world points, so the observed palm normal and every
+        // finger's flexion can be recomputed offline against the avatar trace.
+        // Landmarks 0, 5, and 17 give the palm plane; 5 through 20 are the four
+        // finger chains, so these same rows also settle whether a standalone
+        // middle finger was ever observed.
         if let Some(hand) = arm.hand {
-            for (role, landmark) in [
-                ("hand_wrist", 0usize),
-                ("hand_index", 5),
-                ("hand_pinky", 17),
-            ] {
+            for landmark in DEBUG_HAND_LANDMARKS {
                 let Some(point) = hand.landmarks.get(landmark) else {
                     continue;
                 };
                 let [x, y, z] = point.meters;
                 let _ = writeln!(
                     rows,
-                    "{},{},{side},{role},{x:.4},{y:.4},{z:.4},{},{},-",
+                    "{},{},{side},hand_{landmark:02},{x:.4},{y:.4},{z:.4},{},{},-",
                     frame.source_seq.0,
                     frame.captured_at.0,
                     number(point.visibility),

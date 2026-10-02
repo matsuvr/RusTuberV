@@ -6837,6 +6837,7 @@ dependencies = [
  "bevy",
  "bevy_vrm1",
  "indexmap",
+ "nalgebra",
  "serde",
  "serde_json",
  "toml 0.9.12+spec-1.1.0",

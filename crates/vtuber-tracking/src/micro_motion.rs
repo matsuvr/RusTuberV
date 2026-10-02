@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use crate::filter::time::transition_progress;
 use vtuber_core::types::{MonoTimeNs, TrackingState};
 
 /// Body-scale-aware typed profile for tracking-loss micro-motion.
@@ -183,7 +184,7 @@ fn smoothstep(t: f32) -> f32 {
     } else {
         0.0
     };
-    t * t * (3.0 - 2.0 * t)
+    crate::filter::time::smoothstep(t)
 }
 
 /// Computes the bounded idle target at `elapsed` since tracking was lost.
@@ -318,7 +319,7 @@ impl MicroMotionBlender {
             }
             let start = self.live_started_at.unwrap_or(now);
             let elapsed = Duration::from_nanos(now.0.saturating_sub(start.0)).as_secs_f32();
-            self.blend *= 1.0 - smoothstep(elapsed / transition);
+            self.blend *= 1.0 - smoothstep(transition_progress(elapsed, transition));
         } else {
             if self.idle_started_at.is_none() {
                 self.idle_started_at = Some(now);
@@ -326,7 +327,7 @@ impl MicroMotionBlender {
             }
             let start = self.idle_started_at.unwrap_or(now);
             let elapsed = Duration::from_nanos(now.0.saturating_sub(start.0)).as_secs_f32();
-            self.blend += (1.0 - self.blend) * smoothstep(elapsed / transition);
+            self.blend += (1.0 - self.blend) * smoothstep(transition_progress(elapsed, transition));
         }
         if !self.blend.is_finite() {
             self.blend = 0.0;

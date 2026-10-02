@@ -58,14 +58,14 @@ impl AvatarPreviewTexture {
     }
 }
 
-/// Paints one avatar image rectangle through the avatar-only GPU callback.
+/// Paints one clickable avatar image rectangle through the avatar-only GPU callback.
 pub fn paint_avatar_preview(
     ui: &mut Ui,
     image: Handle<Image>,
     size: Vec2,
     corner_radius: f32,
 ) -> Response {
-    let (response, painter) = ui.allocate_painter(size, Sense::hover());
+    let (response, painter) = ui.allocate_painter(size, Sense::click());
     paint_avatar_preview_at(&painter, response.rect, image, corner_radius);
     response
 }

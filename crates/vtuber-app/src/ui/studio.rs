@@ -14,8 +14,8 @@ use crate::preview::PreviewState;
 use crate::preview_landmarks::PreviewLandmarkState;
 use crate::settings::UiLanguage;
 use crate::ui_model::{
-    AppLifecycle, AvatarLifecycleState, ExpressionEntryViewModel, NdiOutputUiState, Pane,
-    TrackingState, UiViewModel,
+    AvatarLifecycleState, ExpressionEntryViewModel, NdiOutputUiState, Pane, TrackingState,
+    UiViewModel,
 };
 use bevy_egui::egui::{self, Color32, CornerRadius, Frame, Id, RichText, TextureId, Ui, vec2};
 use vtuber_avatar::{
@@ -73,16 +73,6 @@ const LANGUAGES: [(UiLanguage, &str); 4] = [
     (UiLanguage::Ko, "한국어"),
 ];
 
-fn session_label(state: AppLifecycle, lang: UiLanguage) -> &'static str {
-    match state {
-        AppLifecycle::Idle => lang.pick("待機中", "Idle", "待机", "대기 중"),
-        AppLifecycle::Starting => lang.pick("開始中…", "Starting…", "正在启动…", "시작 중…"),
-        AppLifecycle::Running => lang.pick("トラッキング中", "Tracking", "跟踪中", "트래킹 중"),
-        AppLifecycle::Stopping => lang.pick("停止中…", "Stopping…", "正在停止…", "중지 중…"),
-        AppLifecycle::Failed => lang.pick("エラー", "Error", "错误", "오류"),
-    }
-}
-
 fn avatar_label(state: AvatarLifecycleState, lang: UiLanguage) -> &'static str {
     match state {
         AvatarLifecycleState::None => {
@@ -111,18 +101,64 @@ fn panel_frame(gray: u8) -> Frame {
 }
 
 fn section(ui: &mut Ui, title: &str, contents: impl FnOnce(&mut Ui)) {
+    setup_section(ui, title, false, false, contents);
+}
+
+fn setup_section(
+    ui: &mut Ui,
+    title: &str,
+    unfinished: bool,
+    animate: bool,
+    contents: impl FnOnce(&mut Ui),
+) {
     ui.add_space(12.0);
-    Frame::new()
+    let mut frame = Frame::new()
         .fill(Color32::WHITE)
         .stroke(egui::Stroke::new(1.0, Color32::from_gray(220)))
         .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(16))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(title).size(17.0).strong());
-            ui.add_space(10.0);
-            contents(ui);
-        });
+        .inner_margin(egui::Margin::same(16));
+    let attention = unfinished.then(|| attention_style(ui, animate));
+    if let Some((_, shadow)) = attention {
+        frame = frame.shadow(shadow);
+    }
+    let response = frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).size(17.0).strong());
+        ui.add_space(10.0);
+        contents(ui);
+    });
+    if let Some((stroke, _)) = attention {
+        ui.painter().rect_stroke(
+            response.response.rect,
+            CornerRadius::same(10),
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+fn attention_style(ui: &Ui, animate: bool) -> (egui::Stroke, egui::epaint::Shadow) {
+    // A smooth fade directs attention without moving controls or blinking.
+    // A three-point outline reaches full accent color at each peak, so the
+    // change remains visible on both the white cards and dark avatar preview.
+    // Timing and opacity are application choices, not Apple-prescribed values.
+    let pulse = if animate {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
+        ui.input(|input| (0.5 - 0.5 * (input.time * std::f64::consts::TAU / 2.4).cos()) as f32)
+    } else {
+        0.5
+    };
+    let accent = ui.visuals().hyperlink_color;
+    (
+        egui::Stroke::new(3.0, accent.gamma_multiply(0.18 + 0.82 * pulse)),
+        egui::epaint::Shadow {
+            offset: [0, 0],
+            blur: 16,
+            spread: 2,
+            color: accent.gamma_multiply(0.04 + 0.34 * pulse),
+        },
+    )
 }
 
 fn primary_button(ui: &mut Ui, label: &str, enabled: bool) -> egui::Response {
@@ -241,9 +277,7 @@ fn paint_license_glyph(painter: &egui::Painter, center: egui::Pos2, color: Color
     );
 }
 
-// The settings toggle keeps the top-right corner in both states: a floating
-// accent control while the avatar fills the window, and the toolbar's
-// rightmost button while the workspace is open (Apple HIG: consistent placement).
+// The floating settings control reopens the workspace from the top-right corner.
 // During a transition it fades and scales with `progress`, appearing to grow
 // out of the collapsing workspace it replaces.
 fn floating_settings_control(
@@ -394,53 +428,13 @@ fn toolbar(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, sidebar: bool, la
             compact_navigation(ui, vm, state, lang);
             compact_language_buttons(ui, state, lang);
         }
-        ui.separator();
-        ui.label(session_label(vm.lifecycle, lang));
-        if vm.can_stop() {
-            if ui
-                .button(lang.pick(
-                    "トラッキングを停止",
-                    "Stop tracking",
-                    "停止跟踪",
-                    "트래킹 중지",
-                ))
-                .clicked()
-            {
-                state.emit(UiAction::Stop);
-            }
-        } else if primary_button(
-            ui,
-            lang.pick(
-                "トラッキングを開始",
-                "Start tracking",
-                "开始跟踪",
-                "트래킹 시작",
-            ),
-            vm.can_start(),
-        )
-        .clicked()
-        {
-            state.emit(UiAction::Start);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .button(lang.pick(
-                    "アバターのみ (F1)",
-                    "Avatar only (F1)",
-                    "仅虚拟形象 (F1)",
-                    "아바타만 (F1)",
-                ))
-                .clicked()
-            {
-                state.set_controls_open(false);
-            }
-        });
     });
 }
 
 fn avatar_monitor(
     ui: &mut Ui,
     vm: &UiViewModel,
+    state: &mut UiState,
     texture: Option<AvatarPreviewTexture>,
     max_width: f32,
     draw_preview: bool,
@@ -462,15 +456,21 @@ fn avatar_monitor(
             let width = ui.available_width().min(max_width);
             let profile = texture.profile();
             let height = width * profile.height as f32 / profile.width as f32;
-            Frame::new()
+            let attention = (draw_preview && vm.camera.selected_index.is_some())
+                .then(|| attention_style(ui, vm.avatar_import_review.review.is_none()));
+            let mut frame = Frame::new()
                 .fill(STUDIO_BACKGROUND)
-                .corner_radius(CornerRadius::same(MONITOR_CARD_RADIUS))
+                .corner_radius(CornerRadius::same(MONITOR_CARD_RADIUS));
+            if let Some((_, shadow)) = attention {
+                frame = frame.shadow(shadow);
+            }
+            let response = frame
                 .show(ui, |ui| {
                     let size = vec2(width, height);
                     // The expanding transition card owns the texture while the
                     // workspace collapses; the monitor keeps its layout only,
                     // so the preview is never drawn twice.
-                    let response = if draw_preview {
+                    if draw_preview {
                         paint_avatar_preview(
                             ui,
                             texture.image().clone(),
@@ -479,9 +479,37 @@ fn avatar_monitor(
                         )
                     } else {
                         ui.allocate_exact_size(size, egui::Sense::hover()).1
-                    };
-                    preview_rect = Some(response.rect);
-                });
+                    }
+                })
+                .inner;
+            preview_rect = Some(response.rect);
+            if let Some((stroke, _)) = attention {
+                // Paint the border inside the image rect so the glow never
+                // changes the preview's layout or transition origin.
+                ui.painter().rect_stroke(
+                    response.rect,
+                    CornerRadius::same(MONITOR_CARD_RADIUS),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if draw_preview {
+                let hint = lang.pick(
+                    "クリックでアバターを全面表示",
+                    "Click to show the avatar full screen",
+                    "点击全屏显示虚拟形象",
+                    "클릭하여 아바타 전체 화면 표시",
+                );
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    state.set_controls_open(false);
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(hint).small().weak());
+            }
         } else if draw_preview {
             ui.spinner();
         }
@@ -590,6 +618,7 @@ pub(crate) fn render_studio(
                     if let Some(rect) = avatar_monitor(
                         ui,
                         vm,
+                        state,
                         avatar_texture.clone(),
                         panel - MONITOR_PANEL_PADDING,
                         !transitioning,
@@ -607,6 +636,7 @@ pub(crate) fn render_studio(
                     if let Some(rect) = avatar_monitor(
                         ui,
                         vm,
+                        state,
                         avatar_texture.clone(),
                         MIN_MONITOR_WIDTH,
                         !transitioning,
@@ -675,7 +705,7 @@ pub(crate) fn render_studio(
                         match vm.pane {
                             Pane::VrmCamera => {
                                 vrm_page(ui, vm, state, dialog_active, lang);
-                                camera_select_page(ui, vm, state, lang);
+                                camera_select_page(ui, vm, state, dialog_active, lang);
                                 render_rich_look_controls(ui, vm, state, lang);
                             }
                             Pane::PoseCamera => {
@@ -1093,30 +1123,19 @@ fn camera_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiL
         .and_then(|index| vm.camera.available_cameras.get(index))
         .map(|camera| camera.name.as_str())
         .unwrap_or_else(|| lang.pick("カメラを選択", "Select camera", "选择摄像头", "카메라 선택"));
-    let can_change = matches!(vm.lifecycle, AppLifecycle::Idle | AppLifecycle::Failed);
-    ui.add_enabled_ui(can_change, |ui| {
-        egui::ComboBox::from_id_salt("studio_camera_device")
-            .selected_text(selected_label)
-            .width(ui.available_width().min(360.0))
-            .show_ui(ui, |ui| {
-                for (index, camera) in vm.camera.available_cameras.iter().enumerate() {
-                    if ui
-                        .selectable_label(vm.camera.selected_index == Some(index), &camera.name)
-                        .clicked()
-                    {
-                        state.emit(UiAction::SelectCamera { index });
-                    }
+    egui::ComboBox::from_id_salt("studio_camera_device")
+        .selected_text(selected_label)
+        .width(ui.available_width().min(360.0))
+        .show_ui(ui, |ui| {
+            for (index, camera) in vm.camera.available_cameras.iter().enumerate() {
+                if ui
+                    .selectable_label(vm.camera.selected_index == Some(index), &camera.name)
+                    .clicked()
+                {
+                    state.emit(UiAction::SelectCamera { index });
                 }
-            });
-    });
-    if !can_change {
-        ui.label(lang.pick(
-            "カメラを変更するには、トラッキングを停止してください。",
-            "Stop tracking before changing the camera.",
-            "更换摄像头前请停止跟踪。",
-            "카메라를 변경하려면 트래킹을 중지하세요.",
-        ));
-    }
+            }
+        });
     if ui
         .button(lang.pick(
             "カメラを再検出",
@@ -1145,9 +1164,14 @@ fn vrm_page(
     dialog_active: bool,
     lang: UiLanguage,
 ) {
-    section(
+    setup_section(
         ui,
         lang.pick("モデル", "Model", "模型", "모델"),
+        matches!(
+            vm.avatar.lifecycle,
+            AvatarLifecycleState::None | AvatarLifecycleState::Failed
+        ),
+        !dialog_active && vm.avatar_import_review.review.is_none(),
         |ui| {
             import_controls(ui, vm, state, dialog_active, lang);
             if vm.avatar.imported_model.is_some()
@@ -1173,10 +1197,18 @@ fn vrm_page(
     );
 }
 
-fn camera_select_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
-    section(
+fn camera_select_page(
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    dialog_active: bool,
+    lang: UiLanguage,
+) {
+    setup_section(
         ui,
         lang.pick("入力カメラ", "Input camera", "输入摄像头", "입력 카메라"),
+        vm.camera.selected_index.is_none(),
+        !dialog_active && vm.avatar_import_review.review.is_none(),
         |ui| camera_controls(ui, vm, state, lang),
     );
 }
@@ -1304,7 +1336,12 @@ fn camera_preview_section(
                                 }
                             }
                         } else {
-                            ui.label(lang.pick("映像を待っています。停止中の場合は、上部でトラッキングを開始してください。", "Waiting for frames. Start tracking in the toolbar if it is stopped.", "正在等待影像。如已停止，请在顶部开始跟踪。", "영상을 기다리고 있습니다. 중지 상태라면 상단에서 트래킹을 시작하세요."));
+                            ui.label(lang.pick(
+                                "映像を待っています。VRMとカメラを選択してください。",
+                                "Waiting for frames. Select a VRM and camera.",
+                                "正在等待影像。请选择VRM和摄像头。",
+                                "영상을 기다리고 있습니다. VRM과 카메라를 선택하세요.",
+                            ));
                         }
                     }
                 }
@@ -1466,12 +1503,6 @@ fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                 .changed();
             changed |= ui
                 .add(
-                    egui::Slider::new(&mut profile.shoulder_follow_weight, 0.0..=1.0)
-                        .text(lang.pick("肩の追従", "Shoulder follow", "肩部跟随", "어깨 추종")),
-                )
-                .changed();
-            changed |= ui
-                .add(
                     egui::Slider::new(&mut curl_degrees, 0.0..=90.0).text(lang.pick(
                         "指の曲げ",
                         "Finger curl",
@@ -1555,10 +1586,10 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                 }
                 if !vm.can_calibrate() {
                     ui.label(lang.pick(
-                        "先にトラッキングを開始してください。",
-                        "Start tracking first.",
-                        "请先开始跟踪。",
-                        "먼저 트래킹을 시작하세요.",
+                        "VRMとカメラを選択し、映像が届くまでお待ちください。",
+                        "Select a VRM and camera, then wait for the camera feed.",
+                        "请选择VRM和摄像头，并等待摄像头影像。",
+                        "VRM과 카메라를 선택하고 영상이 들어올 때까지 기다리세요.",
                     ));
                 }
             }

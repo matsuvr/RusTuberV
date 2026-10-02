@@ -14,7 +14,7 @@
 //! channel is eased back by the shared loss blend rather than by stiffening the
 //! filter.
 
-use nalgebra::Vector3;
+use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 /// Default maximum accepted delta-time in seconds.
 ///
@@ -23,10 +23,11 @@ pub const DEFAULT_MAX_DT_SEC: f32 = 0.5;
 
 /// One critically damped second-order step toward a target error.
 ///
-/// `error` is the target minus the current value expressed in the channel's own
-/// space, `velocity` is the retained derivative of that space, and
-/// `time_constant_sec` is the inverse bandwidth. Returns the correction to add
-/// to the current value and the new velocity.
+/// `error` is a residual in the channel's coordinate space, `velocity` is its
+/// retained derivative, and `time_constant_sec` is the inverse bandwidth.
+/// Returns the amount removed from the residual and its new derivative.
+/// Scalar/position callers use target minus current and add the correction;
+/// world rotations use current relative to target and reconstruct the residual.
 #[must_use]
 pub fn critically_damped_step(
     error: Vector3<f32>,
@@ -55,6 +56,141 @@ pub fn critically_damped_step_scalar(
     let new_error = (error + combined * dt_sec) * decay;
     let new_velocity = (velocity - combined * (omega * dt_sec)) * decay;
     (error - new_error, new_velocity)
+}
+
+/// Retained state for a scalar joint coordinate. Anatomical limits belong to
+/// the caller, which projects `value` and, where required, `velocity` afterward.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScalarSpring {
+    /// Current scalar coordinate.
+    pub value: f32,
+    /// Retained error derivative.
+    pub velocity: f32,
+}
+
+impl ScalarSpring {
+    /// Seeds a coordinate at its first measurement with no residual motion.
+    #[must_use]
+    pub fn new(value: f32) -> Self {
+        Self {
+            value,
+            velocity: 0.0,
+        }
+    }
+
+    /// Non-finite measurements hold the state, as for observed finger angles.
+    pub fn step(&mut self, target: f32, dt_sec: f32, time_constant_sec: f32) -> f32 {
+        if !target.is_finite() {
+            return self.value;
+        }
+        let (correction, velocity) = critically_damped_step_scalar(
+            target - self.value,
+            self.velocity,
+            dt_sec,
+            time_constant_sec,
+        );
+        self.value += correction;
+        self.velocity = velocity;
+        self.value
+    }
+}
+
+/// Retained state for positions or groups of independent joint coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VectorSpring {
+    /// Current position or group of joint coordinates.
+    pub position: Vector3<f32>,
+    /// Retained error derivative in the same coordinate space.
+    velocity: Vector3<f32>,
+}
+
+impl VectorSpring {
+    /// Seeds at the first measurement with no residual motion.
+    #[must_use]
+    pub fn new(position: Vector3<f32>) -> Self {
+        Self {
+            position,
+            velocity: Vector3::zeros(),
+        }
+    }
+
+    /// Advances in the channel's coordinate space.
+    pub fn step(&mut self, target: Vector3<f32>, dt_sec: f32, time_constant_sec: f32) {
+        let (correction, velocity) = critically_damped_step(
+            target - self.position,
+            self.velocity,
+            dt_sec,
+            time_constant_sec,
+        );
+        self.position += correction;
+        self.velocity = velocity;
+    }
+}
+
+/// Rotation-vector spring state. Error coordinates stay in the frame chosen
+/// by the channel; local head motion and world-frame shoulder motion must not
+/// silently exchange those frames while retaining their error derivatives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RotationSpring {
+    /// Current unit rotation in the channel's coordinate frame.
+    pub value: UnitQuaternion<f32>,
+    velocity: Vector3<f32>,
+}
+
+impl RotationSpring {
+    /// Seeds at the first measurement with no residual motion.
+    #[must_use]
+    pub fn new(value: UnitQuaternion<f32>) -> Self {
+        Self {
+            value,
+            velocity: Vector3::zeros(),
+        }
+    }
+
+    /// Head response: advance the local error from the current rotation.
+    pub fn step_local(
+        &mut self,
+        target: UnitQuaternion<f32>,
+        dt_sec: f32,
+        tau: f32,
+    ) -> UnitQuaternion<f32> {
+        let target = shortest_arc(self.value, target);
+        let error = (self.value.inverse() * target).scaled_axis();
+        let (correction, velocity) = critically_damped_step(error, self.velocity, dt_sec, tau);
+        self.value *= UnitQuaternion::from_scaled_axis(correction);
+        self.velocity = velocity;
+        self.value
+    }
+
+    /// Shoulder response: decay the world-frame residual onto the target.
+    pub fn step_world(
+        &mut self,
+        target: UnitQuaternion<f32>,
+        dt_sec: f32,
+        tau: f32,
+    ) -> UnitQuaternion<f32> {
+        let target = shortest_arc(self.value, target);
+        let error = (self.value * target.inverse()).scaled_axis();
+        let (correction, velocity) = critically_damped_step(error, self.velocity, dt_sec, tau);
+        self.value = UnitQuaternion::from_scaled_axis(error - correction) * target;
+        self.value.renormalize();
+        self.velocity = velocity;
+        self.value
+    }
+}
+
+/// Quaternion sign with the shortest arc from the current rotation.
+#[must_use]
+pub fn shortest_arc(
+    current: UnitQuaternion<f32>,
+    target: UnitQuaternion<f32>,
+) -> UnitQuaternion<f32> {
+    if current.quaternion().coords.dot(&target.quaternion().coords) < 0.0 {
+        let q = target.quaternion();
+        UnitQuaternion::from_quaternion(Quaternion::new(-q.w, -q.i, -q.j, -q.k))
+    } else {
+        target
+    }
 }
 
 #[cfg(test)]
@@ -117,5 +253,60 @@ mod tests {
         let dt = 1.0 / 60.0;
         let (correction, _) = critically_damped_step_scalar(0.0, 0.0, dt, 0.05);
         assert_eq!(correction, 0.0);
+    }
+
+    #[test]
+    fn seeded_scalar_and_rotation_responses_agree_across_render_rates() {
+        // A held one-axis target has the same critical response in every
+        // coordinate representation, including both rotation error frames.
+        let initial = UnitQuaternion::from_scaled_axis(Vector3::new(0.3, -0.2, 0.1));
+        let target = initial * UnitQuaternion::from_scaled_axis(Vector3::y() * 0.8);
+        for fps in [30, 60, 120] {
+            let mut scalar = ScalarSpring::new(0.0);
+            let mut local = RotationSpring::new(initial);
+            let mut world = RotationSpring::new(initial);
+            for _ in 0..fps {
+                scalar.step(0.8, 1.0 / fps as f32, 0.15);
+                local.step_local(target, 1.0 / fps as f32, 0.15);
+                world.step_world(target, 1.0 / fps as f32, 0.15);
+            }
+            let expected_residual = 0.8 * (1.0 + 1.0 / 0.15) * (-1.0_f32 / 0.15).exp();
+            assert!((0.8 - scalar.value - expected_residual).abs() < 2.0e-6);
+            assert!((local.value.angle_to(&target) - expected_residual).abs() < 2.0e-6);
+            assert!((world.value.angle_to(&target) - expected_residual).abs() < 2.0e-6);
+        }
+    }
+
+    #[test]
+    fn multi_axis_rotation_response_preserves_basis_and_quaternion_sign() {
+        let basis = UnitQuaternion::from_scaled_axis(Vector3::new(0.6, -0.9, 0.4));
+        for world_frame in [false, true] {
+            let mut original = RotationSpring::new(UnitQuaternion::identity());
+            let mut transformed = RotationSpring::new(basis);
+            for tick in 0..180 {
+                let t = tick as f32 / 60.0;
+                let target = UnitQuaternion::from_scaled_axis(Vector3::new(
+                    0.4 * t.sin(),
+                    0.6 * (t * 0.7).sin(),
+                    0.3 * (t * 1.3).cos(),
+                ));
+                let transformed_target = basis * target;
+                let q = transformed_target.quaternion();
+                let transformed_target = if tick % 2 == 0 {
+                    UnitQuaternion::from_quaternion(Quaternion::new(-q.w, -q.i, -q.j, -q.k))
+                } else {
+                    transformed_target
+                };
+                if world_frame {
+                    original.step_world(target, 1.0 / 60.0, 0.15);
+                    transformed.step_world(transformed_target, 1.0 / 60.0, 0.15);
+                } else {
+                    original.step_local(target, 1.0 / 60.0, 0.025);
+                    transformed.step_local(transformed_target, 1.0 / 60.0, 0.025);
+                }
+                assert!(transformed.value.angle_to(&(basis * original.value)) < 2.0e-5);
+                assert!((transformed.value.norm() - 1.0).abs() < 2.0e-5);
+            }
+        }
     }
 }

@@ -619,8 +619,6 @@ struct PersistedDynamicArmProfile {
     elbow_swivel_radians: f32,
     swivel_transition_width_ratio: f32,
     pole_influence: f32,
-    twist_relax_weight: f32,
-    twist_parent_child_crossfade: f32,
     shoulder_elevation_trim_radians: f32,
 }
 impl From<DynamicArmProfileOverride> for PersistedDynamicArmProfile {
@@ -632,8 +630,6 @@ impl From<DynamicArmProfileOverride> for PersistedDynamicArmProfile {
             elbow_swivel_radians: profile.elbow_swivel_radians,
             swivel_transition_width_ratio: profile.swivel_transition_width_ratio,
             pole_influence: profile.pole_influence,
-            twist_relax_weight: profile.twist_relax_weight,
-            twist_parent_child_crossfade: profile.twist_parent_child_crossfade,
             shoulder_elevation_trim_radians: profile.shoulder_elevation_trim_radians,
         }
     }
@@ -647,8 +643,6 @@ impl PersistedDynamicArmProfile {
             elbow_swivel_radians: self.elbow_swivel_radians,
             swivel_transition_width_ratio: self.swivel_transition_width_ratio,
             pole_influence: self.pole_influence,
-            twist_relax_weight: self.twist_relax_weight,
-            twist_parent_child_crossfade: self.twist_parent_child_crossfade,
             shoulder_elevation_trim_radians: self.shoulder_elevation_trim_radians,
         }
     }
@@ -661,7 +655,6 @@ struct PersistedArmPoseProfile {
     reach_ratio: f32,
     forward_hand_offset_ratio: f32,
     elbow_pole_offset_ratio: f32,
-    shoulder_follow_weight: f32,
     finger_curl_radians: f32,
 }
 impl From<ArmPoseProfileOverride> for PersistedArmPoseProfile {
@@ -672,7 +665,6 @@ impl From<ArmPoseProfileOverride> for PersistedArmPoseProfile {
             reach_ratio: profile.reach_ratio,
             forward_hand_offset_ratio: profile.forward_hand_offset_ratio,
             elbow_pole_offset_ratio: profile.elbow_pole_offset_ratio,
-            shoulder_follow_weight: profile.shoulder_follow_weight,
             finger_curl_radians: profile.finger_curl_radians,
         }
     }
@@ -685,7 +677,6 @@ impl PersistedArmPoseProfile {
             reach_ratio: self.reach_ratio,
             forward_hand_offset_ratio: self.forward_hand_offset_ratio,
             elbow_pole_offset_ratio: self.elbow_pole_offset_ratio,
-            shoulder_follow_weight: self.shoulder_follow_weight,
             finger_curl_radians: self.finger_curl_radians,
         }
     }
@@ -1141,8 +1132,8 @@ mod tests {
         for invalid in [
             "schema_version = 99\n",
             "this is not valid TOML = [",
-            "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = 999\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nshoulder_follow_weight = 0.18\nfinger_curl_radians = 0.17\n",
-            "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = nan\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nshoulder_follow_weight = 0.18\nfinger_curl_radians = 0.17\n",
+            "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = 999\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nfinger_curl_radians = 0.17\n",
+            "schema_version = 1\n[arm_pose_overrides.bad]\nschema_version = 1\narm_drop_radians = nan\nreach_ratio = 0.99\nforward_hand_offset_ratio = 0.081\nelbow_pole_offset_ratio = 0.05\nfinger_curl_radians = 0.17\n",
         ] {
             fs::write(&path, invalid).unwrap();
             assert!(load_arm_pose_overrides(&path).is_err());
@@ -1314,10 +1305,10 @@ mod dynamic_profile_tests {
     }
 
     #[test]
-    fn corrupt_or_old_version_dynamic_entries_fall_back_to_defaults_without_panicking() {
+    fn invalid_dynamic_entry_is_ignored() {
         let directory = tempdir().expect("temporary settings directory");
         let path = directory.path().join(SETTINGS_FILE_NAME);
-        fs::write(&path, format!("schema_version = {SETTINGS_SCHEMA_VERSION}\n[dynamic_arm_profiles.\"sha256:bad\"]\nschema_version = 1\nhand_anchor_ratio = [0.0, 0.0, 0.0]\ncompensation_gains = [2.5, 0.0, 0.0]\nelbow_swivel_radians = 99.0\nswivel_transition_width_ratio = 0.15\npole_influence = 0.2\ntwist_relax_weight = 0.7\ntwist_parent_child_crossfade = 0.9\nshoulder_elevation_trim_radians = 9.9\n")).expect("write corrupt settings");
+        fs::write(&path, format!("schema_version = {SETTINGS_SCHEMA_VERSION}\n[dynamic_arm_profiles.\"sha256:bad\"]\nschema_version = 1\nhand_anchor_ratio = [0.0, 0.0, 0.0]\ncompensation_gains = [2.5, 0.0, 0.0]\nelbow_swivel_radians = 99.0\nswivel_transition_width_ratio = 0.15\npole_influence = 0.2\nshoulder_elevation_trim_radians = 9.9\n")).expect("write corrupt settings");
         let store = load_arm_pose_overrides(&path).expect("settings reload");
         assert!(
             store

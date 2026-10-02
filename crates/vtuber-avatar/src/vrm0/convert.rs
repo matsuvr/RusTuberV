@@ -140,20 +140,61 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
 ///
 /// The adaptation is selected from the root extension actually present:
 /// - root `VRM` without `VRMC_vrm`: VRM 0.x → VRM 1.0 conversion;
-/// - root `VRMC_vrm`: VRM 1.0 expression adaptation
+/// - root `VRMC_vrm`: correct legacy thumb names in previously converted copies,
+///   then apply VRM 1.0 expression adaptation
 ///   ([`crate::vrm1::adapt_vrm1_expressions`]).
 ///
 /// Returns `Ok(None)` when neither shape is present or the input already
 /// satisfies the runtime contract. The managed copy alone carries everything
 /// the adaptation needs; the original source file is not required.
 pub fn prepare_managed_vrm_bytes(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
-    let (document, _) = parse_glb(bytes)?;
+    let (mut document, bin) = parse_glb(bytes)?;
     let extensions = document.get("extensions").and_then(Value::as_object);
     let has_legacy = extensions.is_some_and(|extensions| extensions.contains_key("VRM"));
     let has_modern = extensions.is_some_and(|extensions| extensions.contains_key("VRMC_vrm"));
     match (has_legacy, has_modern) {
         (true, false) => convert_vrm0_to_vrm1(bytes),
-        (false, true) => crate::vrm1::adapt_vrm1_expressions(bytes),
+        (false, true) => {
+            // Existing managed copies also went through the old converter,
+            // which left VRM 0.x thumb names inside VRMC_vrm. Repair the names
+            // before the upstream loader binds the CMC as the MCP joint.
+            let mut changed = false;
+            if let Some(bones) = document
+                .pointer_mut("/extensions/VRMC_vrm/humanoid/humanBones")
+                .and_then(Value::as_object_mut)
+            {
+                for (metacarpal, proximal, intermediate) in [
+                    (
+                        "leftThumbMetacarpal",
+                        "leftThumbProximal",
+                        "leftThumbIntermediate",
+                    ),
+                    (
+                        "rightThumbMetacarpal",
+                        "rightThumbProximal",
+                        "rightThumbIntermediate",
+                    ),
+                ] {
+                    if let Some(mcp) = bones.remove(intermediate) {
+                        if let Some(cmc) = bones.remove(proximal) {
+                            bones.insert(metacarpal.to_owned(), cmc);
+                        }
+                        bones.insert(proximal.to_owned(), mcp);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                let json = serde_json::to_vec(&document)
+                    .map_err(|error| Vrm0ConvertError::InvalidJson(error.to_string()))?;
+                let normalized = repack_glb(&json, bin);
+                Ok(Some(
+                    crate::vrm1::adapt_vrm1_expressions(&normalized)?.unwrap_or(normalized),
+                ))
+            } else {
+                crate::vrm1::adapt_vrm1_expressions(bytes)
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -620,5 +661,69 @@ pub(crate) fn repack_glb(json: &[u8], bin: Option<Vec<u8>>) -> Vec<u8> {
             padded.push(pad);
         }
         padded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn vrm0_thumb_nodes_bind_to_the_same_anatomical_joints_in_vrm1() {
+        let source = json!({
+            "asset": {"version": "2.0"},
+            "nodes": [{}, {}, {}, {}, {}, {}, {}, {}],
+            "extensions": {"VRM": {"humanoid": {"humanBones": [
+                {"bone": "hips", "node": 0}, {"bone": "head", "node": 1},
+                {"bone": "leftThumbProximal", "node": 2},
+                {"bone": "leftThumbIntermediate", "node": 3},
+                {"bone": "leftThumbDistal", "node": 4},
+                {"bone": "rightThumbProximal", "node": 5},
+                {"bone": "rightThumbIntermediate", "node": 6},
+                {"bone": "rightThumbDistal", "node": 7}
+            ]}}}
+        });
+        let bytes = repack_glb(&serde_json::to_vec(&source).unwrap(), None);
+        let converted = prepare_managed_vrm_bytes(&bytes).unwrap().unwrap();
+        let (document, _) = parse_glb(&converted).unwrap();
+        let bones = &document["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"];
+        for (side, base) in [("left", 2), ("right", 5)] {
+            assert_eq!(bones[format!("{side}ThumbMetacarpal")]["node"], base);
+            assert_eq!(bones[format!("{side}ThumbProximal")]["node"], base + 1);
+            assert_eq!(bones[format!("{side}ThumbDistal")]["node"], base + 2);
+            assert!(bones.get(format!("{side}ThumbIntermediate")).is_none());
+        }
+    }
+
+    #[test]
+    fn loading_an_existing_managed_copy_repairs_legacy_thumb_names_once() {
+        let source = json!({
+            "asset": {"version": "2.0"},
+            "extensions": {"VRMC_vrm": {"humanoid": {"humanBones": {
+                "leftThumbProximal": {"node": 77},
+                "leftThumbIntermediate": {"node": 78},
+                "leftThumbDistal": {"node": 79},
+                "rightThumbMetacarpal": {"node": 101},
+                "rightThumbProximal": {"node": 102},
+                "rightThumbDistal": {"node": 103}
+            }}}}
+        });
+        let bin = vec![1, 2, 3, 4];
+        let bytes = repack_glb(&serde_json::to_vec(&source).unwrap(), Some(bin.clone()));
+        let converted = prepare_managed_vrm_bytes(&bytes).unwrap().unwrap();
+        let (document, converted_bin) = parse_glb(&converted).unwrap();
+        let bones = &document["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"];
+        assert_eq!(bones["leftThumbMetacarpal"]["node"], 77);
+        assert_eq!(bones["leftThumbProximal"]["node"], 78);
+        assert_eq!(bones["leftThumbDistal"]["node"], 79);
+        assert!(bones.get("leftThumbIntermediate").is_none());
+        assert_eq!(bones["rightThumbMetacarpal"]["node"], 101);
+        assert_eq!(bones["rightThumbProximal"]["node"], 102);
+        assert_eq!(bones["rightThumbDistal"]["node"], 103);
+        assert_eq!(converted_bin, Some(bin));
+        assert!(prepare_managed_vrm_bytes(&converted).unwrap().is_none());
     }
 }

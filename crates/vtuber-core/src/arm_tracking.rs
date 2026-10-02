@@ -105,12 +105,15 @@ pub struct HandFingerPose {
     /// Each proximal segment's in-plane angle from forward toward across.
     /// Spread is independent of MCP elevation and compared to the rig's rest.
     pub spread: [f32; 4],
-    /// Thumb `[mcp, ip]` signed bends, about CMC-to-MCP cross palm normal.
-    /// Its own segment defines the bend axis, separately from the four fingers.
+    /// Thumb `[mcp, ip]`, mirroring the four fingers' shape: MCP is the
+    /// signed elevation of the MCP-to-IP segment from the palm plane, and IP
+    /// is the signed bend about that segment cross palm normal. The Hand
+    /// Landmarker CMC is not read, because it is a model-placed point rather
+    /// than a detected joint.
     pub thumb: [f32; 2],
-    /// Unit CMC-to-MCP ray in the hand-local palm frame above. Compare with
-    /// VRM proximal.position - metacarpal.position in the same rest palm frame.
-    pub thumb_direction: [f32; 3],
+    /// The thumb's in-plane opening, from forward toward across, compared to
+    /// the rig's rest exactly like the four fingers' spread.
+    pub thumb_spread: f32,
 }
 
 /// Shoulder-relative target in units of the subject's calibrated total arm length.
@@ -154,14 +157,11 @@ impl ArmTrackingTarget {
             wrist: reflect(self.wrist),
             elbow_pole: reflect(self.elbow_pole),
             palm_normal: self.palm_normal.map(reflect_axial),
-            fingers: self.fingers.map(|fingers| {
-                let [x, y, z] = fingers.thumb_direction;
-                HandFingerPose {
-                    fingers: fingers.fingers.map(|angles| angles.map(|angle| -angle)),
-                    spread: fingers.spread,
-                    thumb: fingers.thumb.map(|angle| -angle),
-                    thumb_direction: [x, y, -z],
-                }
+            fingers: self.fingers.map(|fingers| HandFingerPose {
+                fingers: fingers.fingers.map(|angles| angles.map(|angle| -angle)),
+                spread: fingers.spread,
+                thumb: fingers.thumb.map(|angle| -angle),
+                thumb_spread: fingers.thumb_spread,
             }),
         }
     }
@@ -191,7 +191,10 @@ impl ArmTrackingTargets {
 
 /// How much an observed channel should replace the avatar's virtual arm.
 ///
-/// `wrist` gates the hand position; `pole` gates the observed bend plane;
+/// `wrist` gates the observed shoulder orientation and elbow flexion; the
+/// avatar blends those joint coordinates with its resolved initial skeleton,
+/// keeping bone lengths fixed instead of moving the wrist through Cartesian
+/// space. `pole` gates the observed bend plane within that observed arm;
 /// `palm` gates the observed forearm twist; `fingers` gates the observed finger
 /// articulation. They are separate so losing an elbow keeps the visible hand
 /// following while the avatar supplies a natural pole, and losing a hand
@@ -199,7 +202,7 @@ impl ArmTrackingTargets {
 /// means "use the virtual arm", not "the observation is at the origin".
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmBlendWeight {
-    /// Observed wrist contribution.
+    /// Observed arm contribution, driven by wrist presence.
     pub wrist: f32,
     /// Observed elbow-bend-plane contribution.
     pub pole: f32,
@@ -292,7 +295,7 @@ mod tests {
                 fingers: [[0.1, 0.2, 0.3]; 4],
                 spread: [0.2, 0.0, -0.1, -0.3],
                 thumb: [0.4, 0.5],
-                thumb_direction: [0.6, 0.7, 0.8],
+                thumb_spread: 0.25,
             }),
         };
         let targets = ArmTrackingTargets {
@@ -309,7 +312,7 @@ mod tests {
         assert_eq!(fingers.fingers, [[-0.1, -0.2, -0.3]; 4]);
         assert_eq!(fingers.spread, [0.2, 0.0, -0.1, -0.3]);
         assert_eq!(fingers.thumb, [-0.4, -0.5]);
-        assert_eq!(fingers.thumb_direction, [0.6, 0.7, -0.8]);
+        assert_eq!(fingers.thumb_spread, 0.25);
         assert_eq!(mirrored.mirrored(), targets);
     }
 

@@ -242,13 +242,6 @@ fn binding_resolves_mirrored_motion_geometry_for_both_sides() {
             < 1e-5
     );
 
-    // Twist axes are usable unit vectors along each forearm.
-    let lt = left.forearm_twist.as_ref().unwrap();
-    let rt = right.forearm_twist.as_ref().unwrap();
-    assert!(lt.usable() && rt.usable());
-    assert!((lt.direction.length() - 1.0).abs() < 1e-5);
-    assert!((rt.direction.length() - 1.0).abs() < 1e-5);
-
     // Elbow references sit on the elbow origins with unit normals.
     let le = left.elbow_reference.as_ref().unwrap();
     let re = right.elbow_reference.as_ref().unwrap();

@@ -449,7 +449,7 @@ mod tests {
         app.update();
         app.world_mut()
             .resource_mut::<Orchestrator>()
-            .process_action(&crate::actions::UiAction::Stop);
+            .set_pipeline_state(crate::orchestrator::PipelineState::Stopping);
         app.world_mut().resource_mut::<UiViewModel>().tracking.state =
             crate::ui_model::TrackingState::Lost;
         app.update();

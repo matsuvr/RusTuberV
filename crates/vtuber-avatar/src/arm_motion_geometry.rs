@@ -5,7 +5,6 @@
 //!
 //! - the hips-relative virtual hand anchor frame,
 //! - a chest/torso center reference position,
-//! - the forearm longitudinal twist axis with an explicit degeneracy status,
 //! - a stable elbow pole/swivel reference plane expressed in model space.
 //!
 //! Everything is built from immutable `RestGlobalTransform` data; rendered
@@ -17,7 +16,7 @@ use bevy::prelude::*;
 
 use crate::arm::{ArmRestGeometry, ArmSide};
 
-/// Forearm segments shorter than this cannot define a twist axis.
+/// Segments shorter than this cannot define a swivel reference.
 const MIN_SEGMENT_METERS: f32 = 0.01;
 
 /// Cross-product magnitude below this marks degenerate plane construction.
@@ -34,23 +33,6 @@ pub struct HipsAnchorFrame {
     pub translation_from_hips: Vec3,
     /// Hand rest orientation relative to the hips rest orientation.
     pub rotation_from_hips: Quat,
-}
-
-/// Longitudinal twist axis of the forearm.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ForearmTwistAxisInfo {
-    /// Unit axis along elbow -> wrist in rest global space.
-    pub direction: Vec3,
-    /// Whether the segment was long enough to measure reliably.
-    pub valid: bool,
-}
-
-impl ForearmTwistAxisInfo {
-    /// Whether the axis may be used for twist decomposition.
-    #[must_use]
-    pub const fn usable(&self) -> bool {
-        self.valid
-    }
 }
 
 /// Stable elbow pole/swivel reference plane in rest global space.
@@ -71,8 +53,6 @@ pub struct ArmMotionRestGeometry {
     pub hand_anchor: Option<HipsAnchorFrame>,
     /// Chest/torso center reference; `None` when no usable reference exists.
     pub torso_center: Option<Vec3>,
-    /// Forearm twist axis; `None` only for non-finite input.
-    pub forearm_twist: Option<ForearmTwistAxisInfo>,
     /// Elbow swivel reference plane; `None` when even fallbacks degenerate.
     pub elbow_reference: Option<ElbowSwivelReference>,
 }
@@ -90,9 +70,6 @@ pub struct ArmMotionGeometry {
 ///
 /// * `hand_anchor` requires a hips rest reference (`hips_position`,
 ///   `hips_rotation`) and is otherwise `None`.
-/// * `forearm_twist.direction` is the normalized elbow -> wrist axis; the
-///   info carries `valid = false` when the segment is too short to trust but
-///   still exposes the measured direction.
 /// * `elbow_reference.normal` is the rest bend-plane normal (cross of the
 ///   upper-arm and forearm axes); straight arms fall back to an orthogonal
 ///   of the upper-arm axis around model up, keeping the value deterministic.
@@ -127,19 +104,6 @@ pub fn build_arm_motion_rest_geometry(
     let torso_center = torso_center.and_then(finite_or_none);
 
     let forearm_delta = rest.wrist.position - rest.elbow.position;
-    let forearm_twist = if !forearm_delta.is_finite() {
-        None
-    } else {
-        let length = forearm_delta.length();
-        let valid = length.is_finite() && length > MIN_SEGMENT_METERS;
-        let direction = if valid {
-            forearm_delta / length
-        } else {
-            Vec3::X
-        };
-        Some(ForearmTwistAxisInfo { direction, valid })
-    };
-
     let upper_arm_delta = rest.elbow.position - rest.upper_arm.position;
     let elbow_reference = if !upper_arm_delta.is_finite() || !forearm_delta.is_finite() {
         None
@@ -183,7 +147,6 @@ pub fn build_arm_motion_rest_geometry(
         side,
         hand_anchor,
         torso_center,
-        forearm_twist,
         elbow_reference,
     }
 }
@@ -277,7 +240,6 @@ mod tests {
         let geometry =
             build_arm_motion_rest_geometry(ArmSide::Left, &sample_rest(), None, None, None);
         assert!(geometry.hand_anchor.is_none());
-        assert!(geometry.forearm_twist.is_some());
     }
 
     #[test]
@@ -309,23 +271,6 @@ mod tests {
         assert_scalar_close(l.translation_from_hips.x, -r.translation_from_hips.x);
         assert_scalar_close(l.translation_from_hips.y, r.translation_from_hips.y);
         assert_scalar_close(l.translation_from_hips.z, r.translation_from_hips.z);
-    }
-
-    #[test]
-    fn forearm_twist_axis_follows_elbow_to_wrist_and_flags_degeneracy() {
-        let good = build_arm_motion_rest_geometry(ArmSide::Left, &sample_rest(), None, None, None);
-        let twist = good.forearm_twist.expect("twist");
-        assert!(twist.usable());
-        let rest = sample_rest();
-        let expected = (rest.wrist.position - rest.elbow.position)
-            .try_normalize()
-            .unwrap();
-        assert_close(twist.direction, expected);
-
-        let short = rest_geometry(Vec3::new(0.001, -0.002, 0.0), Vec3::ZERO);
-        let degenerate = build_arm_motion_rest_geometry(ArmSide::Left, &short, None, None, None);
-        let info = degenerate.forearm_twist.expect("info still present");
-        assert!(!info.usable());
     }
 
     #[test]
