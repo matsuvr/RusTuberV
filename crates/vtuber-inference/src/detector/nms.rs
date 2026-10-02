@@ -23,6 +23,16 @@ pub struct FaceDetection {
     pub anchor_index: usize,
 }
 
+impl FaceDetection {
+    /// Orders candidates by descending confidence, then ascending anchor index.
+    pub(crate) fn compare_rank(&self, other: &Self) -> Ordering {
+        other
+            .confidence
+            .total_cmp(&self.confidence)
+            .then_with(|| self.anchor_index.cmp(&other.anchor_index))
+    }
+}
+
 /// Computes intersection over union for two axis-aligned normalized boxes.
 #[must_use]
 pub fn intersection_over_union(first: &NormalizedRect, second: &NormalizedRect) -> f32 {
@@ -66,7 +76,9 @@ pub fn hard_nms(
     }
 
     let mut order: Vec<usize> = (0..candidates.len()).collect();
-    order.sort_unstable_by(|&left, &right| detection_order(&candidates[left], &candidates[right]));
+    order.sort_unstable_by(|&left, &right| {
+        FaceDetection::compare_rank(&candidates[left], &candidates[right])
+    });
 
     let limit = max_detections.min(PRODUCTION_MAX_DETECTIONS);
     let mut selected: Vec<FaceDetection> = Vec::with_capacity(limit.min(order.len()));
@@ -83,13 +95,6 @@ pub fn hard_nms(
         }
     }
     selected
-}
-
-fn detection_order(left: &FaceDetection, right: &FaceDetection) -> Ordering {
-    right
-        .confidence
-        .total_cmp(&left.confidence)
-        .then_with(|| left.anchor_index.cmp(&right.anchor_index))
 }
 
 fn is_finite_rect(rect: &NormalizedRect) -> bool {
