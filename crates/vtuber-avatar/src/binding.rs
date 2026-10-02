@@ -391,8 +391,17 @@ pub fn bind_humanoid_bones(
                     |name| statuses.get(name).copied(),
                 )
             });
-            let expression_caps = ExpressionCapabilities::from_map(expression_map);
-            let mut morph_effective_by_entity: HashMap<Entity, bool> = HashMap::default();
+            let expression_caps = ExpressionCapabilities::from_bindings(
+                expression_map
+                    .into_iter()
+                    .flat_map(|map| map.0.keys())
+                    .map(|name| {
+                        (
+                            name.as_str(),
+                            statuses.get(name.as_str()).copied().unwrap_or_default(),
+                        )
+                    }),
+            );
             let mut material_binds_by_entity: HashMap<
                 Entity,
                 crate::expression::material::ExpressionMaterialBinds,
@@ -408,7 +417,6 @@ pub fn bind_humanoid_bones(
                             );
                             crate::expression::status::ExpressionBindingStatus::default()
                         });
-                    morph_effective_by_entity.insert(entity, status.resolved_morph_bind_count > 0);
                     let binds = crate::expression::material::ExpressionMaterialBinds::from_source(
                         &source_facts,
                         name.as_str(),
@@ -422,14 +430,18 @@ pub fn bind_humanoid_bones(
                     commands.entity(entity).insert(binds);
                 }
             }
-            let perfect_sync = PerfectSyncCapabilities::from_map_with_effective(
-                expression_map,
-                |expression_entity| {
-                    morph_effective_by_entity
-                        .get(&expression_entity)
-                        .copied()
-                        .unwrap_or(false)
-                },
+            let perfect_sync = PerfectSyncCapabilities::from_named_statuses(
+                expression_map
+                    .into_iter()
+                    .flat_map(|map| map.0.keys())
+                    .map(|name| {
+                        (
+                            name.as_str(),
+                            statuses
+                                .get(name.as_str())
+                                .is_some_and(|status| status.resolved_morph_bind_count > 0),
+                        )
+                    }),
             );
             let has_spring_bone = spring_roots
                 .iter()

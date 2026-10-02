@@ -129,10 +129,12 @@ fn detailed_coefficients(values: &[(ArkitBlendshape, f32)]) -> Arkit52Coefficien
 
 fn all_perfect_sync_caps() -> AvatarCapabilities {
     let mut caps = full_caps();
-    caps.perfect_sync = PerfectSyncCapabilities::from_names(
-        ArkitBlendshape::ALL
+    caps.perfect_sync = PerfectSyncCapabilities::from_named_statuses(
+        (ArkitBlendshape::ALL
             .into_iter()
-            .map(ArkitBlendshape::canonical_name),
+            .map(ArkitBlendshape::canonical_name))
+        .into_iter()
+        .map(|name| (name, true)),
     );
     caps
 }
@@ -310,7 +312,9 @@ fn required_perfect_sync_names() -> Vec<&'static str> {
 
 fn perfect_sync_caps(names: &[&str]) -> AvatarCapabilities {
     let mut caps = full_caps();
-    caps.perfect_sync = PerfectSyncCapabilities::from_names(names.iter().copied());
+    caps.perfect_sync = PerfectSyncCapabilities::from_named_statuses(
+        (names.iter().copied()).into_iter().map(|name| (name, true)),
+    );
     caps
 }
 

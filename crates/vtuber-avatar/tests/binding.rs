@@ -67,6 +67,75 @@ fn enter_binding(app: &mut App, root: Entity) {
     lifecycle.start_binding(root);
 }
 
+#[test]
+fn expression_capabilities_and_catalog_use_resolved_binds() {
+    use vtuber_avatar::expression::source::parse_source_expressions;
+    use vtuber_avatar::{
+        AvatarAssetId, BlinkMode, MouthMode, VrmMaterialIndex, VrmSourceExpressions,
+    };
+
+    let mut app = test_app();
+    let head = spawn_bone(&mut app);
+    let document = serde_json::json!({
+        "nodes": [{"name": "Body"}],
+        "extensions": {"VRMC_vrm": {"expressions": {"preset": {
+            "blinkLeft": {}, "blinkRight": {},
+            "blink": {"morphTargetBinds": [{"node": 0, "index": 0, "weight": 1.0}]},
+            "aa": {"morphTargetBinds": [{"node": 0, "index": 1, "weight": 1.0}]},
+            "ih": {}, "ou": {}, "ee": {}, "oh": {},
+            "happy": {"materialColorBinds": [{"material": 0, "type": "color", "targetValue": [1, 0, 0, 1]}]}
+        }, "custom": {
+            "JawOpen": {"materialColorBinds": [{"material": 0, "type": "color", "targetValue": [0, 1, 0, 1]}]}
+        }}}}
+    });
+    let facts = parse_source_expressions(&document);
+    let mut map = bevy::platform::collections::HashMap::default();
+    for entry in &facts.entries {
+        map.insert(
+            VrmExpression::from(entry.name.as_str()),
+            app.world_mut().spawn_empty().id(),
+        );
+    }
+    let root = app
+        .world_mut()
+        .spawn((
+            ActiveAvatar,
+            BindTriggered,
+            HeadBoneEntity(head),
+            AvatarAssetId::new("effective-binds"),
+            ExpressionEntityMap(map),
+            VrmSourceExpressions(facts),
+        ))
+        .id();
+    app.world_mut().spawn((Name::new("Body"), ChildOf(root)));
+    app.world_mut().spawn((VrmMaterialIndex(0), ChildOf(root)));
+    enter_binding(&mut app, root);
+    app.update();
+
+    let lifecycle = app.world().resource::<AvatarLifecycle>();
+    let capabilities = lifecycle.capabilities().unwrap();
+    assert_eq!(capabilities.blink, BlinkMode::Combined);
+    assert_eq!(capabilities.mouth, MouthMode::AaOnly);
+    assert!(
+        !capabilities
+            .perfect_sync
+            .is_effective(vtuber_core::ArkitBlendshape::JawOpen)
+    );
+    let catalog = lifecycle.expression_catalog().unwrap();
+    assert!(catalog.entry("blink").unwrap().availability.is_ready());
+    assert!(!catalog.entry("blinkLeft").unwrap().availability.is_ready());
+    assert!(catalog.entry("happy").unwrap().availability.is_ready());
+    let commands = vtuber_avatar::expression::blink::map_blink_with_fallback(
+        &vtuber_avatar::expression::blink::RawBlinkInput {
+            left: 0.8,
+            right: 0.2,
+            combined: 0.0,
+        },
+        capabilities.blink,
+    );
+    assert_eq!(commands, vec![("blink".to_owned(), 0.8)]);
+}
+
 fn spawn_complete_arm_root(app: &mut App, x: f32, y: f32) -> (Entity, Entity, Entity, Entity) {
     let upper_arm = spawn_rest_bone(app, Vec3::new(x, y, 0.0), Quat::IDENTITY, Quat::IDENTITY);
     let lower_arm = spawn_rest_bone(
