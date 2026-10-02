@@ -28,9 +28,7 @@ use vtuber_avatar::lifecycle::{
     LoadAvatarResult, ReplaceAvatarRequest, ReplaceAvatarResult, UnloadAvatarRequest,
     UnloadAvatarResult, apply_avatar_request_events,
 };
-use vtuber_avatar::unload::{
-    ActiveControlFrame, apply_active_control_frame, despawn_unloading_avatar,
-};
+use vtuber_avatar::unload::{ActiveControlFrame, despawn_unloading_avatar, resolve_control_target};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -528,12 +526,15 @@ fn full_lifecycle_control_frame_generation_boundary() {
             detailed_face: None,
         }),
     };
-    let result = apply_active_control_frame(
+    let result = resolve_control_target(
         app.world().resource::<AvatarLifecycle>(),
-        &active,
         app.world().get::<AvatarBinding>(root_a),
+        Some(active.generation),
     );
-    assert!(result.is_ok(), "frame should apply to avatar A");
+    assert!(
+        result.unwrap().frame_is_current,
+        "frame should apply to avatar A"
+    );
 
     // Replace with B.
     let head_b = spawn_bone(&mut app);
@@ -550,16 +551,13 @@ fn full_lifecycle_control_frame_generation_boundary() {
         .current_generation();
 
     // Old frame targeting A must be rejected for B.
-    let result = apply_active_control_frame(
+    let result = resolve_control_target(
         app.world().resource::<AvatarLifecycle>(),
-        &active,
         app.world().get::<AvatarBinding>(root_b),
+        Some(active.generation),
     );
     assert!(
-        matches!(
-            result,
-            Err(vtuber_avatar::unload::ControlFrameError::StaleGeneration { .. })
-        ),
+        !result.unwrap().frame_is_current,
         "frame from avatar A must be rejected for avatar B"
     );
 
@@ -571,12 +569,15 @@ fn full_lifecycle_control_frame_generation_boundary() {
             ..active.frame.unwrap().clone()
         }),
     };
-    let result = apply_active_control_frame(
+    let result = resolve_control_target(
         app.world().resource::<AvatarLifecycle>(),
-        &active_b,
         app.world().get::<AvatarBinding>(root_b),
+        Some(active_b.generation),
     );
-    assert!(result.is_ok(), "frame should apply to avatar B");
+    assert!(
+        result.unwrap().frame_is_current,
+        "frame should apply to avatar B"
+    );
 }
 
 /// Snapshot reflects the lifecycle at every phase.

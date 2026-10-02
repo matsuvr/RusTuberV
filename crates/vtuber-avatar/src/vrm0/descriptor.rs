@@ -367,7 +367,14 @@ fn parse_vrm0(root: &Value, vrm: &Value) -> Result<VrmRuntimeDescriptor, VrmPars
                 .any(|field| value.get(*field).is_some());
             has_look_at.then_some(value)
         })
-        .map(parse_vrm0_look_at)
+        .map(|value| {
+            parse_vrm0_look_at(
+                value,
+                first_person
+                    .as_ref()
+                    .and_then(|person| person.first_person_bone_offset),
+            )
+        })
         .transpose()?;
 
     let compatibility_warnings = collect_legacy_compatibility_warnings(root, vrm);
@@ -963,21 +970,7 @@ fn parse_first_person_flag(
     }
 }
 
-fn parse_vrm0_look_at(value: &Value) -> Result<VrmLookAt, VrmParseError> {
-    let has_look_at = value.get("lookAtTypeName").is_some()
-        || [
-            "lookAtHorizontalInner",
-            "lookAtHorizontalOuter",
-            "lookAtVerticalDown",
-            "lookAtVerticalUp",
-        ]
-        .iter()
-        .any(|field| value.get(*field).is_some());
-    if !has_look_at {
-        return Err(VrmParseError::MissingField(
-            "VRM.firstPerson.lookAtTypeName".into(),
-        ));
-    }
+fn parse_vrm0_look_at(value: &Value, offset: Option<[f32; 3]>) -> Result<VrmLookAt, VrmParseError> {
     let r#type = match required_string(value, "lookAtTypeName")?.as_str() {
         "Bone" => VrmLookAtType::Bone,
         "BlendShape" => VrmLookAtType::Expression,
@@ -990,12 +983,9 @@ fn parse_vrm0_look_at(value: &Value) -> Result<VrmLookAt, VrmParseError> {
     };
     Ok(VrmLookAt {
         r#type,
-        offset_from_head_bone: array3_object(
-            value.get("firstPersonBoneOffset").ok_or_else(|| {
-                VrmParseError::MissingField("VRM.firstPerson.firstPersonBoneOffset".into())
-            })?,
-            "VRM.firstPerson.firstPersonBoneOffset",
-        )?,
+        offset_from_head_bone: offset.ok_or_else(|| {
+            VrmParseError::MissingField("VRM.firstPerson.firstPersonBoneOffset".into())
+        })?,
         range_map_horizontal_inner: parse_vrm0_range_map(
             value,
             "lookAtHorizontalInner",
