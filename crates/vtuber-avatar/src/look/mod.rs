@@ -7,14 +7,16 @@
 
 mod lighting;
 mod preset;
+mod rich_material;
 mod rich_mtoon;
 mod rich_outline;
 mod rich_standard;
 
 pub(crate) use lighting::register_look_lighting;
 pub use preset::{RichLookSettings, RichLookSettingsError};
-pub(crate) use rich_mtoon::{RichMtoonSwap, register_rich_mtoon};
-pub(crate) use rich_standard::{RichStandardSwap, register_rich_standard};
+pub(crate) use rich_material::RichMaterialSwap;
+pub(crate) use rich_mtoon::{RichMtoonExtension, register_rich_mtoon};
+pub(crate) use rich_standard::{RichStandardExtension, register_rich_standard};
 
 use bevy::prelude::*;
 

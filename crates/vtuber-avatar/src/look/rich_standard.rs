@@ -1,19 +1,23 @@
-use std::collections::HashMap;
-
-use bevy::asset::{AssetEventSystems, AssetId, Handle, load_internal_asset, uuid_handle};
+use bevy::asset::{Handle, load_internal_asset, uuid_handle};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::{Shader, ShaderRef};
 
-use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
-use crate::look::AvatarLookSettings;
-
+#[cfg(test)]
+use super::AvatarLookSettings;
+use super::RichLookSettings;
+#[cfg(test)]
+use super::rich_material::RichMaterialSwap;
+use super::rich_material::{RichMaterialExtension, register_rich_material_systems};
+#[cfg(test)]
+use crate::lifecycle::AvatarLifecycle;
 const RICH_STANDARD_FRAGMENT_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("64a8f4b1-7a13-4f72-8ac3-0d5bba3de8a2");
 
 #[derive(Asset, AsBindGroup, Clone, Debug, Reflect)]
-struct RichStandardExtension {
+#[doc(hidden)]
+pub struct RichStandardExtension {
     #[uniform(100)]
     strength: f32,
 }
@@ -26,13 +30,6 @@ impl MaterialExtension for RichStandardExtension {
 
 type RichStandardMaterial = ExtendedMaterial<StandardMaterial, RichStandardExtension>;
 
-#[doc(hidden)]
-#[derive(Component, Debug, Clone)]
-pub struct RichStandardSwap {
-    pub(crate) native: Handle<StandardMaterial>,
-    rich: Handle<RichStandardMaterial>,
-}
-
 pub(crate) fn register_rich_standard(app: &mut App) {
     app.add_plugins(MaterialPlugin::<RichStandardMaterial>::default());
     load_internal_asset!(
@@ -41,126 +38,44 @@ pub(crate) fn register_rich_standard(app: &mut App) {
         "standard_rich.wgsl",
         Shader::from_wgsl
     );
-    app.add_systems(
-        Update,
-        switch_rich_standard_materials.after(crate::look::apply_look_settings_changes),
-    );
-    app.add_systems(
-        PostUpdate,
-        sync_rich_standard_materials
-            .after(crate::expression::material::apply_expression_materials)
-            .before(AssetEventSystems),
-    );
+    register_rich_material_systems::<RichStandardExtension>(app);
 }
 
-#[expect(
-    clippy::type_complexity,
-    reason = "Bevy's `Query` filter tuple for the Standard material update, with no call site to change"
-)]
-fn switch_rich_standard_materials(
-    mut commands: Commands,
-    lifecycle: Res<AvatarLifecycle>,
-    settings: Res<AvatarLookSettings>,
-    parents: Query<&ChildOf>,
-    standard_assets: Res<Assets<StandardMaterial>>,
-    mut rich_assets: ResMut<Assets<RichStandardMaterial>>,
-    meshes: Query<(
-        Entity,
-        Option<&MeshMaterial3d<StandardMaterial>>,
-        Option<&RichStandardSwap>,
-    )>,
-) {
-    if lifecycle.state() != AvatarLifecycleState::Ready {
-        return;
+impl RichMaterialExtension for RichStandardExtension {
+    type Native = StandardMaterial;
+    fn create(native: &StandardMaterial, settings: RichLookSettings) -> Option<Self> {
+        (!native.unlit).then_some(Self {
+            strength: settings.strength(),
+        })
     }
-    let Some(root) = lifecycle.active_root() else {
-        return;
-    };
-    let enabled = settings.0.enabled();
-    let mut rich_by_native: HashMap<AssetId<StandardMaterial>, Handle<RichStandardMaterial>> =
-        meshes
-            .iter()
-            .filter_map(|(_, _, swap)| swap.map(|swap| (swap.native.id(), swap.rich.clone())))
-            .collect();
-    for (entity, native, swap) in &meshes {
-        if !crate::binding::is_descendant(entity, root, &parents) {
-            continue;
-        }
-        match (enabled, native, swap) {
-            (true, Some(native), None) => {
-                let Some(source) = standard_assets.get(native.id()) else {
-                    continue;
-                };
-                if source.unlit {
-                    continue;
-                }
-                let rich = if let Some(existing) = rich_by_native.get(&native.id()) {
-                    existing.clone()
-                } else {
-                    let created = rich_assets.add(RichStandardMaterial {
-                        base: source.clone(),
-                        extension: RichStandardExtension {
-                            strength: settings.0.strength(),
-                        },
-                    });
-                    rich_by_native.insert(native.id(), created.clone());
-                    created
-                };
-                commands
-                    .entity(entity)
-                    .remove::<MeshMaterial3d<StandardMaterial>>()
-                    .insert((
-                        MeshMaterial3d(rich.clone()),
-                        RichStandardSwap {
-                            native: native.0.clone(),
-                            rich,
-                        },
-                    ));
-            }
-            (false, None, Some(swap)) => {
-                commands
-                    .entity(entity)
-                    .remove::<MeshMaterial3d<RichStandardMaterial>>()
-                    .remove::<RichStandardSwap>()
-                    .insert(MeshMaterial3d(swap.native.clone()));
-            }
-            _ => {}
-        }
-    }
-}
-
-fn sync_rich_standard_materials(
-    settings: Res<AvatarLookSettings>,
-    standard_assets: Res<Assets<StandardMaterial>>,
-    mut rich_assets: ResMut<Assets<RichStandardMaterial>>,
-    swaps: Query<&RichStandardSwap>,
-) {
-    let strength = if settings.0.enabled() {
-        settings.0.strength()
-    } else {
-        0.0
-    };
-    for swap in &swaps {
-        let Some(native) = standard_assets.get(swap.native.id()) else {
-            continue;
-        };
-        let Some(current) = rich_assets.get(swap.rich.id()) else {
-            continue;
-        };
-        if current.base.base_color == native.base_color
+    fn matches(
+        current: &RichStandardMaterial,
+        native: &StandardMaterial,
+        settings: RichLookSettings,
+    ) -> bool {
+        current.base.base_color == native.base_color
             && current.base.emissive == native.emissive
             && current.base.uv_transform == native.uv_transform
-            && current.extension.strength == strength
-        {
-            continue;
-        }
-        let Some(mut material) = rich_assets.get_mut(swap.rich.id()) else {
-            continue;
+            && current.extension.strength
+                == if settings.enabled() {
+                    settings.strength()
+                } else {
+                    0.0
+                }
+    }
+    fn sync(
+        current: &mut RichStandardMaterial,
+        native: &StandardMaterial,
+        settings: RichLookSettings,
+    ) {
+        current.base.base_color = native.base_color;
+        current.base.emissive = native.emissive;
+        current.base.uv_transform = native.uv_transform;
+        current.extension.strength = if settings.enabled() {
+            settings.strength()
+        } else {
+            0.0
         };
-        material.base.base_color = native.base_color;
-        material.base.emissive = native.emissive;
-        material.base.uv_transform = native.uv_transform;
-        material.extension.strength = strength;
     }
 }
 
@@ -184,12 +99,8 @@ mod tests {
             .init_asset::<StandardMaterial>()
             .init_asset::<RichStandardMaterial>()
             .init_resource::<AvatarLifecycle>()
-            .init_resource::<AvatarLookSettings>()
-            .add_systems(Update, switch_rich_standard_materials)
-            .add_systems(
-                PostUpdate,
-                sync_rich_standard_materials.before(AssetEventSystems),
-            );
+            .init_resource::<AvatarLookSettings>();
+        register_rich_material_systems::<RichStandardExtension>(&mut app);
         app
     }
 
@@ -266,7 +177,7 @@ mod tests {
         assert!(native_handle(&mut app, mesh).is_none());
         let swap = app
             .world()
-            .get::<RichStandardSwap>(mesh)
+            .get::<RichMaterialSwap<RichStandardExtension>>(mesh)
             .expect("swap component keeps the native handle");
         assert_eq!(swap.native.id(), native.id());
 

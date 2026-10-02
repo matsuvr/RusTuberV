@@ -6,17 +6,21 @@
 //! only the fragment shader with the additive Rich shader. The native asset
 //! remains the owner of current expression and UV values.
 
-use std::collections::HashMap;
-
-use bevy::asset::{AssetId, Handle, load_internal_asset, uuid_handle};
+use bevy::asset::{Handle, load_internal_asset, uuid_handle};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::{Shader, ShaderRef};
 use bevy_vrm1::prelude::MToonMaterial;
 
-use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
-use crate::look::AvatarLookSettings;
+#[cfg(test)]
+use super::AvatarLookSettings;
+use super::RichLookSettings;
+#[cfg(test)]
+use super::rich_material::RichMaterialSwap;
+use super::rich_material::{RichMaterialExtension, register_rich_material_systems};
+#[cfg(test)]
+use crate::lifecycle::AvatarLifecycle;
 
 pub(crate) const RICH_MTOON_FRAGMENT_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("7c2f9a41-6d3b-4e58-9a17-0f2c8d5b1e63");
@@ -39,23 +43,6 @@ impl MaterialExtension for RichMtoonExtension {
 
 /// Upstream MToon data rendered by the app-side additive shader.
 pub type RichMtoonMaterial = ExtendedMaterial<MToonMaterial, RichMtoonExtension>;
-/// Marks a mesh whose material is currently swapped to the app-side Rich
-/// material.
-///
-/// The native handle stays here while the mesh renders Rich, so the expression
-/// writer keeps updating the native asset and the switch back to OFF restores
-/// the current expression/UV state.
-///
-/// This component is an implementation detail of the look; it is public only
-/// because it appears in the public expression-writer signature.
-#[derive(Component, Debug, Clone)]
-pub struct RichMtoonSwap {
-    /// The upstream material the mesh had before the swap.
-    pub(crate) native: Handle<MToonMaterial>,
-    /// The app-side Rich material the mesh renders while ON.
-    rich: Handle<RichMtoonMaterial>,
-}
-
 /// Registers the Rich material, its shaders, the switch and the sync.
 pub(crate) fn register_rich_mtoon(app: &mut App) {
     app.add_plugins(MaterialPlugin::<RichMtoonMaterial>::default());
@@ -71,124 +58,34 @@ pub(crate) fn register_rich_mtoon(app: &mut App) {
         "mtoon_rich_vertex.wgsl",
         Shader::from_wgsl
     );
-    app.add_systems(
-        Update,
-        switch_rich_mtoon_materials.after(crate::look::apply_look_settings_changes),
-    );
-    app.add_systems(
-        PostUpdate,
-        sync_rich_mtoon_materials.after(crate::expression::material::apply_expression_materials),
-    );
+    register_rich_material_systems::<RichMtoonExtension>(app);
     crate::look::rich_outline::register_rich_outline(app);
 }
 
-// A Rich asset is created only when a mesh turns ON; slider changes never
-// touch the material assets.
-#[expect(
-    clippy::type_complexity,
-    reason = "Bevy's `Query` filter tuple for the MToon material update, with no call site to change"
-)]
-fn switch_rich_mtoon_materials(
-    mut commands: Commands,
-    lifecycle: Res<AvatarLifecycle>,
-    settings: Res<AvatarLookSettings>,
-    parents: Query<&ChildOf>,
-    mtoon_assets: Res<Assets<MToonMaterial>>,
-    mut rich_assets: ResMut<Assets<RichMtoonMaterial>>,
-    meshes: Query<(
-        Entity,
-        Option<&MeshMaterial3d<MToonMaterial>>,
-        Option<&RichMtoonSwap>,
-    )>,
-) {
-    if lifecycle.state() != AvatarLifecycleState::Ready {
-        return;
+impl RichMaterialExtension for RichMtoonExtension {
+    type Native = MToonMaterial;
+    fn create(_native: &MToonMaterial, _settings: RichLookSettings) -> Option<Self> {
+        Some(Self {})
     }
-    let Some(root) = lifecycle.active_root() else {
-        return;
-    };
-    let enabled = settings.0.enabled();
-    let mut rich_by_native: HashMap<AssetId<MToonMaterial>, Handle<RichMtoonMaterial>> = meshes
-        .iter()
-        .filter_map(|(_, _, swap)| swap.map(|swap| (swap.native.id(), swap.rich.clone())))
-        .collect();
-    for (entity, native, swap) in &meshes {
-        if !crate::binding::is_descendant(entity, root, &parents) {
-            continue;
-        }
-        match (enabled, native, swap) {
-            (true, Some(native), None) => {
-                let rich = if let Some(existing) = rich_by_native.get(&native.id()) {
-                    existing.clone()
-                } else {
-                    let Some(source) = mtoon_assets.get(native.id()) else {
-                        continue;
-                    };
-                    let created = rich_assets.add(RichMtoonMaterial {
-                        base: source.clone(),
-                        extension: RichMtoonExtension {},
-                    });
-                    rich_by_native.insert(native.id(), created.clone());
-                    created
-                };
-                commands
-                    .entity(entity)
-                    .remove::<MeshMaterial3d<MToonMaterial>>()
-                    .insert((
-                        MeshMaterial3d(rich.clone()),
-                        RichMtoonSwap {
-                            native: native.0.clone(),
-                            rich,
-                        },
-                    ));
-            }
-            (false, None, Some(swap)) => {
-                commands
-                    .entity(entity)
-                    .remove::<MeshMaterial3d<RichMtoonMaterial>>()
-                    .remove::<RichMtoonSwap>()
-                    .insert(MeshMaterial3d(swap.native.clone()));
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Keeps the Rich assets in step with the native material.
-///
-/// Runs in `PostUpdate` after the expression writer, so the render extraction
-/// of the same frame sees the synced values. Only the fields an expression can
-/// write are copied; the rest of the Rich asset was copied at switch time.
-fn sync_rich_mtoon_materials(
-    mtoon_assets: Res<Assets<MToonMaterial>>,
-    mut rich_assets: ResMut<Assets<RichMtoonMaterial>>,
-    meshes: Query<&RichMtoonSwap>,
-) {
-    for swap in &meshes {
-        let Some(native) = mtoon_assets.get(swap.native.id()) else {
-            continue;
-        };
-        let Some(current) = rich_assets.get(swap.rich.id()) else {
-            continue;
-        };
-        if current.base.base_color == native.base_color
+    fn matches(
+        current: &RichMtoonMaterial,
+        native: &MToonMaterial,
+        _settings: RichLookSettings,
+    ) -> bool {
+        current.base.base_color == native.base_color
             && current.base.emissive == native.emissive
             && current.base.shade.color == native.shade.color
             && current.base.rim_lighting.color == native.rim_lighting.color
             && current.base.outline.color == native.outline.color
             && current.base.uv_transform == native.uv_transform
-        {
-            continue;
-        }
-        let Some(mut material) = rich_assets.get_mut(swap.rich.id()) else {
-            continue;
-        };
-        material.base.base_color = native.base_color;
-        material.base.emissive = native.emissive;
-        material.base.shade.color = native.shade.color;
-        material.base.rim_lighting.color = native.rim_lighting.color;
-        material.base.outline.color = native.outline.color;
-        material.base.uv_transform = native.uv_transform;
+    }
+    fn sync(current: &mut RichMtoonMaterial, native: &MToonMaterial, _settings: RichLookSettings) {
+        current.base.base_color = native.base_color;
+        current.base.emissive = native.emissive;
+        current.base.shade.color = native.shade.color;
+        current.base.rim_lighting.color = native.rim_lighting.color;
+        current.base.outline.color = native.outline.color;
+        current.base.uv_transform = native.uv_transform;
     }
 }
 
@@ -209,9 +106,8 @@ mod tests {
             .init_asset::<MToonMaterial>()
             .init_asset::<RichMtoonMaterial>()
             .init_resource::<AvatarLifecycle>()
-            .init_resource::<AvatarLookSettings>()
-            .add_systems(Update, switch_rich_mtoon_materials)
-            .add_systems(PostUpdate, sync_rich_mtoon_materials);
+            .init_resource::<AvatarLookSettings>();
+        register_rich_material_systems::<RichMtoonExtension>(&mut app);
         app
     }
 
@@ -285,7 +181,7 @@ mod tests {
         assert!(native_handle(&mut app, mesh).is_none());
         let swap = app
             .world()
-            .get::<RichMtoonSwap>(mesh)
+            .get::<RichMaterialSwap<RichMtoonExtension>>(mesh)
             .expect("swap component keeps the native handle");
         assert_eq!(swap.native.id(), native.id());
 
@@ -316,7 +212,11 @@ mod tests {
         set_look(&mut app, false, 1.0);
         app.update();
         assert!(rich_handle(&mut app, mesh).is_none());
-        assert!(app.world().get::<RichMtoonSwap>(mesh).is_none());
+        assert!(
+            app.world()
+                .get::<RichMaterialSwap<RichMtoonExtension>>(mesh)
+                .is_none()
+        );
         let restored = native_handle(&mut app, mesh).expect("native material restored");
         assert_eq!(restored.id(), native.id());
     }
@@ -333,7 +233,11 @@ mod tests {
         // because #93 despawns the spot lights, so the shader's only added
         // input is gone.
         assert!(rich_handle(&mut app, mesh).is_some());
-        assert!(app.world().get::<RichMtoonSwap>(mesh).is_some());
+        assert!(
+            app.world()
+                .get::<RichMaterialSwap<RichMtoonExtension>>(mesh)
+                .is_some()
+        );
     }
 
     #[test]
