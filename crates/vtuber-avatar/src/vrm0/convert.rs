@@ -23,6 +23,7 @@
 //! details cannot be represented by the upstream contract and are dropped;
 //! the import diagnostics already report the unsupported properties.
 
+use crate::glb::{Glb, GlbError};
 use anyhow::Context;
 use serde_json::{Map, Value};
 
@@ -38,10 +39,8 @@ use super::normalize::{
 /// Errors that can occur while converting a VRM 0.x source file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Vrm0ConvertError {
-    /// The input is not a binary glTF container.
-    NotGlb,
-    /// The GLB JSON chunk is not valid JSON.
-    InvalidJson(String),
+    /// GLB container or JSON failure.
+    Glb(GlbError),
     /// The input has no root `VRM` extension or already carries `VRMC_vrm`.
     NotVrm0,
     /// A VRM field cannot be normalized into the VRM 1.0 shape.
@@ -56,8 +55,7 @@ pub enum Vrm0ConvertError {
 impl std::fmt::Display for Vrm0ConvertError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotGlb => write!(f, "file is not a binary glTF container"),
-            Self::InvalidJson(reason) => write!(f, "glTF JSON is invalid: {reason}"),
+            Self::Glb(error) => error.fmt(f),
             Self::NotVrm0 => write!(f, "file is not a VRM 0.x model"),
             Self::InvalidField { path, reason } => {
                 write!(f, "invalid VRM field {path}: {reason}")
@@ -68,13 +66,20 @@ impl std::fmt::Display for Vrm0ConvertError {
 
 impl std::error::Error for Vrm0ConvertError {}
 
+impl From<GlbError> for Vrm0ConvertError {
+    fn from(error: GlbError) -> Self {
+        Self::Glb(error)
+    }
+}
+
 /// Converts VRM 0.x `bytes` into VRM 1.0-shaped bytes.
 ///
 /// Returns `Ok(None)` when the input carries no root `VRM` extension (not a
 /// VRM 0.x source). Returns `Err` when the input claims to be VRM 0.x but
 /// cannot be normalized.
 pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
-    let (mut document, bin) = parse_glb(bytes)?;
+    let mut glb = Glb::parse(bytes)?;
+    let document = &mut glb.document;
     let extensions = document
         .get("extensions")
         .and_then(Value::as_object)
@@ -88,15 +93,15 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
     }
 
     let descriptor =
-        parse_runtime_descriptor(&document).map_err(|error| Vrm0ConvertError::InvalidField {
+        parse_runtime_descriptor(document).map_err(|error| Vrm0ConvertError::InvalidField {
             path: "extensions.VRM".to_string(),
             reason: error.to_string(),
         })?;
     let vrmc = normalized_legacy_vrm(&descriptor).map_err(invalid_field)?;
-    let spring = normalized_legacy_spring_bone(&document, &legacy).map_err(invalid_field)?;
+    let spring = normalized_legacy_spring_bone(document, &legacy).map_err(invalid_field)?;
 
-    convert_materials(&mut document, &legacy)?;
-    bake_y_pi_basis(&mut document);
+    convert_materials(document, &legacy)?;
+    bake_y_pi_basis(document);
     let mut vrmc_value =
         serde_json::to_value(&vrmc).map_err(|error| Vrm0ConvertError::InvalidField {
             path: "extensions.VRMC_vrm".to_string(),
@@ -105,7 +110,7 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
     // The upstream `Expressions` type cannot carry material color binds or
     // the custom-origin record, so the expression section is built as raw
     // JSON and injected over the (null) placeholder.
-    let expressions = normalized_legacy_expressions(&legacy, &document).map_err(|error| {
+    let expressions = normalized_legacy_expressions(&legacy, document).map_err(|error| {
         Vrm0ConvertError::InvalidField {
             path: "extensions.VRM.blendShapeMaster".to_string(),
             reason: error.to_string(),
@@ -116,10 +121,10 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
     {
         *slot = expressions;
     }
-    inject_extension(&mut document, "VRMC_vrm", vrmc_value);
+    inject_extension(document, "VRMC_vrm", vrmc_value);
     if let Some(spring) = spring {
         inject_extension(
-            &mut document,
+            document,
             "VRMC_springBone",
             serde_json::to_value(&spring).map_err(|error| Vrm0ConvertError::InvalidField {
                 path: "extensions.VRMC_springBone".to_string(),
@@ -127,13 +132,9 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
             })?,
         );
     }
-    remove_root_extension(&mut document, "VRM");
+    remove_root_extension(document, "VRM");
 
-    let json = serde_json::to_vec(&document).map_err(|error| Vrm0ConvertError::InvalidField {
-        path: "$".to_string(),
-        reason: error.to_string(),
-    })?;
-    Ok(Some(repack_glb(&json, bin)))
+    Ok(Some(glb.to_vec()?))
 }
 
 /// Prepares a managed model copy for the unmodified upstream runtime.
@@ -148,7 +149,8 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
 /// satisfies the runtime contract. The managed copy alone carries everything
 /// the adaptation needs; the original source file is not required.
 pub fn prepare_managed_vrm_bytes(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
-    let (mut document, bin) = parse_glb(bytes)?;
+    let mut glb = Glb::parse(bytes)?;
+    let document = &mut glb.document;
     let extensions = document.get("extensions").and_then(Value::as_object);
     let has_legacy = extensions.is_some_and(|extensions| extensions.contains_key("VRM"));
     let has_modern = extensions.is_some_and(|extensions| extensions.contains_key("VRMC_vrm"));
@@ -185,9 +187,7 @@ pub fn prepare_managed_vrm_bytes(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Co
                 }
             }
             if changed {
-                let json = serde_json::to_vec(&document)
-                    .map_err(|error| Vrm0ConvertError::InvalidJson(error.to_string()))?;
-                let normalized = repack_glb(&json, bin);
+                let normalized = glb.to_vec()?;
                 Ok(Some(
                     crate::vrm1::adapt_vrm1_expressions(&normalized)?.unwrap_or(normalized),
                 ))
@@ -601,69 +601,6 @@ fn bake_y_pi_basis(document: &mut Value) {
     }
 }
 
-/// Splits GLB bytes into the JSON document and the binary chunk.
-pub(crate) fn parse_glb(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>), Vrm0ConvertError> {
-    if bytes.get(0..4) != Some(b"glTF".as_slice()) {
-        return Err(Vrm0ConvertError::NotGlb);
-    }
-    let json_len = bytes
-        .get(12..16)
-        .and_then(|chunk| chunk.try_into().ok())
-        .map(u32::from_le_bytes)
-        .ok_or(Vrm0ConvertError::NotGlb)? as usize;
-    if bytes.get(16..20) != Some(b"JSON".as_slice()) {
-        return Err(Vrm0ConvertError::NotGlb);
-    }
-    let Some(json_chunk) = bytes.get(20..20 + json_len) else {
-        return Err(Vrm0ConvertError::NotGlb);
-    };
-    let document: Value = serde_json::from_slice(json_chunk)
-        .map_err(|error| Vrm0ConvertError::InvalidJson(error.to_string()))?;
-    let rest = bytes.get(20 + json_len..).unwrap_or_default();
-    let bin = if rest.len() >= 8 && rest.get(4..8) == Some(b"BIN\0".as_slice()) {
-        let bin_len = rest
-            .get(0..4)
-            .and_then(|chunk| chunk.try_into().ok())
-            .map(u32::from_le_bytes)
-            .ok_or(Vrm0ConvertError::NotGlb)? as usize;
-        let Some(chunk) = rest.get(8..8 + bin_len) else {
-            return Err(Vrm0ConvertError::NotGlb);
-        };
-        Some(chunk.to_vec())
-    } else {
-        None
-    };
-    Ok((document, bin))
-}
-
-/// Repacks a JSON document and an optional binary chunk into GLB bytes.
-pub(crate) fn repack_glb(json: &[u8], bin: Option<Vec<u8>>) -> Vec<u8> {
-    let json_padded = pad_chunk(json, 0x20);
-    let mut out = Vec::with_capacity(28 + json_padded.len() + bin.as_ref().map_or(0, Vec::len));
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    let bin_padded = bin.map(|bin| pad_chunk(&bin, 0));
-    let total = 12 + 8 + json_padded.len() + bin_padded.as_ref().map_or(0, |bin| 8 + bin.len());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_padded.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"JSON");
-    out.extend_from_slice(&json_padded);
-    if let Some(bin) = bin_padded {
-        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-        out.extend_from_slice(b"BIN\0");
-        out.extend_from_slice(&bin);
-    }
-    return out;
-
-    fn pad_chunk(chunk: &[u8], pad: u8) -> Vec<u8> {
-        let mut padded = chunk.to_vec();
-        while padded.len() % 4 != 0 {
-            padded.push(pad);
-        }
-        padded
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
@@ -686,9 +623,9 @@ mod tests {
                 {"bone": "rightThumbDistal", "node": 7}
             ]}}}
         });
-        let bytes = repack_glb(&serde_json::to_vec(&source).unwrap(), None);
+        let bytes = Glb::new(source, None).to_vec().unwrap();
         let converted = prepare_managed_vrm_bytes(&bytes).unwrap().unwrap();
-        let (document, _) = parse_glb(&converted).unwrap();
+        let document = Glb::parse(&converted).unwrap().document;
         let bones = &document["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"];
         for (side, base) in [("left", 2), ("right", 5)] {
             assert_eq!(bones[format!("{side}ThumbMetacarpal")]["node"], base);
@@ -712,9 +649,11 @@ mod tests {
             }}}}
         });
         let bin = vec![1, 2, 3, 4];
-        let bytes = repack_glb(&serde_json::to_vec(&source).unwrap(), Some(bin.clone()));
+        let bytes = Glb::new(source, Some(&bin)).to_vec().unwrap();
         let converted = prepare_managed_vrm_bytes(&bytes).unwrap().unwrap();
-        let (document, converted_bin) = parse_glb(&converted).unwrap();
+        let glb = Glb::parse(&converted).unwrap();
+        let document = glb.document;
+        let converted_bin = glb.bin;
         let bones = &document["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"];
         assert_eq!(bones["leftThumbMetacarpal"]["node"], 77);
         assert_eq!(bones["leftThumbProximal"]["node"], 78);
@@ -723,7 +662,7 @@ mod tests {
         assert_eq!(bones["rightThumbMetacarpal"]["node"], 101);
         assert_eq!(bones["rightThumbProximal"]["node"], 102);
         assert_eq!(bones["rightThumbDistal"]["node"], 103);
-        assert_eq!(converted_bin, Some(bin));
+        assert_eq!(converted_bin, Some(bin.as_slice()));
         assert!(prepare_managed_vrm_bytes(&converted).unwrap().is_none());
     }
 }

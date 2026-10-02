@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use vtuber_avatar::glb::Glb;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -291,7 +292,7 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
     let source_bytes = fs::read(source)?;
     let id = format!("{:x}", Sha256::digest(&source_bytes));
     let runtime_bytes = runtime_ready_source_bytes(&source_bytes, summary.generation)?;
-    let stored_bytes = match normalize_vrm_morph_targets(&runtime_bytes) {
+    let stored_bytes = match normalize_vrm_morph_targets(&runtime_bytes)? {
         Some(normalized) => normalized,
         None => {
             if let Some(target_count) = over_limit_morph_target_count(&runtime_bytes) {
@@ -342,8 +343,13 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
 /// Inspects a VRM file without copying it.
 pub fn inspect_vrm<P: AsRef<Path>>(path: P) -> Result<VrmInspectionSummary, ModelImportError> {
     let path = path.as_ref();
-    let gltf::Gltf { document, blob } =
-        gltf::Gltf::open(path).map_err(|e| ModelImportError::GlbParse(e.to_string()))?;
+    let bytes = fs::read(path)?;
+    let glb = Glb::parse(&bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
+    let root = serde_json::from_value(glb.document)
+        .map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
+    let document = gltf::Document::from_json(root)
+        .map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
+    let blob = glb.bin.map(<[u8]>::to_vec);
     check_external_uris(&document)?;
     let buffers = gltf::import_buffers(&document, path.parent(), blob)
         .map_err(|e| ModelImportError::GlbParse(e.to_string()))?;
@@ -1160,7 +1166,7 @@ pub fn ensure_managed_model_ready(managed_path: &Path) -> Result<bool, ModelImpo
         Ok(None) => current.clone(),
         Err(error) => return Err(vrm0_convert_error(error)),
     };
-    let stored_bytes = normalize_vrm_morph_targets(&runtime_bytes).unwrap_or(runtime_bytes);
+    let stored_bytes = normalize_vrm_morph_targets(&runtime_bytes)?.unwrap_or(runtime_bytes);
     if stored_bytes != current {
         crate::file_io::replace_file(managed_path, &stored_bytes)?;
         return Ok(true);
@@ -1175,24 +1181,20 @@ pub fn ensure_managed_model_ready(managed_path: &Path) -> Result<bool, ModelImpo
 /// expression section — including the app-retained `custom` origin record
 /// and material bind entries — is the single source of truth for binding.
 ///
-/// Returns an empty fact set when the file cannot be read: such a managed
-/// copy also fails the runtime asset load, so the lifecycle surfaces the
-/// failure through [`ModelImportError`]s there.
+/// Read and container failures propagate as [`ModelImportError`].
 pub fn read_runtime_expression_facts(
     managed_path: &Path,
 ) -> Result<vtuber_avatar::SourceExpressions, ModelImportError> {
     let bytes = fs::read(managed_path)?;
-    let (json, _) = parse_glb(&bytes).ok_or_else(|| {
-        ModelImportError::GlbParse("managed model is not a binary glTF container".into())
-    })?;
+    let glb = Glb::parse(&bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
+    let json = glb.document;
     Ok(vtuber_avatar::parse_source_expressions(&json))
 }
 
 fn vrm0_convert_error(error: vtuber_avatar::Vrm0ConvertError) -> ModelImportError {
     use vtuber_avatar::Vrm0ConvertError as ConvertError;
     match error {
-        ConvertError::NotGlb => ModelImportError::GlbParse("not a binary glTF container".into()),
-        ConvertError::InvalidJson(reason) => ModelImportError::GlbParse(reason),
+        ConvertError::Glb(error) => ModelImportError::GlbParse(error.to_string()),
         ConvertError::NotVrm0 => ModelImportError::NotVrm {
             reason: "no VRM 0.x extension to convert".to_string(),
         },
@@ -1207,19 +1209,24 @@ fn vrm0_convert_error(error: vtuber_avatar::Vrm0ConvertError) -> ModelImportErro
 ///
 /// Morph targets with no VRM expression bind or nonzero default weight are dropped from
 /// meshes above the limit, and bind indices are remapped to the reduced
-/// target arrays. Returns `None` when the bytes need no rewrite or cannot be
-/// rewritten safely: non-GLB containers, GLBs without an excess mesh, models
+/// target arrays. Returns `Ok(None)` when the bytes need no rewrite or cannot be
+/// rewritten safely: GLBs without an excess mesh, models
 /// that animate morph weights, and meshes whose referenced bind set alone
-/// exceeds the limit together with the nonzero defaults.
-pub fn normalize_vrm_morph_targets(bytes: &[u8]) -> Option<Vec<u8>> {
-    let (mut json, bin_chunk) = parse_glb(bytes)?;
-    if has_morph_weight_animation(&json) {
-        return None;
+/// exceeds the limit together with the nonzero defaults. Invalid containers return `Err`.
+pub fn normalize_vrm_morph_targets(bytes: &[u8]) -> Result<Option<Vec<u8>>, ModelImportError> {
+    let mut glb =
+        Glb::parse(bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
+    if has_morph_weight_animation(&glb.document) {
+        return Ok(None);
     }
-    let references = collect_morph_references(&json);
-    let plan = plan_morph_reduction(&json, &references)?;
-    apply_morph_reduction(&mut json, &plan);
-    write_glb(&json, bin_chunk)
+    let references = collect_morph_references(&glb.document);
+    let Some(plan) = plan_morph_reduction(&glb.document, &references) else {
+        return Ok(None);
+    };
+    apply_morph_reduction(&mut glb.document, &plan);
+    glb.to_vec()
+        .map(Some)
+        .map_err(|error| ModelImportError::GlbParse(error.to_string()))
 }
 
 /// One over-limit mesh's keep set, keyed by glTF mesh index.
@@ -1228,55 +1235,6 @@ struct MorphReductionPlan {
     target_count: usize,
     /// Old morph target index to reduced index.
     remap: BTreeMap<usize, usize>,
-}
-
-fn parse_glb(bytes: &[u8]) -> Option<(Value, Option<&[u8]>)> {
-    if bytes.get(0..4)? != b"glTF" {
-        return None;
-    }
-    let version = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
-    if version != 2 {
-        return None;
-    }
-    let mut json: Option<Value> = None;
-    let mut bin_chunk: Option<&[u8]> = None;
-    let mut offset = 12_usize;
-    while offset < bytes.len() {
-        let header = bytes.get(offset..offset + 8)?;
-        let chunk_len =
-            usize::try_from(u32::from_le_bytes(header.get(0..4)?.try_into().ok()?)).ok()?;
-        let chunk_type: [u8; 4] = header.get(4..8)?.try_into().ok()?;
-        let data = bytes.get(offset + 8..offset + 8 + chunk_len)?;
-        match &chunk_type {
-            b"JSON" if json.is_none() => json = Some(serde_json::from_slice(data).ok()?),
-            b"BIN\0" if bin_chunk.is_none() => bin_chunk = Some(data),
-            _ => {}
-        }
-        offset = offset.checked_add(8 + chunk_len)?;
-    }
-    Some((json?, bin_chunk))
-}
-
-fn write_glb(json: &Value, bin_chunk: Option<&[u8]>) -> Option<Vec<u8>> {
-    let mut json_chunk = serde_json::to_vec(json).ok()?;
-    while json_chunk.len() % 4 != 0 {
-        json_chunk.push(b' ');
-    }
-    let mut out = Vec::with_capacity(12 + 8 + json_chunk.len());
-    out.extend_from_slice(&0x46546C67_u32.to_le_bytes());
-    out.extend_from_slice(&2_u32.to_le_bytes());
-    out.extend_from_slice(&0_u32.to_le_bytes());
-    out.extend_from_slice(&u32::try_from(json_chunk.len()).ok()?.to_le_bytes());
-    out.extend_from_slice(&0x4E4F534A_u32.to_le_bytes());
-    out.extend_from_slice(&json_chunk);
-    if let Some(bin_chunk) = bin_chunk {
-        out.extend_from_slice(&u32::try_from(bin_chunk.len()).ok()?.to_le_bytes());
-        out.extend_from_slice(&0x004E4942_u32.to_le_bytes());
-        out.extend_from_slice(bin_chunk);
-    }
-    let total = u32::try_from(out.len()).ok()?;
-    out.get_mut(8..12)?.copy_from_slice(&total.to_le_bytes());
-    Some(out)
 }
 
 fn has_morph_weight_animation(root: &Value) -> bool {
@@ -1453,7 +1411,7 @@ fn morph_target_count(mesh: &Value) -> usize {
 }
 
 fn over_limit_morph_target_count(bytes: &[u8]) -> Option<usize> {
-    let (root, _) = parse_glb(bytes)?;
+    let root = Glb::parse(bytes).ok()?.document;
     root.get("meshes")?
         .as_array()?
         .iter()
@@ -1847,23 +1805,9 @@ mod tests {
     }"#;
 
     fn write_glb_fixture(dir: &TempDir, file_name: &str, json: &str) -> PathBuf {
-        let mut json_chunk = json.as_bytes().to_vec();
-        while !json_chunk.len().is_multiple_of(4) {
-            json_chunk.push(b' ');
-        }
-
-        let bin_chunk = [0_u8; 12];
-        let total_length = 12 + 8 + json_chunk.len() + 8 + bin_chunk.len();
-        let mut bytes = Vec::with_capacity(total_length);
-        bytes.extend_from_slice(&0x46546C67_u32.to_le_bytes());
-        bytes.extend_from_slice(&2_u32.to_le_bytes());
-        bytes.extend_from_slice(&(total_length as u32).to_le_bytes());
-        bytes.extend_from_slice(&(json_chunk.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&0x4E4F534A_u32.to_le_bytes());
-        bytes.extend_from_slice(&json_chunk);
-        bytes.extend_from_slice(&(bin_chunk.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&0x004E4942_u32.to_le_bytes());
-        bytes.extend_from_slice(&bin_chunk);
+        let bytes = Glb::new(serde_json::from_str(json).unwrap(), Some(&[0; 12]))
+            .to_vec()
+            .unwrap();
 
         let path = dir.path().join(file_name);
         fs::write(&path, bytes).unwrap();
@@ -2101,7 +2045,8 @@ humanoid_nodes = { hips = 0, head = 1 }
 
     fn stored_glb_json(imported: &ImportedModel) -> serde_json::Value {
         let stored = fs::read(&imported.asset_path).unwrap();
-        let (json, bin) = parse_glb(&stored).expect("stored copy is a valid GLB");
+        let glb = Glb::parse(&stored).expect("stored copy is a valid GLB");
+        let (json, bin) = (glb.document, glb.bin);
         assert!(bin.is_some(), "BIN chunk must be preserved");
         json
     }
@@ -2400,7 +2345,7 @@ humanoid_nodes = { hips = 0, head = 1 }
         let bind_indices: Vec<usize> = (0..MAX_MORPH_TARGETS + 4).collect();
         let source = over_limit_vrm0_fixture(&dir, 300, &bind_indices);
         let bytes = fs::read(&source).unwrap();
-        assert_eq!(normalize_vrm_morph_targets(&bytes), None);
+        assert!(normalize_vrm_morph_targets(&bytes).unwrap().is_none());
 
         let error = import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
             .expect_err("an over-limit model that cannot be reduced must not be cached raw");
@@ -2412,8 +2357,34 @@ humanoid_nodes = { hips = 0, head = 1 }
     }
 
     #[test]
-    fn normalization_ignores_non_glb_bytes() {
-        assert_eq!(normalize_vrm_morph_targets(b"not glb"), None);
+    fn normalization_rejects_non_glb_bytes() {
+        assert!(normalize_vrm_morph_targets(b"not glb").is_err());
+    }
+
+    #[test]
+    fn inspection_and_conversion_share_container_rules_and_keep_unknown_chunks() {
+        let dir = TempDir::new().unwrap();
+        let source = over_limit_vrm0_fixture(&dir, 300, &[5]);
+        let mut bytes = fs::read(&source).unwrap();
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&0x1234_u32.to_le_bytes());
+        bytes.extend_from_slice(&[9, 8, 7, 6]);
+        let length = bytes.len() as u32;
+        bytes[8..12].copy_from_slice(&length.to_le_bytes());
+        fs::write(&source, &bytes).unwrap();
+        assert!(inspect_vrm(&source).is_ok());
+        let imported = import_vrm(&source, dir.path().join("managed"), DEFAULT_SIZE_LIMIT).unwrap();
+        let stored = fs::read(imported.asset_path).unwrap();
+        assert_eq!(&stored[stored.len() - 12..], &bytes[bytes.len() - 12..]);
+        assert_eq!(
+            Glb::parse(&stored).unwrap().bin,
+            Glb::parse(&bytes).unwrap().bin
+        );
+        bytes[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        fs::write(&source, &bytes).unwrap();
+        assert!(inspect_vrm(&source).is_err());
+        assert!(vtuber_avatar::prepare_managed_vrm_bytes(&bytes).is_err());
+        assert!(normalize_vrm_morph_targets(&bytes).is_err());
     }
 
     #[test]
@@ -2442,13 +2413,16 @@ humanoid_nodes = { hips = 0, head = 1 }
         let dir = TempDir::new().unwrap();
         let source = over_limit_vrm0_fixture(&dir, 300, &[5]);
         let bytes = fs::read(source).unwrap();
-        let (mut root, bin) = parse_glb(&bytes).unwrap();
+        let mut glb = Glb::parse(&bytes).unwrap();
+        let root = &mut glb.document;
         // The fixture's mesh defaults use 5 and 250; add a node-only default.
         let mut weights = vec![0.0_f32; 300];
         weights[299] = 1.0;
         root["nodes"][3]["weights"] = serde_json::json!(weights);
-        let normalized = normalize_vrm_morph_targets(&write_glb(&root, bin).unwrap()).unwrap();
-        let (after, _) = parse_glb(&normalized).unwrap();
+        let normalized = normalize_vrm_morph_targets(&glb.to_vec().unwrap())
+            .unwrap()
+            .unwrap();
+        let after = Glb::parse(&normalized).unwrap().document;
         assert_eq!(
             after["meshes"][0]["weights"],
             serde_json::json!([0.25, 0.75, 0.0])
@@ -2471,9 +2445,10 @@ humanoid_nodes = { hips = 0, head = 1 }
         let dir = TempDir::new().unwrap();
         let source = over_limit_vrm0_fixture(&dir, 300, &[5]);
         let bytes = fs::read(&source).unwrap();
-        let (mut root, bin) = parse_glb(&bytes).unwrap();
+        let mut glb = Glb::parse(&bytes).unwrap();
+        let root = &mut glb.document;
         root["meshes"][0]["weights"] = serde_json::json!(vec![1.0; 300]);
-        let bytes = write_glb(&root, bin).unwrap();
+        let bytes = glb.to_vec().unwrap();
         fs::write(&source, &bytes).unwrap();
         let error =
             import_vrm(&source, dir.path().join("managed"), DEFAULT_SIZE_LIMIT).unwrap_err();
@@ -2486,14 +2461,15 @@ humanoid_nodes = { hips = 0, head = 1 }
         let dir = TempDir::new().unwrap();
         let source = over_limit_vrm0_fixture(&dir, 300, &[5]);
         let source_bytes = fs::read(source).unwrap();
-        let (mut root, bin_chunk) = parse_glb(&source_bytes).unwrap();
+        let mut glb = Glb::parse(&source_bytes).unwrap();
+        let root = &mut glb.document;
         root["animations"] = serde_json::json!([{
             "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}],
             "samplers": [{"input": 0, "output": 0}]
         }]);
-        let bytes = write_glb(&root, bin_chunk).unwrap();
+        let bytes = glb.to_vec().unwrap();
         assert_eq!(over_limit_morph_target_count(&bytes), Some(300));
-        assert_eq!(normalize_vrm_morph_targets(&bytes), None);
+        assert!(normalize_vrm_morph_targets(&bytes).unwrap().is_none());
     }
 
     fn over_limit_vrm1_fixture(dir: &TempDir) -> PathBuf {
