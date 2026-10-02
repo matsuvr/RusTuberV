@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_stale_binding() {
+    fn resolve_rejects_missing_binding() {
         let mut lifecycle = AvatarLifecycle::new();
         let root = Entity::from_raw_u32(1).unwrap();
         lifecycle.request_load(root).unwrap();
