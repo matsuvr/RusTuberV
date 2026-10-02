@@ -27,7 +27,9 @@ use crate::glb::{Glb, GlbError};
 use anyhow::Context;
 use serde_json::{Map, Value};
 
-use super::descriptor::{LegacyShaderKind, classify_legacy_shader, parse_runtime_descriptor};
+use super::descriptor::{
+    LegacyShaderKind, VrmParseError, classify_legacy_shader, parse_runtime_descriptor,
+};
 use super::materials::{
     LegacyAlphaMode, convert_legacy_material_properties_with_render_queue_offset,
     legacy_alpha_mode, plan_legacy_render_queue_offsets,
@@ -41,6 +43,8 @@ use super::normalize::{
 pub enum Vrm0ConvertError {
     /// GLB container or JSON failure.
     Glb(GlbError),
+    /// VRM descriptor validation failure.
+    Descriptor(VrmParseError),
     /// The input has no root `VRM` extension or already carries `VRMC_vrm`.
     NotVrm0,
     /// A VRM field cannot be normalized into the VRM 1.0 shape.
@@ -56,6 +60,7 @@ impl std::fmt::Display for Vrm0ConvertError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Glb(error) => error.fmt(f),
+            Self::Descriptor(error) => error.fmt(f),
             Self::NotVrm0 => write!(f, "file is not a VRM 0.x model"),
             Self::InvalidField { path, reason } => {
                 write!(f, "invalid VRM field {path}: {reason}")
@@ -92,12 +97,8 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
         return Err(Vrm0ConvertError::NotVrm0);
     }
 
-    let descriptor =
-        parse_runtime_descriptor(document).map_err(|error| Vrm0ConvertError::InvalidField {
-            path: "extensions.VRM".to_string(),
-            reason: error.to_string(),
-        })?;
-    let vrmc = normalized_legacy_vrm(&descriptor).map_err(invalid_field)?;
+    let descriptor = parse_runtime_descriptor(document).map_err(Vrm0ConvertError::Descriptor)?;
+    let vrmc = normalized_legacy_vrm(&descriptor);
     let spring = normalized_legacy_spring_bone(document, &legacy).map_err(invalid_field)?;
 
     convert_materials(document, &legacy)?;

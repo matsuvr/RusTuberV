@@ -9,6 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use vtuber_avatar::glb::Glb;
+use vtuber_avatar::vrm0::descriptor::{VrmLookAtType, VrmParseError, parse_runtime_descriptor};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -109,6 +110,36 @@ pub enum ModelImportError {
         /// Stable validation reason.
         reason: String,
     },
+}
+
+impl From<VrmParseError> for ModelImportError {
+    fn from(error: VrmParseError) -> Self {
+        match error {
+            VrmParseError::DuplicateBone(name) => Self::DuplicateHumanBone(name),
+            VrmParseError::MissingField(path) => {
+                if let Some(name) = path.strip_prefix("humanoid.humanBones.") {
+                    Self::MissingRequiredBone(name.into())
+                } else {
+                    Self::InvalidVrmField {
+                        path,
+                        reason: "required field is missing".into(),
+                    }
+                }
+            }
+            VrmParseError::InvalidField { path, reason } => Self::InvalidVrmField { path, reason },
+            VrmParseError::InvalidIndex { path, index } if path.ends_with(".mesh") => {
+                Self::InvalidMeshIndex { index }
+            }
+            VrmParseError::InvalidIndex { index, .. } => Self::InvalidNodeIndex { index },
+            VrmParseError::MissingGeneration => Self::NotVrm {
+                reason: error.to_string(),
+            },
+            VrmParseError::AmbiguousGeneration => Self::AmbiguousVrmVersion {
+                reason: error.to_string(),
+            },
+            VrmParseError::UnsupportedVersion(version) => Self::UnsupportedVersion(version),
+        }
+    }
 }
 
 impl ModelImportError {
@@ -345,7 +376,7 @@ pub fn inspect_vrm<P: AsRef<Path>>(path: P) -> Result<VrmInspectionSummary, Mode
     let path = path.as_ref();
     let bytes = fs::read(path)?;
     let glb = Glb::parse(&bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
-    let root = serde_json::from_value(glb.document)
+    let root = serde_json::from_value(glb.document.clone())
         .map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
     let document = gltf::Document::from_json(root)
         .map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
@@ -391,7 +422,7 @@ pub fn inspect_vrm<P: AsRef<Path>>(path: P) -> Result<VrmInspectionSummary, Mode
                 reason: "both VRM and VRMC_vrm extensions are present".into(),
             });
         }
-        (Some(vrm), None) => inspect_vrm0(&document, vrm)?,
+        (Some(vrm), None) => inspect_vrm0(&document, &glb.document, vrm)?,
         (None, Some(vrmc)) => inspect_vrm1(&document, vrmc)?,
         (None, None) => {
             return Err(ModelImportError::NotVrm {
@@ -408,10 +439,6 @@ pub fn inspect_vrm<P: AsRef<Path>>(path: P) -> Result<VrmInspectionSummary, Mode
     summary.mtoon_material_count = mtoon_material_count;
     summary.unlit_material_count = unlit_material_count;
     summary.fallback_material_count = fallback_material_count;
-    if let Some(legacy) = legacy {
-        summary.compatibility_warnings =
-            vtuber_avatar::collect_legacy_compatibility_warnings(&material_root, legacy);
-    }
     let (spring_chain_count, spring_joint_count, spring_collider_count, spring_center_count) =
         spring_counts(&material_root, summary.generation, legacy);
     summary.spring_chain_count = spring_chain_count;
@@ -558,37 +585,11 @@ fn spring_counts(
 
 fn inspect_vrm0(
     document: &gltf::Document,
+    root: &Value,
     vrm: &serde_json::Value,
 ) -> Result<VrmInspectionSummary, ModelImportError> {
-    let meta = vrm
-        .get("meta")
-        .and_then(|value| value.as_object())
-        .cloned()
-        .unwrap_or_default();
-    let name = meta
-        .get("title")
-        .or_else(|| meta.get("name"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string();
-    let authors = meta
-        .get("author")
-        .and_then(|value| value.as_str())
-        .map(|value| vec![value.to_string()])
-        .unwrap_or_default();
-    let license_url = meta
-        .get("otherLicenseUrl")
-        .or_else(|| meta.get("licenseUrl"))
-        .and_then(|value| value.as_str())
-        .map(String::from);
-
-    let human_bones = vrm
-        .get("humanoid")
-        .and_then(|humanoid| humanoid.get("humanBones"))
-        .and_then(|bones| bones.as_array())
-        .ok_or_else(|| ModelImportError::GlbParse("missing legacy humanoid.humanBones".into()))?;
-    let node_count = document.nodes().len();
-    let indexed_bones = index_legacy_human_bones(human_bones, node_count)?;
+    let descriptor = parse_runtime_descriptor(root)?;
+    let indexed_bones = &descriptor.humanoid.human_bones;
     let hips = indexed_bones
         .get("hips")
         .copied()
@@ -598,8 +599,6 @@ fn inspect_vrm0(
         .copied()
         .ok_or_else(|| ModelImportError::MissingRequiredBone("head".into()))?;
     let neck = indexed_bones.get("neck").copied();
-
-    validate_vrm0_first_person(document, vrm)?;
     validate_vrm0_expression_binds(document, vrm)?;
 
     let mut expression_presets = vrm
@@ -620,25 +619,32 @@ fn inspect_vrm0(
     expression_presets.sort();
     expression_presets.dedup();
 
-    let look_at_type = validate_vrm0_look_at(vrm)?;
+    let look_at_type = descriptor
+        .look_at
+        .as_ref()
+        .map(|look_at| match look_at.r#type {
+            VrmLookAtType::Bone => "bone".into(),
+            VrmLookAtType::Expression => "expression".into(),
+        });
 
     Ok(VrmInspectionSummary {
         generation: VrmGeneration::Vrm0,
-        spec_version: "0.x".into(),
+        spec_version: descriptor.spec_version,
         exporter_version: vrm
             .get("exporterVersion")
             .or_else(|| vrm.get("meta").and_then(|meta| meta.get("exporterVersion")))
             .and_then(|value| value.as_str())
             .map(String::from),
-        name,
-        authors,
-        license_url,
+        name: descriptor.meta.name.unwrap_or_default(),
+        authors: descriptor.meta.authors,
+        license_url: descriptor.meta.license_url,
         expression_presets,
         look_at_type,
         has_spring_bone: vrm.get("secondaryAnimation").is_some(),
         has_node_constraint: false,
-        has_first_person: vrm.get("firstPerson").is_some(),
+        has_first_person: descriptor.first_person.is_some(),
         has_mtoon_materials: false,
+        compatibility_warnings: descriptor.compatibility_warnings,
         humanoid_nodes: HumanoidNodes { hips, head, neck },
         ..Default::default()
     })
@@ -735,195 +741,6 @@ fn inspect_vrm1(
     })
 }
 
-fn validate_vrm0_look_at(vrm: &serde_json::Value) -> Result<Option<String>, ModelImportError> {
-    let Some(first_person) = vrm.get("firstPerson") else {
-        return Ok(None);
-    };
-    let look_at_fields = [
-        "lookAtTypeName",
-        "lookAtHorizontalInner",
-        "lookAtHorizontalOuter",
-        "lookAtVerticalDown",
-        "lookAtVerticalUp",
-    ];
-    let has_look_at = look_at_fields
-        .iter()
-        .any(|field| first_person.get(*field).is_some());
-    if !has_look_at {
-        return Ok(None);
-    }
-    let look_at_type = first_person
-        .get("lookAtTypeName")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| ModelImportError::InvalidVrmField {
-            path: "VRM.firstPerson.lookAtTypeName".into(),
-            reason: "expected Bone or BlendShape".into(),
-        })?;
-    let normalized = match look_at_type {
-        "Bone" => "bone",
-        "BlendShape" => "expression",
-        other => {
-            return Err(ModelImportError::InvalidVrmField {
-                path: "VRM.firstPerson.lookAtTypeName".into(),
-                reason: format!("unknown value {other}"),
-            });
-        }
-    };
-    let offset = first_person.get("firstPersonBoneOffset").ok_or_else(|| {
-        ModelImportError::InvalidVrmField {
-            path: "VRM.firstPerson.firstPersonBoneOffset".into(),
-            reason: "required when LookAt is declared".into(),
-        }
-    })?;
-    validate_vector3_object(offset, "VRM.firstPerson.firstPersonBoneOffset")?;
-    for field in [
-        "lookAtHorizontalInner",
-        "lookAtHorizontalOuter",
-        "lookAtVerticalDown",
-        "lookAtVerticalUp",
-    ] {
-        let path = format!("VRM.firstPerson.{field}");
-        let map = first_person
-            .get(field)
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: path.clone(),
-                reason: "all four DegreeMap objects are required".into(),
-            })?;
-        let object = map
-            .as_object()
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: path.clone(),
-                reason: "expected an object".into(),
-            })?;
-        for range in ["xRange", "yRange"] {
-            let value = object
-                .get(range)
-                .and_then(|value| value.as_f64())
-                .filter(|value| value.is_finite());
-            if value.is_none() || value.is_some_and(|value| value < 0.0) {
-                return Err(ModelImportError::InvalidVrmField {
-                    path: format!("{path}.{range}"),
-                    reason: "expected a finite, non-negative number".into(),
-                });
-            }
-        }
-        if let Some(curve) = object.get("curve") {
-            let values = curve
-                .as_array()
-                .ok_or_else(|| ModelImportError::InvalidVrmField {
-                    path: format!("{path}.curve"),
-                    reason: "expected an array".into(),
-                })?;
-            if values
-                .iter()
-                .any(|value| value.as_f64().is_none_or(|value| !value.is_finite()))
-            {
-                return Err(ModelImportError::InvalidVrmField {
-                    path: format!("{path}.curve"),
-                    reason: "curve coefficients must be finite numbers".into(),
-                });
-            }
-            if values.len() % 4 != 0 {
-                return Err(ModelImportError::InvalidVrmField {
-                    path: format!("{path}.curve"),
-                    reason: "curve must contain groups of four coefficients".into(),
-                });
-            }
-        }
-    }
-    Ok(Some(normalized.into()))
-}
-
-fn validate_vector3_object(value: &serde_json::Value, path: &str) -> Result<(), ModelImportError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| ModelImportError::InvalidVrmField {
-            path: path.into(),
-            reason: "expected an object with x, y, z".into(),
-        })?;
-    for field in ["x", "y", "z"] {
-        if object
-            .get(field)
-            .and_then(|value| value.as_f64())
-            .is_none_or(|value| !value.is_finite())
-        {
-            return Err(ModelImportError::InvalidVrmField {
-                path: format!("{path}.{field}"),
-                reason: "expected a finite number".into(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_vrm0_first_person(
-    document: &gltf::Document,
-    vrm: &serde_json::Value,
-) -> Result<(), ModelImportError> {
-    let Some(first_person) = vrm.get("firstPerson") else {
-        return Ok(());
-    };
-    let node_count = document.nodes().len();
-    if let Some(value) = first_person.get("firstPersonBone") {
-        let index = value
-            .as_u64()
-            .and_then(|value| value.try_into().ok())
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: "VRM.firstPerson.firstPersonBone".into(),
-                reason: "expected a non-negative integer".into(),
-            })?;
-        if index >= node_count {
-            return Err(ModelImportError::InvalidNodeIndex { index });
-        }
-    }
-    let annotations = match first_person.get("meshAnnotations") {
-        None => return Ok(()),
-        Some(value) => value
-            .as_array()
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: "VRM.firstPerson.meshAnnotations".into(),
-                reason: "expected an array".into(),
-            })?,
-    };
-    for annotation in annotations {
-        let mesh = annotation
-            .get("mesh")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize)
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: "VRM.firstPerson.meshAnnotations[].mesh".into(),
-                reason: "expected a non-negative integer".into(),
-            })?;
-        if mesh >= document.meshes().len() {
-            return Err(ModelImportError::InvalidMeshIndex { index: mesh });
-        }
-        let flag = annotation
-            .get("firstPersonFlag")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: "VRM.firstPerson.meshAnnotations[].firstPersonFlag".into(),
-                reason: "expected Auto, Both, ThirdPersonOnly, or FirstPersonOnly".into(),
-            })?;
-        if !matches!(
-            flag,
-            "Auto"
-                | "auto"
-                | "Both"
-                | "both"
-                | "ThirdPersonOnly"
-                | "thirdPersonOnly"
-                | "FirstPersonOnly"
-                | "firstPersonOnly"
-        ) {
-            return Err(ModelImportError::InvalidVrmField {
-                path: "VRM.firstPerson.meshAnnotations[].firstPersonFlag".into(),
-                reason: format!("unknown value {flag}"),
-            });
-        }
-    }
-    Ok(())
-}
-
 fn validate_vrm0_expression_binds(
     document: &gltf::Document,
     vrm: &serde_json::Value,
@@ -996,37 +813,6 @@ fn validate_vrm0_expression_binds(
         }
     }
     Ok(())
-}
-
-fn index_legacy_human_bones(
-    bones: &[serde_json::Value],
-    node_count: usize,
-) -> Result<std::collections::BTreeMap<String, usize>, ModelImportError> {
-    let mut indexed = std::collections::BTreeMap::new();
-    for bone in bones {
-        let name = bone
-            .get("bone")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: "VRM.humanoid.humanBones[].bone".into(),
-                reason: "expected a bone name".into(),
-            })?;
-        let index = bone
-            .get("node")
-            .and_then(|node| node.as_u64())
-            .and_then(|node| usize::try_from(node).ok())
-            .ok_or_else(|| ModelImportError::InvalidVrmField {
-                path: format!("VRM.humanoid.humanBones[{name}].node"),
-                reason: "expected a non-negative integer".into(),
-            })?;
-        if index >= node_count {
-            return Err(ModelImportError::InvalidNodeIndex { index });
-        }
-        if indexed.insert(name.to_string(), index).is_some() {
-            return Err(ModelImportError::DuplicateHumanBone(name.to_string()));
-        }
-    }
-    Ok(indexed)
 }
 
 fn required_bone_index(
@@ -1156,6 +942,7 @@ pub fn read_runtime_expression_facts(
 fn vrm0_convert_error(error: vtuber_avatar::Vrm0ConvertError) -> ModelImportError {
     use vtuber_avatar::Vrm0ConvertError as ConvertError;
     match error {
+        ConvertError::Descriptor(error) => error.into(),
         ConvertError::Glb(error) => ModelImportError::GlbParse(error.to_string()),
         ConvertError::NotVrm0 => ModelImportError::NotVrm {
             reason: "no VRM 0.x extension to convert".to_string(),
@@ -1887,6 +1674,22 @@ mod tests {
         let path = write_glb_fixture(&dir, "bone-look-at.vrm", &bone);
         let summary = inspect_vrm(path).expect("Bone LookAt should be valid");
         assert_eq!(summary.look_at_type.as_deref(), Some("bone"));
+        let zero_range = bone.replace("\"xRange\": 90.0", "\"xRange\": 0.0");
+        let path = write_glb_fixture(&dir, "zero-range.vrm", &zero_range);
+        assert_eq!(
+            inspect_vrm(&path).unwrap().look_at_type.as_deref(),
+            Some("bone")
+        );
+        let converted = vtuber_avatar::convert_vrm0_to_vrm1(&fs::read(path).unwrap())
+            .unwrap()
+            .unwrap();
+        let document = Glb::parse(&converted).unwrap().document;
+        assert_eq!(
+            document
+                .pointer("/extensions/VRMC_vrm/lookAt/rangeMapHorizontalInner/inputMaxValue")
+                .and_then(Value::as_f64),
+            Some(90.0)
+        );
     }
 
     #[test]

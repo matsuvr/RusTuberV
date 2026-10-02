@@ -37,7 +37,7 @@ use serde_json::{Value, json};
 use super::descriptor::{VrmFirstPersonFlag, VrmLookAtType, VrmRuntimeDescriptor};
 
 type AppResult<T> = anyhow::Result<T>;
-pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> AppResult<VrmcVrm> {
+pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> VrmcVrm {
     let human_bones = descriptor
         .humanoid
         .human_bones
@@ -102,7 +102,7 @@ pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> AppRes
     let legacy_meta = descriptor.legacy_meta.as_ref();
     let is_allowed = |field: &Option<String>| field.as_deref() == Some("Allow");
 
-    Ok(VrmcVrm {
+    VrmcVrm {
         // Built as raw JSON below and injected by `convert`; the upstream
         // `Expressions` type cannot carry the material bind records.
         expressions: None,
@@ -133,7 +133,7 @@ pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> AppRes
             version: None,
         }),
         spec_version: "1.0".into(),
-    })
+    }
 }
 
 /// Builds the `VRMC_vrm.expressions` JSON for the converted managed copy.
