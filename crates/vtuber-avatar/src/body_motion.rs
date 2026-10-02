@@ -130,7 +130,7 @@ impl BodyFollowFilter {
 /// the lateral axis of both channels, consistent with the rotation bridge's
 /// yaw/roll reflection and [`vtuber_core::types::HeadTranslationSignal`].
 #[must_use]
-pub fn position_channels(
+fn position_channels(
     frame: &AvatarControlFrame,
     mirrored: bool,
     profiles: &BodyMotionProfiles,
@@ -162,10 +162,6 @@ pub fn position_channels(
     ))
 }
 
-fn neutral_input() -> BodyTrackingPositionInput {
-    BodyTrackingPositionInput::default()
-}
-
 /// Process-agnostic monotonic timestamp from the Bevy clock.
 ///
 /// The loss-idle envelope only consumes elapsed differences, so aligning it
@@ -180,7 +176,7 @@ fn monotonic_from_time(time: &Time) -> MonoTimeNs {
 
 fn deactivate_inputs(inputs: &mut Query<&mut BodyTrackingPositionInput>) {
     for mut input in inputs.iter_mut() {
-        *input = neutral_input();
+        *input = BodyTrackingPositionInput::default();
     }
 }
 
@@ -188,9 +184,9 @@ fn deactivate_inputs(inputs: &mut Query<&mut BodyTrackingPositionInput>) {
 ///
 /// # Schedule
 ///
-/// Runs in `PostUpdate` after `AnimationSystems`, before the dependency-owned
-/// direct body-tracking systems. It writes only the position input component;
-/// bone and root transforms are owned exclusively by `bevy_vrm1`.
+/// Runs in `PostUpdate` after `AnimationSystems`, before the application-owned
+/// body and arm writers. It publishes both tracked targets and body-follow
+/// offsets once; Transform application remains with those existing writers.
 ///
 /// # Skip conditions
 ///
@@ -289,10 +285,11 @@ pub fn update_body_tracking_position_input(
                 body_offset,
                 weight: idle_state.blend(),
                 active: true,
+                ..Default::default()
             };
             metrics.frames_published += 1;
         } else {
-            *input = neutral_input();
+            *input = BodyTrackingPositionInput::default();
             metrics.skipped_no_frame += 1;
         }
         return;
@@ -341,6 +338,8 @@ pub fn update_body_tracking_position_input(
         time.delta_secs(),
     );
     *input = BodyTrackingPositionInput {
+        tracked_head_target: frame_head,
+        tracked_body_target: frame_body,
         head_offset,
         body_offset,
         weight,

@@ -44,6 +44,7 @@ fn live_input(head_offset: Vec3, body_offset: Vec3) -> BodyTrackingPositionInput
         body_offset,
         weight: 1.0,
         active: true,
+        ..Default::default()
     }
 }
 

@@ -479,7 +479,7 @@ pub fn bind_humanoid_bones(
             // The position input pair activates the application position-aware
             // upper-body solve (bounded torso lean + root/body translation
             // follow). Without it the head motion would stop at the neck:
-            // the arms consume the same channels directly, so the body below
+            // the arms consume its published tracked targets directly, so the body below
             // the neck would stay rigid while the arms follow. The writer is
             // `update_body_tracking_position_input`; this only provides the
             // inert (inactive) component the writer and the application solve

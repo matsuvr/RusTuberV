@@ -238,9 +238,9 @@ pub struct ArmPipelineInput<'a> {
     pub legacy_profile: ArmPoseProfile,
     /// Virtual-hand profile used by the dynamic stage.
     pub dynamic_profile: DynamicArmProfile,
-    /// Semantic head translation offset (meters), used by dynamic sources.
+    /// Shaped tracked head target before body-follow/idle/weight, in semantic meters.
     pub head_offset: Vec3,
-    /// Semantic root/body compensation offset (meters), dynamic sources.
+    /// Shaped tracked body target at the same pre-body-follow stage, in semantic meters.
     pub body_offset: Vec3,
     /// Model-space rotation delta of the torso bone the arms hang from
     /// (chest-relative-to-rest), sampled this frame. The dynamic hand target
@@ -838,28 +838,28 @@ pub fn resolve_side(
 /// Per-frame system that resolves hips-relative virtual hand poses for the
 /// active avatar (Issue #168).
 ///
-/// Runs after the position-input bridge so it consumes the same shaped
-/// head/body channels, and before `apply_default_arm_pose`, which stays the
+/// Reads the bridge-published tracked targets before body-follow/idle/weight,
+/// with the actual torso rotation after body and grounding writers. Runs
+/// before `apply_default_arm_pose`, which stays the
 /// only arm Transform writer. When lifecycle is not Ready, the selected
 /// source is not the virtual hand, or no control frame is available, targets
 /// clear so the compositor falls back to its static default pose.
 /// In tracked mode the observed stage owns and clears its own targets.
 #[expect(
-    clippy::too_many_arguments,
-    reason = "Bevy injects this system's resources and message streams, so the parameter list is the declared ECS contract and has no call site to restructure"
+    clippy::type_complexity,
+    reason = "the ECS tuple matches binding, geometry, scale, published position and mutable arm targets on the same avatar root"
 )]
 pub fn update_dynamic_arm_targets(
     lifecycle: Res<AvatarLifecycle>,
     selection: Res<ArmSourceSelection>,
     overrides: Option<Res<crate::arm_pose::ArmPoseOverrideStore>>, // per-model profiles
     control_frame: Res<crate::unload::ActiveControlFrame>,
-    mirror: Option<Res<crate::mirror::AvatarMotionMirror>>,
-    body_profiles: Option<Res<crate::body_motion::BodyMotionProfiles>>,
     mut roots: Query<(
         &AvatarBinding,
         &crate::load::AvatarAssetId,
         &crate::arm_motion_geometry::ArmMotionGeometry,
         &crate::body_scale::BodyScaleMeters,
+        &crate::direct_position::BodyTrackingPositionInput,
         Option<&mut DynamicArmTargets>,
     )>,
     torso_rotations: Query<(&GlobalTransform, &RestGlobalTransform)>,
@@ -870,7 +870,7 @@ pub fn update_dynamic_arm_targets(
     if selection.mode == ArmPoseSourceKind::TrackedPose {
         return;
     }
-    let Ok((binding, model_id, motion, scale, targets)) = roots.single_mut() else {
+    let Ok((binding, model_id, motion, scale, position, targets)) = roots.single_mut() else {
         return;
     };
     // Per-model dynamic profile; automatic defaults otherwise.
@@ -900,12 +900,8 @@ pub fn update_dynamic_arm_targets(
         *targets = DynamicArmTargets::default();
         return;
     };
-    let default_profiles = crate::body_motion::BodyMotionProfiles::default();
-    let body_profiles = body_profiles.as_deref().unwrap_or(&default_profiles);
-    let mirrored = mirror.as_deref().is_none_or(|mirror| mirror.is_enabled());
-    let (head_offset, body_offset) =
-        crate::body_motion::position_channels(frame, mirrored, body_profiles, scale.scale_meters)
-            .unwrap_or((Vec3::ZERO, Vec3::ZERO));
+    let head_offset = position.tracked_head_target;
+    let body_offset = position.tracked_body_target;
 
     // Sample the torso bone the arms hang from. The direct body-tracking
     // writer refreshed its global rotation (one frame at most), so the delta

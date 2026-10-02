@@ -43,6 +43,34 @@ world軸に二度使っていた。大きなleanを前フレームのアニメ�
 仮想/観測腕の解決 → 腕と指のcompositor → VRMのgaze/constraints/通常のtransform伝播とする。
 腕は最終的な骨盤・胸の姿勢を一度だけ継承する。
 
+## 位置入力の段階と仮想腕（#222）
+
+位置チャンネルは`update_body_tracking_position_input`が一度だけ生成し、
+同じrootの`BodyTrackingPositionInput`に次の二段階を公開する。
+
+- `tracked_head_target` / `tracked_body_target`: translation shaping、軸別split、
+  mirrorを終えた目標。idle混合・body-follow・表示用confidence適用の前。
+- `head_offset` / `body_offset`: idle混合後に既存`BodyFollowFilter`を一度通した
+  胴体用入力。既存の`weight`はdirect position writerが一度適用し、root移動と
+  bounded leanを描画する。これらも最終boneのworld位置ではない。
+
+仮想手のhips-relative anchor補償は前者を使う。これは既存の位置応答を維持する
+判断であり、意図的に遅れる胴体の表示位置へ参照先を変えない。手先の補償目標に
+body-followをもう一度入れず、`(tracked_head_target + tracked_body_target) *
+compensation_gains`を既存のanchor生成へ渡す。胴体側のidleとconfidenceは腕へ
+再適用しない。腕自身に新しいフィルタや補正は足さない。
+
+一方、torso lagは目標回転ではなく、胴体・lean・接地後の実際の胸回転を参照する。
+仮想anchorの既存counter-rotationと固定骨長two-bone解決を保ち、root・骨盤・胸の
+表示移動は親子FKで一度だけ継承する。表示済みroot/world位置をanchorへ再加算しない。
+目標位置と表示回転は役割が異なる入力であり、段階差を不具合とは断定しない。
+
+ロスト中も既存control frameが持つ減衰目標を共有する。frameがなくなればtracked
+目標はゼロとなり仮想overrideは解除され、胴体だけが既存idleへ移る。世代不一致・
+非Readyでは両段階を無効化する。`TrackedPose`では観測stageの所有権・減衰状態を
+維持し、仮想stageは入力を読まずreturnする。#183の指追従と#184の性能比較の受入は
+この整理に含めない。
+
 ## 一次資料
 
 [ozz IKTwoBoneJob](https://guillaumeblanc.github.io/ozz-animation/documentation/ik/)の
@@ -77,3 +105,9 @@ import時のrest正規化はそれぞれの仕様上の役割を維持する。
 変更クレートのClippyは成功（既存警告を除く追加警告なし）。
 `cargo build -p vtuber-desktop -j 1`で`target/debug/RusTuberV.exe`を更新した。
 今回の変更後の実カメラ映像、VRM実モデルの目視、macOSは未確認。
+
+#222のローカル確認: body_motion 8件、arm_pipeline 26件、tracked_arm絞込32件、
+関連integration 45件が成功。公開tracked目標への参照、body-follow出力との分離、
+idle時の目標ゼロ、世代・ロスト復帰、FKと固定骨長を既存の合成入力で確認した。
+観測腕・idleのfixtureは実lifecycle世代へ移行した。実カメラとVRM目視、macOS、
+NDI送受信は未実施であり、2026-10-01の実機評価を今回の実機証拠として流用しない。
