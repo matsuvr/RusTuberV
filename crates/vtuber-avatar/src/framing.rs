@@ -6,6 +6,7 @@ pub mod camera_reset;
 pub(crate) mod fixed_fov_fit;
 pub(crate) mod hair_bounds;
 pub(crate) mod head_subtree_bounds;
+mod mesh_bounds;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -14,7 +15,8 @@ use bevy_vrm1::prelude::{HeadBoneEntity, HipsBoneEntity};
 use self::camera_control::{AvatarCameraControl, CameraControlPose};
 use self::fixed_fov_fit::{FIXED_VERTICAL_FOV, solve_fixed_fov_fit};
 use self::hair_bounds::{HairBounds, collect_hair_bounds};
-use self::head_subtree_bounds::{HeadSubtreeBounds, WorldBounds, collect_head_subtree_bounds};
+use self::head_subtree_bounds::{HeadSubtreeBounds, collect_head_subtree_bounds};
+use self::mesh_bounds::WorldBounds;
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 
 const TARGET_FROM_HIPS: f32 = 0.60;

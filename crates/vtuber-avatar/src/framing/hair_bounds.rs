@@ -6,11 +6,9 @@
 
 use std::collections::HashSet;
 
-use bevy::camera::primitives::MeshAabb;
-use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
-use super::head_subtree_bounds::WorldBounds;
+use super::mesh_bounds::{WorldBounds, mesh_world_bounds};
 
 /// Status of hair geometry below an avatar root.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,21 +70,7 @@ pub(crate) fn collect_hair_bounds(
                 pending = true;
                 continue;
             };
-            let Some(local_bounds) = mesh.compute_aabb() else {
-                invalid = true;
-                continue;
-            };
-            if !mesh_positions_are_finite(mesh) {
-                invalid = true;
-                continue;
-            }
-            let Some(local_bounds) =
-                WorldBounds::new(local_bounds.min().into(), local_bounds.max().into())
-            else {
-                invalid = true;
-                continue;
-            };
-            let Some(world_bounds) = world_bounds(local_bounds, global_transform) else {
+            let Some(world_bounds) = mesh_world_bounds(mesh, global_transform) else {
                 invalid = true;
                 continue;
             };
@@ -114,40 +98,6 @@ pub(crate) fn collect_hair_bounds(
     } else {
         HairBounds::Invalid
     }
-}
-
-fn mesh_positions_are_finite(mesh: &Mesh) -> bool {
-    let Some(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
-        return true;
-    };
-    match positions {
-        VertexAttributeValues::Float32x3(values) => {
-            values.iter().flatten().all(|value| value.is_finite())
-        }
-        _ => false,
-    }
-}
-
-fn world_bounds(
-    local_bounds: WorldBounds,
-    global_transform: &GlobalTransform,
-) -> Option<WorldBounds> {
-    let mut corners = local_bounds.corners().into_iter();
-    let first = global_transform.transform_point(corners.next()?);
-    if !first.is_finite() {
-        return None;
-    }
-    let mut min = first;
-    let mut max = first;
-    for local_corner in corners {
-        let world_corner = global_transform.transform_point(local_corner);
-        if !world_corner.is_finite() {
-            return None;
-        }
-        min = min.min(world_corner);
-        max = max.max(world_corner);
-    }
-    WorldBounds::new(min, max)
 }
 
 #[cfg(test)]

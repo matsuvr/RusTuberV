@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 
-use super::head_subtree_bounds::WorldBounds;
+use super::mesh_bounds::WorldBounds;
 
 /// The vertical field of view required by the avatar framing design.
 pub const FIXED_VERTICAL_FOV: f32 = 12.0_f32.to_radians();
