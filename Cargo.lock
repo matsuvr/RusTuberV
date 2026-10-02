@@ -7869,7 +7869,6 @@ dependencies = [
  "bevy_vrm1",
  "gltf",
  "image",
- "mediapipe",
  "serde",
  "serde_json",
  "sha2",
