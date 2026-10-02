@@ -1093,9 +1093,18 @@ impl ArmTrackingState {
         }
     }
 
-    /// Drops calibration and observation state, e.g. after a camera or model change.
+    /// Drops calibration and observation state after recalibration or capture stop.
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Drops temporal state on model replacement, preserving camera arm lengths.
+    pub fn reset_temporal(&mut self) {
+        let left = self.left.calibration;
+        let right = self.right.calibration;
+        self.reset();
+        self.left.calibration = left;
+        self.right.calibration = right;
     }
 }
 
@@ -1620,6 +1629,27 @@ mod tests {
             let _ = feed(&mut state, arm, seq, now, profile);
         }
         state
+    }
+
+    #[test]
+    fn model_reset_preserves_arm_lengths_but_drops_temporal_state() {
+        let profile = ArmTrackingProfile::default();
+        let mut state = tracked_state(arm(), &profile);
+        let left_length = state.left.calibration.confirmed_length();
+        assert!(left_length.is_some());
+        state.reset_temporal();
+        assert_eq!(state.left.calibration.confirmed_length(), left_length);
+        assert_eq!(state.right.calibration.confirmed_length(), left_length);
+        assert!(state.last_consumed.is_none());
+        assert!(state.last_now.is_none());
+        assert!(state.left.output.is_none());
+        assert!(state.left.smoother.is_none());
+        let (next, control) = step_arm_tracking(&state, None, MonoTimeNs(1), &profile);
+        assert!(control.is_none());
+        state = next;
+        state.reset();
+        assert!(state.left.calibration.confirmed_length().is_none());
+        assert!(state.right.calibration.confirmed_length().is_none());
     }
 
     fn hidden_arm(base: ArmLandmarks) -> ArmLandmarks {
