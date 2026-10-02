@@ -8,6 +8,7 @@
 
 pub mod convert;
 pub mod descriptor;
+pub mod expression_id;
 pub mod materials;
 pub(crate) mod normalize;
 

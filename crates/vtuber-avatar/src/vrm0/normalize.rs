@@ -161,13 +161,11 @@ pub(crate) fn normalized_legacy_expressions(
     let mut standards = Vec::new();
     let mut customs = Vec::new();
     for (group_index, group) in groups.iter().enumerate() {
-        let Some(name) = normalized_legacy_expression_name(group, group_index) else {
-            continue;
-        };
-        if legacy_expression_is_standard(group) {
-            standards.push((name, group_index));
+        let id = super::expression_id::resolve_legacy_expression_id(group, group_index);
+        if id.is_standard {
+            standards.push((id.name, group_index));
         } else {
-            customs.push((name, group_index));
+            customs.push((id.name, group_index));
         }
     }
     let material_indices = legacy_material_indices(root);
@@ -360,65 +358,7 @@ fn legacy_material_color_bind(
         "targetValue": [red, green, blue, alpha],
     }))
 }
-/// Maps a known VRM 0.x `presetName` to the VRM 1.0 runtime ID.
-///
-/// This is the only standard-semantic table. It is applied exclusively to the
-/// source `presetName`; author names are never translated, so a custom
-/// expression that happens to be named `joy` or `A` keeps its own ID.
-pub(crate) fn vrm0_preset_runtime_name(preset_name: &str) -> Option<&'static str> {
-    Some(match preset_name {
-        "A" | "a" => "aa",
-        "I" | "i" => "ih",
-        "U" | "u" => "ou",
-        "E" | "e" => "ee",
-        "O" | "o" => "oh",
-        "Blink" | "blink" => "blink",
-        "Blink_L" | "blink_l" => "blinkLeft",
-        "Blink_R" | "blink_r" => "blinkRight",
-        "LookUp" | "lookup" => "lookUp",
-        "LookDown" | "lookdown" => "lookDown",
-        "LookLeft" | "lookleft" => "lookLeft",
-        "LookRight" | "lookright" => "lookRight",
-        "Joy" | "joy" => "happy",
-        "Angry" | "angry" => "angry",
-        "Sorrow" | "sorrow" => "sad",
-        "Fun" | "fun" => "relaxed",
-        "Neutral" | "neutral" => "neutral",
-        _ => return None,
-    })
-}
 
-/// Returns `true` when a legacy group's `presetName` is a known VRM 0.x
-/// semantic. `Unknown`/missing preset names stay custom even when the author
-/// name spells a standard preset name.
-fn legacy_expression_is_standard(group: &Value) -> bool {
-    group
-        .get("presetName")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
-        .and_then(vrm0_preset_runtime_name)
-        .is_some()
-}
-fn normalized_legacy_expression_name(group: &Value, group_index: usize) -> Option<String> {
-    let preset = group
-        .get("presetName")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
-    if let Some(runtime_name) = preset.and_then(vrm0_preset_runtime_name) {
-        return Some(runtime_name.into());
-    }
-    let name = group
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    Some(
-        name.map(str::to_owned)
-            .unwrap_or_else(|| format!("custom_{group_index}")),
-    )
-}
 pub(crate) fn normalized_legacy_spring_bone(
     root: &Value,
     legacy: &Value,

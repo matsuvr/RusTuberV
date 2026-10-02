@@ -610,7 +610,10 @@ fn inspect_vrm0(
             groups
                 .iter()
                 .enumerate()
-                .map(|(index, group)| normalize_legacy_expression_name(group, index))
+                .map(|(index, group)| {
+                    vtuber_avatar::vrm0::expression_id::resolve_legacy_expression_id(group, index)
+                        .name
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -993,47 +996,6 @@ fn validate_vrm0_expression_binds(
         }
     }
     Ok(())
-}
-
-fn normalize_legacy_expression_name(group: &serde_json::Value, group_index: usize) -> String {
-    // Only the source `presetName` selects a standard semantic. Custom groups
-    // keep the author's name exactly, so a custom `joy` or `A` is never
-    // rewritten into a standard or tracking runtime ID.
-    let preset = group
-        .get("presetName")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
-    if let Some(source) = preset {
-        let mapped = match source {
-            "A" | "a" => "aa",
-            "I" | "i" => "ih",
-            "U" | "u" => "ou",
-            "E" | "e" => "ee",
-            "O" | "o" => "oh",
-            "Blink" | "blink" => "blink",
-            "Blink_L" | "blink_l" => "blinkLeft",
-            "Blink_R" | "blink_r" => "blinkRight",
-            "Joy" | "joy" => "happy",
-            "Angry" | "angry" => "angry",
-            "Sorrow" | "sorrow" => "sad",
-            "Fun" | "fun" => "relaxed",
-            "LookUp" | "lookup" => "lookUp",
-            "LookDown" | "lookdown" => "lookDown",
-            "LookLeft" | "lookleft" => "lookLeft",
-            "LookRight" | "lookright" => "lookRight",
-            "Neutral" | "neutral" => "neutral",
-            other => other,
-        };
-        return mapped.into();
-    }
-    let name = group
-        .get("name")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    name.map(str::to_owned)
-        .unwrap_or_else(|| format!("custom_{group_index}"))
 }
 
 fn index_legacy_human_bones(
@@ -2359,6 +2321,57 @@ humanoid_nodes = { hips = 0, head = 1 }
     #[test]
     fn normalization_rejects_non_glb_bytes() {
         assert!(normalize_vrm_morph_targets(b"not glb").is_err());
+    }
+
+    #[test]
+    fn legacy_expression_ids_match_inspection_diagnostics_and_runtime() {
+        let dir = TempDir::new().unwrap();
+        let mut root: Value = serde_json::from_str(VRM0_GLTF_JSON).unwrap();
+        root["extensions"]["VRM"]["blendShapeMaster"]["blendShapeGroups"] = serde_json::json!([
+            {"presetName": "A", "name": "author-vowel"},
+            {"presetName": "Joy", "name": ""},
+            {"presetName": "vendorPreset", "name": "smile"},
+            {"presetName": "Unknown", "name": "joy"},
+            {"presetName": "", "name": "A"},
+            {"name": "Blink_L"},
+            {"presetName": "unknown", "name": " "},
+            {"presetName": "vendorPreset"},
+            {"presetName": "vendorOther", "name": "smile"}
+        ]);
+        let source = write_glb_fixture(&dir, "identities.vrm", &root.to_string());
+        let summary = inspect_vrm(&source).unwrap();
+        let expected = [
+            "A", "Blink_L", "aa", "custom_6", "custom_7", "happy", "joy", "smile",
+        ];
+        assert_eq!(summary.expression_presets, expected);
+        let warnings = &summary.compatibility_warnings;
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| warning.code
+                    == vtuber_avatar::VrmCompatibilityWarningCode::EmptyLegacyExpressionName)
+                .count(),
+            2
+        );
+        assert!(warnings.iter().any(|warning| warning.code
+            == vtuber_avatar::VrmCompatibilityWarningCode::DuplicateLegacyExpression
+            && warning.context.contains("canonical=smile")));
+        let imported = import_vrm(&source, dir.path().join("managed"), DEFAULT_SIZE_LIMIT).unwrap();
+        let facts = read_runtime_expression_facts(&imported.asset_path).unwrap();
+        assert_eq!(
+            facts
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for entry in facts.entries {
+            assert_eq!(
+                entry.declared_as_preset,
+                matches!(entry.name.as_str(), "aa" | "happy")
+            );
+        }
     }
 
     #[test]
