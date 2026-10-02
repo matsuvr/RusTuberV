@@ -564,7 +564,14 @@ pub fn collect_legacy_compatibility_warnings(
     {
         let mut seen = BTreeMap::new();
         for (group_index, group) in groups.iter().enumerate() {
-            let name = normalized_legacy_expression_name(group, group_index, &mut warnings);
+            let id = super::expression_id::resolve_legacy_expression_id(group, group_index);
+            if id.is_unnamed {
+                warnings.push(VrmCompatibilityWarning::new(
+                    VrmCompatibilityWarningCode::EmptyLegacyExpressionName,
+                    format!("VRM.blendShapeMaster.blendShapeGroups[{group_index}]"),
+                ));
+            }
+            let name = id.name;
             if let Some(previous) = seen.insert(name.clone(), group_index) {
                 warnings.push(VrmCompatibilityWarning::new(
                     VrmCompatibilityWarningCode::DuplicateLegacyExpression,
@@ -792,37 +799,6 @@ fn legacy_curve_is_linear(curve: &[Value]) -> bool {
             (outgoing - 1.0).abs() <= EPSILON && (incoming - 1.0).abs() <= EPSILON
         })
     })
-}
-
-fn normalized_legacy_expression_name(
-    group: &Value,
-    group_index: usize,
-    warnings: &mut Vec<VrmCompatibilityWarning>,
-) -> String {
-    let preset = group
-        .get("presetName")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
-    let name = group
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    // Only a known `presetName` selects a standard semantic. Custom author
-    // names are never translated, so a custom `joy` does not collide with the
-    // standard `joy` in duplicate diagnostics.
-    if let Some(runtime_name) = preset.and_then(super::normalize::vrm0_preset_runtime_name) {
-        return runtime_name.to_string();
-    }
-    let Some(source) = name else {
-        warnings.push(VrmCompatibilityWarning::new(
-            VrmCompatibilityWarningCode::EmptyLegacyExpressionName,
-            format!("VRM.blendShapeMaster.blendShapeGroups[{group_index}]"),
-        ));
-        return format!("custom_{group_index}");
-    };
-    source.to_string()
 }
 
 fn parse_vrm1_meta(meta: Option<&Value>) -> VrmMeta {
