@@ -118,37 +118,43 @@ pub fn set_active_control_frame(
     Ok(())
 }
 
-/// Applies the active control frame to the given binding if generations match.
+/// The current avatar and whether the supplied automatic input is current.
+pub struct ResolvedControlTarget<'a> {
+    /// Ready binding owned by the current lifecycle generation and root.
+    pub binding: &'a AvatarBinding,
+    /// An absent frame permits camera-off behavior; a stale frame is rejected.
+    pub frame_is_current: bool,
+}
+
+/// Resolves the current ready binding and marks stale automatic input.
 ///
-/// Returns the frame when it can be applied. Returns `Ok(None)` when there is
-/// no active frame.
+/// An absent input generation permits feature-specific camera-off behavior.
 ///
 /// # Errors
 /// Returns [`ControlFrameError::NotReady`] when the lifecycle has not reached
-/// `Ready`, [`ControlFrameError::StaleBinding`] when no binding is supplied, and
-/// [`ControlFrameError::StaleGeneration`] when the active frame's generation
-/// does not match the binding's.
-pub fn apply_active_control_frame<'a>(
-    lifecycle: &'a AvatarLifecycle,
-    active: &'a ActiveControlFrame,
+/// `Ready`, or [`ControlFrameError::StaleBinding`] when the binding is absent
+/// or belongs to a different root or lifecycle generation.
+pub fn resolve_control_target<'a>(
+    lifecycle: &AvatarLifecycle,
     binding: Option<&'a AvatarBinding>,
-) -> Result<Option<&'a AvatarControlFrame>, ControlFrameError> {
+    frame_generation: Option<AvatarGeneration>,
+) -> Result<ResolvedControlTarget<'a>, ControlFrameError> {
     if lifecycle.state() != AvatarLifecycleState::Ready {
         return Err(ControlFrameError::NotReady {
             state: lifecycle.state(),
         });
     }
     let binding = binding.ok_or(ControlFrameError::StaleBinding)?;
-    let Some(frame) = active.frame.as_ref() else {
-        return Ok(None);
-    };
-    if active.generation != binding.generation {
-        return Err(ControlFrameError::StaleGeneration {
-            frame_generation: active.generation,
-            binding_generation: binding.generation,
-        });
+    if lifecycle.active_root() != Some(binding.root)
+        || binding.generation != lifecycle.current_generation()
+    {
+        return Err(ControlFrameError::StaleBinding);
     }
-    Ok(Some(frame))
+    Ok(ResolvedControlTarget {
+        binding,
+        frame_is_current: frame_generation
+            .is_none_or(|generation| generation == binding.generation),
+    })
 }
 
 /// Recursively despawns an avatar root and all its descendants.
@@ -287,17 +293,17 @@ mod tests {
             frame: Some(dummy_frame()),
         };
 
-        let result = apply_active_control_frame(&lifecycle, &active, None);
+        let result = resolve_control_target(&lifecycle, None, Some(active.generation));
         assert!(matches!(result, Err(ControlFrameError::StaleBinding)));
     }
 
     #[test]
-    fn apply_rejects_generation_mismatch() {
+    fn resolve_marks_a_stale_frame_and_rejects_a_stale_binding() {
         let mut lifecycle = AvatarLifecycle::new();
         let root = Entity::from_raw_u32(1).unwrap();
         lifecycle.request_load(root).unwrap();
 
-        let binding = AvatarBinding {
+        let mut binding = AvatarBinding {
             root,
             head: root,
             generation: lifecycle.current_generation(),
@@ -311,13 +317,23 @@ mod tests {
             frame: Some(dummy_frame()),
         };
 
-        let result = apply_active_control_frame(&lifecycle, &active, Some(&binding));
+        let result = resolve_control_target(&lifecycle, Some(&binding), Some(active.generation));
+        assert!(!result.unwrap().frame_is_current);
+        assert!(
+            resolve_control_target(&lifecycle, Some(&binding), None)
+                .unwrap()
+                .frame_is_current
+        );
+        binding.generation = AvatarGeneration(0);
         assert!(matches!(
-            result,
-            Err(ControlFrameError::StaleGeneration {
-                frame_generation: AvatarGeneration(999),
-                ..
-            })
+            resolve_control_target(&lifecycle, Some(&binding), Some(binding.generation)),
+            Err(ControlFrameError::StaleBinding)
+        ));
+        binding.generation = lifecycle.current_generation();
+        binding.root = Entity::from_raw_u32(2).unwrap();
+        assert!(matches!(
+            resolve_control_target(&lifecycle, Some(&binding), None),
+            Err(ControlFrameError::StaleBinding)
         ));
     }
 }

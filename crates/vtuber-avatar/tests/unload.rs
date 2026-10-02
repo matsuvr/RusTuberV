@@ -19,9 +19,7 @@ use vtuber_avatar::lifecycle::{
     ReplaceAvatarRequest, ReplaceAvatarResult, UnloadAvatarRequest, UnloadAvatarResult,
     apply_avatar_request_events,
 };
-use vtuber_avatar::unload::{
-    ActiveControlFrame, ControlFrameError, apply_active_control_frame, despawn_unloading_avatar,
-};
+use vtuber_avatar::unload::{ActiveControlFrame, despawn_unloading_avatar, resolve_control_target};
 use vtuber_core::types::{
     AvatarControlFrame, ExpressionCoefficients, FrameSeq, HeadPose, MonoTimeNs, TrackingState,
 };
@@ -139,13 +137,13 @@ fn avatar_unload_cleanup() {
         generation: generation_a,
         frame: Some(dummy_frame()),
     };
-    let frame_ref = apply_active_control_frame(
+    let frame_ref = resolve_control_target(
         app.world().resource::<AvatarLifecycle>(),
-        &active,
         app.world().get::<AvatarBinding>(root_a),
+        Some(active.generation),
     )
     .expect("frame should apply to avatar A");
-    assert!(frame_ref.is_some());
+    assert!(frame_ref.frame_is_current);
 
     // --- Unload avatar A ---
     app.world_mut()
@@ -201,19 +199,13 @@ fn avatar_unload_cleanup() {
         .expect("avatar B should be bound");
     assert_eq!(binding_b.generation, generation_b);
 
-    let result = apply_active_control_frame(
+    let result = resolve_control_target(
         app.world().resource::<AvatarLifecycle>(),
-        &active,
         app.world().get::<AvatarBinding>(root_b),
+        Some(active.generation),
     );
     assert!(
-        matches!(
-            result,
-            Err(ControlFrameError::StaleGeneration {
-                frame_generation,
-                binding_generation,
-            }) if frame_generation == generation_a && binding_generation == generation_b
-        ),
-        "stale frame targeting avatar A should be rejected for avatar B, got {result:?}"
+        !result.expect("avatar B is ready").frame_is_current,
+        "stale frame targeting avatar A should be rejected for avatar B"
     );
 }

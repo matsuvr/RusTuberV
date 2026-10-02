@@ -36,7 +36,7 @@ use crate::binding::AvatarBinding;
 use crate::body_scale::{BodyScaleMeters, DEFAULT_BODY_SCALE_METERS};
 use crate::lifecycle::{AvatarGeneration, AvatarLifecycle, AvatarLifecycleState};
 use crate::mirror::AvatarMotionMirror;
-use crate::unload::ActiveControlFrame;
+use crate::unload::{ActiveControlFrame, ControlFrameError, resolve_control_target};
 
 /// Typed profiles for the shaping/split pipeline.
 ///
@@ -215,16 +215,37 @@ pub fn update_body_tracking_position_input(
     scale_query: Query<&BodyScaleMeters>,
     mut inputs: Query<&mut BodyTrackingPositionInput>,
 ) {
-    if lifecycle.state() != AvatarLifecycleState::Ready {
+    let target = resolve_control_target(
+        &lifecycle,
+        lifecycle
+            .active_root()
+            .and_then(|root| binding_query.get(root).ok()),
+        control_frame
+            .frame
+            .as_ref()
+            .map(|_| control_frame.generation),
+    );
+    let target = match target {
+        Ok(target) => target,
+        Err(error) => {
+            deactivate_inputs(&mut inputs);
+            match error {
+                ControlFrameError::NotReady { .. } => metrics.skipped_not_ready += 1,
+                ControlFrameError::StaleBinding => metrics.skipped_stale_entity += 1,
+                ControlFrameError::StaleGeneration { .. } => {
+                    metrics.skipped_generation_mismatch += 1
+                }
+            }
+            return;
+        }
+    };
+    if !target.frame_is_current {
         deactivate_inputs(&mut inputs);
-        metrics.skipped_not_ready += 1;
+        metrics.skipped_generation_mismatch += 1;
         return;
     }
-    let Some(active_root) = lifecycle.active_root() else {
-        deactivate_inputs(&mut inputs);
-        metrics.skipped_not_ready += 1;
-        return;
-    };
+    let binding = target.binding;
+    let active_root = binding.root;
     let Ok(mut input) = inputs.get_mut(active_root) else {
         metrics.skipped_stale_entity += 1;
         return;
@@ -236,11 +257,6 @@ pub fn update_body_tracking_position_input(
         None => &default_profiles,
     };
 
-    let Ok(binding) = binding_query.get(active_root) else {
-        *input = neutral_input();
-        metrics.skipped_stale_entity += 1;
-        return;
-    };
     let body_scale = scale_query
         .get(active_root)
         .map(|scale| scale.scale_meters)
@@ -281,26 +297,16 @@ pub fn update_body_tracking_position_input(
         }
         return;
     };
-    if control_frame.generation != binding.generation {
-        *input = neutral_input();
-        metrics.skipped_generation_mismatch += 1;
-        return;
-    }
-
     // Advance (or start) the generation-scoped loss-idle episode. The blend
     // and target computed here are also read by the pose bridge for the
     // yaw/pitch idle component, keeping both channels coherent.
-    metrics.idle_blend = 0.0;
-    if control_frame.generation == binding.generation {
-        let tracked = is_tracked_state(frame.state);
-        idle_state.prepare(
-            control_frame.generation,
-            tracked,
-            body_scale,
-            monotonic_from_time(&time),
-        );
-        metrics.idle_blend = idle_state.blend();
-    }
+    idle_state.prepare(
+        binding.generation,
+        is_tracked_state(frame.state),
+        body_scale,
+        monotonic_from_time(&time),
+    );
+    metrics.idle_blend = idle_state.blend();
 
     // The idle sway cross-fades with the control frame instead of replacing
     // it: during a loss the sway fades in over the still-easing offsets, and

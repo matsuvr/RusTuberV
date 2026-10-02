@@ -19,7 +19,7 @@ use bevy_vrm1::prelude::{
 use crate::binding::AvatarBinding;
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 use crate::mirror::AvatarMotionMirror;
-use crate::unload::ActiveControlFrame;
+use crate::unload::{ActiveControlFrame, ControlFrameError, resolve_control_target};
 
 /// Metrics for the pose apply system, useful for diagnostics.
 #[derive(Resource, Debug, Clone)]
@@ -130,20 +130,37 @@ pub fn update_body_tracking_pose_input(
     binding_query: Query<&AvatarBinding>,
     mut inputs: Query<&mut BodyTrackingPoseInput>,
 ) {
-    if lifecycle.state() != AvatarLifecycleState::Ready {
-        deactivate_inputs(&mut inputs);
-        metrics.skipped_not_ready += 1;
-        return;
-    }
-
-    let active_root = match lifecycle.active_root() {
-        Some(root) => root,
-        None => {
+    let target = resolve_control_target(
+        &lifecycle,
+        lifecycle
+            .active_root()
+            .and_then(|root| binding_query.get(root).ok()),
+        control_frame
+            .frame
+            .as_ref()
+            .map(|_| control_frame.generation),
+    );
+    let target = match target {
+        Ok(target) => target,
+        Err(error) => {
             deactivate_inputs(&mut inputs);
-            metrics.skipped_not_ready += 1;
+            match error {
+                ControlFrameError::NotReady { .. } => metrics.skipped_not_ready += 1,
+                ControlFrameError::StaleBinding => metrics.skipped_stale_entity += 1,
+                ControlFrameError::StaleGeneration { .. } => {
+                    metrics.skipped_generation_mismatch += 1
+                }
+            }
             return;
         }
     };
+    if !target.frame_is_current {
+        deactivate_inputs(&mut inputs);
+        metrics.skipped_generation_mismatch += 1;
+        return;
+    }
+    let binding = target.binding;
+    let active_root = binding.root;
 
     let mut input = match inputs.get_mut(active_root) {
         Ok(input) => input,
@@ -181,21 +198,6 @@ pub fn update_body_tracking_pose_input(
             return;
         }
     };
-
-    let binding = match binding_query.get(active_root) {
-        Ok(b) => b,
-        Err(_) => {
-            *input = BodyTrackingPoseInput::default();
-            metrics.skipped_stale_entity += 1;
-            return;
-        }
-    };
-
-    if control_frame.generation != binding.generation {
-        *input = BodyTrackingPoseInput::default();
-        metrics.skipped_generation_mismatch += 1;
-        return;
-    }
 
     *input = body_tracking_input(frame, mirrored);
 

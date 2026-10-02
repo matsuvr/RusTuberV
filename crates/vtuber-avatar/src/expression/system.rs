@@ -13,6 +13,7 @@ use vtuber_core::{
     ExpressionCoefficients,
 };
 
+use crate::binding::AvatarBinding;
 use crate::capabilities::SelectedGazeBackend;
 use crate::direct_look::LookAtExpressionWeights;
 use crate::expression::blink::{RawBlinkInput, map_blink_with_fallback};
@@ -20,9 +21,9 @@ use crate::expression::command::{ExpressionCommand, build_face_commands};
 use crate::expression::manual::ManualExpressionSelection;
 use crate::expression::mouth::{RawMouthInput, map_mouth_with_fallback};
 use crate::expression::status::ExpressionBindingStatus;
-use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
+use crate::lifecycle::AvatarLifecycle;
 use crate::mirror::AvatarMotionMirror;
-use crate::unload::ActiveControlFrame;
+use crate::unload::{ActiveControlFrame, resolve_control_target};
 
 /// Default epsilon for change detection.
 pub const DEFAULT_CHANGE_EPSILON: f32 = 0.01;
@@ -230,22 +231,28 @@ pub fn apply_tracked_expressions(
     control_frame: Res<ActiveControlFrame>,
     manual: Res<ManualExpressionSelection>,
     mirror: Option<Res<AvatarMotionMirror>>,
+    bindings: Query<&AvatarBinding>,
     expression_maps: Query<(&ExpressionEntityMap, Option<&LookAtExpressionWeights>)>,
     expression_statuses: Query<&ExpressionBindingStatus>,
     mut tracker: Local<ExpressionStateTracker>,
     mut had_manual: Local<bool>,
 ) {
-    if lifecycle.state() != AvatarLifecycleState::Ready {
-        tracker.force_reset();
-        *had_manual = false;
-        return;
-    }
-    let Some(root) = lifecycle.active_root() else {
+    let Ok(target) = resolve_control_target(
+        &lifecycle,
+        lifecycle
+            .active_root()
+            .and_then(|root| bindings.get(root).ok()),
+        control_frame
+            .frame
+            .as_ref()
+            .map(|_| control_frame.generation),
+    ) else {
         tracker.force_reset();
         *had_manual = false;
         return;
     };
-    let current_generation = lifecycle.current_generation();
+    let root = target.binding.root;
+    let current_generation = target.binding.generation;
     let catalog = lifecycle.expression_catalog();
     let selected: Option<String> = manual
         .selected_in(current_generation, catalog)
@@ -253,7 +260,10 @@ pub fn apply_tracked_expressions(
     let manual_tracking = selected
         .as_deref()
         .is_some_and(|id| catalog.is_some_and(|catalog| catalog.is_tracking(id)));
-    let frame = control_frame.frame.as_ref();
+    let frame = control_frame
+        .frame
+        .as_ref()
+        .filter(|_| target.frame_is_current);
     if frame.is_none() && selected.is_none() && !*had_manual {
         return;
     }
@@ -837,6 +847,10 @@ mod tests {
             lifecycle.current_generation()
         };
 
+        app.world_mut()
+            .entity_mut(root)
+            .insert(AvatarBinding::head_only(root, root, generation));
+
         let mut map = HashMap::default();
         for name in [
             "happy",
@@ -988,6 +1002,62 @@ mod tests {
             triggers[0].get(&VrmExpression::from("happy")).copied(),
             Some(0.0),
             "the disappeared manual expression gets an explicit zero"
+        );
+    }
+
+    #[test]
+    fn stale_automatic_frame_is_rejected_by_live_gaze_and_expression_bridges() {
+        let (mut app, root) = manual_expression_app();
+        app.add_systems(Update, crate::gaze::system::update_direct_look_at_input);
+        app.world_mut().entity_mut(root).insert((
+            crate::gaze::system::fallback_look_at_properties(
+                crate::capabilities::SelectedGazeBackend::Bone,
+            ),
+            crate::direct_look::DirectLookAtInput::default(),
+        ));
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
+        let mut frame = sample_frame();
+        frame.gaze = vtuber_core::GazeSignal::tracked(0.7, 0.2, 1.0);
+        frame.expressions.blink_left = 1.0;
+        *app.world_mut().resource_mut::<ActiveControlFrame>() = ActiveControlFrame {
+            generation: crate::AvatarGeneration(generation.0 + 1),
+            frame: Some(frame),
+        };
+        app.update();
+        assert!(take_triggers(&mut app).is_empty());
+        assert!(
+            !app.world()
+                .get::<crate::direct_look::DirectLookAtInput>(root)
+                .unwrap()
+                .active
+        );
+
+        app.world_mut()
+            .resource_mut::<ManualExpressionSelection>()
+            .toggle(generation, "happy");
+        app.update();
+        let triggers = take_triggers(&mut app);
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].get(&VrmExpression::from("happy")), Some(&1.0));
+        assert!(!triggers[0].contains_key(&VrmExpression::from("blinkLeft")));
+
+        app.world_mut()
+            .resource_mut::<ActiveControlFrame>()
+            .generation = generation;
+        app.update();
+        assert!(
+            app.world()
+                .get::<crate::direct_look::DirectLookAtInput>(root)
+                .unwrap()
+                .active
+        );
+        assert!(
+            take_triggers(&mut app)
+                .iter()
+                .any(|weights| weights.contains_key(&VrmExpression::from("blinkLeft")))
         );
     }
 
