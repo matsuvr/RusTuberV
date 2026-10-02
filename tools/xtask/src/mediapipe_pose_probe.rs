@@ -232,7 +232,10 @@ fn run_windows(options: Options) -> Result<(), String> {
 
     if !options.json {
         eprintln!("backend=mediapipe-face-landmarker");
-        eprintln!("mediapipe_version={}", mediapipe::MEDIAPIPE_VERSION);
+        eprintln!(
+            "mediapipe_version={}",
+            vtuber_inference::backend::mediapipe::MEDIAPIPE_VERSION
+        );
         eprintln!("camera={device}");
         eprintln!(
             "protocol=neutral,image-right,image-left,up,down,image-clockwise,image-counter-clockwise"
@@ -319,9 +322,6 @@ fn run_worker(
     data: Arc<Mutex<ProbeData>>,
     stop: StopToken,
 ) -> ProbeWorkerOutput {
-    let library_source = mediapipe::loader::lib()
-        .map(|library| library_source_name(&library.source))
-        .unwrap_or_else(|_| "unknown".into());
     let mut runtime = match MediaPipeRuntime::from_task_source(
         &vtuber_inference::MediaPipeTaskSource::Path(task_path.to_path_buf()),
     ) {
@@ -329,7 +329,17 @@ fn run_worker(
         Err(error) => {
             return ProbeWorkerOutput {
                 data: data.lock().map(|guard| guard.clone()).unwrap_or_default(),
-                library_source,
+                library_source: String::new(),
+                failure: Some(error.to_string()),
+            };
+        }
+    };
+    let library_source = match vtuber_inference::backend::mediapipe::native_library_source() {
+        Ok(source) => source.to_owned(),
+        Err(error) => {
+            return ProbeWorkerOutput {
+                data: data.lock().map(|guard| guard.clone()).unwrap_or_default(),
+                library_source: String::new(),
                 failure: Some(error.to_string()),
             };
         }
@@ -573,14 +583,17 @@ fn print_report(report: &ProbeReport, json: bool) {
             .join(",");
         println!(
             "{{\"backend\":\"mediapipe-face-landmarker\",\"mediapipe_version\":\"{}\",\"native_library_source\":\"{}\",\"signs_pass\":{},\"phases\":[{}]}}",
-            mediapipe::MEDIAPIPE_VERSION,
+            vtuber_inference::backend::mediapipe::MEDIAPIPE_VERSION,
             report.library_source,
             report.signs_pass,
             phases
         );
     } else {
         println!("backend=mediapipe-face-landmarker");
-        println!("mediapipe_version={}", mediapipe::MEDIAPIPE_VERSION);
+        println!(
+            "mediapipe_version={}",
+            vtuber_inference::backend::mediapipe::MEDIAPIPE_VERSION
+        );
         println!("native_library_source={}", report.library_source);
         for phase in &report.phases {
             println!(
@@ -620,13 +633,4 @@ fn choose_camera(
         .get(index)
         .cloned()
         .ok_or_else(|| format!("camera index {index} is not available"))
-}
-
-#[cfg(target_os = "windows")]
-fn library_source_name(source: &mediapipe::loader::LibrarySource) -> String {
-    match source {
-        mediapipe::loader::LibrarySource::Env(_) => "environment override".into(),
-        mediapipe::loader::LibrarySource::Cache(_) => "verified cache".into(),
-        mediapipe::loader::LibrarySource::Downloaded(_) => "official PyPI wheel download".into(),
-    }
 }

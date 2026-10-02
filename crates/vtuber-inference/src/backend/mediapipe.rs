@@ -23,6 +23,20 @@ use crate::pose_decode::{decode_hand_result, decode_pose_result};
 use crate::runtime::FaceTrackingInference;
 
 use crate::task::{MediaPipeTask, MediaPipeTaskSource};
+/// Native Tasks version supplied by the pinned binding.
+pub use mediapipe::MEDIAPIPE_VERSION;
+
+/// Identifies the native library selected by the production binding.
+pub fn native_library_source() -> Result<&'static str> {
+    let library = mediapipe::loader::lib()
+        .map_err(|error| InferenceError::MediaPipeLoadFailed(error.to_string()))?;
+    Ok(match &library.source {
+        mediapipe::loader::LibrarySource::Env(_) => "environment override",
+        mediapipe::loader::LibrarySource::Cache(_) => "verified cache",
+        mediapipe::loader::LibrarySource::Downloaded(_) => "official PyPI wheel download",
+    })
+}
+
 const MATRIX_AFFINE_EPSILON: f32 = 0.1;
 
 /// MediaPipe Pose plus Hand Landmarker runtimes owned by one inference worker.

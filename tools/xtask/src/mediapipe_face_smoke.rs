@@ -1,7 +1,8 @@
 //! Standalone Windows MediaPipe Face Landmarker gate.
 //!
 //! The smoke path uses the existing camera boundary, `vtuber-core`, and the
-//! pinned `mediapipe-rs` binding. It does not construct Bevy or access a VRM.
+//! production `vtuber-inference` adapter, including task verification, pixel
+//! conversion and validated output decoding. It does not construct Bevy or access a VRM.
 //! The task is built and dropped in a supervised inference worker, while
 //! camera frames cross only the capacity-one [`vtuber_core::LatestSlot`].
 
@@ -15,24 +16,17 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(target_os = "windows")]
-use mediapipe::{
-    Confidence, Delegate, FaceLandmarker, FaceLandmarkerResult, Image, IouThreshold,
-    MEDIAPIPE_VERSION, ModelSource, Size, Timestamp,
+use vtuber_core::{FaceTrackingOutcome, FrameSeq, LatestSlot, ReadResult, VideoFrame};
+#[cfg(target_os = "windows")]
+use vtuber_inference::backend::mediapipe::{
+    MEDIAPIPE_VERSION, MediaPipeRuntime, native_library_source,
 };
 #[cfg(target_os = "windows")]
-use vtuber_core::FrameSeq;
-#[cfg(target_os = "windows")]
-use vtuber_core::{LatestSlot, ReadResult};
-#[cfg(any(target_os = "windows", test))]
-use vtuber_core::{MonoTimeNs, PixelFormat, VideoFrame};
-#[cfg(target_os = "windows")]
-use vtuber_inference::{MediaPipeTask, MediaPipeTaskSource};
+use vtuber_inference::{FaceTrackingInference, InferenceError, MediaPipeTask, MediaPipeTaskSource};
 
 const MAX_TASK_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 #[cfg(target_os = "windows")]
 const FRAME_WAIT: Duration = Duration::from_millis(100);
-#[cfg(target_os = "windows")]
-const MATRIX_AFFINE_EPSILON: f32 = 0.1;
 
 /// Runs the standalone MediaPipe face gate.
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -66,6 +60,10 @@ pub fn print_help() {
     println!("  --project-root <path>    Workspace root (default: current directory)");
     println!("  --json                   Emit one bounded JSON summary");
     println!("  -h, --help               Show this help");
+    println!();
+    println!(
+        "Runs the production task/pixel/inference/output adapter; timings include that full call."
+    );
 }
 
 #[derive(Debug)]
@@ -172,9 +170,6 @@ fn run_windows(options: Options) -> Result<(), String> {
         .join("assets")
         .join("models")
         .join(MediaPipeTask::Face.file());
-    MediaPipeTask::Face
-        .read(&MediaPipeTaskSource::Path(task_path.clone()))
-        .map_err(|error| error.to_string())?;
 
     let devices = MsmfBackend::new()
         .enumerate()
@@ -266,35 +261,23 @@ fn run_worker(
     stop: vtuber_core::StopToken,
 ) -> WorkerOutput {
     let mut stats = SmokeStats::default();
-    let library_source = match mediapipe::loader::lib() {
-        Ok(library) => library_source_name(&library.source),
+    let mut runtime = match MediaPipeRuntime::from_task_source(&MediaPipeTaskSource::Path(
+        task_path.to_path_buf(),
+    )) {
+        Ok(runtime) => runtime,
         Err(error) => {
-            stats.failure = Some(format!("native library load failed: {error}"));
+            stats.failure = Some(error.to_string());
             return WorkerOutput { stats };
         }
     };
-    stats.backend_source = Some(library_source);
-
-    let mut landmarker = match FaceLandmarker::builder(ModelSource::path(task_path))
-        .delegate(Delegate::Cpu)
-        .num_faces(std::num::NonZeroU32::MIN)
-        .min_face_detection_confidence(Confidence::HALF)
-        .min_face_presence_confidence(Confidence::HALF)
-        .min_tracking_confidence(IouThreshold::HALF)
-        .output_blendshapes(true)
-        .output_transformation_matrixes(true)
-        .build_for_video()
-    {
-        Ok(landmarker) => landmarker,
+    stats.backend_source = match native_library_source() {
+        Ok(source) => Some(source.into()),
         Err(error) => {
-            stats.failure = Some(format!("task construction failed: {error}"));
+            stats.failure = Some(error.to_string());
             return WorkerOutput { stats };
         }
     };
-
     let mut last_generation = 0;
-    let mut last_timestamp_ms = None;
-    let mut staging = Vec::new();
     while !stop.is_stopped() {
         let Some(read) = frame_slot.wait_read_after(last_generation, FRAME_WAIT) else {
             continue;
@@ -308,42 +291,16 @@ fn run_worker(
         };
         last_generation = read_generation;
         stats.last_source_seq = Some(frame.seq);
-        let timestamp_ms = match video_timestamp_ms(frame.captured_at, &mut last_timestamp_ms) {
-            Ok(timestamp_ms) => timestamp_ms,
-            Err(error) => {
-                stats.failure = Some(error);
-                break;
-            }
-        };
-        let image_data = match frame_rgb(&frame, &mut staging) {
-            Ok(image_data) => image_data,
-            Err(error) => {
-                stats.inference_errors += 1;
-                stats.failure = Some(error);
-                break;
-            }
-        };
-        let image = match Image::from_rgb(
-            Size {
-                width: frame.width,
-                height: frame.height,
-            },
-            image_data,
-        ) {
-            Ok(image) => image,
-            Err(error) => {
-                stats.inference_errors += 1;
-                stats.failure = Some(format!("image construction failed: {error}"));
-                break;
-            }
-        };
         let inference_started = Instant::now();
-        let result = match landmarker.detect_for_video(&image, Timestamp::from_millis(timestamp_ms))
-        {
+        let result = match runtime.infer_face_tracking(&frame) {
             Ok(result) => result,
             Err(error) => {
-                stats.inference_errors += 1;
-                stats.failure = Some(format!("detect_for_video failed: {error}"));
+                if matches!(error, InferenceError::MediaPipeOutputContract(_)) {
+                    stats.contract_failures += 1;
+                } else {
+                    stats.inference_errors += 1;
+                }
+                stats.failure = Some(error.to_string());
                 break;
             }
         };
@@ -356,200 +313,26 @@ fn run_worker(
         record_result(&mut stats, result);
     }
 
-    drop(landmarker);
+    drop(runtime);
     WorkerOutput { stats }
 }
 
 #[cfg(target_os = "windows")]
-#[expect(
-    clippy::indexing_slicing,
-    reason = "the result is checked above to hold exactly one face, one blendshape set and one matrix"
-)]
-fn record_result(stats: &mut SmokeStats, result: FaceLandmarkerResult) {
-    let face_count = result.landmarks.len();
-    if face_count == 0 {
-        stats.no_face_count += 1;
-        return;
-    }
-    if face_count != 1 || result.blendshapes.len() != 1 || result.transformation_matrixes.len() != 1
-    {
-        stats.contract_failures += 1;
-        stats.face_count += 1;
-        stats.last_landmark_count = result.landmarks.first().map(Vec::len);
-        stats.last_blendshape_count = result.blendshapes.first().map(Vec::len);
-        stats.last_matrix_count = Some(result.transformation_matrixes.len());
-        return;
-    }
-
-    let landmarks = &result.landmarks[0];
-    let blendshapes = &result.blendshapes[0];
-    stats.last_landmark_count = Some(landmarks.len());
-    stats.last_blendshape_count = Some(blendshapes.len());
-    stats.last_matrix_count = Some(result.transformation_matrixes.len());
-    let landmarks_valid = landmarks.len() == 478
-        && landmarks.iter().all(|landmark| {
-            landmark.point.x().is_finite()
-                && landmark.point.y().is_finite()
-                && landmark.point.z().is_finite()
-                && landmark
-                    .visibility
-                    .is_none_or(|value| value.get().is_finite())
-                && landmark
-                    .presence
-                    .is_none_or(|value| value.get().is_finite())
-        });
-    let blendshapes_valid = blendshapes.len() == 52
-        && blendshapes.iter().all(|category| {
-            category.score.get().is_finite() && (0.0..=1.0).contains(&category.score.get())
-        });
-    let matrix = matrix_quality(&result);
-    let matrix_valid = matrix.is_some_and(|quality| quality.is_valid);
-    if !(landmarks_valid && blendshapes_valid && matrix_valid) {
-        stats.contract_failures += 1;
-    } else {
-        stats.valid_matrix_count += 1;
-    }
-    if let Some(quality) = matrix {
-        stats.matrix_determinant = Some(quality.determinant);
-        stats.matrix_orthogonality_error = Some(quality.orthogonality_error);
-    }
-    stats.face_count += 1;
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug)]
-struct MatrixQuality {
-    determinant: f32,
-    orthogonality_error: f32,
-    is_valid: bool,
-}
-
-#[cfg(target_os = "windows")]
-#[expect(
-    clippy::indexing_slicing,
-    reason = "the matrix is read through `get` into a fixed 4x4 array and the loops are bounded by 4 and 3"
-)]
-fn matrix_quality(result: &FaceLandmarkerResult) -> Option<MatrixQuality> {
-    let matrix = result.transformation_matrixes.first()?;
-    let mut values = [[0.0; 4]; 4];
-    for (row, values_row) in values.iter_mut().enumerate() {
-        for (col, value) in values_row.iter_mut().enumerate() {
-            *value = matrix.get(row, col);
+fn record_result(stats: &mut SmokeStats, result: FaceTrackingOutcome) {
+    match result {
+        FaceTrackingOutcome::NoFace { .. } => stats.no_face_count += 1,
+        FaceTrackingOutcome::Face(sample) => {
+            stats.face_count += 1;
+            stats.last_source_seq = Some(sample.source_seq);
+            stats.last_landmark_count = Some(sample.landmarks.len());
+            stats.last_blendshape_count = Some(sample.blendshapes.as_array().len());
+            // The production adapter accepts exactly one validated source matrix.
+            stats.last_matrix_count = Some(1);
+            stats.valid_matrix_count += 1;
+            stats.matrix_determinant = Some(sample.quality.matrix_determinant);
+            stats.matrix_orthogonality_error = Some(sample.quality.matrix_orthogonality_error);
         }
     }
-    if !values.iter().flatten().all(|value| value.is_finite()) {
-        return None;
-    }
-    let determinant = determinant3(values);
-    let mut error_squared = 0.0;
-    for row in 0..3 {
-        for col in 0..3 {
-            let dot = (0..3)
-                .map(|index| values[index][row] * values[index][col])
-                .sum::<f32>();
-            let expected = if row == col { 1.0 } else { 0.0 };
-            error_squared += (dot - expected).powi(2);
-        }
-    }
-    let orthogonality_error = error_squared.sqrt();
-    let affine = values[3][0].abs() <= MATRIX_AFFINE_EPSILON
-        && values[3][1].abs() <= MATRIX_AFFINE_EPSILON
-        && values[3][2].abs() <= MATRIX_AFFINE_EPSILON
-        && (values[3][3] - 1.0).abs() <= MATRIX_AFFINE_EPSILON;
-    Some(MatrixQuality {
-        determinant,
-        orthogonality_error,
-        is_valid: affine && determinant > 0.0,
-    })
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn determinant3(matrix: [[f32; 4]; 4]) -> f32 {
-    matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
-        - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
-        + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn video_timestamp_ms(
-    captured_at: MonoTimeNs,
-    last_timestamp_ms: &mut Option<i64>,
-) -> Result<i64, String> {
-    let candidate = i64::try_from(captured_at.0 / 1_000_000)
-        .map_err(|_| "capture timestamp exceeds MediaPipe millisecond range".to_string())?;
-    let timestamp_ms =
-        last_timestamp_ms.map_or(candidate, |last| candidate.max(last.saturating_add(1)));
-    *last_timestamp_ms = Some(timestamp_ms);
-    Ok(timestamp_ms)
-}
-
-#[cfg(any(target_os = "windows", test))]
-#[expect(
-    clippy::indexing_slicing,
-    reason = "every row and column index is checked against the frame dimensions above, so the staging writes stay inside the resized buffer"
-)]
-fn frame_rgb<'a>(frame: &'a VideoFrame, staging: &'a mut Vec<u8>) -> Result<&'a [u8], String> {
-    let width = usize::try_from(frame.width).map_err(|_| "frame width is too large".to_string())?;
-    let height =
-        usize::try_from(frame.height).map_err(|_| "frame height is too large".to_string())?;
-    let channels = match frame.format {
-        PixelFormat::Rgb8 | PixelFormat::Bgr8 => 3,
-        PixelFormat::Rgba8 => 4,
-        PixelFormat::Gray8 => 1,
-    };
-    let row_bytes = width
-        .checked_mul(channels)
-        .ok_or_else(|| "frame row size overflow".to_string())?;
-    if frame.stride_bytes < row_bytes {
-        return Err(format!(
-            "frame stride {} is smaller than row size {row_bytes}",
-            frame.stride_bytes
-        ));
-    }
-    let required = frame
-        .stride_bytes
-        .checked_mul(height)
-        .ok_or_else(|| "frame buffer size overflow".to_string())?;
-    if frame.data.len() < required {
-        return Err(format!(
-            "frame buffer has {} bytes but requires {required}",
-            frame.data.len()
-        ));
-    }
-    if frame.format == PixelFormat::Rgb8 && frame.stride_bytes == row_bytes {
-        return Ok(frame.data.as_ref());
-    }
-
-    let rgb_row_bytes = width
-        .checked_mul(3)
-        .ok_or_else(|| "RGB row size overflow".to_string())?;
-    let staging_len = rgb_row_bytes
-        .checked_mul(height)
-        .ok_or_else(|| "RGB frame size overflow".to_string())?;
-    staging.resize(staging_len, 0);
-    for row in 0..height {
-        let source = &frame.data[row * frame.stride_bytes..row * frame.stride_bytes + row_bytes];
-        let destination = &mut staging[row * rgb_row_bytes..(row + 1) * rgb_row_bytes];
-        match frame.format {
-            PixelFormat::Rgb8 => destination.copy_from_slice(source),
-            PixelFormat::Bgr8 => {
-                for (src, dst) in source.chunks_exact(3).zip(destination.chunks_exact_mut(3)) {
-                    dst.copy_from_slice(&[src[2], src[1], src[0]]);
-                }
-            }
-            PixelFormat::Rgba8 => {
-                for (src, dst) in source.chunks_exact(4).zip(destination.chunks_exact_mut(3)) {
-                    dst.copy_from_slice(&src[..3]);
-                }
-            }
-            PixelFormat::Gray8 => {
-                for (value, dst) in source.iter().zip(destination.chunks_exact_mut(3)) {
-                    dst.fill(*value);
-                }
-            }
-        }
-    }
-    Ok(staging)
 }
 
 #[cfg(target_os = "windows")]
@@ -573,15 +356,6 @@ fn choose_camera(
         .get(index)
         .cloned()
         .ok_or_else(|| format!("camera index {index} is not available"))
-}
-
-#[cfg(target_os = "windows")]
-fn library_source_name(source: &mediapipe::loader::LibrarySource) -> String {
-    match source {
-        mediapipe::loader::LibrarySource::Env(_) => "environment override".into(),
-        mediapipe::loader::LibrarySource::Cache(_) => "verified cache".into(),
-        mediapipe::loader::LibrarySource::Downloaded(_) => "official PyPI wheel download".into(),
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -725,55 +499,8 @@ mod tests {
         clippy::panic,
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
-    use super::{determinant3, frame_rgb, percentile_ms, video_timestamp_ms};
+    use super::percentile_ms;
     use std::time::Duration;
-    use vtuber_core::{FrameSeq, MonoTimeNs, PixelFormat, VideoFrame};
-
-    #[test]
-    fn timestamp_adapter_is_strictly_increasing() {
-        let mut last = None;
-        assert_eq!(
-            video_timestamp_ms(MonoTimeNs(10_000_000), &mut last).unwrap(),
-            10
-        );
-        assert_eq!(
-            video_timestamp_ms(MonoTimeNs(10_000_000), &mut last).unwrap(),
-            11
-        );
-        assert_eq!(
-            video_timestamp_ms(MonoTimeNs(9_000_000), &mut last).unwrap(),
-            12
-        );
-    }
-
-    #[test]
-    fn rgb_repack_honors_stride_and_channel_order() {
-        let frame = VideoFrame {
-            seq: FrameSeq(1),
-            captured_at: MonoTimeNs(0),
-            width: 1,
-            height: 2,
-            stride_bytes: 4,
-            format: PixelFormat::Bgr8,
-            data: vec![3, 2, 1, 99, 6, 5, 4, 99].into(),
-        };
-        let mut staging = Vec::new();
-        assert_eq!(
-            frame_rgb(&frame, &mut staging).unwrap(),
-            &[1, 2, 3, 4, 5, 6]
-        );
-    }
-
-    #[test]
-    fn identity_matrix_has_unit_determinant() {
-        let matrix = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ];
-        assert_eq!(determinant3(matrix), 1.0);
-    }
 
     #[test]
     fn percentile_is_sorted() {
