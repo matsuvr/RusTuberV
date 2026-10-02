@@ -2,18 +2,24 @@
 
 use vtuber_core::arm_tracking::{ArmControlFrame, ArmTrackingTarget, HandFingerPose};
 
-/// Maximum summed absolute flexion for a finger to count as clearly extended.
+/// Maximum summed absolute flexion for a finger to count as standing straight.
 ///
-/// This is deliberately strict: the policy must not rewrite an ordinary hand
-/// opening or a partially moving finger.
-const EXTENDED_MAX_TOTAL_FLEXION_RAD: f32 = 0.45;
-
-/// Minimum summed absolute flexion for a finger to count as clearly folded.
+/// The same value decides both halves of the test: whether the middle finger is
+/// standing up, and whether a neighbour is standing up beside it. One shared
+/// threshold is what makes the policy stable, because a neighbour is then
+/// either clearly straight or clearly not, and landmark noise cannot leave the
+/// middle finger looking alone while the index is straight too.
 ///
-/// All three non-middle fingers must exceed this value. If any one of them is
-/// opening or otherwise moving out of a folded pose, the middle finger is left
-/// untouched.
-const FOLDED_MIN_TOTAL_FLEXION_RAD: f32 = 1.80;
+/// This is not a question of how far the neighbours are folded. Asking that
+/// needed a second, much larger cut-off, and a naturally held isolated
+/// middle-finger pose never reached it on all three neighbours at once, so the
+/// gesture passed through unfiltered.
+///
+/// A straight finger measures well under half a radian per joint, so 1.2 leaves
+/// room for estimation error and for a middle finger held slightly bent, while
+/// a curled finger passes 1.2 as soon as one knuckle is well past half of its
+/// range.
+const STANDING_MAX_TOTAL_FLEXION_RAD: f32 = 1.2;
 
 /// Rewrites an isolated extended middle finger to the neighbouring folded pose.
 ///
@@ -32,22 +38,21 @@ fn sanitize_target(mut target: ArmTrackingTarget) -> ArmTrackingTarget {
     target
 }
 
-/// Rewrites one hand pose only when the middle finger is the sole extended finger.
+/// Rewrites one hand pose only when the middle finger stands up on its own.
 ///
-/// Index, ring, and little must all be clearly folded. The thumb is deliberately
-/// not used as a gate: its oblique MediaPipe solve is less stable, and a weak
-/// thumb observation must not allow the isolated middle-finger pose through.
-/// When the policy applies, each middle-finger joint takes the median of the
-/// corresponding index, ring, and little joints. This keeps the hand curled
-/// without introducing a fixed authored pose.
+/// The middle finger must be straight and none of the index, ring, or little
+/// may be. Any straight neighbour leaves the pose alone, which is what keeps an
+/// open hand, a peace sign, and a three tracked exactly as they are seen. The
+/// thumb is deliberately not used as a gate: its oblique MediaPipe solve is
+/// less stable, and a weak thumb observation must not allow the isolated
+/// middle-finger pose through. When the policy applies, each middle-finger joint
+/// takes the median of the corresponding index, ring, and little joints. This
+/// keeps the hand curled without introducing a fixed authored pose.
 #[must_use]
 pub fn suppress_isolated_middle_extension_pose(mut pose: HandFingerPose) -> HandFingerPose {
+    let standing = |finger: [f32; 3]| total_flexion(finger) <= STANDING_MAX_TOTAL_FLEXION_RAD;
     let [index, middle, ring, little] = pose.fingers;
-    let isolated_middle = total_flexion(middle) <= EXTENDED_MAX_TOTAL_FLEXION_RAD
-        && [index, ring, little]
-            .into_iter()
-            .all(|finger| total_flexion(finger) >= FOLDED_MIN_TOTAL_FLEXION_RAD);
-    if !isolated_middle {
+    if !standing(middle) || [index, ring, little].into_iter().any(standing) {
         return pose;
     }
 
@@ -89,7 +94,7 @@ mod tests {
             fingers,
             spread: [0.0; 4],
             thumb: [0.4, 0.4],
-            thumb_direction: [1.0, 0.0, 0.0],
+            thumb_spread: 0.3,
         }
     }
 
@@ -120,25 +125,43 @@ mod tests {
         assert_approx_eq(filtered.fingers[1], [0.9, 1.0, 0.5]);
         assert_eq!(filtered.spread, input.spread);
         assert_eq!(filtered.thumb, input.thumb);
-        assert_eq!(filtered.thumb_direction, input.thumb_direction);
+        assert_eq!(filtered.thumb_spread, input.thumb_spread);
     }
 
     #[test]
-    fn middle_extension_is_preserved_when_any_other_finger_is_moving() {
-        let folded = [0.8, 0.9, 0.4];
-        let moving = [0.5, 0.6, 0.4];
-        let extended = [0.05, 0.05, 0.05];
+    fn middle_extension_is_preserved_when_a_neighbour_is_also_standing() {
+        let curled = [0.8, 0.9, 0.4];
+        let standing = [0.05, 0.05, 0.05];
+        let nearly_standing = [0.25, 0.15, 0.1];
         for fingers in [
-            [extended, extended, folded, folded],
-            [folded, extended, extended, folded],
-            [folded, extended, folded, extended],
-            [moving, extended, folded, folded],
-            [folded, extended, moving, folded],
-            [folded, extended, folded, moving],
+            [standing, standing, curled, curled],
+            [curled, standing, standing, curled],
+            [curled, standing, curled, standing],
+            [nearly_standing, standing, curled, curled],
+            [curled, standing, nearly_standing, curled],
+            [curled, standing, curled, nearly_standing],
         ] {
             let input = pose(fingers);
             assert_eq!(suppress_isolated_middle_extension_pose(input), input);
         }
+    }
+
+    #[test]
+    fn a_bent_middle_finger_is_left_alone() {
+        // Only a straight middle finger is the gesture. A middle that is bent
+        // past the standing threshold, even while it is the straightest finger
+        // on the hand, must still track as seen.
+        let curled = [0.8, 0.9, 0.4];
+        let bent_middle = [0.5, 0.45, 0.4];
+        let input = pose([curled, bent_middle, curled, curled]);
+        assert_eq!(suppress_isolated_middle_extension_pose(input), input);
+    }
+
+    #[test]
+    fn a_closed_hand_is_left_alone() {
+        let curled = [1.4, 1.5, 0.8];
+        let input = pose([curled; 4]);
+        assert_eq!(suppress_isolated_middle_extension_pose(input), input);
     }
 
     #[test]

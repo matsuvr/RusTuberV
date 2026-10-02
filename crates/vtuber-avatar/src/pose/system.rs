@@ -393,6 +393,188 @@ pub fn debug_propagation_probe(
     let _ = file.flush();
 }
 
+/// Temporary per-frame arm diagnosis (remove after the investigation).
+///
+/// `propagation_debug.log` samples once per second, which cannot resolve a
+/// single-frame discontinuity. This appends **every render tick** to
+/// `arm_frame_debug.log` so a pop can be read off the frame before and after it.
+///
+/// Each side reports the composed bone rotations, because those are what the
+/// viewer sees, plus the two quantities that decide whether a discontinuity is
+/// reachable at all:
+///
+/// - `up_dot` is the dot of the solved upper-arm direction with its rest
+///   direction. It reaches -1 where the shortest arc the solver takes has no
+///   defined axis, which is where an upper arm can jump.
+/// - `desc` is the signed coronal descent, which wraps at a half turn.
+///
+/// The observation is reported **after** the avatar mirror, because the mirror
+/// decides which observed side drives which bone; the per-second probe reports
+/// the unmirrored sides, which reads as the wrong arm.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "temporary arm probe; each parameter is one stage input written to the debug log"
+)]
+pub fn debug_arm_frame_probe(
+    lifecycle: Res<AvatarLifecycle>,
+    selection: Res<crate::arm_pipeline::ArmSourceSelection>,
+    control: Res<crate::arm_pipeline::TrackedArmControl>,
+    mirror: Option<Res<crate::mirror::AvatarMotionMirror>>,
+    mut frame_counter: Local<u64>,
+    mut log_file: Local<Option<std::fs::File>>,
+    bindings: Query<&AvatarBinding>,
+    dynamic_targets: Query<&crate::arm_pipeline::DynamicArmTargets>,
+    bones: Query<(&Transform, &RestTransform)>,
+) {
+    *frame_counter += 1;
+    if log_file.is_none() {
+        *log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("arm_frame_debug.log")
+            .ok();
+    }
+    let Some(file) = log_file.as_mut() else {
+        return;
+    };
+    use std::io::Write;
+    let mirrored = mirror.as_deref().is_none_or(|mirror| mirror.is_enabled());
+    let root = lifecycle.active_root();
+    let binding = root.and_then(|root| bindings.get(root).ok());
+    // A frame only counts once it belongs to the avatar that is on screen, which
+    // is the same generation guard the compositor applies.
+    let frame = control
+        .frame
+        .filter(|_| control.generation == binding.map(|binding| binding.generation));
+    // Mirrored, because the mirror decides which observed side drives which bone.
+    let (targets, weights) = match frame {
+        Some(_) if mirrored => (
+            frame.map_or_else(Default::default, |frame| frame.targets.mirrored()),
+            frame.map_or_else(Default::default, |frame| frame.weights.mirrored()),
+        ),
+        Some(_) => (
+            frame.map_or_else(Default::default, |frame| frame.targets),
+            frame.map_or_else(Default::default, |frame| frame.weights),
+        ),
+        None => (Default::default(), Default::default()),
+    };
+
+    let mut line = format!(
+        "[arm] frame={}|src={:?} mirror={mirrored}",
+        *frame_counter, selection.mode
+    );
+    if let Some(frame) = frame {
+        line.push_str(&format!("|seq={}", frame.source_seq.0));
+    }
+    match binding.zip(root.and_then(|root| dynamic_targets.get(root).ok())) {
+        Some((binding, dynamic)) => {
+            for (label, chain, pose, target, weight) in [
+                (
+                    "L",
+                    binding.left_arm.as_ref(),
+                    dynamic.left,
+                    targets.left,
+                    weights.left,
+                ),
+                (
+                    "R",
+                    binding.right_arm.as_ref(),
+                    dynamic.right,
+                    targets.right,
+                    weights.right,
+                ),
+            ] {
+                line.push_str(&format!(
+                    "|{label}{}",
+                    arm_side_text(chain, pose.as_ref(), target, weight, &bones)
+                ));
+            }
+        }
+        None => line.push_str("|<no-avatar>"),
+    }
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
+/// One side of the per-frame arm probe: the composed rotations and the two
+/// quantities that make a discontinuity reachable.
+fn arm_side_text(
+    chain: Option<&crate::arm::ArmChainBinding>,
+    pose: Option<&crate::arm_pose::ResolvedArmPose>,
+    target: Option<vtuber_core::arm_tracking::ArmTrackingTarget>,
+    weight: vtuber_core::arm_tracking::ArmBlendWeight,
+    bones: &Query<(&Transform, &RestTransform)>,
+) -> String {
+    let degrees = |entity: Option<Entity>| -> f32 {
+        entity
+            .and_then(|entity| bones.get(entity).ok())
+            .map_or(f32::NAN, |(transform, rest)| {
+                (rest.0.rotation.inverse() * transform.rotation)
+                    .angle_between(Quat::IDENTITY)
+                    .to_degrees()
+            })
+    };
+    let observation = target.map_or_else(
+        || "obs=none".to_string(),
+        |target| {
+            let [x, y, z] = target.wrist;
+            let [ex, ey, ez] = target.elbow_pole;
+            let palm = target.palm_normal.map_or("none".to_string(), |[x, y, z]| {
+                format!("{x:+.2},{y:+.2},{z:+.2}")
+            });
+            format!("w={x:+.2},{y:+.2},{z:+.2} pole={ex:+.2},{ey:+.2},{ez:+.2} palm={palm}")
+        },
+    );
+    let Some(chain) = chain else {
+        return format!("(unbound {observation})");
+    };
+    let rest_direction =
+        crate::arm::finite_normalized(chain.rest.elbow.position - chain.rest.upper_arm.position);
+    let written = bones
+        .get(chain.upper_arm)
+        .ok()
+        .map(|(transform, rest)| rest.0.rotation.inverse() * transform.rotation);
+    let diagnostics = match (rest_direction, written) {
+        (Some(rest_direction), Some(written)) => upper_arm_diagnostics(
+            rest_direction,
+            chain.rest.upper_arm.global_rotation,
+            written,
+        ),
+        _ => (f32::NAN, f32::NAN),
+    };
+    let hand = pose.and_then(|pose| pose.hand).map_or(f32::NAN, |hand| {
+        hand.delta.angle_between(Quat::IDENTITY).to_degrees()
+    });
+    format!(
+        "(sh={:+.1} up={:+.1} up_dot={:+.3} desc={:+.1} lo={:+.1} hand={hand:+.1} \
+         w={:.2}/{:.2}/{:.2} {observation})",
+        degrees(chain.shoulder),
+        degrees(Some(chain.upper_arm)),
+        diagnostics.0,
+        diagnostics.1,
+        degrees(Some(chain.lower_arm)),
+        weight.wrist,
+        weight.pole,
+        weight.palm,
+    )
+}
+
+/// The two numbers that decide whether an upper-arm discontinuity is reachable.
+///
+/// `written` is the bone's rest-relative *local* rotation, so it is conjugated
+/// into model space before it is applied to a model-space direction. `up_dot` is
+/// how close the arm is to pointing opposite its rest direction, which is where
+/// the shortest arc the solver takes has no defined axis. `desc` is the signed
+/// coronal descent, which wraps at a half turn.
+fn upper_arm_diagnostics(rest_direction: Vec3, rest_global: Quat, written: Quat) -> (f32, f32) {
+    let model_delta = rest_global * written * rest_global.inverse();
+    let upper = model_delta * rest_direction;
+    let descent = crate::arm_pipeline::coronal_descent_radians(rest_direction, upper)
+        .map_or(f32::NAN, |radians| radians.to_degrees());
+    (upper.dot(rest_direction), descent)
+}
+
 /// Renders the observed-arm authority and per-side blend state for the probe.
 ///
 /// This is what separates "the hand was not seen" from "it was seen and the
@@ -562,6 +744,45 @@ mod tests {
     use vtuber_core::types::{
         ExpressionCoefficients, FrameSeq, HeadPose, HeadTranslationSignal, MonoTimeNs,
     };
+
+    #[test]
+    fn arm_probe_diagnostics_read_the_composed_bone_correctly() {
+        // A T-pose arm, authored with a non-identity local rotation the way a real
+        // VRM bone is, so the conjugation into model space is actually exercised.
+        let rest_direction = Vec3::X;
+        let rest_global = Quat::from_rotation_z(0.7);
+        // A local rotation that must be conjugated before it means anything in
+        // model space: the same local angle about a different axis is a different
+        // model-space rotation.
+        let written = Quat::from_rotation_y(0.5);
+        let (dot, descent) = upper_arm_diagnostics(rest_direction, rest_global, written);
+        let model_delta = rest_global * written * rest_global.inverse();
+        let expected = model_delta * rest_direction;
+        assert!((dot - expected.dot(rest_direction)).abs() < 1.0e-5);
+        assert!(descent.is_finite());
+
+        // At rest the arm points along its rest direction: dot 1, no descent.
+        let (rest_dot, rest_descent) =
+            upper_arm_diagnostics(rest_direction, rest_global, Quat::IDENTITY);
+        assert!((rest_dot - 1.0).abs() < 1.0e-5, "rest dot was {rest_dot}");
+        assert!(
+            rest_descent.abs() < 1.0e-3,
+            "rest descent was {rest_descent}"
+        );
+
+        // The antipode: the arm pointing opposite its rest direction is where the
+        // shortest arc off rest has no defined axis. The probe must be able to
+        // see the approach, so `dot` has to run down to -1 there.
+        let (anti_dot, _) = upper_arm_diagnostics(
+            rest_direction,
+            rest_global,
+            rest_global.inverse() * Quat::from_rotation_y(std::f32::consts::PI) * rest_global,
+        );
+        assert!(
+            (anti_dot + 1.0).abs() < 1.0e-5,
+            "the antipode must read as dot -1, got {anti_dot}"
+        );
+    }
 
     fn frame(state: TrackingState) -> AvatarControlFrame {
         AvatarControlFrame {

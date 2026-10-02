@@ -297,9 +297,11 @@ fn to_eye_rotation(
     rest_tf: &RestTransform,
     rest_gtf: &RestGlobalTransform,
 ) -> Quat {
-    (rest_tf.rotation * rest_gtf.rotation().inverse())
-        * Quat::from_euler(EulerRot::YXZ, yaw.to_radians(), pitch.to_radians(), 0.0)
-        * rest_gtf.rotation()
+    rest_tf.rotation
+        * crate::skeleton::rest_delta(
+            Quat::from_euler(EulerRot::YXZ, yaw.to_radians(), pitch.to_radians(), 0.0),
+            rest_gtf.rotation(),
+        )
 }
 
 fn map_range_output(input: f32, range: RangeMap) -> f32 {

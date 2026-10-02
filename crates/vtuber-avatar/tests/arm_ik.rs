@@ -123,7 +123,7 @@ fn asymmetric_lengths_are_used_without_iterative_solving() {
 }
 
 #[test]
-fn unreachable_targets_are_clamped_at_both_annulus_boundaries() {
+fn unreachable_targets_are_clamped_to_extension_and_flexion_limits() {
     let chain = chain(ArmSide::Left, 0.9, 0.4);
     let far = solve_two_bone_arm(input_for(
         &chain,
@@ -144,7 +144,43 @@ fn unreachable_targets_are_clamped_at_both_annulus_boundaries() {
     assert_finite_solution(&far);
     assert_finite_solution(&folded);
     assert!((far.solved_reach - (1.3 - 1.0e-4)).abs() < 1.0e-5);
-    assert!((folded.solved_reach - (0.5 + 1.0e-4)).abs() < 1.0e-5);
+    let upper = (folded.elbow - chain.rest.upper_arm.position).normalize();
+    let lower = (folded.wrist - folded.elbow).normalize();
+    assert!((upper.dot(lower).clamp(-1.0, 1.0).acos() - 130.0_f32.to_radians()).abs() < 1.0e-5);
+}
+
+#[test]
+fn elbow_flexion_uses_one_rest_axis_across_poles_and_non_identity_bone_axes() {
+    for side in [ArmSide::Left, ArmSide::Right] {
+        let mut chain = chain(side, 0.7, 0.55);
+        chain.rest.upper_arm.global_rotation = Quat::from_rotation_y(0.6);
+        chain.rest.elbow.global_rotation = Quat::from_rotation_x(0.4) * Quat::from_rotation_z(-0.5);
+        for pole in [Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+            let input = ArmIkInput::from_chain(
+                &chain,
+                ArmIkTarget {
+                    wrist: chain.rest.upper_arm.position + Vec3::new(0.8, -0.3, 0.2),
+                    elbow_pole: chain.rest.upper_arm.position + pole,
+                },
+            );
+            let solution = solve_two_bone_arm(input).unwrap();
+            let hinge = chain.rest.elbow.global_rotation
+                * solution.lower_arm_delta
+                * chain.rest.elbow.global_rotation.inverse();
+            assert!(
+                (hinge * input.elbow_axis).distance(input.elbow_axis) < 1.0e-5,
+                "flexion must not introduce extra elbow axes"
+            );
+            let upper_model =
+                solution.upper_arm_global_rotation * chain.rest.upper_arm.global_rotation.inverse();
+            let elbow = chain.rest.upper_arm.position
+                + upper_model * (chain.rest.elbow.position - chain.rest.upper_arm.position);
+            let wrist = elbow
+                + upper_model * hinge * (chain.rest.wrist.position - chain.rest.elbow.position);
+            assert!(elbow.distance(solution.elbow) < 1.0e-5);
+            assert!(wrist.distance(solution.wrist) < 1.0e-5);
+        }
+    }
 }
 
 #[test]

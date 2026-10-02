@@ -231,7 +231,10 @@ impl TranslationFilter {
             return signal;
         }
 
-        let alpha = 1.0 - (-dt.as_secs_f32() / self.tau.as_secs_f32()).exp();
+        let alpha = crate::filter::exponential::time_constant_alpha(
+            self.tau.as_secs_f32(),
+            dt.as_secs_f32(),
+        );
         let lerp = |previous_value: f32, next_value: f32| {
             previous_value + (next_value - previous_value) * alpha
         };

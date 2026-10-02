@@ -38,6 +38,7 @@ pub mod placeholder;
 pub mod plugin;
 pub mod pose;
 pub mod render_output;
+mod skeleton;
 pub mod tracking_profile;
 pub mod unload;
 pub mod vrm0;
@@ -51,8 +52,8 @@ pub use arm::{
     RestSpaceBonePose, default_arm_target, solve_two_bone_arm,
 };
 pub use arm_motion_geometry::{
-    ArmMotionGeometry, ArmMotionRestGeometry, ElbowSwivelReference, ForearmTwistAxisInfo,
-    HipsAnchorFrame, build_arm_motion_rest_geometry,
+    ArmMotionGeometry, ArmMotionRestGeometry, ElbowSwivelReference, HipsAnchorFrame,
+    build_arm_motion_rest_geometry,
 };
 pub use arm_pipeline::{
     ArmPipelineError, ArmPipelineInput, ArmPipelineOutcome, ArmPoseSourceKind, ArmPoseSourceUsed,
@@ -134,8 +135,7 @@ pub use render_output::{
     register_output_systems,
 };
 pub use tracked_arm::{
-    blend_arm_targets, resolved_tracked_arm_pose, solve_tracked_arm, tracked_arm_ik_target,
-    tracking_to_rest_rotation,
+    resolved_tracked_arm_pose, solve_tracked_arm, tracked_arm_ik_target, tracking_to_rest_rotation,
 };
 pub use tracking_profile::{
     GlobalBodyTrackingProfile, TRACKING_PROFILE_SCHEMA_VERSION, TrackingProfileDocument,

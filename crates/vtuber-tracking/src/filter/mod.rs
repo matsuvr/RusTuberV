@@ -1,11 +1,13 @@
 //! Tracking filters: rotation/point smoothing and expression
 //! normalization / smoothing.
 
-pub(crate) mod damped;
+pub mod damped;
 pub mod detailed;
+pub mod exponential;
 pub mod expression;
 pub mod gaze;
 pub mod head;
+pub mod time;
 pub mod translation;
 
 pub use detailed::DetailedExpressionFilter;

@@ -25,7 +25,7 @@ whether application-local runtime distribution is permitted.
   or the local SDK installation and is never downloaded.
 - Require the exact SDK license agreement file, SDK version, and SDK package
   SHA-256 as package inputs.
-- Place the runtime beside vtuber-desktop.exe; never install it into a
+- Place the runtime beside RusTuberV.exe; never install it into a
   system directory, edit PATH, or include NDI Tools.
 - Generate NDI_RUNTIME_MANIFEST.txt with runtime/license hashes and explicit
   exclusions for Advanced/HX, audio, and system installation.

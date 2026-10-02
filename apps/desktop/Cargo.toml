@@ -10,7 +10,7 @@ repository.workspace = true
 description = "Desktop executable for RusTuberV."
 
 [[bin]]
-name = "vtuber-desktop"
+name = "RusTuberV"
 path = "src/main.rs"
 
 [dependencies]

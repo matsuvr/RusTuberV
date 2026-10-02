@@ -16,7 +16,7 @@ const RUNTIME_LICENSES_FILE: &str = "Processing.NDI.Lib.Licenses.txt";
 const USAGE_FILE: &str = "README_NDI.md";
 const NOTICES_FILE: &str = "THIRD_PARTY_NOTICES.md";
 const MANIFEST_FILE: &str = "NDI_RUNTIME_MANIFEST.txt";
-const EXECUTABLE_FILE: &str = "vtuber-desktop.exe";
+const EXECUTABLE_FILE: &str = "RusTuberV.exe";
 const MODEL_MANIFEST_FILE: &str = "assets/models/manifest.toml";
 const MODEL_TASK_FILE: &str = "assets/models/face_landmarker.task";
 const MODEL_LICENSE_FILE: &str = "assets/models/LICENSE.mediapipe.txt";
@@ -556,7 +556,7 @@ impl PackageOptions {
     fn parse(args: &[String]) -> Result<Option<Self>, String> {
         let mut output = None;
         let workspace_root = workspace_root();
-        let mut executable = workspace_root.join("target/release/vtuber-desktop.exe");
+        let mut executable = workspace_root.join("target/release/RusTuberV.exe");
         let mut runtime_dll = None;
         let mut sdk_license = None;
         let mut sdk_version = None;
@@ -766,7 +766,7 @@ fn print_package_help() {
     println!("    --sdk-license <NDI SDK License Agreement.pdf> \\");
     println!("    --sdk-version <version> \\");
     println!("    [--sdk-package-sha256 <sha256> | --sdk-package-unavailable] \\");
-    println!("    [--executable <vtuber-desktop.exe>] [--runtime-licenses <txt>] \\");
+    println!("    [--executable <RusTuberV.exe>] [--runtime-licenses <txt>] \\");
     println!("    [--usage <README_NDI.md>] [--zip <output.zip>] [--force]");
 }
 

@@ -75,12 +75,6 @@ pub enum UiAction {
     /// Unload the current avatar.
     UnloadAvatar,
 
-    // --- Lifecycle actions ---
-    /// Start all workers (capture → inference → tracking).
-    Start,
-    /// Stop all workers in reverse order.
-    Stop,
-
     // --- NDI output actions ---
     /// Start the optional transparent avatar NDI output.
     StartNdiOutput,
@@ -204,20 +198,10 @@ mod tests {
     use crate::ui_model::Pane;
 
     #[test]
-    fn actions_start_does_not_require_pipeline() {
-        assert!(!UiAction::Start.requires_running_pipeline());
-    }
-
-    #[test]
     fn actions_calibration_requires_pipeline() {
         assert!(UiAction::BeginCalibration.requires_running_pipeline());
         assert!(UiAction::CancelCalibration.requires_running_pipeline());
         assert!(UiAction::RetryCalibration.requires_running_pipeline());
-    }
-
-    #[test]
-    fn actions_stop_does_not_require_pipeline() {
-        assert!(!UiAction::Stop.requires_running_pipeline());
     }
 
     #[test]
@@ -236,8 +220,6 @@ mod tests {
 
     #[test]
     fn actions_non_navigation_is_not_navigation() {
-        assert!(!UiAction::Start.is_navigation());
-        assert!(!UiAction::Stop.is_navigation());
         assert!(!UiAction::RefreshCameras.is_navigation());
     }
 
@@ -289,7 +271,7 @@ mod tests {
 
     #[test]
     fn actions_are_clone_and_eq() {
-        let a = UiAction::Start;
+        let a = UiAction::SelectCamera { index: 1 };
         let b = a.clone();
         assert_eq!(a, b);
     }

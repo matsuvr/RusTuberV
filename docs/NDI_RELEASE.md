@@ -33,7 +33,7 @@ cargo check --workspace --no-default-features
 
 For an NDI-enabled local build, `apps/desktop/build.rs` reads the x64 import
 library and stages the matching Standard SDK runtime beside
-`vtuber-desktop.exe` in `target/debug` or `target/release`. It does not download
+`RusTuberV.exe` in `target/debug` or `target/release`. It does not download
 or install anything. Set `NDI_RUNTIME_DLL` to an explicitly selected SDK DLL
 when the runtime is not at the SDK's `Bin\x64` directory; otherwise the build
 fails before producing an unlaunchable NDI artifact. Both the current
@@ -127,7 +127,7 @@ and it does not make a legal determination.
 Expected top-level package:
 
 ~~~~text
-vtuber-desktop.exe
+RusTuberV.exe
 Processing.NDI.Lib.x64.dll
 # or Processing.NDI.Lib_x64.dll when that is the executable's import name
 NDI_SDK_LICENSE_AGREEMENT.pdf

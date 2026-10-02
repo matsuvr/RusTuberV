@@ -97,7 +97,7 @@ pub struct Orchestrator {
     next_load_request_id: u64,
     /// Mirror of the avatar lifecycle state, updated by the sync system.
     lifecycle_state: crate::ui_model::AvatarLifecycleState,
-    /// Whether capture should be running (set by Start/Stop actions).
+    /// Whether capture should be running for the selected avatar and camera.
     capture_desired: bool,
     /// Whether the capture system has acknowledged the current intent.
     capture_ack: bool,
@@ -107,8 +107,6 @@ pub struct Orchestrator {
     calibration_request: Option<CalibrationRequest>,
     /// Whether inference should be restarted after a recoverable worker error.
     inference_retry_requested: bool,
-    /// Whether the automatic start after setup completion is still pending.
-    auto_start_armed: bool,
 }
 
 /// Calibration intent passed from UI orchestration to the tracking domain.
@@ -161,10 +159,6 @@ pub enum OrchestratorError {
     NoCameraSelected,
     /// No avatar loaded.
     NoAvatarLoaded,
-    /// Pipeline already running.
-    PipelineAlreadyRunning,
-    /// Pipeline not running.
-    PipelineNotRunning,
     /// The avatar lifecycle rejected an imported model load request.
     AvatarLoadRejected(String),
     /// The avatar lifecycle entered a failed state while loading or binding.
@@ -189,8 +183,6 @@ impl fmt::Display for OrchestratorError {
             Self::ImportFailed(msg) => write!(f, "Import failed: {msg}"),
             Self::NoCameraSelected => write!(f, "No camera selected"),
             Self::NoAvatarLoaded => write!(f, "No avatar loaded"),
-            Self::PipelineAlreadyRunning => write!(f, "Pipeline already running"),
-            Self::PipelineNotRunning => write!(f, "Pipeline not running"),
             Self::AvatarLoadRejected(msg) => write!(f, "Avatar load rejected: {msg}"),
             Self::AvatarLifecycleFailed(msg) => write!(f, "Avatar lifecycle failed: {msg}"),
             Self::ArmPoseSettingsFailed(msg) => write!(f, "Arm-pose settings failed: {msg}"),
@@ -230,7 +222,6 @@ impl Default for Orchestrator {
             camera_refresh_requested: true,
             calibration_request: None,
             inference_retry_requested: false,
-            auto_start_armed: true,
         }
     }
 }
@@ -276,12 +267,6 @@ impl Orchestrator {
             }
             UiAction::UnloadAvatar => {
                 self.unload_avatar();
-            }
-            UiAction::Start => {
-                self.start_pipeline();
-            }
-            UiAction::Stop => {
-                self.stop_pipeline();
             }
             UiAction::DismissError => {
                 self.last_error = None;
@@ -335,14 +320,16 @@ impl Orchestrator {
             .and_then(|id| self.cameras.iter().position(|camera| camera.id == *id));
     }
 
-    /// Select a camera by index.
+    /// Select a camera, stopping the previous session before automatic startup.
     fn select_camera(&mut self, index: usize) {
-        if index < self.cameras.len() {
-            self.selected_camera = Some(index);
-            // Choosing a camera completes the camera setup step, so tracking
-            // may start once the avatar is also ready.
-            self.auto_start_armed = true;
+        if index >= self.cameras.len()
+            || (self.selected_camera == Some(index) && self.pipeline_state != PipelineState::Failed)
+        {
+            return;
         }
+        self.selected_camera = Some(index);
+        self.last_error = None;
+        self.stop_pipeline();
     }
 
     /// Import an avatar from the given path.
@@ -378,9 +365,10 @@ impl Orchestrator {
 
     /// Unload the current avatar.
     ///
-    /// Clears the imported model and any pending load request. The sync system
-    /// detects the removal and emits an `UnloadAvatarRequest`.
+    /// Stops tracking and clears the imported model and pending load requests.
+    /// The sync system requests removal of the active avatar.
     fn unload_avatar(&mut self) {
+        self.stop_pipeline();
         self.imported_model = None;
         self.import_state = ImportState::Idle;
         self.pending_load = None;
@@ -450,51 +438,24 @@ impl Orchestrator {
         }
     }
 
-    /// Start the tracking pipeline.
-    fn start_pipeline(&mut self) {
-        if self.pipeline_state == PipelineState::Running
-            || self.pipeline_state == PipelineState::Starting
-        {
-            self.last_error = Some(OrchestratorError::PipelineAlreadyRunning);
-            return;
-        }
-        if self.selected_camera.is_none() {
-            self.last_error = Some(OrchestratorError::NoCameraSelected);
-            return;
-        }
-        if self.imported_model.is_none() {
-            self.last_error = Some(OrchestratorError::NoAvatarLoaded);
-            return;
-        }
-        self.pipeline_state = PipelineState::Starting;
-        self.capture_desired = true;
-        self.capture_ack = false;
-        self.inference_retry_requested = false;
-        self.auto_start_armed = false;
-    }
-
     /// Starts tracking automatically once setup is complete: the avatar is
-    /// ready and a camera is selected.
-    ///
-    /// A successful import or an explicit camera selection arms this start,
-    /// which then fires once the lifecycle reports ready. Starting (manually
-    /// or automatically) and stopping disarm it, so a user-requested stop is
-    /// not overridden on the next frame.
+    /// ready, a camera is selected, and the pipeline is idle.
     pub fn maybe_auto_start_tracking(&mut self) {
-        if !self.auto_start_armed
-            || self.pipeline_state != PipelineState::Idle
+        if self.pipeline_state != PipelineState::Idle
             || self.lifecycle_state != AvatarLifecycleState::Ready
             || self.selected_camera.is_none()
             || self.imported_model.is_none()
         {
             return;
         }
-        self.start_pipeline();
+        self.pipeline_state = PipelineState::Starting;
+        self.capture_desired = true;
+        self.capture_ack = false;
+        self.inference_retry_requested = false;
     }
 
     /// Stop the tracking pipeline.
     fn stop_pipeline(&mut self) {
-        self.auto_start_armed = false;
         if self.pipeline_state == PipelineState::Idle
             || self.pipeline_state == PipelineState::Stopping
         {
@@ -1548,7 +1509,6 @@ pub fn sync_avatar_lifecycle_system(
                         );
                     }
                     orchestrator.imported_model = Some(submitted.model);
-                    orchestrator.auto_start_armed = true;
                 }
             }
             vtuber_avatar::LoadImportedAvatarResult::Rejected { request_id, error } => {
@@ -2516,34 +2476,16 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_start_without_camera_sets_error() {
-        let mut orch = Orchestrator {
-            imported_model: Some(ImportedModel {
-                id: "test".into(),
-                name: "test".into(),
-                asset_path: PathBuf::new(),
-                meta_path: PathBuf::new(),
-                summary: Default::default(),
-                original_path: PathBuf::new(),
-                size: 0,
-            }),
-            ..Default::default()
-        };
-        orch.process_action(&UiAction::Start);
-        assert_eq!(
-            orch.last_error(),
-            Some(&OrchestratorError::NoCameraSelected)
-        );
-    }
-
-    #[test]
-    fn orchestrator_start_without_avatar_sets_error() {
+    fn auto_start_waits_quietly_for_avatar() {
         let mut orch = Orchestrator {
             selected_camera: Some(0),
+            lifecycle_state: AvatarLifecycleState::Ready,
             ..Default::default()
         };
-        orch.process_action(&UiAction::Start);
-        assert_eq!(orch.last_error(), Some(&OrchestratorError::NoAvatarLoaded));
+        orch.maybe_auto_start_tracking();
+        assert_eq!(orch.pipeline_state(), PipelineState::Idle);
+        assert!(!orch.capture_desired());
+        assert!(orch.last_error().is_none());
     }
 
     #[test]
@@ -2592,45 +2534,62 @@ mod tests {
     }
 
     #[test]
-    fn manual_stop_disarms_auto_start() {
+    fn camera_change_waits_for_capture_stop_then_starts_latest_selection() {
         let mut orch = Orchestrator {
             imported_model: Some(stub_imported_model()),
             selected_camera: Some(0),
             lifecycle_state: AvatarLifecycleState::Ready,
+            cameras: (0..3)
+                .map(|index| CameraDescriptor {
+                    id: format!("test:{index}"),
+                    label: format!("Test camera {index}"),
+                })
+                .collect(),
+            pipeline_state: PipelineState::Running,
+            capture_desired: true,
             ..Default::default()
         };
-        orch.maybe_auto_start_tracking();
-        orch.process_action(&UiAction::Stop);
-        orch.complete_capture_stop();
-        assert_eq!(orch.pipeline_state(), PipelineState::Idle);
 
+        orch.process_action(&UiAction::SelectCamera { index: 1 });
         orch.maybe_auto_start_tracking();
-
-        assert_eq!(orch.pipeline_state(), PipelineState::Idle);
+        assert_eq!(orch.pipeline_state(), PipelineState::Stopping);
         assert!(!orch.capture_desired());
+        assert!(!orch.capture_ack());
+
+        // Another dropdown choice during shutdown replaces the pending camera.
+        orch.process_action(&UiAction::SelectCamera { index: 2 });
+        orch.maybe_auto_start_tracking();
+        assert_eq!(orch.pipeline_state(), PipelineState::Stopping);
+        assert_eq!(orch.selected_camera, Some(2));
+
+        orch.complete_capture_stop();
+        orch.maybe_auto_start_tracking();
+        assert_eq!(orch.pipeline_state(), PipelineState::Starting);
+        assert!(orch.capture_desired());
+        assert!(!orch.capture_ack());
     }
 
     #[test]
-    fn selecting_a_camera_rearms_auto_start_after_stop() {
+    fn selecting_the_running_camera_keeps_the_session() {
         let mut orch = Orchestrator {
             imported_model: Some(stub_imported_model()),
             selected_camera: Some(0),
             lifecycle_state: AvatarLifecycleState::Ready,
+            cameras: vec![CameraDescriptor {
+                id: "test:0".into(),
+                label: "Test camera".into(),
+            }],
+            pipeline_state: PipelineState::Running,
+            capture_desired: true,
             ..Default::default()
         };
-        orch.maybe_auto_start_tracking();
-        orch.process_action(&UiAction::Stop);
-        orch.complete_capture_stop();
 
-        orch.set_camera_list(vec![CameraDescriptor {
-            id: "test:0".into(),
-            label: "Test camera".into(),
-        }]);
         orch.process_action(&UiAction::SelectCamera { index: 0 });
         orch.maybe_auto_start_tracking();
 
-        assert_eq!(orch.pipeline_state(), PipelineState::Starting);
+        assert_eq!(orch.pipeline_state(), PipelineState::Running);
         assert!(orch.capture_desired());
+        assert!(orch.capture_ack());
     }
 
     #[test]

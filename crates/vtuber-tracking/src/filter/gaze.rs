@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use super::exponential::half_life_alpha;
 use vtuber_core::{GazeSignal, GazeTrackingState};
 
 /// Default tracked-motion half-life.
@@ -69,7 +70,10 @@ impl GazeFilter {
                 self.current = GazeSignal::degraded(0.0, 0.0, 0.0);
                 self.initialized = true;
             }
-            let alpha = smoothing_alpha(dt, self.params.tracked_half_life);
+            let alpha = half_life_alpha(
+                self.params.tracked_half_life.as_secs_f32(),
+                dt.as_secs_f32(),
+            );
             self.current = blend(self.current, input, alpha, input.state());
             return self.current;
         }
@@ -87,7 +91,7 @@ impl GazeFilter {
             return self.current;
         }
 
-        let alpha = smoothing_alpha(dt, self.params.return_half_life);
+        let alpha = half_life_alpha(self.params.return_half_life.as_secs_f32(), dt.as_secs_f32());
         self.current = blend(
             self.current,
             GazeSignal::degraded(0.0, 0.0, 0.0),
@@ -103,15 +107,6 @@ impl GazeFilter {
         }
         self.current
     }
-}
-
-fn smoothing_alpha(dt: Duration, half_life: Duration) -> f32 {
-    if half_life.is_zero() {
-        return 1.0;
-    }
-    let dt = dt.as_secs_f32().max(0.0);
-    let half_life = half_life.as_secs_f32();
-    (1.0 - (-std::f32::consts::LN_2 * dt / half_life).exp()).clamp(0.0, 1.0)
 }
 
 fn blend(from: GazeSignal, to: GazeSignal, t: f32, state: GazeTrackingState) -> GazeSignal {

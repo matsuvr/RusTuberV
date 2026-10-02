@@ -58,10 +58,16 @@ fn build_rig(
 ) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
+        .init_resource::<vtuber_avatar::direct_position::TorsoLeanBases>()
         .insert_resource(TimeUpdateStrategy::ManualInstant(instant_at(0)))
         .add_systems(
             PostUpdate,
-            (apply_direct_body_tracking, apply_direct_body_position).chain(),
+            (
+                vtuber_avatar::direct_position::restore_torso_lean,
+                apply_direct_body_tracking,
+                apply_direct_body_position,
+            )
+                .chain(),
         );
 
     let root = app
@@ -266,6 +272,74 @@ fn literal_same_tick_reevaluation_is_bit_stable() {
     tick(&mut app, FRAME_MILLIS);
     assert_relative_vec(head_world_position(&app, rig.head), head_first);
     assert_relative_quat(bone_rotation(&app, rig.spine), spine_first);
+}
+
+#[test]
+fn large_lean_does_not_become_the_next_animation_base() {
+    let mut app = build_rig(
+        false,
+        false,
+        live_input(Vec3::new(0.3, 0.0, 0.0), Vec3::ZERO),
+    );
+    let rig = rig_of(&app);
+    tick(&mut app, FRAME_MILLIS);
+    let steady = head_world_position(&app, rig.head);
+    for frame in 2..=120 {
+        tick(&mut app, FRAME_MILLIS * frame);
+        assert_relative_vec(head_world_position(&app, rig.head), steady);
+    }
+    *app.world_mut()
+        .get_mut::<BodyTrackingPositionInput>(rig.root)
+        .unwrap() = Default::default();
+    tick(&mut app, FRAME_MILLIS * 121);
+    assert_relative_quat(bone_rotation(&app, rig.spine), Quat::IDENTITY);
+    assert_relative_quat(bone_rotation(&app, rig.chest), Quat::IDENTITY);
+}
+
+#[test]
+fn lean_uses_model_axes_with_rotated_root_and_authored_joint_frames() {
+    let input = live_input(Vec3::new(0.08, 0.0, 0.035), Vec3::ZERO);
+    let mut baseline = build_rig(true, true, input);
+    tick(&mut baseline, FRAME_MILLIS);
+    let expected = head_world_position(&baseline, rig_of(&baseline).head);
+    for yaw in [0.6, std::f32::consts::PI] {
+        let mut app = build_rig(true, true, input);
+        let rig = rig_of(&app);
+        let placement = Quat::from_rotation_y(yaw);
+        app.world_mut()
+            .get_mut::<Transform>(rig.root)
+            .unwrap()
+            .rotation = placement;
+        *app.world_mut()
+            .get_mut::<GlobalTransform>(rig.root)
+            .unwrap() = GlobalTransform::from(Transform::from_rotation(placement));
+        let mut parent = *app.world().get::<GlobalTransform>(rig.root).unwrap();
+        for entity in [
+            Some(rig.spine),
+            Some(rig.chest),
+            rig.upper_chest,
+            rig.neck,
+            Some(rig.head),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut local = *app.world().get::<Transform>(entity).unwrap();
+            local.rotation = Quat::from_rotation_y(0.4);
+            let global = parent.mul_transform(local);
+            app.world_mut().entity_mut(entity).insert((
+                local,
+                global,
+                RestTransform(local),
+                RestGlobalTransform(global),
+            ));
+            parent = global;
+        }
+        for frame in 1..=20 {
+            tick(&mut app, FRAME_MILLIS * frame);
+            assert_relative_vec(head_world_position(&app, rig.head), placement * expected);
+        }
+    }
 }
 
 #[test]

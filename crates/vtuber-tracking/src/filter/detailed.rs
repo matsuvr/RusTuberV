@@ -64,9 +64,7 @@ impl DetailedExpressionFilter {
             self.last_time = Some(now);
             return self.coefficients();
         }
-        let dt_sec = ((now.0 - last_time.0) as f32 / 1_000_000_000.0)
-            .min(self.params.max_dt_sec)
-            .max(0.0);
+        let dt_sec = super::time::elapsed_seconds(now, last_time, self.params.max_dt_sec);
         self.last_time = Some(now);
         if dt_sec > 0.0 {
             self.smooth(input, dt_sec);
@@ -83,13 +81,7 @@ impl DetailedExpressionFilter {
     fn smooth(&mut self, input: &Arkit52Coefficients, dt_sec: f32) {
         for (channel, slot) in ArkitBlendshape::ALL.into_iter().zip(self.values.iter_mut()) {
             let target = coefficient(channel, input);
-            let tau = if target > *slot {
-                self.params.attack_time_constant_sec
-            } else {
-                self.params.release_time_constant_sec
-            }
-            .max(f32::EPSILON);
-            let alpha = (1.0 - (-dt_sec / tau).exp()).clamp(0.0, 1.0);
+            let alpha = self.params.alpha(*slot, target, dt_sec);
             *slot = (*slot + alpha * (target - *slot)).clamp(0.0, 1.0);
         }
     }

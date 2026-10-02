@@ -5,12 +5,12 @@
 //! rest components or accumulating the delta from one frame to the next.
 
 use bevy::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::arm::{
     ArmChainBinding, ArmIkInput, ArmIkSolution, ArmPoseProfile, ArmPoseProfileOverride,
     ArmPoseProfileOverrideError, FingerJointRestBinding, FingerJointRestReferences,
-    FingerRestReferences, solve_two_bone_arm,
+    solve_two_bone_arm,
 };
 use crate::arm_pipeline::DynamicArmProfileOverride;
 use crate::binding::AvatarBinding;
@@ -18,18 +18,6 @@ use crate::lifecycle::{ActiveAvatar, AvatarGeneration};
 use crate::load::AvatarAssetId;
 
 const ROTATION_MATCH_EPSILON: f32 = 1.0e-6;
-const SHOULDER_FOLLOW_MAX_RADIANS: f32 = 5.0_f32.to_radians();
-/// Share of a shoulder model-space rotation inherited by the upper arm.
-///
-/// The hierarchy already carries the shoulder rotation rigidly to its
-/// children; this small extra share changes the relative bend so the arm
-/// does not rotate as a single rigid stick.
-pub(crate) const SHOULDER_TO_UPPER_SHARE: f32 = 0.3;
-/// Share of a shoulder model-space rotation inherited by the forearm.
-///
-/// Smaller than the upper-arm share so motion visibly decays toward the
-/// terminal bones instead of stopping at the shoulder.
-pub(crate) const SHOULDER_TO_LOWER_SHARE: f32 = 0.15;
 /// Normal default-pose transition duration.
 pub const DEFAULT_ARM_TRANSITION_SECONDS: f32 = 0.25;
 /// Slower return-to-default transition duration.
@@ -431,8 +419,8 @@ impl ArmPoseBlendSide {
             from,
             target,
             elapsed_seconds: 0.0,
-            duration_seconds: if duration_seconds.is_finite() {
-                duration_seconds.max(0.0)
+            duration_seconds: if duration_seconds.is_finite() && duration_seconds > f32::EPSILON {
+                duration_seconds
             } else {
                 0.0
             },
@@ -450,11 +438,10 @@ impl ArmPoseBlendSide {
     /// Returns the shortest-arc interpolated pose at the current time.
     #[must_use]
     pub fn current(self) -> ResolvedArmPose {
-        let amount = if self.duration_seconds <= f32::EPSILON {
-            1.0
-        } else {
-            (self.elapsed_seconds / self.duration_seconds).clamp(0.0, 1.0)
-        };
+        let amount = vtuber_tracking::filter::time::transition_progress(
+            self.elapsed_seconds,
+            self.duration_seconds,
+        );
         blend_pose(self.from, self.target, amount)
     }
 }
@@ -590,9 +577,8 @@ pub(crate) fn solve_stage(
     chain: &ArmChainBinding,
     profile: crate::arm::ArmPoseProfile,
     target: &crate::arm::ArmIkTarget,
-    twist_relax: Option<&crate::arm_pipeline::TwistRelaxParams<'_>>,
 ) -> Result<Option<ResolvedArmPose>, crate::arm_pipeline::ArmPipelineError> {
-    let input = ArmIkInput::from_geometry(chain.rest, *target);
+    let input = ArmIkInput::from_chain(chain, *target);
     let mut solution =
         solve_two_bone_arm(input).map_err(crate::arm_pipeline::ArmPipelineError::Solve)?;
     // Stage 3b: the coronal descent limit keeps the arm out of the torso
@@ -603,19 +589,16 @@ pub(crate) fn solve_stage(
         &input,
         crate::arm_pipeline::MAX_ARM_DROP_RADIANS,
     );
-    if let Some(params) = twist_relax {
-        crate::arm_pipeline::relax_forearm_twist(&mut solution, params)?;
-    }
     resolved_from_solution(chain, &solution, profile)
 }
 
-/// Stages 2..=4 shared by every source: turn a solved analytic pose into the
+/// Stages 2..=4 for a virtual/default arm: turn a solved analytic pose into the
 /// final rest-relative deltas the compositor writes.
 ///
 /// The hand target is produced by an earlier stage; this function never
 /// generates one. `Ok(None)` means the solved pose was degenerate (non-finite
-/// or identity) and the side should stay untouched. Tracked-pose resolution
-/// reuses this exact conversion so the two paths cannot drift.
+/// or identity) and the side should stay untouched. The observed path uses the
+/// same fixed-axis IK and rest-delta helpers.
 pub(crate) fn resolved_from_solution(
     chain: &ArmChainBinding,
     solution: &ArmIkSolution,
@@ -629,42 +612,15 @@ pub(crate) fn resolved_from_solution(
         return Ok(None);
     }
 
-    let upper_model_delta = normalized_or_identity(
-        solution.upper_arm_global_rotation * chain.rest.upper_arm.global_rotation.inverse(),
-    )
-    .ok_or(crate::arm_pipeline::ArmPipelineError::DegenerateSolvedPose)?;
-    let shoulder = chain
-        .shoulder
-        .zip(chain.rest.shoulder)
-        .and_then(|(entity, rest)| {
-            weak_follow_delta(
-                upper_model_delta,
-                rest.global_rotation,
-                chain.rest.elbow.position - chain.rest.upper_arm.position,
-                profile.shoulder_follow_weight,
-            )
-            .map(|delta| ResolvedBoneDelta { entity, delta })
-        });
-
-    let (mut upper_arm_delta, mut lower_arm_delta) = (
-        solution.upper_arm_delta.normalize(),
-        solution.lower_arm_delta.normalize(),
-    );
-    // Downstream propagation: a small share of the shoulder's own
-    // model-space rotation reaches the elbow and wrist so the bend follows
-    // the shoulder instead of locking into a rigid stick.
-    if let Some(shoulder_delta) = shoulder.zip(chain.rest.shoulder) {
-        let (rest_shoulder, local) = (shoulder_delta.1, shoulder_delta.0.delta);
-        let shoulder_model =
-            rest_shoulder.global_rotation * local * rest_shoulder.global_rotation.inverse();
-        (upper_arm_delta, lower_arm_delta) = propagate_shoulder_downstream(
-            shoulder_model,
-            chain.rest.upper_arm.global_rotation,
-            chain.rest.elbow.global_rotation,
-            upper_arm_delta,
-            lower_arm_delta,
-        );
-    }
+    // Joint rotations are already solved relative to the authored hierarchy.
+    // A parent's transform propagates rigidly through FK; adding fractions to
+    // descendant local joints invents extra articulation and changes the IK.
+    let shoulder = chain.shoulder.map(|entity| ResolvedBoneDelta {
+        entity,
+        delta: Quat::IDENTITY,
+    });
+    let upper_arm_delta = solution.upper_arm_delta.normalize();
+    let lower_arm_delta = solution.lower_arm_delta.normalize();
 
     Ok(Some(ResolvedArmPose {
         upper_arm: chain.upper_arm,
@@ -673,174 +629,85 @@ pub(crate) fn resolved_from_solution(
         lower_arm_delta,
         hand: None,
         shoulder,
-        fingers: resolve_finger_pose(chain.finger_rest, profile.finger_curl_radians),
+        fingers: resolve_finger_pose(chain, profile.finger_curl_radians),
     }))
 }
 
-fn normalized_or_identity(value: Quat) -> Option<Quat> {
-    if value.is_finite() && value.length_squared() > f32::EPSILON {
-        Some(value.normalize())
-    } else {
-        None
-    }
-}
-
-fn weak_follow_delta(
-    model_delta: Quat,
-    rest_global: Quat,
-    rest_arm_direction: Vec3,
-    weight: f32,
-) -> Option<Quat> {
-    let model_delta = normalized_or_identity(model_delta)?;
-    // The clavicle follows arm elevation about a rig-defined axis. Copying
-    // the upper arm's full axis-angle also copied its changing twist axis,
-    // wobbling the shoulder even while its angle stayed at the five-degree cap.
-    let lateral = finite_normalized(rest_arm_direction)?;
-    let axis = finite_normalized(lateral.cross(Vec3::Y))?;
-    let up = axis.cross(lateral);
-    let elevation = (model_delta * lateral).dot(up).clamp(-1.0, 1.0).asin();
-    let angle =
-        (elevation * weight).clamp(-SHOULDER_FOLLOW_MAX_RADIANS, SHOULDER_FOLLOW_MAX_RADIANS);
-    let weak_model_delta = Quat::from_axis_angle(axis, angle);
-    normalized_or_identity(rest_global.inverse() * weak_model_delta * rest_global)
-}
-
-/// Propagates a small share of a shoulder model-space rotation downstream
-/// into the upper/lower local rest-relative deltas.
-///
-/// Every motion, however slight, must reach the terminal bones: without this
-/// the solved elbow bend stays locked while the shoulder rotates and the arm
-/// reads as a rigid stick. The shares decay toward the wrist
-/// ([`SHOULDER_TO_UPPER_SHARE`] > [`SHOULDER_TO_LOWER_SHARE`]). Degenerate
-/// input leaves the deltas untouched.
-pub(crate) fn propagate_shoulder_downstream(
-    shoulder_model_delta: Quat,
-    upper_rest_global: Quat,
-    lower_rest_global: Quat,
-    upper_delta: Quat,
-    lower_delta: Quat,
-) -> (Quat, Quat) {
-    let Some(upper_extra) = fractional_rest_delta(
-        shoulder_model_delta,
-        upper_rest_global,
-        SHOULDER_TO_UPPER_SHARE,
-    ) else {
-        return (upper_delta, lower_delta);
+pub(crate) fn resolve_finger_pose(
+    chain: &ArmChainBinding,
+    curl_radians: f32,
+) -> ResolvedFingerPose {
+    let Some(normal) = crate::arm::rest_palm_normal(chain) else {
+        return ResolvedFingerPose::default();
     };
-    let Some(lower_extra) = fractional_rest_delta(
-        shoulder_model_delta,
-        lower_rest_global,
-        SHOULDER_TO_LOWER_SHARE,
-    ) else {
-        return (upper_delta, lower_delta);
-    };
-    let upper = (upper_extra * upper_delta).normalize();
-    let lower = (lower_extra * lower_delta).normalize();
-    if upper.is_finite() && lower.is_finite() {
-        (upper, lower)
-    } else {
-        (upper_delta, lower_delta)
-    }
-}
-
-fn fractional_rest_delta(model_delta: Quat, rest_global: Quat, share: f32) -> Option<Quat> {
-    if !model_delta.is_finite() || !rest_global.is_finite() {
-        return None;
-    }
-    let model_delta = model_delta.normalize();
-    let fractional = Quat::IDENTITY.slerp(model_delta, share).normalize();
-    normalized_or_identity(rest_global.inverse() * fractional * rest_global)
-}
-
-fn resolve_finger_pose(fingers: FingerRestReferences, curl_radians: f32) -> ResolvedFingerPose {
+    let fingers = chain.finger_rest;
     ResolvedFingerPose {
-        thumb: resolve_finger_joints(fingers.thumb, curl_radians),
-        index: resolve_finger_joints(fingers.index, curl_radians),
-        middle: resolve_finger_joints(fingers.middle, curl_radians),
-        ring: resolve_finger_joints(fingers.ring, curl_radians),
-        little: resolve_finger_joints(fingers.little, curl_radians),
+        thumb: resolve_finger_joints(fingers.thumb, curl_radians, normal),
+        index: resolve_finger_joints(fingers.index, curl_radians, normal),
+        middle: resolve_finger_joints(fingers.middle, curl_radians, normal),
+        ring: resolve_finger_joints(fingers.ring, curl_radians, normal),
+        little: resolve_finger_joints(fingers.little, curl_radians, normal),
     }
 }
 
 fn resolve_finger_joints(
     finger: FingerJointRestReferences,
     curl_radians: f32,
+    normal: Vec3,
 ) -> ResolvedFingerJointPose {
     ResolvedFingerJointPose {
-        metacarpal: resolve_finger_joint(
-            finger.metacarpal,
-            finger.proximal,
-            None,
-            curl_radians,
-            None,
-        ),
+        metacarpal: finger.metacarpal.map(|joint| ResolvedBoneDelta {
+            entity: joint.entity,
+            delta: Quat::IDENTITY,
+        }),
         proximal: resolve_finger_joint(
             finger.proximal,
-            finger.intermediate,
+            finger.intermediate.or(finger.distal),
             finger.metacarpal,
             curl_radians,
-            None,
+            normal,
         ),
         intermediate: resolve_finger_joint(
             finger.intermediate,
             finger.distal,
             finger.proximal,
             curl_radians,
-            None,
+            normal,
         ),
-        distal: resolve_finger_joint(finger.distal, None, finger.intermediate, curl_radians, None),
+        distal: resolve_finger_joint(
+            finger.distal,
+            None,
+            finger.intermediate.or(finger.proximal),
+            curl_radians,
+            normal,
+        ),
     }
 }
-
 /// Builds the rest-relative rotation for one finger joint's flexion.
 ///
-/// Observed signed flexion supplies the rest palm normal as `bend_toward`.
-/// The virtual relaxed curl passes `None` to use its authored local axes.
+/// Observed signed flexion and virtual curl use the same rest palm normal.
 /// Both paths conjugate the model-space rotation into the joint's rest frame.
 pub(crate) fn resolve_finger_joint(
     joint: Option<FingerJointRestBinding>,
     next: Option<FingerJointRestBinding>,
     previous: Option<FingerJointRestBinding>,
     curl_radians: f32,
-    bend_toward: Option<Vec3>,
+    bend_toward: Vec3,
 ) -> Option<ResolvedBoneDelta> {
     let joint = joint?;
     let segment = next
         .map(|next| next.rest.position - joint.rest.position)
         .or_else(|| previous.map(|previous| joint.rest.position - previous.rest.position))?;
-    let segment_direction = finite_normalized(segment)?;
-    // Observed signed bends use the segment and rest palm normal, so an
-    // arbitrary authored local Z cannot reverse the physical bend direction.
-    // The virtual relaxed curl continues to use the authored local axes.
-    let axis = if let Some(direction) = bend_toward {
-        finite_normalized(segment_direction.cross(direction))?
-    } else {
-        [
-            joint.rest.global_rotation * Vec3::Z,
-            joint.rest.global_rotation * Vec3::Y,
-            joint.rest.global_rotation * Vec3::X,
-        ]
-        .into_iter()
-        .map(|candidate| candidate - segment_direction * candidate.dot(segment_direction))
-        .find_map(finite_normalized)?
-    };
-    let model_delta = Quat::from_axis_angle(axis, curl_radians);
-    let delta = normalized_or_identity(
-        joint.rest.global_rotation.inverse() * model_delta * joint.rest.global_rotation,
+    let delta = crate::skeleton::hinge_delta(
+        joint.rest.global_rotation,
+        segment,
+        bend_toward,
+        curl_radians,
     )?;
     Some(ResolvedBoneDelta {
         entity: joint.entity,
         delta,
     })
-}
-
-fn finite_normalized(value: Vec3) -> Option<Vec3> {
-    let length_squared = value.length_squared();
-    if value.is_finite() && length_squared.is_finite() && length_squared > f32::EPSILON {
-        Some(value.normalize())
-    } else {
-        None
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -979,38 +846,15 @@ pub fn apply_default_arm_pose(
                 continue;
             }
 
-            let mut computed = HashMap::new();
-            let mut visiting = HashSet::new();
-            if refresh_parent_global(
-                resolved
-                    .shoulder
-                    .map(|bone| bone.entity)
-                    .unwrap_or(resolved.upper_arm),
-                &mut transforms,
-                &child_ofs,
-                &mut computed,
-                &mut visiting,
-            )
-            .is_none()
-            {
-                continue;
-            }
             let refresh_root = resolved
                 .shoulder
                 .map(|bone| bone.entity)
                 .unwrap_or(resolved.upper_arm);
-            let root_parent_global = child_ofs
-                .get(refresh_root)
-                .ok()
-                .and_then(|child_of| computed.get(&child_of.parent()).copied())
-                .unwrap_or(GlobalTransform::IDENTITY);
-            refresh_subtree(
-                refresh_root,
-                root_parent_global,
-                &mut transforms,
-                &children,
-                &mut HashSet::new(),
-            );
+            if let Some(global) =
+                crate::skeleton::refresh_global(refresh_root, &mut transforms, &child_ofs, None)
+            {
+                crate::skeleton::refresh_subtree(refresh_root, global, &mut transforms, &children);
+            }
         }
     }
 }
@@ -1099,104 +943,5 @@ fn finite_normalized_or(value: Quat, fallback: Quat) -> Quat {
         value.normalize()
     } else {
         fallback
-    }
-}
-
-fn refresh_parent_global(
-    entity: Entity,
-    transforms: &mut Query<(&mut Transform, &mut GlobalTransform)>,
-    child_ofs: &Query<&ChildOf>,
-    computed: &mut HashMap<Entity, GlobalTransform>,
-    visiting: &mut HashSet<Entity>,
-) -> Option<GlobalTransform> {
-    if let Some(global) = computed.get(&entity) {
-        return Some(*global);
-    }
-    if !visiting.insert(entity) {
-        return None;
-    }
-
-    let parent_global = match child_ofs.get(entity) {
-        Ok(child_of) => {
-            refresh_parent_global(child_of.parent(), transforms, child_ofs, computed, visiting)?
-        }
-        Err(_) => GlobalTransform::IDENTITY,
-    };
-    let Ok((transform, mut global)) = transforms.get_mut(entity) else {
-        visiting.remove(&entity);
-        return None;
-    };
-    *global = parent_global.mul_transform(*transform);
-    let result = *global;
-    computed.insert(entity, result);
-    visiting.remove(&entity);
-    Some(result)
-}
-
-fn refresh_subtree(
-    entity: Entity,
-    parent_global: GlobalTransform,
-    transforms: &mut Query<(&mut Transform, &mut GlobalTransform)>,
-    children: &Query<&Children>,
-    visited: &mut HashSet<Entity>,
-) {
-    if !visited.insert(entity) {
-        return;
-    }
-    let current_global = {
-        let Ok((transform, mut global)) = transforms.get_mut(entity) else {
-            return;
-        };
-        *global = parent_global.mul_transform(*transform);
-        *global
-    };
-
-    if let Ok(child_entities) = children.get(entity) {
-        for child in child_entities.iter() {
-            refresh_subtree(child, current_global, transforms, children, visited);
-        }
-    }
-}
-
-#[cfg(test)]
-mod shoulder_follow_tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-
-    #[test]
-    fn shoulder_axis_and_elevation_do_not_follow_upper_arm_twist() {
-        for lateral in [Vec3::X, Vec3::NEG_X] {
-            let axis = lateral.cross(Vec3::Y);
-            for rest in [Quat::IDENTITY, Quat::from_rotation_y(0.4)] {
-                let swing = Quat::from_axis_angle(axis, -0.2);
-                let baseline = weak_follow_delta(swing, rest, lateral, 0.35).unwrap();
-                for twist in [-2.0, 0.0, 2.0] {
-                    let upper = swing * Quat::from_axis_angle(lateral, twist);
-                    let shoulder = weak_follow_delta(upper, rest, lateral, 0.35).unwrap();
-                    assert!(
-                        shoulder.dot(baseline).abs() > 1.0 - 1.0e-6,
-                        "upper-arm twist changed the shoulder: {twist}"
-                    );
-                    let model = rest * shoulder * rest.inverse();
-                    assert!(
-                        model.xyz().cross(axis).length() < 1.0e-6,
-                        "shoulder rotation left its rest elevation axis"
-                    );
-                }
-                let raised =
-                    weak_follow_delta(Quat::from_axis_angle(axis, 0.1), rest, lateral, 0.35)
-                        .unwrap();
-                assert!(
-                    raised.angle_between(baseline) > 0.05,
-                    "arm elevation must still reach the shoulder"
-                );
-                let capped =
-                    weak_follow_delta(Quat::from_axis_angle(axis, 1.0), rest, lateral, 0.35)
-                        .unwrap();
-                assert!(
-                    capped.angle_between(Quat::IDENTITY) <= SHOULDER_FOLLOW_MAX_RADIANS + 1.0e-5
-                );
-            }
-        }
     }
 }

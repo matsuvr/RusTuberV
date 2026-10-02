@@ -102,14 +102,14 @@ impl TranslationFilter {
             return target;
         };
 
-        let dt_ns = timestamp.0.saturating_sub(state.last_time.0);
-        let dt_sec = ((dt_ns as f32) / 1_000_000_000.0).min(self.params.max_dt_sec);
+        let dt_sec =
+            super::time::elapsed_seconds(timestamp, state.last_time, self.params.max_dt_sec);
         if dt_sec <= 0.0 {
             return state.translation;
         }
 
         let tau = self.params.time_constant_sec.max(f32::EPSILON);
-        let alpha = 1.0 - (-dt_sec / tau).exp();
+        let alpha = super::exponential::time_constant_alpha(tau, dt_sec);
         let blend_axis = |current: f32, goal: f32| current + (goal - current) * alpha;
         let coordinates = (
             blend_axis(state.translation.x_meters(), target.x_meters()),

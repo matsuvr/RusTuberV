@@ -42,7 +42,18 @@ pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> AppRes
         .humanoid
         .human_bones
         .iter()
-        .map(|(name, node)| (name.clone(), VrmNode { node: *node }))
+        .map(|(name, node)| {
+            // VRM 0.x names the CMC/MCP/IP chain proximal/intermediate/distal;
+            // VRM 1.0 names those same nodes metacarpal/proximal/distal.
+            let name = match name.as_str() {
+                "leftThumbProximal" => "leftThumbMetacarpal",
+                "leftThumbIntermediate" => "leftThumbProximal",
+                "rightThumbProximal" => "rightThumbMetacarpal",
+                "rightThumbIntermediate" => "rightThumbProximal",
+                name => name,
+            };
+            (name.to_owned(), VrmNode { node: *node })
+        })
         .collect::<HashMap<_, _>>();
     let first_person = descriptor
         .first_person

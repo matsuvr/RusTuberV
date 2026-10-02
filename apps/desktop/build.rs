@@ -95,7 +95,7 @@ fn stage_runtime_dll() -> Result<(), String> {
     }
 
     println!(
-        "cargo:warning=staged {runtime_name} beside vtuber-desktop.exe in {}",
+        "cargo:warning=staged {runtime_name} beside RusTuberV.exe in {}",
         destination.parent().map_or_else(
             || destination.display().to_string(),
             |path| path.display().to_string()

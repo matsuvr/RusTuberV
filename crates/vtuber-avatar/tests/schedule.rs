@@ -118,6 +118,11 @@ fn avatar_post_update_schedule_orders_body_arms_gaze_and_expressions() {
                 ("apply_direct_body_tracking", "update_tracked_arm_targets"),
                 ("apply_direct_body_position", "update_tracked_arm_targets"),
                 ("apply_direct_body_position", "apply_default_arm_pose"),
+                ("restore_torso_lean", "trace_animation"),
+                ("apply_direct_body_position", "plant_feet"),
+                ("plant_feet", "update_dynamic_arm_targets"),
+                ("plant_feet", "update_tracked_arm_targets"),
+                ("plant_feet", "apply_default_arm_pose"),
                 ("update_dynamic_arm_targets", "update_tracked_arm_targets"),
                 ("update_tracked_arm_targets", "apply_default_arm_pose"),
             ] {

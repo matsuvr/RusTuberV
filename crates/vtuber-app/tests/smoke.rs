@@ -36,19 +36,12 @@ fn smoke_ui_action_flow() {
     orch.update_view_model(&mut vm);
     assert_eq!(vm.camera.selected_index, Some(0));
 
-    // 3. Cannot start without avatar.
-    orch.process_action(&UiAction::Start);
-    assert!(orch.last_error().is_some());
-
-    // 4. Dismiss error.
-    orch.process_action(&UiAction::DismissError);
+    // 3. Camera selection waits quietly for an avatar.
+    orch.maybe_auto_start_tracking();
+    assert!(!orch.capture_desired());
     assert!(orch.last_error().is_none());
 
-    // 5. Stop when idle is safe (no-op).
-    orch.process_action(&UiAction::Stop);
-    assert!(orch.last_error().is_none());
-
-    // 6. Unload when no avatar is safe.
+    // 4. Unload when no avatar is safe.
     orch.process_action(&UiAction::UnloadAvatar);
     assert!(orch.last_error().is_none());
 }
@@ -136,24 +129,11 @@ fn smoke_diagnostics_snapshot() {
     assert!(snap.has_active_workers());
 }
 
-/// Smoke test: M1-07 acceptance criteria.
+/// A camera failure can be cleared through the UI action boundary.
 #[test]
-fn smoke_m107_acceptance_criteria() {
-    // 1. UI system does not call camera API directly.
-    //    → Verified by architecture: UiAction → Orchestrator → domain.
-
-    // 2. Preview texture is reused (not recreated).
-    //    → PreviewState holds image_handle: Option<Handle<Image>>.
-
-    // 3. Preview OFF does not stop tracking.
-    //    → PreviewState is independent of pipeline state.
-
-    // 4. Mirror ON/OFF does not change tracking values.
-    //    → PreviewState.mirrored is display-only.
-
-    // 5. Error → recovery is possible.
+fn smoke_camera_error_can_be_cleared() {
     let mut orch = Orchestrator::default();
-    orch.process_action(&UiAction::Start); // Fails: no camera.
+    orch.fail_camera("camera disconnected".into());
     assert!(orch.last_error().is_some());
     orch.process_action(&UiAction::RefreshCameras);
     orch.set_camera_list(vec![CameraDescriptor {

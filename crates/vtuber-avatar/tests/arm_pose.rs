@@ -103,6 +103,359 @@ fn rotation_close(actual: Quat, expected: Quat) -> bool {
     actual.dot(expected).abs() > 1.0 - EPSILON
 }
 
+#[test]
+fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
+    use bevy_vrm1::prelude::{RestGlobalTransform, RestTransform};
+    use vtuber_avatar::{
+        ActiveControlFrame, ArmMotionGeometry, ArmPoseSourceKind, ArmSourceSelection,
+        AvatarAssetId, AvatarLifecycle, AvatarMotionMirror, DynamicArmTargets, TrackedArmControl,
+        build_arm_motion_rest_geometry, update_dynamic_arm_targets, update_tracked_arm_targets,
+    };
+    use vtuber_core::arm_tracking::{
+        ArmBlendWeight, ArmBlendWeights, ArmControlFrame, ArmTrackingTarget, ArmTrackingTargets,
+        HandFingerPose,
+    };
+    use vtuber_core::{FrameSeq, MonoTimeNs};
+    use vtuber_tracking::loss_blend::{LossBlend, LossBlendProfile};
+
+    for side in [ArmSide::Left, ArmSide::Right] {
+        let sign = if side == ArmSide::Left { 1.0 } else { -1.0 };
+        let mut app = build_app();
+        app.init_resource::<ActiveControlFrame>().add_systems(
+            PostUpdate,
+            (update_dynamic_arm_targets, update_tracked_arm_targets)
+                .chain()
+                .before(apply_default_arm_pose),
+        );
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f64(1.0 / 60.0),
+        ));
+        let mut mirror = AvatarMotionMirror::default();
+        mirror.toggle();
+        app.insert_resource(mirror);
+        app.insert_resource(ArmSourceSelection {
+            mode: ArmPoseSourceKind::TrackedPose,
+            ..Default::default()
+        });
+        let generation = AvatarGeneration(51);
+        let bone = |position, rotation| RestSpaceBonePose {
+            position,
+            global_rotation: rotation,
+            local_rotation: rotation,
+        };
+        let hips_rest = bone(Vec3::new(0.0, 0.95, 0.0), Quat::IDENTITY);
+        let root = app
+            .world_mut()
+            .spawn((
+                ActiveAvatar,
+                Transform::from_translation(hips_rest.position),
+                GlobalTransform::from_translation(hips_rest.position),
+            ))
+            .id();
+        let spawn =
+            |app: &mut App, parent, parent_rest: RestSpaceBonePose, mut rest: RestSpaceBonePose| {
+                rest.local_rotation = parent_rest.global_rotation.inverse() * rest.global_rotation;
+                let local = Transform::from_translation(
+                    parent_rest.global_rotation.inverse() * (rest.position - parent_rest.position),
+                )
+                .with_rotation(rest.local_rotation);
+                let global = GlobalTransform::from(
+                    Transform::from_translation(rest.position).with_rotation(rest.global_rotation),
+                );
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        local,
+                        global,
+                        RestTransform(local),
+                        RestGlobalTransform(global),
+                        ChildOf(parent),
+                    ))
+                    .id();
+                (entity, rest)
+            };
+        let (chest, chest_rest) = spawn(
+            &mut app,
+            root,
+            hips_rest,
+            bone(Vec3::new(0.0, 1.20, 0.0), Quat::from_rotation_y(0.2)),
+        );
+        let (shoulder, shoulder_rest) = spawn(
+            &mut app,
+            chest,
+            chest_rest,
+            bone(
+                Vec3::new(sign * 0.05, 1.35, 0.0),
+                Quat::from_rotation_z(0.15),
+            ),
+        );
+        let (upper, upper_rest) = spawn(
+            &mut app,
+            shoulder,
+            shoulder_rest,
+            bone(
+                Vec3::new(sign * 0.16, 1.35, 0.0),
+                Quat::from_rotation_y(0.4),
+            ),
+        );
+        let (lower, lower_rest) = spawn(
+            &mut app,
+            upper,
+            upper_rest,
+            bone(
+                Vec3::new(sign * 0.41, 1.35, 0.0),
+                Quat::from_rotation_x(-0.3),
+            ),
+        );
+        let (hand, hand_rest) = spawn(
+            &mut app,
+            lower,
+            lower_rest,
+            bone(
+                Vec3::new(sign * 0.65, 1.35, 0.0),
+                Quat::from_rotation_z(-0.2),
+            ),
+        );
+        let mut fingers = FingerRestReferences::default();
+        let mut finger_entities = Vec::new();
+        for (joints, z) in [(&mut fingers.index, 0.015), (&mut fingers.little, -0.015)] {
+            let mut parent = hand;
+            let mut parent_rest = hand_rest;
+            for (slot, x) in [
+                (&mut joints.proximal, 0.02),
+                (&mut joints.intermediate, 0.04),
+                (&mut joints.distal, 0.055),
+            ] {
+                let (entity, rest) = spawn(
+                    &mut app,
+                    parent,
+                    parent_rest,
+                    bone(
+                        hand_rest.position + Vec3::new(sign * x, 0.0, z),
+                        hand_rest.global_rotation,
+                    ),
+                );
+                *slot = Some(FingerJointRestBinding { entity, rest });
+                finger_entities.push(entity);
+                parent = entity;
+                parent_rest = rest;
+            }
+        }
+        let chain = ArmChainBinding {
+            side,
+            shoulder: Some(shoulder),
+            upper_arm: upper,
+            lower_arm: lower,
+            hand,
+            fingers: FingerReferences::default(),
+            finger_rest: fingers,
+            rest: ArmRestGeometry {
+                shoulder: Some(shoulder_rest),
+                upper_arm: upper_rest,
+                elbow: lower_rest,
+                wrist: hand_rest,
+                upper_arm_length: 0.25,
+                forearm_length: 0.24,
+                total_arm_length: 0.49,
+            },
+            capabilities: ArmChainCapabilities::default(),
+        };
+        let geometry = build_arm_motion_rest_geometry(
+            side,
+            &chain.rest,
+            Some(hips_rest.position),
+            Some(Quat::IDENTITY),
+            Some(chest_rest.position),
+        );
+        let (left, right) = if side == ArmSide::Left {
+            (Some(chain), None)
+        } else {
+            (None, Some(chain))
+        };
+        let mut binding = AvatarBinding::head_only(root, chest, generation);
+        binding.chest = Some(chest);
+        binding.left_arm = left;
+        binding.right_arm = right;
+        let motion = if side == ArmSide::Left {
+            ArmMotionGeometry {
+                left: Some(geometry),
+                right: None,
+            }
+        } else {
+            ArmMotionGeometry {
+                left: None,
+                right: Some(geometry),
+            }
+        };
+        app.world_mut().entity_mut(root).insert((
+            binding,
+            DefaultArmPose::from_chains(generation, left, right),
+            AvatarAssetId::new("sha256:loss-rest-rotation-model"),
+            motion,
+            vtuber_avatar::body_scale::BodyScaleMeters {
+                generation,
+                scale_meters: 0.7,
+            },
+            DynamicArmTargets::default(),
+        ));
+        let mut lifecycle = AvatarLifecycle::default();
+        lifecycle.request_load(root).unwrap();
+        lifecycle.start_binding(root);
+        lifecycle.finish_ready();
+        app.insert_resource(lifecycle);
+        let publish = |app: &mut App, target, weight| {
+            let weights = ArmBlendWeight {
+                wrist: weight,
+                pole: weight,
+                palm: weight,
+                fingers: weight,
+            };
+            let (targets, weights) = if side == ArmSide::Left {
+                (
+                    ArmTrackingTargets {
+                        left: target,
+                        right: None,
+                    },
+                    ArmBlendWeights {
+                        left: weights,
+                        right: ArmBlendWeight::ZERO,
+                    },
+                )
+            } else {
+                (
+                    ArmTrackingTargets {
+                        left: None,
+                        right: target,
+                    },
+                    ArmBlendWeights {
+                        left: ArmBlendWeight::ZERO,
+                        right: weights,
+                    },
+                )
+            };
+            app.insert_resource(TrackedArmControl {
+                generation: Some(generation),
+                view_to_model: Quat::IDENTITY,
+                frame: Some(ArmControlFrame {
+                    source_seq: FrameSeq(1),
+                    captured_at: MonoTimeNs(0),
+                    produced_at: MonoTimeNs(0),
+                    targets,
+                    weights,
+                }),
+            });
+        };
+        publish(&mut app, None, 0.0);
+        app.update();
+        let entities: Vec<_> = [shoulder, upper, lower, hand]
+            .into_iter()
+            .chain(finger_entities)
+            .collect();
+        let initial: Vec<_> = entities
+            .iter()
+            .map(|&entity| *app.world().get::<Transform>(entity).unwrap())
+            .collect();
+        let turn = Quat::from_rotation_z(sign * 2.5);
+        let position = |entity| {
+            app.world()
+                .get::<GlobalTransform>(entity)
+                .unwrap()
+                .translation()
+        };
+        let wrist = turn * (position(hand) - position(upper));
+        let pole = turn * (position(lower) - position(upper));
+        let mut target = ArmTrackingTarget {
+            wrist: (wrist / 0.49).to_array(),
+            elbow_pole: (pole / 0.49).to_array(),
+            palm_normal: None,
+            fingers: Some(HandFingerPose {
+                fingers: [[0.8, 0.9, 0.4]; 4],
+                spread: [0.0; 4],
+                thumb: [0.0; 2],
+                thumb_spread: 0.0,
+            }),
+        };
+        let solution = solve_two_bone_arm(ArmIkInput::from_chain(
+            &chain,
+            vtuber_avatar::tracked_arm_ik_target(chain.rest, target, Quat::IDENTITY),
+        ))
+        .unwrap();
+        let palm_rest = (fingers.index.proximal.unwrap().rest.position - hand_rest.position)
+            .cross(fingers.little.proximal.unwrap().rest.position - hand_rest.position)
+            .normalize();
+        let normal =
+            solution.lower_arm_global_rotation * lower_rest.global_rotation.inverse() * palm_rest;
+        let axis = (solution.wrist - solution.elbow).normalize();
+        target.palm_normal = Some((Quat::from_axis_angle(axis, 1.0) * normal).to_array());
+        publish(&mut app, Some(target), 1.0);
+        for _ in 0..120 {
+            app.update();
+        }
+        assert!(
+            !rotation_close(
+                app.world().get::<Transform>(entities[4]).unwrap().rotation,
+                initial[4].rotation
+            ),
+            "the test must first articulate the fingers"
+        );
+        let mut loss = LossBlend::new();
+        let loss_profile = LossBlendProfile::default();
+        loss.advance(MonoTimeNs(0), true, &loss_profile);
+        loss.advance(MonoTimeNs(1_000_000_000), true, &loss_profile);
+        for tick in 0..400 {
+            loss.advance(
+                MonoTimeNs(1_000_000_000 + tick * 16_666_667),
+                false,
+                &loss_profile,
+            );
+            let t = tick as f32 / 399.0;
+            let torso = Transform::from_translation(chest_rest.position - hips_rest.position)
+                .with_rotation(Quat::from_rotation_y(t * 0.5) * chest_rest.global_rotation);
+            *app.world_mut().get_mut::<Transform>(chest).unwrap() = torso;
+            *app.world_mut().get_mut::<GlobalTransform>(chest).unwrap() =
+                GlobalTransform::from_translation(hips_rest.position).mul_transform(torso);
+            publish(&mut app, Some(target), loss.weight());
+            app.update();
+            let position = |entity| {
+                app.world()
+                    .get::<GlobalTransform>(entity)
+                    .unwrap()
+                    .translation()
+            };
+            let u = position(lower) - position(upper);
+            let l = position(hand) - position(lower);
+            assert!((u.length() - 0.25).abs() < EPSILON);
+            assert!((l.length() - 0.24).abs() < EPSILON);
+            assert!(
+                u.angle_between(l) < 0.05,
+                "return must not fold a straight arm: side {side:?}, tick {tick}"
+            );
+            for (&entity, rest) in entities.iter().zip(&initial) {
+                let local = app.world().get::<Transform>(entity).unwrap();
+                assert_eq!(local.translation, rest.translation);
+                assert_eq!(local.scale, rest.scale);
+            }
+            assert!(
+                rotation_close(
+                    app.world().get::<Transform>(hand).unwrap().rotation,
+                    hand_rest.local_rotation
+                ),
+                "the wrist must inherit pronation once through FK"
+            );
+        }
+        assert_eq!(loss.weight(), 0.0);
+        for (&entity, rest) in entities.iter().zip(&initial) {
+            assert!(
+                rotation_close(
+                    app.world().get::<Transform>(entity).unwrap().rotation,
+                    rest.rotation
+                ),
+                "the complete chain must return to its actual initial local pose: {side:?}, {entity:?}"
+            );
+        }
+    }
+}
+
 fn optional_correction_chain() -> ArmChainBinding {
     let rest_pose =
         |position: Vec3, global_rotation: Quat, local_rotation: Quat| RestSpaceBonePose {
@@ -223,14 +576,16 @@ fn successive_small_animation_updates_are_not_overwritten() {
 }
 
 #[test]
-fn shoulder_follow_is_weak_clamped_and_finger_rest_axes_are_converted() {
-    let chain = optional_correction_chain();
+fn unobserved_clavicle_stays_at_rest_and_finger_axes_are_converted() {
+    let mut chain = optional_correction_chain();
+    let mut little = chain.finger_rest.index.proximal.unwrap();
+    little.rest.position += Vec3::Z * 0.03;
+    chain.finger_rest.little.proximal = Some(little);
     let pose = DefaultArmPose::from_chains(AvatarGeneration(1), Some(chain), None);
     let resolved = pose.left.expect("complete chain should resolve");
     let shoulder = resolved.shoulder.expect("optional shoulder should resolve");
     let (_, shoulder_angle) = shoulder.delta.to_axis_angle();
-    assert!(shoulder_angle > 0.0);
-    assert!(shoulder_angle <= 5.0_f32.to_radians() + EPSILON);
+    assert!(shoulder_angle <= EPSILON);
     assert!(resolved.fingers.index.proximal.is_some());
     assert!(resolved.fingers.index.intermediate.is_some());
     assert!(resolved.fingers.thumb.proximal.is_none());
@@ -257,7 +612,7 @@ fn shoulder_follow_is_weak_clamped_and_finger_rest_axes_are_converted() {
 }
 
 #[test]
-fn shoulder_follow_propagates_weakly_downstream_to_elbow_and_wrist() {
+fn clavicle_presence_does_not_add_artificial_elbow_articulation() {
     let with_shoulder = optional_correction_chain();
     let mut without_shoulder = with_shoulder;
     without_shoulder.shoulder = None;
@@ -265,34 +620,19 @@ fn shoulder_follow_propagates_weakly_downstream_to_elbow_and_wrist() {
     without_shoulder.capabilities.has_shoulder = false;
     let with = DefaultArmPose::from_chains(AvatarGeneration(1), Some(with_shoulder), None)
         .left
-        .expect("complete chain should resolve");
+        .unwrap();
     let without = DefaultArmPose::from_chains(AvatarGeneration(1), Some(without_shoulder), None)
         .left
-        .expect("complete chain should resolve");
-    let shoulder_angle = with
-        .shoulder
-        .expect("shoulder should resolve")
-        .delta
-        .angle_between(Quat::IDENTITY);
-    assert!(shoulder_angle > 0.0);
-    let upper_change = with.upper_arm_delta.angle_between(without.upper_arm_delta);
-    let lower_change = with.lower_arm_delta.angle_between(without.lower_arm_delta);
-    assert!(
-        upper_change > 1.0e-6,
-        "upper arm inherits part of the shoulder"
-    );
-    assert!(
-        lower_change > 1.0e-6,
-        "forearm inherits part of the shoulder"
-    );
-    assert!(
-        upper_change < shoulder_angle,
-        "downstream share stays smaller than the shoulder change"
-    );
-    assert!(
-        lower_change < upper_change,
-        "motion decays toward the terminal bones"
-    );
+        .unwrap();
+    assert_eq!(with.shoulder.unwrap().delta, Quat::IDENTITY);
+    assert!(rotation_close(
+        with.upper_arm_delta,
+        without.upper_arm_delta
+    ));
+    assert!(rotation_close(
+        with.lower_arm_delta,
+        without.lower_arm_delta
+    ));
 }
 
 #[test]

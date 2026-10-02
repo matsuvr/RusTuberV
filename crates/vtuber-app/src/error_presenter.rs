@@ -44,40 +44,20 @@ pub fn present_error(
         OrchestratorError::NoCameraSelected => ErrorPresentation {
             code: "NO_CAMERA",
             user_message: message(
-                "開始する前にカメラを選択してください。",
-                "Please select a camera before starting.",
-                "开始前请选择摄像头。",
-                "시작하기 전에 카메라를 선택하세요.",
+                "カメラを選択してください。",
+                "Please select a camera.",
+                "请选择摄像头。",
+                "카메라를 선택하세요.",
             ),
             suggested_actions: vec![UiAction::RefreshCameras, UiAction::DismissError],
         },
         OrchestratorError::NoAvatarLoaded => ErrorPresentation {
             code: "NO_AVATAR",
             user_message: message(
-                "開始する前にアバターを読み込んでください。",
-                "Please import an avatar before starting.",
-                "开始前请加载虚拟形象。",
-                "시작하기 전에 아바타를 불러오세요.",
-            ),
-            suggested_actions: vec![UiAction::DismissError],
-        },
-        OrchestratorError::PipelineAlreadyRunning => ErrorPresentation {
-            code: "PIPELINE_RUNNING",
-            user_message: message(
-                "トラッキングは既に実行中です。",
-                "Tracking is already running.",
-                "跟踪已在运行。",
-                "트래킹이 이미 실행 중입니다.",
-            ),
-            suggested_actions: vec![UiAction::DismissError],
-        },
-        OrchestratorError::PipelineNotRunning => ErrorPresentation {
-            code: "PIPELINE_NOT_RUNNING",
-            user_message: message(
-                "トラッキングは実行されていません。",
-                "Tracking is not running.",
-                "跟踪未在运行。",
-                "트래킹이 실행 중이 아닙니다.",
+                "アバターを読み込んでください。",
+                "Please import an avatar.",
+                "请加载虚拟形象。",
+                "아바타를 불러오세요.",
             ),
             suggested_actions: vec![UiAction::DismissError],
         },

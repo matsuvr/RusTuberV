@@ -5,8 +5,13 @@
 //! Euler-angle wrapping, gimbal-lock singularities, and independent per-axis
 //! low-pass artefacts.
 
-use nalgebra::{Quaternion, UnitQuaternion, Vector3};
+use nalgebra::UnitQuaternion;
 use vtuber_core::types::MonoTimeNs;
+
+use super::{
+    damped::{RotationSpring, shortest_arc},
+    time::elapsed_seconds,
+};
 
 /// Parameters for the head rotation filter.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,15 +61,14 @@ impl HeadFilterParams {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct FilterState {
-    quat: UnitQuaternion<f32>,
-    velocity: Vector3<f32>,
+    spring: RotationSpring,
     last_time: MonoTimeNs,
 }
 
 /// Quaternion-centered critically damped second-order filter for head rotation.
 ///
 /// The filter maintains an internal quaternion state and a tangent-space
-/// angular velocity. On each update it applies a critically damped second
+/// error derivative. On each update it applies a critically damped second
 /// order (biquad) step to the local rotation error. The step is derived from
 /// elapsed time and a time constant, making the smoothing independent of the
 /// input frame rate.
@@ -143,10 +147,9 @@ impl HeadRotationFilter {
         target: UnitQuaternion<f32>,
         timestamp: MonoTimeNs,
     ) -> UnitQuaternion<f32> {
-        let Some(state) = self.state else {
+        let Some(mut state) = self.state else {
             self.state = Some(FilterState {
-                quat: target,
-                velocity: Vector3::zeros(),
+                spring: RotationSpring::new(target),
                 last_time: timestamp,
             });
             return target;
@@ -154,22 +157,20 @@ impl HeadRotationFilter {
 
         // Compute elapsed seconds. `saturating_sub` clamps backwards
         // timestamps to zero and avoids overflow for very large differences.
-        let dt_ns = timestamp.0.saturating_sub(state.last_time.0);
-        let dt_sec = (dt_ns as f32) / 1_000_000_000.0;
-        let dt_sec = dt_sec.min(self.params.max_dt_sec).max(0.0);
+        let dt_sec = elapsed_seconds(timestamp, state.last_time, self.params.max_dt_sec);
 
         // If dt is zero (same timestamp or backwards), keep the current
         // state. This also covers the zero/negative dt acceptance cases.
         if dt_sec <= 0.0 {
-            return state.quat;
+            return state.spring.value;
         }
 
         // Clamp tau away from zero before the damping step.
         let tau = self.params.time_constant_sec.max(f32::EPSILON);
 
         // Choose the quaternion sign that gives the shortest arc.
-        let signed_target = choose_shortest_arc(state.quat, target);
-        let error = (state.quat.inverse() * signed_target).scaled_axis();
+        let signed_target = shortest_arc(state.spring.value, target);
+        let error = (state.spring.value.inverse() * signed_target).scaled_axis();
         let max_step = if self.params.max_step_rad.is_finite() {
             self.params.max_step_rad.max(0.0)
         } else {
@@ -177,20 +178,15 @@ impl HeadRotationFilter {
         };
         if error.norm() > max_step {
             self.quarantined_samples = self.quarantined_samples.saturating_add(1);
-            return state.quat;
+            return state.spring.value;
         }
 
         // A critically damped second-order response in the local rotation
         // vector is the SO(3) equivalent of a biquad. The quaternion remains
         // on SO(3); only the tangent-space error and velocity are filtered.
-        let (smoothed, velocity) =
-            critically_damped_rotation_step(state.quat, signed_target, state.velocity, dt_sec, tau);
-
-        self.state = Some(FilterState {
-            quat: smoothed,
-            velocity,
-            last_time: timestamp,
-        });
+        let smoothed = state.spring.step_local(signed_target, dt_sec, tau);
+        state.last_time = timestamp;
+        self.state = Some(state);
 
         smoothed
     }
@@ -200,43 +196,8 @@ impl HeadRotationFilter {
     /// Returns `None` if the filter has not been initialized.
     #[must_use]
     pub fn current(&self) -> Option<UnitQuaternion<f32>> {
-        self.state.map(|s| s.quat)
+        self.state.map(|s| s.spring.value)
     }
-}
-
-fn critically_damped_rotation_step(
-    current: UnitQuaternion<f32>,
-    target: UnitQuaternion<f32>,
-    velocity: Vector3<f32>,
-    dt_sec: f32,
-    time_constant_sec: f32,
-) -> (UnitQuaternion<f32>, Vector3<f32>) {
-    let error = (current.inverse() * target).scaled_axis();
-    let (step, new_velocity) =
-        super::damped::critically_damped_step(error, velocity, dt_sec, time_constant_sec);
-    (
-        current * UnitQuaternion::from_scaled_axis(step),
-        new_velocity,
-    )
-}
-
-/// Returns `target` or `-target`, whichever is closer to `current`.
-#[must_use]
-fn choose_shortest_arc(
-    current: UnitQuaternion<f32>,
-    target: UnitQuaternion<f32>,
-) -> UnitQuaternion<f32> {
-    let c = current.quaternion();
-    let t = target.quaternion();
-    let dot = c.w * t.w + c.i * t.i + c.j * t.j + c.k * t.k;
-    if dot < 0.0 { negate(target) } else { target }
-}
-
-/// Explicitly negates a unit quaternion, preserving unit norm.
-#[must_use]
-fn negate(q: UnitQuaternion<f32>) -> UnitQuaternion<f32> {
-    let inner = q.quaternion();
-    UnitQuaternion::from_quaternion(Quaternion::new(-inner.w, -inner.i, -inner.j, -inner.k))
 }
 
 #[cfg(test)]
