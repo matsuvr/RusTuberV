@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256;
+use vtuber_inference::MediaPipeTask;
 use vtuber_tracking::{
     EYE_CLOSURE_ALGORITHM_VERSION, EYE_CLOSURE_FEATURE, EYE_CLOSURE_PROFILE_SCHEMA_VERSION,
     EyeClosureFingerprints, EyeClosureProfileDocument, EyeClosureVerificationStatus,
@@ -52,7 +52,7 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
             .fingerprints
             .task_bundle_sha256
             .as_deref()
-            .is_some_and(|hash| hash.eq_ignore_ascii_case(TASK_BUNDLE_SHA256));
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(MediaPipeTask::Face.sha256()));
 
     let mut report = String::from("# Eye-closure held-out evaluation (algorithm v2)\n\n");
     let _ = writeln!(
@@ -130,7 +130,7 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
         left: values(left),
         right: values(right),
         fingerprints: EyeClosureFingerprints {
-            task_bundle_sha256: Some(TASK_BUNDLE_SHA256.to_owned()),
+            task_bundle_sha256: Some(MediaPipeTask::Face.sha256().to_owned()),
             feature: EYE_CLOSURE_FEATURE.into(),
             preprocess: Some("mediapipe face landmarker landmarks and raw blendshapes".into()),
         },

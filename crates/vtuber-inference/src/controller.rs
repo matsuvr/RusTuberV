@@ -20,14 +20,7 @@ use crate::worker::run_inference_worker;
 /// Capacity of the control channel between controller and worker.
 const CONTROL_CHANNEL_CAPACITY: usize = 8;
 
-/// Where the MediaPipe Face Landmarker task bundle comes from.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MediaPipeTaskSource {
-    /// Load and SHA-256-verify the task bundle at this filesystem path.
-    Path(std::path::PathBuf),
-    /// Use the approved task bundle embedded in the binary at compile time.
-    Embedded,
-}
+use crate::task::MediaPipeTaskSource;
 
 /// Control commands sent from [`InferenceController`] to the inference worker.
 #[derive(Clone, Debug, PartialEq)]
@@ -261,33 +254,9 @@ impl InferenceController {
         })
     }
 
-    /// Loads the approved MediaPipe Face Landmarker task from `task_path`.
-    ///
-    /// The task and native runtime are both constructed inside the worker;
-    /// only the plain path crosses the controller boundary.
-    ///
-    /// # Errors
-    /// Returns `WorkerNotStarted`, `ControlQueueFull`, or `ControlChannelClosed`
-    /// without waiting for queue capacity. `Ok` means enqueued, not loaded;
-    /// the worker reports loading success or failure through its status.
-    pub fn load_mediapipe(&mut self, task_path: std::path::PathBuf) -> Result<(), InferenceError> {
-        self.load_mediapipe_task(MediaPipeTaskSource::Path(task_path))
-    }
-
-    /// Loads the approved MediaPipe Face Landmarker task embedded in the
-    /// binary (`backend::mediapipe::embedded_task_bundle`).
-    ///
-    /// The task and native runtime are both constructed inside the worker.
-    ///
-    /// # Errors
-    /// Returns `WorkerNotStarted`, `ControlQueueFull`, or `ControlChannelClosed`
-    /// without waiting for queue capacity. `Ok` means enqueued, not loaded;
-    /// the worker reports loading success or failure through its status.
-    pub fn load_mediapipe_embedded(&mut self) -> Result<(), InferenceError> {
-        self.load_mediapipe_task(MediaPipeTaskSource::Embedded)
-    }
-
-    fn load_mediapipe_task(&mut self, task: MediaPipeTaskSource) -> Result<(), InferenceError> {
+    /// Enqueues the explicitly selected approved task for the worker to load.
+    /// Returns a queue/worker error; successful enqueue does not mean loaded.
+    pub fn load_mediapipe_task(&mut self, task: MediaPipeTaskSource) -> Result<(), InferenceError> {
         self.enqueue_load(ControlCommand::LoadMediaPipe { task })
     }
 
@@ -507,7 +476,7 @@ mod tests {
         assert_eq!(controller.resume(), Err(InferenceError::WorkerNotStarted));
         assert_eq!(controller.reset(), Err(InferenceError::WorkerNotStarted));
         assert_eq!(
-            controller.load_mediapipe_embedded(),
+            controller.load_mediapipe_task(MediaPipeTaskSource::Embedded),
             Err(InferenceError::WorkerNotStarted)
         );
         assert_eq!(controller.status(), before);
@@ -535,7 +504,7 @@ mod tests {
         }
         let before = controller.status();
         assert_eq!(
-            controller.load_mediapipe_embedded(),
+            controller.load_mediapipe_task(MediaPipeTaskSource::Embedded),
             Err(InferenceError::ControlQueueFull)
         );
         assert_eq!(controller.resume(), Err(InferenceError::ControlQueueFull));
@@ -552,7 +521,9 @@ mod tests {
         let mut controller = idle_controller();
         let (tx, rx) = std::sync::mpsc::sync_channel(CONTROL_CHANNEL_CAPACITY);
         controller.command_tx = Some(tx);
-        controller.load_mediapipe_embedded().unwrap();
+        controller
+            .load_mediapipe_task(MediaPipeTaskSource::Embedded)
+            .unwrap();
         controller.pause().unwrap();
         controller.resume().unwrap();
         controller.reset().unwrap();
@@ -692,7 +663,9 @@ mod tests {
 
         controller.start_worker().expect("start worker");
         controller
-            .load_mediapipe(std::path::PathBuf::from("missing-face-landmarker.task"))
+            .load_mediapipe_task(MediaPipeTaskSource::Path(std::path::PathBuf::from(
+                "missing-face-landmarker.task",
+            )))
             .expect("send MediaPipe load command");
         std::thread::sleep(Duration::from_millis(150));
 

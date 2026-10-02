@@ -23,7 +23,7 @@ fn production_start_queues_mediapipe_pipeline_and_classifies_load_failure() {
 
     // A task file that is present but fails the pinned SHA-256 check must be
     // rejected. A missing file legitimately falls back to the embedded bundle.
-    let task_path = model_root.join("face_landmarker.task");
+    let task_path = model_root.join(vtuber_inference::MediaPipeTask::Face.file());
     std::fs::write(&task_path, b"corrupt task bundle").expect("write corrupt task bundle");
 
     let frame_slot: Arc<LatestSlot<VideoFrame>> = Arc::new(LatestSlot::new());
@@ -72,7 +72,7 @@ fn production_status_exposes_mediapipe_identity_before_task_load() {
     );
     assert_eq!(
         status.detector_model_hash.as_deref(),
-        Some(vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256)
+        Some(vtuber_inference::MediaPipeTask::Face.sha256())
     );
     assert_eq!(status.landmark_model_hash, None);
 

@@ -315,7 +315,7 @@ pub fn load_eye_closure_thresholds(
     };
     let document: vtuber_tracking::EyeClosureProfileDocument = serde_json::from_str(&text)
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
-    let current = vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256;
+    let current = vtuber_inference::MediaPipeTask::Face.sha256();
     if document.fingerprints.feature != vtuber_tracking::EYE_CLOSURE_FEATURE
         || !document
             .fingerprints
@@ -1154,9 +1154,7 @@ mod tests {
                 min_blink: 0.0,
             },
             fingerprints: vtuber_tracking::EyeClosureFingerprints {
-                task_bundle_sha256: Some(
-                    vtuber_inference::backend::mediapipe::TASK_BUNDLE_SHA256.into(),
-                ),
+                task_bundle_sha256: Some(vtuber_inference::MediaPipeTask::Face.sha256().into()),
                 feature: vtuber_tracking::EYE_CLOSURE_FEATURE.into(),
                 preprocess: None,
             },

@@ -148,7 +148,8 @@ fn load_and_inspect(
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     let runtime_bytes = vtuber_app::import::runtime_ready_source_bytes(&bytes, summary.generation)
         .map_err(|error| format!("failed to convert {}: {error}", path.display()))?;
-    let normalized = vtuber_app::import::normalize_vrm_morph_targets(&runtime_bytes);
+    let normalized = vtuber_app::import::normalize_vrm_morph_targets(&runtime_bytes)
+        .map_err(|error| format!("failed to normalize {}: {error}", path.display()))?;
     let staged_bytes = normalized.as_ref().unwrap_or(&runtime_bytes);
     // Stage a temp copy whenever the runtime bytes differ from the source
     // file (VRM 0.x conversion and/or morph normalization).

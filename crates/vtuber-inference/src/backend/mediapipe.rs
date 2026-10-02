@@ -4,7 +4,6 @@
 //! approved task bundle, converts owned camera frames to packed RGB, and
 //! decodes one MediaPipe result into the canonical `vtuber-core` contract.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use mediapipe::{
@@ -12,7 +11,6 @@ use mediapipe::{
     HandLandmarkerVideo, Image, IouThreshold, ModelSource, PoseLandmarker, PoseLandmarkerVideo,
     Size, Timestamp,
 };
-use sha2::{Digest, Sha256};
 use vtuber_core::arm_tracking::PoseArmFrame;
 use vtuber_core::{
     CameraFaceTransform, FaceBlendshapeSet, FaceLandmark, FaceTrackingOutcome, FaceTrackingQuality,
@@ -24,58 +22,8 @@ use crate::error::{InferenceError, Result};
 use crate::pose_decode::{decode_hand_result, decode_pose_result};
 use crate::runtime::FaceTrackingInference;
 
-/// The packaged MediaPipe task filename.
-pub const TASK_BUNDLE_FILE: &str = "face_landmarker.task";
-/// SHA-256 of the approved MediaPipe task bundle.
-pub const TASK_BUNDLE_SHA256: &str =
-    "64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF";
-/// The packaged MediaPipe Pose task filename.
-pub const POSE_TASK_BUNDLE_FILE: &str = "pose_landmarker_full.task";
-/// SHA-256 of the approved MediaPipe Pose Landmarker Full task bundle.
-pub const POSE_TASK_BUNDLE_SHA256: &str =
-    "4EAA5EB7A98365221087693FCC286334CF0858E2EB6E15B506AA4A7ECDCEC4AD";
-/// The packaged MediaPipe Hand Landmarker task filename.
-pub const HAND_TASK_BUNDLE_FILE: &str = "hand_landmarker.task";
-/// SHA-256 of the approved MediaPipe Hand Landmarker task bundle.
-pub const HAND_TASK_BUNDLE_SHA256: &str =
-    "FBC2A30080C3C557093B5DDFC334698132EB341044CCEE322CCF8BCF3607CDE1";
+use crate::task::{MediaPipeTask, MediaPipeTaskSource};
 const MATRIX_AFFINE_EPSILON: f32 = 0.1;
-
-/// The approved task bundle compiled into this binary.
-///
-/// Release builds must run without depending on the process working directory
-/// or a packaged `assets/models` resource tree, so the same SHA-256-verified
-/// bundle is embedded at compile time. The task bundle is distributed under
-/// the Apache-2.0 license (`assets/models/LICENSE.mediapipe.txt`).
-#[must_use]
-pub fn embedded_task_bundle() -> &'static [u8] {
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/models/face_landmarker.task"
-    ))
-}
-
-/// The approved Pose task bundle compiled into this binary.
-///
-/// As with the face bundle, release builds must not depend on the process
-/// working directory or a packaged resource tree, so the same SHA-256-verified
-/// bundle is embedded at compile time.
-#[must_use]
-pub fn embedded_pose_task_bundle() -> &'static [u8] {
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/models/pose_landmarker_full.task"
-    ))
-}
-
-/// The approved Hand Landmarker task bundle compiled into this binary.
-#[must_use]
-pub fn embedded_hand_task_bundle() -> &'static [u8] {
-    include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/models/hand_landmarker.task"
-    ))
-}
 
 /// MediaPipe Pose plus Hand Landmarker runtimes owned by one inference worker.
 ///
@@ -95,19 +43,12 @@ impl MediaPipePoseRuntime {
     ///
     /// Each source may be a path or embedded bytes; the bundle is verified by
     /// SHA-256 before any native object is created.
-    pub fn from_task_sources(pose: ModelSource, hand: ModelSource) -> Result<Self> {
-        match &pose {
-            ModelSource::Path(path) => verify_pose_task_bundle(path)?,
-            ModelSource::Bytes(bytes) => verify_pose_task_bundle_bytes(bytes)?,
-        }
-        match &hand {
-            ModelSource::Path(path) => verify_hand_task_bundle(path)?,
-            ModelSource::Bytes(bytes) => verify_hand_task_bundle_bytes(bytes)?,
-        }
-        Self::from_verified_sources(pose, hand)
-    }
-
-    fn from_verified_sources(pose: ModelSource, hand: ModelSource) -> Result<Self> {
+    pub fn from_task_sources(
+        pose: &MediaPipeTaskSource,
+        hand: &MediaPipeTaskSource,
+    ) -> Result<Self> {
+        let pose = ModelSource::bytes(MediaPipeTask::Pose.read(pose)?);
+        let hand = ModelSource::bytes(MediaPipeTask::Hand.read(hand)?);
         let landmarker = PoseLandmarker::builder(pose)
             .delegate(Delegate::Cpu)
             .num_poses(std::num::NonZeroU32::new(1).ok_or_else(|| {
@@ -191,26 +132,9 @@ pub struct MediaPipeRuntime {
 }
 
 impl MediaPipeRuntime {
-    /// Verifies the task bundle and constructs a CPU VIDEO-mode landmarker.
-    ///
-    /// The returned runtime must be constructed and dropped in the inference
-    /// worker. No live MediaPipe object crosses the controller boundary.
-    pub fn from_task_path(path: &Path) -> Result<Self> {
-        verify_task_bundle(path)?;
-        Self::from_verified_source(ModelSource::path(path))
-    }
-
-    /// Verifies an in-memory task bundle and constructs a CPU VIDEO-mode
-    /// landmarker from the bundle bytes.
-    ///
-    /// The returned runtime must be constructed and dropped in the inference
-    /// worker. No live MediaPipe object crosses the controller boundary.
-    pub fn from_task_bytes(bytes: &[u8]) -> Result<Self> {
-        verify_task_bundle_bytes(bytes)?;
-        Self::from_verified_source(ModelSource::bytes(bytes.to_vec()))
-    }
-
-    fn from_verified_source(source: ModelSource) -> Result<Self> {
+    /// Verifies the selected task and builds the worker-owned CPU VIDEO landmarker.
+    pub fn from_task_source(task: &MediaPipeTaskSource) -> Result<Self> {
+        let source = ModelSource::bytes(MediaPipeTask::Face.read(task)?);
         let landmarker = FaceLandmarker::builder(source)
             .delegate(Delegate::Cpu)
             .num_faces(std::num::NonZeroU32::new(1).ok_or_else(|| {
@@ -622,75 +546,6 @@ fn video_timestamp_ms(captured_at: MonoTimeNs, last_timestamp_ms: &mut Option<i6
     Ok(timestamp_ms)
 }
 
-fn verify_task_bundle(path: &Path) -> Result<()> {
-    let bytes = std::fs::read(path).map_err(|error| {
-        InferenceError::MediaPipeLoadFailed(format!("task bundle read failed: {error}"))
-    })?;
-    verify_task_bundle_bytes(&bytes)
-}
-
-fn verify_task_bundle_bytes(bytes: &[u8]) -> Result<()> {
-    let actual = Sha256::digest(bytes);
-    let actual = actual
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<String>();
-    if actual.eq_ignore_ascii_case(TASK_BUNDLE_SHA256) {
-        Ok(())
-    } else {
-        Err(InferenceError::HashMismatch {
-            expected: TASK_BUNDLE_SHA256.into(),
-            actual,
-        })
-    }
-}
-
-fn verify_pose_task_bundle(path: &Path) -> Result<()> {
-    let bytes = std::fs::read(path).map_err(|error| {
-        InferenceError::MediaPipeLoadFailed(format!("pose task bundle read failed: {error}"))
-    })?;
-    verify_pose_task_bundle_bytes(&bytes)
-}
-
-fn verify_pose_task_bundle_bytes(bytes: &[u8]) -> Result<()> {
-    let actual = Sha256::digest(bytes);
-    let actual = actual
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<String>();
-    if actual.eq_ignore_ascii_case(POSE_TASK_BUNDLE_SHA256) {
-        Ok(())
-    } else {
-        Err(InferenceError::HashMismatch {
-            expected: POSE_TASK_BUNDLE_SHA256.into(),
-            actual,
-        })
-    }
-}
-
-fn verify_hand_task_bundle(path: &Path) -> Result<()> {
-    let bytes = std::fs::read(path).map_err(|error| {
-        InferenceError::MediaPipeLoadFailed(format!("hand task bundle read failed: {error}"))
-    })?;
-    verify_hand_task_bundle_bytes(&bytes)
-}
-
-fn verify_hand_task_bundle_bytes(bytes: &[u8]) -> Result<()> {
-    let actual = Sha256::digest(bytes);
-    let actual = actual
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<String>();
-    if actual.eq_ignore_ascii_case(HAND_TASK_BUNDLE_SHA256) {
-        Ok(())
-    } else {
-        Err(InferenceError::HashMismatch {
-            expected: HAND_TASK_BUNDLE_SHA256.into(),
-            actual,
-        })
-    }
-}
-
 fn contract_error(message: impl Into<String>) -> InferenceError {
     InferenceError::MediaPipeOutputContract(message.into())
 }
@@ -703,27 +558,35 @@ mod tests {
         clippy::panic,
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
-    use super::{
-        embedded_hand_task_bundle, embedded_pose_task_bundle, embedded_task_bundle,
-        matrix_from_column_major, verify_hand_task_bundle_bytes, verify_pose_task_bundle_bytes,
-        verify_task_bundle_bytes, video_timestamp_ms,
-    };
+    use super::{MediaPipeTask, matrix_from_column_major, video_timestamp_ms};
     use std::sync::Arc;
     use vtuber_core::{FrameSeq, MonoTimeNs, PixelFormat, VideoFrame};
 
     #[test]
     fn embedded_task_bundle_matches_the_pinned_sha256() {
-        assert!(verify_task_bundle_bytes(embedded_task_bundle()).is_ok());
+        assert!(
+            MediaPipeTask::Face
+                .verify(MediaPipeTask::Face.embedded())
+                .is_ok()
+        );
     }
 
     #[test]
     fn embedded_pose_task_bundle_matches_the_pinned_sha256() {
-        assert!(verify_pose_task_bundle_bytes(embedded_pose_task_bundle()).is_ok());
+        assert!(
+            MediaPipeTask::Pose
+                .verify(MediaPipeTask::Pose.embedded())
+                .is_ok()
+        );
     }
 
     #[test]
     fn embedded_hand_task_bundle_matches_the_pinned_sha256() {
-        assert!(verify_hand_task_bundle_bytes(embedded_hand_task_bundle()).is_ok());
+        assert!(
+            MediaPipeTask::Hand
+                .verify(MediaPipeTask::Hand.embedded())
+                .is_ok()
+        );
     }
 
     fn frame(

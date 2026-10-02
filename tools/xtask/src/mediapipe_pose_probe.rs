@@ -19,8 +19,9 @@ use vtuber_core::{
 };
 #[cfg(target_os = "windows")]
 use vtuber_inference::FaceTrackingInference;
+use vtuber_inference::MediaPipeTask;
 #[cfg(target_os = "windows")]
-use vtuber_inference::backend::mediapipe::{MediaPipeRuntime, TASK_BUNDLE_FILE};
+use vtuber_inference::backend::mediapipe::MediaPipeRuntime;
 #[cfg(target_os = "windows")]
 use vtuber_tracking::relative_pose;
 
@@ -212,7 +213,7 @@ fn run_windows(options: Options) -> Result<(), String> {
         .project_root
         .join("assets")
         .join("models")
-        .join(TASK_BUNDLE_FILE);
+        .join(MediaPipeTask::Face.file());
     let devices = MsmfBackend::new()
         .enumerate()
         .map_err(|error| format!("camera enumeration failed: {error}"))?;
@@ -321,7 +322,9 @@ fn run_worker(
     let library_source = mediapipe::loader::lib()
         .map(|library| library_source_name(&library.source))
         .unwrap_or_else(|_| "unknown".into());
-    let mut runtime = match MediaPipeRuntime::from_task_path(task_path) {
+    let mut runtime = match MediaPipeRuntime::from_task_source(
+        &vtuber_inference::MediaPipeTaskSource::Path(task_path.to_path_buf()),
+    ) {
         Ok(runtime) => runtime,
         Err(error) => {
             return ProbeWorkerOutput {
