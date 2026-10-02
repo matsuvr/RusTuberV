@@ -8,7 +8,7 @@ use bevy::prelude::*;
 /// Controls whether avatar motion is reflected for the person operating it.
 ///
 /// The default is enabled: horizontal head and eye motion, head roll, and
-/// side-specific blink expressions are reflected at the avatar boundary.
+/// side-specific standard and Perfect Sync expressions are reflected at the avatar boundary.
 /// Pitch and non-directional expressions remain unchanged. This never changes
 /// camera frames, inference input, calibration, or tracking values.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]

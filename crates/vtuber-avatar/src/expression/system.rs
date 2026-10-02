@@ -8,7 +8,10 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{ExpressionEntityMap, ModifyExpressions, VrmExpression};
-use vtuber_core::ArkitBlendshape;
+use vtuber_core::{
+    ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS, Arkit52Coefficients, ArkitBlendshape, AvatarControlFrame,
+    ExpressionCoefficients,
+};
 
 use crate::capabilities::SelectedGazeBackend;
 use crate::direct_look::LookAtExpressionWeights;
@@ -268,18 +271,24 @@ pub fn apply_tracked_expressions(
         // automatic face commands are not overlaid.
         Vec::new()
     } else if let Some(frame) = frame {
+        let (expressions, detailed_face) =
+            face_input(frame, mirror.is_none_or(|mirror| mirror.is_enabled()));
         let blink = map_blink_with_fallback(
-            &blink_input(frame, mirror.is_none_or(|mirror| mirror.is_enabled())),
+            &RawBlinkInput {
+                left: expressions.blink_left,
+                right: expressions.blink_right,
+                combined: expressions.blink_left.max(expressions.blink_right),
+            },
             capabilities.blink,
         );
         let mouth = map_mouth_with_fallback(
             &RawMouthInput {
-                openness: frame.expressions.aa,
-                aa: frame.expressions.aa,
-                ih: frame.expressions.ih,
-                ou: frame.expressions.ou,
-                ee: frame.expressions.ee,
-                oh: frame.expressions.oh,
+                openness: expressions.aa,
+                aa: expressions.aa,
+                ih: expressions.ih,
+                ou: expressions.ou,
+                ee: expressions.ee,
+                oh: expressions.oh,
             },
             capabilities.mouth,
         );
@@ -289,7 +298,7 @@ pub fn apply_tracked_expressions(
         let detailed_face = if selected.is_some() {
             None
         } else {
-            frame.detailed_face.as_ref()
+            detailed_face.as_ref()
         };
         build_face_commands(
             detailed_face,
@@ -347,19 +356,23 @@ fn resolve_detailed_expression_name(
         })
 }
 
-fn blink_input(frame: &vtuber_core::AvatarControlFrame, mirrored: bool) -> RawBlinkInput {
-    let (left, right) = if mirrored {
-        // VRM's left/right names are anatomical. Swapping them preserves the
-        // image-space side when the avatar is presented as a mirror.
-        (frame.expressions.blink_right, frame.expressions.blink_left)
-    } else {
-        (frame.expressions.blink_left, frame.expressions.blink_right)
-    };
-    RawBlinkInput {
-        left,
-        right,
-        combined: left.max(right),
+fn face_input(
+    frame: &AvatarControlFrame,
+    mirrored: bool,
+) -> (ExpressionCoefficients, Option<Arkit52Coefficients>) {
+    let mut expressions = frame.expressions;
+    let mut detailed_face = frame.detailed_face;
+    if mirrored {
+        // Tracking stays canonical. Both face routes reflect anatomical sides
+        // exactly once here; LookAt and manual expressions have their own input.
+        std::mem::swap(&mut expressions.blink_left, &mut expressions.blink_right);
+        if let Some(coefficients) = &mut detailed_face {
+            for &(left, right) in ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS {
+                coefficients.swap(left, right);
+            }
+        }
     }
+    (expressions, detailed_face)
 }
 
 fn look_at_expression_commands(
@@ -462,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_blink_input_swaps_only_side_specific_channels() {
+    fn face_input_reflects_standard_and_detailed_sides_once() {
         let frame = AvatarControlFrame {
             source_seq: FrameSeq(1),
             captured_at: MonoTimeNs(1),
@@ -475,27 +488,111 @@ mod tests {
             expressions: ExpressionCoefficients {
                 blink_left: 0.2,
                 blink_right: 0.8,
+                aa: 0.4,
+                look_left: 0.6,
                 ..Default::default()
             },
-            detailed_face: None,
+            detailed_face: Some(
+                Arkit52Coefficients::try_from_array(std::array::from_fn(|index| {
+                    index as f32 / 52.0
+                }))
+                .unwrap(),
+            ),
         };
 
         assert_eq!(
-            blink_input(&frame, true),
-            RawBlinkInput {
-                left: 0.8,
-                right: 0.2,
-                combined: 0.8,
-            }
+            face_input(&frame, false),
+            (frame.expressions, frame.detailed_face)
         );
+        let (expressions, detailed) = face_input(&frame, true);
+        assert_eq!(expressions.blink_left, 0.8);
+        assert_eq!(expressions.blink_right, 0.2);
+        assert_eq!(expressions.aa, frame.expressions.aa);
+        assert_eq!(expressions.look_left, frame.expressions.look_left);
+        let original = frame.detailed_face.unwrap();
+        let detailed = detailed.unwrap();
+        for channel in ArkitBlendshape::ALL {
+            let source = ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS
+                .iter()
+                .find_map(|&(left, right)| {
+                    if channel == left {
+                        Some(right)
+                    } else if channel == right {
+                        Some(left)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(channel);
+            assert_eq!(detailed.get(channel), original.get(source), "{channel:?}");
+        }
         assert_eq!(
-            blink_input(&frame, false),
-            RawBlinkInput {
-                left: 0.2,
-                right: 0.8,
-                combined: 0.8,
-            }
+            face_input(
+                &AvatarControlFrame {
+                    expressions,
+                    detailed_face: Some(detailed),
+                    ..frame.clone()
+                },
+                true
+            ),
+            (frame.expressions, frame.detailed_face)
         );
+    }
+
+    #[test]
+    fn asymmetric_blink_uses_the_same_side_in_standard_and_perfect_sync_commands() {
+        use crate::capabilities::{BlinkMode, PerfectSyncCapabilities};
+        for mirrored in [false, true] {
+            let mut frame = sample_frame();
+            frame.expressions.blink_left = 0.2;
+            frame.expressions.blink_right = 0.8;
+            let mut values = [0.0; vtuber_core::ARKIT52_CHANNEL_COUNT];
+            values[ArkitBlendshape::EyeBlinkLeft.index()] = 0.2;
+            values[ArkitBlendshape::EyeBlinkRight.index()] = 0.8;
+            values[ArkitBlendshape::JawOpen.index()] = 0.5;
+            frame.detailed_face = Some(Arkit52Coefficients::try_from_array(values).unwrap());
+            let (expressions, detailed) = face_input(&frame, mirrored);
+            let standard = map_blink_with_fallback(
+                &RawBlinkInput {
+                    left: expressions.blink_left,
+                    right: expressions.blink_right,
+                    combined: expressions.blink_left.max(expressions.blink_right),
+                },
+                BlinkMode::PerEye,
+            );
+            let detailed = crate::expression::command::build_detailed_face_commands(
+                &detailed.unwrap(),
+                &PerfectSyncCapabilities::from_names(
+                    ArkitBlendshape::ALL.map(ArkitBlendshape::canonical_name),
+                ),
+                |channel| Some(channel.canonical_name()),
+            );
+            for (standard_name, detailed_name) in [
+                ("blinkLeft", "EyeBlinkLeft"),
+                ("blinkRight", "EyeBlinkRight"),
+            ] {
+                assert_eq!(
+                    standard
+                        .iter()
+                        .find(|(name, _)| name == standard_name)
+                        .unwrap()
+                        .1,
+                    detailed
+                        .iter()
+                        .find(|command| command.name == detailed_name)
+                        .unwrap()
+                        .weight
+                );
+            }
+            assert_eq!(
+                detailed
+                    .iter()
+                    .find(|command| command.name == "JawOpen")
+                    .unwrap()
+                    .weight,
+                0.5
+            );
+        }
     }
 
     #[test]

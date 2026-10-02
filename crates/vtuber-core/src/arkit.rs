@@ -468,6 +468,12 @@ impl Arkit52Coefficients {
         self.0[channel.index()]
     }
 
+    /// Exchanges two validated channel values without changing their bounds.
+    pub fn swap(&mut self, left: ArkitBlendshape, right: ArkitBlendshape) {
+        // Every enum index is below ARKIT52_CHANNEL_COUNT.
+        self.0.swap(left.index(), right.index());
+    }
+
     /// Returns the fixed-size coefficient array.
     #[must_use]
     pub const fn as_array(&self) -> &[f32; ARKIT52_CHANNEL_COUNT] {
