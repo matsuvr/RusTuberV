@@ -103,7 +103,7 @@ fn instant_at(millis: u64) -> Instant {
 }
 
 /// Builds a minimal headless app wired in production control order.
-fn build_app(generation: AvatarGeneration) -> (App, TraceRig) {
+fn build_app() -> (App, TraceRig) {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .insert_resource(TimeUpdateStrategy::ManualInstant(instant_at(0)))
@@ -171,6 +171,13 @@ fn build_app(generation: AvatarGeneration) -> (App, TraceRig) {
         )),
     };
 
+    let mut lifecycle = AvatarLifecycle::default();
+    lifecycle.request_load(root).expect("load request");
+    lifecycle.start_binding(root);
+    lifecycle.finish_ready();
+    let generation = lifecycle.current_generation();
+    app.insert_resource(lifecycle);
+
     let binding = AvatarBinding {
         root,
         head,
@@ -214,12 +221,6 @@ fn build_app(generation: AvatarGeneration) -> (App, TraceRig) {
         Transform::IDENTITY,
         GlobalTransform::IDENTITY,
     ));
-
-    let mut lifecycle = AvatarLifecycle::default();
-    lifecycle.request_load(root).expect("load request");
-    lifecycle.start_binding(root);
-    lifecycle.finish_ready();
-    app.insert_resource(lifecycle);
 
     let rig = TraceRig {
         root,
@@ -334,8 +335,11 @@ fn assert_all_finite(app: &App, rig: &TraceRig) {
 #[test]
 fn trace_is_deterministic_across_30_60_and_120_fps_equivalents() {
     for frame_millis in [33_u64, 16, 8] {
-        let generation = AvatarGeneration(11);
-        let (mut app, rig) = build_app(generation);
+        let (mut app, rig) = build_app();
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
         let mut tick_clock = 0_u64;
         let mut previous = Option::<[Quat; 4]>::None;
 
@@ -378,8 +382,11 @@ fn trace_is_deterministic_across_30_60_and_120_fps_equivalents() {
 
 #[test]
 fn virtual_hand_authority_drives_the_compositor_not_the_legacy_source() {
-    let generation = AvatarGeneration(21);
-    let (mut app, rig) = build_app(generation);
+    let (mut app, rig) = build_app();
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
     let selection = app.world().resource::<ArmSourceSelection>();
     assert_eq!(
         selection.mode,
@@ -405,8 +412,11 @@ fn virtual_hand_authority_drives_the_compositor_not_the_legacy_source() {
 
 #[test]
 fn tracking_loss_reacquire_replaces_state_without_snaps_or_stale_entities() {
-    let generation = AvatarGeneration(31);
-    let (mut app, rig) = build_app(generation);
+    let (mut app, rig) = build_app();
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
 
     push_frame(&mut app, generation, 1, Vec3::new(0.05, 0.0, 0.02));
     app.update();
@@ -439,8 +449,11 @@ fn tracking_loss_reacquire_replaces_state_without_snaps_or_stale_entities() {
 
 #[test]
 fn avatar_generation_cleanup_rejects_stale_frames_and_targets() {
-    let old_generation = AvatarGeneration(41);
-    let (mut app, rig) = build_app(old_generation);
+    let (mut app, rig) = build_app();
+    let old_generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
 
     push_frame(&mut app, old_generation, 1, Vec3::new(0.03, 0.0, 0.0));
     app.update();
@@ -461,8 +474,11 @@ fn avatar_generation_cleanup_rejects_stale_frames_and_targets() {
 fn rotation_and_position_trace_is_deterministic_across_fps_equivalents() {
     let mut reference = Option::<(Vec3, Quat)>::None;
     for frame_millis in [33_u64, 16, 8] {
-        let generation = AvatarGeneration(51);
-        let (mut app, rig) = build_app(generation);
+        let (mut app, rig) = build_app();
+        let generation = app
+            .world()
+            .resource::<AvatarLifecycle>()
+            .current_generation();
         let mut tick_clock = 0_u64;
 
         for step in 0..40u64 {
@@ -531,8 +547,8 @@ fn rotation_and_position_trace_is_deterministic_across_fps_equivalents() {
 
 #[test]
 fn idle_amplitude_in_the_trace_is_zero_by_policy() {
-    let generation = AvatarGeneration(61);
-    let (app, rig) = build_app(generation);
+    let (app, rig) = build_app();
+
     let profile = app
         .world()
         .get::<vtuber_avatar::IdleMotionProfile>(rig.root)
@@ -550,8 +566,11 @@ fn camera_silence_keeps_idle_rotation_and_breathing_alive_in_the_default_pose() 
     // ADR-021: when the control frame disappears entirely (camera signal
     // gone), the avatar must relax to its default pose while the loss-idle
     // sway (rotation) and breathing (vertical offset) keep flowing.
-    let generation = AvatarGeneration(81);
-    let (mut app, rig) = build_app(generation);
+    let (mut app, rig) = build_app();
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
 
     // Establish tracking once so the "silence" is a real transition.
     push_frame(&mut app, generation, 1, Vec3::new(0.04, 0.0, 0.01));

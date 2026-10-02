@@ -73,7 +73,7 @@ fn chain(side: ArmSide, upper: Entity, lower: Entity) -> ArmChainBinding {
     }
 }
 
-fn build_app(mirror_enabled: bool, generation: AvatarGeneration) -> (App, MirrorRig) {
+fn build_app(mirror_enabled: bool) -> (App, MirrorRig) {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .init_resource::<AvatarLifecycle>()
@@ -136,6 +136,13 @@ fn build_app(mirror_enabled: bool, generation: AvatarGeneration) -> (App, Mirror
         )),
     };
 
+    let mut lifecycle = AvatarLifecycle::default();
+    lifecycle.request_load(root).expect("load request");
+    lifecycle.start_binding(root);
+    lifecycle.finish_ready();
+    let generation = lifecycle.current_generation();
+    app.insert_resource(lifecycle);
+
     let binding = AvatarBinding {
         root,
         head: chest,
@@ -161,12 +168,6 @@ fn build_app(mirror_enabled: bool, generation: AvatarGeneration) -> (App, Mirror
         },
         DynamicArmTargets::default(),
     ));
-
-    let mut lifecycle = AvatarLifecycle::default();
-    lifecycle.request_load(root).expect("load request");
-    lifecycle.start_binding(root);
-    lifecycle.finish_ready();
-    app.insert_resource(lifecycle);
 
     (app, MirrorRig { root, right_upper })
 }
@@ -208,8 +209,11 @@ fn observed_target() -> ArmTrackingTarget {
 
 #[test]
 fn the_live_stage_order_keeps_palm_roll_state_and_returns_from_a_turn() {
-    let generation = AvatarGeneration(31);
-    let (mut app, rig) = build_app(false, generation);
+    let (mut app, rig) = build_app(false);
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         std::time::Duration::from_secs_f64(1.0 / 60.0),
     ));
@@ -310,14 +314,17 @@ fn the_live_stage_order_keeps_palm_roll_state_and_returns_from_a_turn() {
 
 #[test]
 fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
-    let generation = AvatarGeneration(7);
     let weight = ArmBlendWeight {
         wrist: 0.25,
         pole: 0.5,
         palm: 0.75,
         fingers: 0.0,
     };
-    let (mut app, rig) = build_app(true, generation);
+    let (mut app, rig) = build_app(true);
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
 
     set_control(
         &mut app,
@@ -379,8 +386,11 @@ fn enabled_mirror_equals_a_manually_mirrored_frame_with_the_mirror_disabled() {
 
 #[test]
 fn opposed_bend_planes_resolve_and_return_instead_of_freezing() {
-    let generation = AvatarGeneration(23);
-    let (mut app, rig) = build_app(false, generation);
+    let (mut app, rig) = build_app(false);
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         std::time::Duration::from_secs_f64(1.0 / 60.0),
     ));
@@ -495,8 +505,11 @@ fn opposed_bend_planes_resolve_and_return_instead_of_freezing() {
 
 #[test]
 fn disabled_mirror_keeps_the_canonical_side_assignment() {
-    let generation = AvatarGeneration(11);
-    let (mut app, rig) = build_app(false, generation);
+    let (mut app, rig) = build_app(false);
+    let generation = app
+        .world()
+        .resource::<AvatarLifecycle>()
+        .current_generation();
 
     set_control(
         &mut app,

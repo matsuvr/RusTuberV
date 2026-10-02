@@ -5,10 +5,11 @@ use bevy_vrm1::prelude::{LookAtProperties, LookAtType, RangeMap};
 
 use crate::direct_look::DirectLookAtInput;
 
+use crate::binding::AvatarBinding;
 use crate::capabilities::SelectedGazeBackend;
-use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
+use crate::lifecycle::AvatarLifecycle;
 use crate::mirror::AvatarMotionMirror;
-use crate::unload::ActiveControlFrame;
+use crate::unload::{ActiveControlFrame, resolve_control_target};
 use vtuber_core::GazeSignal;
 
 /// Adapter-owned conservative LookAt fallback used when model metadata is absent.
@@ -72,20 +73,32 @@ pub fn update_direct_look_at_input(
     lifecycle: Res<AvatarLifecycle>,
     control_frame: Res<ActiveControlFrame>,
     mirror: Option<Res<AvatarMotionMirror>>,
+    bindings: Query<&AvatarBinding>,
     mut roots: Query<(&LookAtProperties, &mut DirectLookAtInput)>,
 ) {
-    if lifecycle.state() != AvatarLifecycleState::Ready {
-        return;
-    }
-    let Some(root) = lifecycle.active_root() else {
+    let Ok(target) = resolve_control_target(
+        &lifecycle,
+        lifecycle
+            .active_root()
+            .and_then(|root| bindings.get(root).ok()),
+        control_frame
+            .frame
+            .as_ref()
+            .map(|_| control_frame.generation),
+    ) else {
+        for (_, mut input) in &mut roots {
+            *input = DirectLookAtInput::default();
+        }
         return;
     };
+    let root = target.binding.root;
     let Ok((properties, mut input)) = roots.get_mut(root) else {
         return;
     };
     let gaze = control_frame
         .frame
         .as_ref()
+        .filter(|_| target.frame_is_current)
         .map_or(GazeSignal::UNAVAILABLE, |frame| frame.gaze);
     *input = direct_look_at_input(
         properties,

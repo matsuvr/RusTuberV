@@ -881,21 +881,22 @@ pub fn update_dynamic_arm_targets(
 
     // Any condition that breaks generation or source authority clears the
     // dynamic override so the compositor falls back to its static default.
-    let active = lifecycle.state() == crate::lifecycle::AvatarLifecycleState::Ready
-        && selection.mode == ArmPoseSourceKind::VirtualHandAnchor
-        && control_frame.generation == binding.generation
-        && control_frame.frame.is_some();
-
     let Some(mut targets) = targets else {
         return;
     };
-    if !active {
-        *targets = DynamicArmTargets::default();
-        return;
-    }
-    // `active` already verified a frame exists; keep the invariant explicit
-    // without panicking on runtime data.
-    let Some(frame) = control_frame.frame.as_ref() else {
+    let frame = crate::unload::resolve_control_target(
+        &lifecycle,
+        Some(binding),
+        control_frame
+            .frame
+            .as_ref()
+            .map(|_| control_frame.generation),
+    )
+    .ok()
+    .filter(|target| target.frame_is_current)
+    .and_then(|_| control_frame.frame.as_ref());
+    let Some(frame) = frame.filter(|_| selection.mode == ArmPoseSourceKind::VirtualHandAnchor)
+    else {
         *targets = DynamicArmTargets::default();
         return;
     };
@@ -1014,19 +1015,20 @@ pub fn update_tracked_arm_targets(
     let Some(mut targets) = targets else {
         return;
     };
-    let Some(frame) = control
-        .frame
-        .filter(|_| control.generation == Some(binding.generation))
-    else {
+    let observed = control.frame.zip(control.generation);
+    let frame = crate::unload::resolve_control_target(
+        &lifecycle,
+        Some(binding),
+        observed.map(|(_, generation)| generation),
+    )
+    .ok()
+    .filter(|target| target.frame_is_current)
+    .and_then(|_| observed.map(|(frame, _)| frame));
+    let Some(frame) = frame else {
         filters.clear();
         *targets = DynamicArmTargets::default();
         return;
     };
-    if lifecycle.state() != crate::lifecycle::AvatarLifecycleState::Ready {
-        filters.clear();
-        *targets = DynamicArmTargets::default();
-        return;
-    }
 
     // The tracked frame is re-resolved on every render tick: its source
     // sequence only advances when the camera does, but the render-clock
