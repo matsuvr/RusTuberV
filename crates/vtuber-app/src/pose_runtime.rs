@@ -591,6 +591,10 @@ mod tests {
     #[test]
     fn pose_session_reset_waits_for_new_capture_and_never_relabels_a_held_frame() {
         let mut pose = PoseRuntime::default();
+        #[cfg(debug_assertions)]
+        {
+            pose.debug_log = Some(tempfile::tempfile().unwrap());
+        }
         let first = AvatarGeneration(1);
         let second = AvatarGeneration(2);
         assert!(pose.read_latest(first, MonoTimeNs(10)).is_none());

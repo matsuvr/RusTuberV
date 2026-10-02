@@ -355,7 +355,8 @@ pub fn load_language(path: &Path) -> Result<UiLanguage, SettingsError> {
 pub fn save_language(path: &Path, language: UiLanguage) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.language = language;
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+    crate::file_io::replace_file(path, toml::to_string_pretty(&document)?.as_bytes())
+        .map_err(SettingsError::Io)
 }
 
 /// Loads the stored arm-tracking switch.
@@ -376,7 +377,8 @@ pub fn load_arm_tracking_enabled(path: &Path) -> Result<bool, SettingsError> {
 pub fn save_arm_tracking_enabled(path: &Path, enabled: bool) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.arm_tracking_enabled = enabled;
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+    crate::file_io::replace_file(path, toml::to_string_pretty(&document)?.as_bytes())
+        .map_err(SettingsError::Io)
 }
 
 /// Loads and validates model-specific expression bindings.
@@ -404,7 +406,8 @@ pub fn save_expression_bindings(
         .entries()
         .map(|(model_id, bindings)| (model_id.to_owned(), bindings.clone()))
         .collect();
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+    crate::file_io::replace_file(path, toml::to_string_pretty(&document)?.as_bytes())
+        .map_err(SettingsError::Io)
 }
 
 /// Loads and validates the arm-pose settings document.
@@ -442,7 +445,8 @@ pub fn save_arm_pose_overrides(
             )
         })
         .collect();
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+    crate::file_io::replace_file(path, toml::to_string_pretty(&document)?.as_bytes())
+        .map_err(SettingsError::Io)
 }
 
 fn load_rich_look_settings(
@@ -458,7 +462,8 @@ fn save_rich_look_settings(
 ) -> Result<(), SettingsError> {
     let mut document = read_settings_document(path)?;
     document.rich_look.insert(model_id, settings);
-    write_settings_atomically(path, &toml::to_string_pretty(&document)?)
+    crate::file_io::replace_file(path, toml::to_string_pretty(&document)?.as_bytes())
+        .map_err(SettingsError::Io)
 }
 
 /// Builds the startup resource from one already-validated document.
@@ -556,31 +561,6 @@ fn arm_store(
             .map(|(model_id, profile)| (model_id, profile.into_runtime())),
     );
     Ok(store)
-}
-
-/// Writes the complete settings text by replacing the target with a unique
-/// temporary file from the same directory.
-///
-/// The existing file is never deleted up front: a failed write or replacement
-/// leaves the previous bytes in place, and unique temporary names keep
-/// concurrent saves from clobbering each other's scratch file.
-fn write_settings_atomically(path: &Path, text: &str) -> Result<(), SettingsError> {
-    use std::io::Write as _;
-    use tempfile::NamedTempFile;
-
-    // A bare file name has no meaningful parent; the save directory is then
-    // the current directory itself.
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    fs::create_dir_all(directory)?;
-    let mut temporary = NamedTempFile::new_in(directory)?;
-    temporary.write_all(text.as_bytes())?;
-    temporary
-        .persist(path)
-        .map_err(|persist_error| SettingsError::Io(persist_error.error))?;
-    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -721,34 +701,6 @@ mod tests {
     use crate::expression_keys::ExpressionKey;
     use tempfile::tempdir;
     use vtuber_avatar::{ArmPoseProfile, AvatarAssetId};
-
-    #[test]
-    fn atomically_replaces_existing_file_with_the_second_content() {
-        let directory = tempdir().expect("temporary settings directory");
-        let path = directory.path().join(SETTINGS_FILE_NAME);
-        write_settings_atomically(&path, "schema_version = 1\n").expect("first save");
-        write_settings_atomically(&path, "schema_version = 1\nlanguage = \"en\"\n")
-            .expect("second save");
-        assert_eq!(
-            fs::read_to_string(&path).expect("settings readable"),
-            "schema_version = 1\nlanguage = \"en\"\n"
-        );
-    }
-
-    #[test]
-    fn failed_save_keeps_the_existing_bytes() {
-        let directory = tempdir().expect("temporary settings directory");
-        let original = directory.path().join(SETTINGS_FILE_NAME);
-        fs::write(&original, "schema_version = 1\n").unwrap();
-        // `original` is a file, so a path nested under it cannot resolve a
-        // save directory and the write must fail without touching it.
-        let nested = original.join(SETTINGS_FILE_NAME);
-        assert!(write_settings_atomically(&nested, "schema_version = 2\n").is_err());
-        assert_eq!(
-            fs::read_to_string(&original).expect("settings readable"),
-            "schema_version = 1\n"
-        );
-    }
 
     fn profile(drop: f32) -> ArmPoseProfileOverride {
         ArmPoseProfileOverride::from_profile(ArmPoseProfile {

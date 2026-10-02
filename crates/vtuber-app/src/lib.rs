@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod file_io;
+
 /// UI action commands emitted by the UI layer.
 pub mod actions;
 
