@@ -34,7 +34,8 @@
 
 use serde_json::{Map, Value};
 
-use crate::vrm0::convert::{Vrm0ConvertError, parse_glb, repack_glb};
+use crate::glb::Glb;
+use crate::vrm0::convert::Vrm0ConvertError;
 
 /// Managed-copy marker written into `custom` entries this adaptation merged
 /// into `preset`.
@@ -52,7 +53,8 @@ pub const MERGED_CUSTOM_MARKER: &str = "vtuberManagedCustomOrigin";
 /// satisfies the contract, so callers can pass the source through unchanged.
 /// Returns `Err` when the input cannot be parsed as a GLB.
 pub fn adapt_vrm1_expressions(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
-    let (mut document, bin) = parse_glb(bytes)?;
+    let mut glb = Glb::parse(bytes)?;
+    let document = &mut glb.document;
     let Some(vrmc) = document
         .get_mut("extensions")
         .and_then(Value::as_object_mut)
@@ -131,9 +133,7 @@ pub fn adapt_vrm1_expressions(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Conve
         expressions.insert("custom".to_string(), Value::Object(custom));
     }
 
-    let json = serde_json::to_vec(&document)
-        .map_err(|error| Vrm0ConvertError::InvalidJson(error.to_string()))?;
-    Ok(Some(repack_glb(&json, bin)))
+    Ok(Some(glb.to_vec()?))
 }
 
 #[cfg(test)]
@@ -152,11 +152,11 @@ mod tests {
             "extensions": {"VRMC_vrm": vrmc},
             "extensionsUsed": ["VRMC_vrm"]
         });
-        repack_glb(&serde_json::to_vec(&document).unwrap(), None)
+        Glb::new(document, None).to_vec().unwrap()
     }
 
     fn json_of(bytes: &[u8]) -> Value {
-        let (document, _) = parse_glb(bytes).unwrap();
+        let document = Glb::parse(bytes).unwrap().document;
         document
     }
 
@@ -275,7 +275,7 @@ mod tests {
         assert!(adapt_vrm1_expressions(b"not a glb").is_err());
         let no_expressions = glb(serde_json::json!({"specVersion": "1.0"}));
         assert!(adapt_vrm1_expressions(&no_expressions).unwrap().is_none());
-        let (document, _) = parse_glb(&no_expressions).unwrap();
+        let document = Glb::parse(&no_expressions).unwrap().document;
         assert!(document.get("nodes").is_none());
     }
 }
