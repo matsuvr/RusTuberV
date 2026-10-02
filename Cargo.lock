@@ -7878,6 +7878,7 @@ dependencies = [
  "vtuber-camera",
  "vtuber-core",
  "vtuber-inference",
+ "vtuber-ndi",
  "vtuber-tracking",
 ]
 

@@ -11,6 +11,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod runtime_identity;
+
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -33,7 +35,9 @@ pub const fn is_sdk_feature_enabled() -> bool {
 pub fn is_ndi_runtime_installed() -> bool {
     #[cfg(target_os = "windows")]
     {
-        runtime_dll_present_in(&candidate_runtime_dirs(), &RUNTIME_FILE_NAMES)
+        candidate_runtime_dirs()
+            .iter()
+            .any(|dir| runtime_identity::runtime_file_in(dir).is_some())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -801,10 +805,6 @@ impl Drop for NdiOutputController {
     }
 }
 
-/// File names of the supported NDI Standard runtime DLLs (current and legacy).
-#[cfg(any(target_os = "windows", test))]
-const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
-
 #[cfg(target_os = "windows")]
 fn candidate_runtime_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
@@ -832,12 +832,6 @@ fn candidate_runtime_dirs() -> Vec<std::path::PathBuf> {
         r"C:\Program Files\NDI\NDI 6 Runtime",
     ));
     dirs
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn runtime_dll_present_in(dirs: &[std::path::PathBuf], file_names: &[&str]) -> bool {
-    dirs.iter()
-        .any(|dir| file_names.iter().any(|file| dir.join(file).is_file()))
 }
 
 fn validate_output_profile(profile: VideoOutputProfile) -> Result<(), NdiOutputError> {
@@ -1465,33 +1459,25 @@ mod tests {
     #[test]
     fn runtime_probe_finds_current_dll_name() {
         let dir = runtime_probe_dir("current");
-        std::fs::write(dir.join(RUNTIME_FILE_NAMES[0]), b"stub").expect("current stub is writable");
-        assert!(runtime_dll_present_in(
-            std::slice::from_ref(&dir),
-            &RUNTIME_FILE_NAMES
-        ));
+        std::fs::write(dir.join(runtime_identity::RUNTIME_FILE_NAMES[0]), b"stub")
+            .expect("current stub is writable");
+        assert!(runtime_identity::runtime_file_in(&dir).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn runtime_probe_accepts_legacy_dll_name() {
         let dir = runtime_probe_dir("legacy");
-        std::fs::write(dir.join(RUNTIME_FILE_NAMES[1]), b"stub").expect("legacy stub is writable");
-        assert!(runtime_dll_present_in(
-            std::slice::from_ref(&dir),
-            &RUNTIME_FILE_NAMES
-        ));
+        std::fs::write(dir.join(runtime_identity::RUNTIME_FILE_NAMES[1]), b"stub")
+            .expect("legacy stub is writable");
+        assert!(runtime_identity::runtime_file_in(&dir).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn runtime_probe_reports_missing_for_empty_dir() {
         let dir = runtime_probe_dir("empty");
-        assert!(!runtime_dll_present_in(
-            std::slice::from_ref(&dir),
-            &RUNTIME_FILE_NAMES
-        ));
-        assert!(!runtime_dll_present_in(&[], &RUNTIME_FILE_NAMES));
+        assert!(runtime_identity::runtime_file_in(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

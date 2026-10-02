@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use vtuber_inference::MediaPipeTask;
 
-const RUNTIME_FILE_NAMES: [&str; 2] = ["Processing.NDI.Lib.x64.dll", "Processing.NDI.Lib_x64.dll"];
+use vtuber_ndi::runtime_identity::{RUNTIME_FILE_NAMES, runtime_file_in, runtime_name_in_binary};
 const LICENSE_FILE: &str = "NDI_SDK_LICENSE_AGREEMENT.pdf";
 const RUNTIME_LICENSES_FILE: &str = "Processing.NDI.Lib.Licenses.txt";
 const USAGE_FILE: &str = "README_NDI.md";
@@ -85,7 +85,11 @@ fn stage_package(options: PackageOptions) -> Result<(), String> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "runtime DLL path has no valid UTF-8 filename".to_string())?;
-    let imported_runtime_name = detect_runtime_name_in_file(&options.executable)?;
+    let imported_runtime_name = runtime_name_in_binary(
+        &fs::read(&options.executable)
+            .map_err(|error| format!("cannot read executable: {error}"))?,
+    )
+    .map_err(|error| format!("executable {} {error}", options.executable.display()))?;
     if runtime_name != imported_runtime_name {
         return Err(format!(
             "runtime DLL {runtime_name} does not match the executable's NDI import {imported_runtime_name}"
@@ -189,16 +193,12 @@ fn verify_package(package_dir: &Path) -> Result<(), String> {
         ));
     }
 
-    let runtime_name = RUNTIME_FILE_NAMES
-        .iter()
-        .copied()
-        .find(|name| package_dir.join(name).is_file())
-        .ok_or_else(|| {
-            format!(
-                "package is missing one of the supported NDI runtime DLLs: {}",
-                RUNTIME_FILE_NAMES.join(", ")
-            )
-        })?;
+    let (runtime_name, _) = runtime_file_in(package_dir).ok_or_else(|| {
+        format!(
+            "package is missing one of the supported NDI runtime DLLs: {}",
+            RUNTIME_FILE_NAMES.join(", ")
+        )
+    })?;
     let expected = [
         EXECUTABLE_FILE,
         LICENSE_FILE,
@@ -507,31 +507,6 @@ fn require_file(path: &Path, description: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn detect_runtime_name_in_file(path: &Path) -> Result<&'static str, String> {
-    let bytes = fs::read(path)
-        .map_err(|error| format!("cannot read executable {}: {error}", path.display()))?;
-    let matches: Vec<_> = RUNTIME_FILE_NAMES
-        .iter()
-        .copied()
-        .filter(|name| {
-            bytes
-                .windows(name.len())
-                .any(|window| window == name.as_bytes())
-        })
-        .collect();
-    match matches.as_slice() {
-        [name] => Ok(*name),
-        [] => Err(format!(
-            "executable {} does not import a supported NDI runtime DLL",
-            path.display()
-        )),
-        _ => Err(format!(
-            "executable {} imports multiple supported NDI runtime DLL names",
-            path.display()
-        )),
-    }
-}
-
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("cannot hash {}: {error}", path.display()))?;
@@ -719,10 +694,7 @@ fn probe_environment() -> Result<(), String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\NDI\NDI 6 SDK"));
     let license = sdk_dir.join("NDI SDK License Agreement.pdf");
-    let runtime = sdk_dir
-        .join("Bin")
-        .join("x64")
-        .join("Processing.NDI.Lib.x64.dll");
+    let runtime = runtime_file_in(&sdk_dir.join("Bin").join("x64"));
     let header = sdk_dir.join("Include").join("Processing.NDI.Lib.h");
     let tools = PathBuf::from(r"C:\Program Files\NDI\NDI 6 Tools");
     let system_runtime = PathBuf::from(r"C:\Program Files\NDI\NDI 6 Runtime");
@@ -740,9 +712,14 @@ fn probe_environment() -> Result<(), String> {
             fs::metadata(&license).map(|m| m.len()).unwrap_or(0)
         );
     }
-    println!("runtime_file={}", runtime.display());
-    println!("runtime_present={}", runtime.is_file());
-    if runtime.is_file() {
+    println!(
+        "runtime_file={}",
+        runtime
+            .as_ref()
+            .map_or_else(|| "none".into(), |(_, path)| path.display().to_string())
+    );
+    println!("runtime_present={}", runtime.is_some());
+    if let Some((_, runtime)) = runtime {
         println!("runtime_sha256={}", sha256_file(&runtime)?);
     }
     println!("header_present={}", header.is_file());
@@ -770,7 +747,7 @@ fn probe_environment() -> Result<(), String> {
 
 fn print_package_help() {
     println!("  cargo xtask ndi package --output <dir> \\");
-    println!("    --runtime-dll <Processing.NDI.Lib.x64.dll or Processing.NDI.Lib_x64.dll> \\");
+    println!("    --runtime-dll <{}> \\", RUNTIME_FILE_NAMES.join(" or "));
     println!("    --sdk-license <NDI SDK License Agreement.pdf> \\");
     println!("    --sdk-version <version> \\");
     println!("    [--sdk-package-sha256 <sha256> | --sdk-package-unavailable] \\");
@@ -848,20 +825,6 @@ mod tests {
         fs::write(directory.join("unexpected.dll"), b"not allowed").expect("test file");
         let result = verify_package(&directory);
         assert!(result.is_err());
-        fs::remove_dir_all(directory).expect("test directory should be removable");
-    }
-
-    #[test]
-    fn executable_import_name_supports_legacy_runtime() {
-        let directory = temporary_directory();
-        fs::create_dir_all(&directory).expect("test directory should be creatable");
-        let executable = directory.join(EXECUTABLE_FILE);
-        fs::write(&executable, b"MZ Processing.NDI.Lib_x64.dll\0").expect("executable");
-
-        assert_eq!(
-            detect_runtime_name_in_file(&executable).expect("legacy import should be detected"),
-            "Processing.NDI.Lib_x64.dll"
-        );
         fs::remove_dir_all(directory).expect("test directory should be removable");
     }
 
