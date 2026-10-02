@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -334,7 +334,7 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
     };
     let meta_text = toml::to_string_pretty(&meta)
         .map_err(|e| ModelImportError::Io(io::Error::other(e.to_string())))?;
-    write_atomic(&meta_path, meta_text.as_bytes())?;
+    crate::file_io::replace_file(&meta_path, meta_text.as_bytes())?;
 
     Ok(imported)
 }
@@ -1162,7 +1162,7 @@ pub fn ensure_managed_model_ready(managed_path: &Path) -> Result<bool, ModelImpo
     };
     let stored_bytes = normalize_vrm_morph_targets(&runtime_bytes).unwrap_or(runtime_bytes);
     if stored_bytes != current {
-        write_atomic(managed_path, &stored_bytes)?;
+        crate::file_io::replace_file(managed_path, &stored_bytes)?;
         return Ok(true);
     }
     Ok(false)
@@ -1635,7 +1635,7 @@ fn ensure_cached_model(dest: &Path, stored_bytes: &[u8]) -> Result<(), ModelImpo
         .is_some_and(|_| file_sha256(dest).is_ok_and(|hash| hash == stored_hash));
 
     if !cache_matches {
-        write_atomic(dest, stored_bytes)?;
+        crate::file_io::replace_file(dest, stored_bytes)?;
     }
     Ok(())
 }
@@ -1645,30 +1645,6 @@ fn file_sha256(path: &Path) -> io::Result<String> {
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher)?;
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn replace_staged_file(temp: &Path, dest: &Path) -> Result<(), ModelImportError> {
-    match fs::rename(temp, dest) {
-        Ok(()) => Ok(()),
-        Err(rename_error) if dest.exists() => {
-            // Windows does not replace an existing file with rename. The
-            // validated source is already staged in `temp`; remove only this
-            // cache entry, then complete the rename.
-            fs::remove_file(dest).map_err(|_| rename_error)?;
-            fs::rename(temp, dest)?;
-            Ok(())
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), ModelImportError> {
-    let temp = path.with_extension("tmp");
-    let mut file = fs::File::create(&temp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    drop(file);
-    replace_staged_file(&temp, path)
 }
 
 #[cfg(test)]
