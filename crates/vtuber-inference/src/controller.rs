@@ -14,7 +14,7 @@ use crate::descriptor::{FacePipelineDescriptor, ModelDescriptor, RuntimeSettings
 use crate::error::InferenceError;
 use crate::metrics::InferenceMetrics;
 use crate::runtime::InferenceOutcome;
-use crate::state::{FailureStage, InferenceWorkerState, SharedStatus};
+use crate::state::{InferenceWorkerState, SharedStatus};
 use crate::worker::run_inference_worker;
 
 /// Capacity of the control channel between controller and worker.
@@ -167,16 +167,14 @@ impl InferenceController {
     /// explicitly so a panic is reported even from a paused or idle worker.
     ///
     /// # Errors
-    /// Returns WorkerPanicked if the completed join reports a panic.
+    /// Returns the retained worker failure, including WorkerPanicked for a panic.
     pub fn poll_worker_exit(&mut self) -> Result<(), InferenceError> {
-        if !self.worker.as_ref().is_some_and(WorkerHandle::is_finished) {
-            return Ok(());
-        }
-        let Some(worker) = self.worker.take() else {
+        let Some(result) = crate::completion::reap_finished_worker(&mut self.worker, &self.status)
+        else {
             return Ok(());
         };
         self.command_tx = None;
-        self.finish_join(worker.join()).map(|_| ())
+        self.finish_join(result).map(|_| ())
     }
 
     /// Starts the inference worker.
@@ -381,26 +379,17 @@ impl InferenceController {
             })
         };
 
-        self.finish_join(result)
+        self.finish_join(crate::completion::finish_worker_join(result, &self.status))
     }
 
     fn finish_join(
         &self,
-        result: WorkerResult<InferenceWorkerResult>,
+        result: Result<InferenceWorkerResult, InferenceError>,
     ) -> Result<InferenceMetrics, InferenceError> {
         self.output_slot.close();
         self.outcome_slot.close();
         self.canonical_outcome_slot.close();
-        match result {
-            WorkerResult::Completed(result) => Ok(result.final_metrics),
-            WorkerResult::Panicked => {
-                self.status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
-                Err(InferenceError::WorkerPanicked)
-            }
-        }
+        result.map(|result| result.final_metrics)
     }
 }
 

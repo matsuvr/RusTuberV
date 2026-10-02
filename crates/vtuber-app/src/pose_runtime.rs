@@ -96,14 +96,14 @@ impl PoseRuntime {
 
     /// Selects observed arm tracking on or off. The worker follows in the bridge.
     ///
-    /// An explicit off-then-on reselection clears a retained spawn failure so
-    /// the next bridge tick tries the OS thread creation again. Re-assigning the
+    /// An explicit off-then-on reselection clears a retained worker failure so
+    /// the next bridge tick starts a fresh worker. Re-assigning the
     /// same value does not, so a failing spawn is never retried implicitly.
     pub fn set_enabled(&mut self, enabled: bool) {
         let reselected = enabled && !self.enabled;
         self.enabled = enabled;
         if reselected {
-            self.clear_spawn_failure();
+            self.clear_worker_failure();
         }
     }
 
@@ -116,7 +116,21 @@ impl PoseRuntime {
     /// Whether the Pose worker thread is currently running.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.worker.is_some()
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+            && self.lock_status().state != InferenceWorkerState::Failed
+    }
+
+    /// Reaps an exited worker and clears its retained observations.
+    fn poll_worker_exit(&mut self) -> Result<(), InferenceError> {
+        let Some(result) =
+            vtuber_inference::completion::reap_finished_worker(&mut self.worker, &self.status)
+        else {
+            return Ok(());
+        };
+        self.reset_observations();
+        result.map(|_| ())
     }
 
     /// Starts the Pose worker, loading the task bundle inside the worker thread.
@@ -177,10 +191,10 @@ impl PoseRuntime {
         }
     }
 
-    /// Clears a retained spawn failure so an explicit reselection can retry.
-    fn clear_spawn_failure(&mut self) {
+    /// Clears a retained failure so an explicit reselection can retry.
+    fn clear_worker_failure(&mut self) {
         let mut status = self.lock_status();
-        if !status.last_failure.as_ref().is_some_and(is_spawn_failure) {
+        if status.last_failure.is_none() {
             return;
         }
         status.last_failure = None;
@@ -202,18 +216,15 @@ impl PoseRuntime {
         } else {
             vtuber_core::WorkerResult::Completed(InferenceWorkerResult::default())
         };
+        self.reset_observations();
+        vtuber_inference::completion::finish_worker_join(result, &self.status).map(|_| ())
+    }
+
+    fn reset_observations(&mut self) {
         self.tracking.reset();
         self.output_generation = 0;
         self.held_frame = None;
         self.output_slot.clear();
-        match result {
-            vtuber_core::WorkerResult::Completed(_) => Ok(()),
-            vtuber_core::WorkerResult::Panicked => {
-                self.lock_status()
-                    .record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
-                Err(InferenceError::WorkerPanicked)
-            }
-        }
     }
 
     /// Advances the pure tracking state by one render tick.
@@ -374,29 +385,23 @@ pub fn restore_pose_settings_system(
     pose.set_enabled(settings.arm_tracking_enabled());
 }
 
-/// Whether a recorded failure came from the OS refusing the worker thread.
-fn is_spawn_failure(failure: &WorkerFailure) -> bool {
-    matches!(&failure.error, InferenceError::WorkerSpawnFailed { .. })
-}
-
 /// Whether the bridge should ask for a Pose worker on this tick.
 ///
-/// A retained spawn failure blocks the automatic retry: the same request would
-/// fail the same way, so only an explicit arm-tracking off-then-on reselection
-/// starts another attempt.
+/// A retained failure blocks automatic restart until an explicit arm-tracking
+/// off-then-on reselection starts another attempt.
 fn should_start_pose(
     enabled: bool,
     capture_active: bool,
     has_worker: bool,
     last_failure: Option<&WorkerFailure>,
 ) -> bool {
-    enabled && capture_active && !has_worker && !last_failure.is_some_and(is_spawn_failure)
+    enabled && capture_active && !has_worker && last_failure.is_none()
 }
 
 /// Starts or stops the Pose worker with the capture session.
 ///
 /// The Pose worker never runs while capture is not active, so a stopped camera
-/// cannot leave stale observations behind. A spawn failure is reported once
+/// cannot leave stale observations behind. A worker failure is reported once
 /// through the existing error presentation and then retained, leaving face
 /// tracking and capture untouched.
 pub fn pose_worker_bridge_system(
@@ -404,6 +409,11 @@ pub fn pose_worker_bridge_system(
     capture: Res<CaptureRuntime>,
     mut orchestrator: ResMut<Orchestrator>,
 ) {
+    if let Err(error) = pose.poll_worker_exit() {
+        orchestrator.set_last_error(Some(OrchestratorError::PoseInferenceFailed(
+            error.to_string(),
+        )));
+    }
     let capture_active = matches!(
         capture.state(),
         vtuber_camera::CaptureServiceState::Starting | vtuber_camera::CaptureServiceState::Running
@@ -418,7 +428,7 @@ pub fn pose_worker_bridge_system(
     if start {
         if let Err(error) = pose.ensure_running() {
             error!("pose worker could not be started: {error}");
-            orchestrator.set_last_error(Some(OrchestratorError::PoseWorkerStartFailed(
+            orchestrator.set_last_error(Some(OrchestratorError::PoseInferenceFailed(
                 error.to_string(),
             )));
         }
@@ -427,8 +437,9 @@ pub fn pose_worker_bridge_system(
         // worker. Not starting this tick says nothing about a running worker.
         if let Err(error) = pose.stop() {
             error!("pose worker shutdown failed: {error}");
-            orchestrator
-                .set_last_error(Some(OrchestratorError::InferenceFailed(error.to_string())));
+            orchestrator.set_last_error(Some(OrchestratorError::PoseInferenceFailed(
+                error.to_string(),
+            )));
         }
     }
 }
@@ -439,7 +450,7 @@ pub fn read_pose_output_system(
     mut pose: ResMut<PoseRuntime>,
     mut tracked: ResMut<TrackedArmControl>,
 ) {
-    if !pose.enabled() {
+    if !pose.enabled() || !pose.is_running() {
         tracked.frame = None;
         tracked.generation = None;
         return;
@@ -557,6 +568,120 @@ mod tests {
         ));
     }
 
+    fn wait_for_pose_exit(pose: &PoseRuntime) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !pose.worker.as_ref().unwrap().is_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn pose_poll_keeps_running_workers_and_reports_an_exited_panic_once() {
+        let mut pose = PoseRuntime::default();
+        pose.finish_spawn(Ok(test_pose_worker())).unwrap();
+        assert_eq!(pose.poll_worker_exit(), Ok(()));
+        assert!(pose.is_running());
+        pose.stop().unwrap();
+
+        pose.worker = Some(
+            WorkerHandle::spawn("pose-poll-panic", |_| {
+                panic!("scripted panic");
+            })
+            .unwrap(),
+        );
+        wait_for_pose_exit(&pose);
+        assert!(!pose.is_running());
+        assert_eq!(pose.poll_worker_exit(), Err(InferenceError::WorkerPanicked));
+        assert!(pose.worker.is_none());
+        assert_eq!(pose.poll_worker_exit(), Ok(()));
+        assert_eq!(
+            pose.lock_status().last_failure.as_ref().unwrap().stage,
+            FailureStage::WorkerPanic
+        );
+    }
+
+    #[test]
+    fn completed_pose_load_failure_is_reported_once_and_releases_tracked_authority() {
+        let mut pose = PoseRuntime::default();
+        pose.set_enabled(true);
+        let status = Arc::clone(&pose.status);
+        let input = Arc::clone(&pose.frame_slot);
+        let output = Arc::clone(&pose.output_slot);
+        let missing = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .join("missing-pose.task");
+        pose.worker = Some(
+            WorkerHandle::spawn("pose-load-failure", move |stop| {
+                let task = MediaPipeTaskSource::Path(missing);
+                run_pose_worker(
+                    stop,
+                    status,
+                    input,
+                    output,
+                    &task,
+                    &MediaPipeTaskSource::Embedded,
+                )
+            })
+            .unwrap(),
+        );
+        wait_for_pose_exit(&pose);
+        assert_eq!(pose.lock_status().state, InferenceWorkerState::Failed);
+        assert!(!pose.is_running());
+
+        let mut app = App::new();
+        app.insert_resource(pose)
+            .insert_resource(active_mock_capture())
+            .init_resource::<Orchestrator>()
+            .insert_resource(ArmSourceSelection {
+                mode: vtuber_avatar::ArmPoseSourceKind::TrackedPose,
+                ..Default::default()
+            })
+            .add_systems(
+                Update,
+                (pose_worker_bridge_system, pose_source_selection_system).chain(),
+            );
+        app.update();
+        assert!(matches!(
+            app.world().resource::<Orchestrator>().last_error(),
+            Some(OrchestratorError::PoseInferenceFailed(_))
+        ));
+        assert_eq!(
+            app.world().resource::<ArmSourceSelection>().mode,
+            vtuber_avatar::ArmPoseSourceKind::VirtualHandAnchor
+        );
+        assert!(app.world().resource::<PoseRuntime>().worker.is_none());
+        assert_eq!(
+            app.world()
+                .resource::<PoseRuntime>()
+                .lock_status()
+                .last_failure
+                .as_ref()
+                .unwrap()
+                .stage,
+            FailureStage::ModelLoad
+        );
+
+        app.world_mut()
+            .resource_mut::<Orchestrator>()
+            .set_last_error(None);
+        app.update();
+        assert_bridge_neither_retried_nor_reported(&app);
+
+        let mut pose = app.world_mut().resource_mut::<PoseRuntime>();
+        pose.set_enabled(false);
+        pose.set_enabled(true);
+        assert!(pose.lock_status().last_failure.is_none());
+        pose.finish_spawn(Ok(test_pose_worker())).unwrap();
+        assert!(pose.is_running());
+        pose.stop().unwrap();
+        app.world_mut()
+            .resource_mut::<CaptureRuntime>()
+            .shutdown()
+            .unwrap();
+    }
+
     #[test]
     fn spawn_failure_is_recorded_and_reported_without_a_worker() {
         let mut pose = PoseRuntime::new(std::path::PathBuf::from("."));
@@ -594,8 +719,7 @@ mod tests {
         assert!(!should_start_pose(false, true, false, None));
         assert!(!should_start_pose(true, false, false, None));
         assert!(!should_start_pose(true, true, true, None));
-        // Only a spawn failure blocks the start; other model errors do not.
-        assert!(should_start_pose(true, true, false, Some(&failure)));
+        assert!(!should_start_pose(true, true, false, Some(&failure)));
     }
 
     #[test]
