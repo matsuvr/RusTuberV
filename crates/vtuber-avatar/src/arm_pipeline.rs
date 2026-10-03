@@ -593,7 +593,7 @@ pub const DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION: u32 = 3;
 /// Versioned, persisted per-model dynamic arm profile.
 ///
 /// Version 3 removes the fixed hips-relative hand anchor. Neutral hand positions
-/// now come from each arm's A-pose geometry; older profiles are rejected by the
+/// now come from each arm's relaxed attention pose geometry; older profiles are rejected by the
 /// existing settings policy rather than restoring their model-dependent posture.
 ///
 /// This schema replaces the legacy static-pose parameters as the center of
@@ -713,7 +713,7 @@ fn virtual_hand_target(input: &ArmPipelineInput<'_>) -> Option<(ArmIkTarget, Arm
     // Recover the hips rest origin from the bound wrist/anchor pair so the
     // target stays hips-relative even though the solver works in rest space.
     let hips_rest = input.chain.rest.wrist.position - anchor.translation_from_hips;
-    // The neutral anchor is the same model-specific A-pose as the static
+    // The neutral anchor is the same model-specific relaxed attention pose as the static
     // initial pose. A fixed hips/body-scale ratio ignores shoulder width and
     // arm lengths, forcing different models to fold their elbows or hang inward.
     let base = crate::arm::default_arm_target(input.chain, ArmPoseProfile::default())
@@ -1450,7 +1450,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_and_lost_arms_share_an_a_pose_across_model_proportions() {
+    fn initial_and_lost_arms_share_attention_pose_across_model_proportions() {
         for side in [ArmSide::Left, ArmSide::Right] {
             for (shoulder_width, upper_length, lower_length, body_scale) in [
                 (0.09, 0.18, 0.17, 0.46),
@@ -1481,7 +1481,8 @@ mod tests {
                     body_scale_meters: body_scale,
                     ..ArmPipelineInput::binding_time(&chain, &motion, ArmPoseProfile::default())
                 };
-                let expected = Vec3::new(side_sign(side), -1.0, 0.0).normalize();
+                let (down, lateral) = ArmPoseProfile::default().arm_drop_radians.sin_cos();
+                let expected = Vec3::new(side_sign(side) * lateral, -down, 0.0);
                 let lost = resolve_tracked_side(
                     Some(&chain),
                     Some(&motion),
@@ -2290,7 +2291,7 @@ mod tests {
     #[test]
     fn clamp_is_a_noop_while_the_descent_stays_within_the_limit() {
         let chain = sample_chain(ArmSide::Left);
-        // The default A-pose (45 degrees below horizontal) must never be
+        // The default relaxed attention pose (80 degrees below horizontal) must never be
         // touched by the 85-degree limit.
         let target = crate::arm::default_arm_target(&chain, ArmPoseProfile::default())
             .expect("legacy target");

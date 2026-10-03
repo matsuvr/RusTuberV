@@ -222,7 +222,7 @@ pub struct ArmChainBinding {
     pub capabilities: ArmChainCapabilities,
 }
 
-/// Initial geometry-derived parameters for the default A-pose.
+/// Initial geometry-derived parameters for the relaxed attention pose.
 ///
 /// The values are intentionally kept in one typed profile so later per-model
 /// tuning can validate and replace them without scattering pose constants
@@ -245,7 +245,9 @@ pub struct ArmPoseProfile {
 impl Default for ArmPoseProfile {
     fn default() -> Self {
         Self {
-            arm_drop_radians: 45.0_f32.to_radians(),
+            // Leave ten degrees of lateral clearance instead of pressing the
+            // hands against the thighs in a fully vertical attention pose.
+            arm_drop_radians: 80.0_f32.to_radians(),
             reach_ratio: 1.0,
             forward_hand_offset_ratio: 0.0,
             elbow_pole_offset_ratio: 0.0,
@@ -472,7 +474,7 @@ impl std::fmt::Display for ArmIkError {
 
 impl std::error::Error for ArmIkError {}
 
-/// Builds the default A-pose target from the shoulder and that arm's bone lengths.
+/// Builds the relaxed attention target from the shoulder and that arm's bone lengths.
 pub fn default_arm_target(
     chain: &ArmChainBinding,
     profile: ArmPoseProfile,

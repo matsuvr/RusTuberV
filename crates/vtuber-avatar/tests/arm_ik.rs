@@ -69,7 +69,7 @@ fn assert_finite_solution(solution: &vtuber_avatar::ArmIkSolution) {
 }
 
 #[test]
-fn default_profile_opens_the_whole_arm_into_an_a_pose() {
+fn default_profile_lowers_the_arm_with_lateral_hand_clearance() {
     let chain = chain(ArmSide::Left, 0.7, 0.55);
     let target = default_arm_target(&chain, ArmPoseProfile::default()).unwrap();
     assert_eq!(target.wrist.z, chain.rest.upper_arm.position.z);
@@ -78,7 +78,11 @@ fn default_profile_opens_the_whole_arm_into_an_a_pose() {
     assert_finite_solution(&solution);
     assert!(solution.solved_reach < chain.rest.total_arm_length);
     assert!(solution.elbow.y < chain.rest.upper_arm.position.y);
-    let direction = Vec3::new(1.0, -1.0, 0.0).normalize();
+    let direction = Vec3::new(
+        10.0_f32.to_radians().sin(),
+        -10.0_f32.to_radians().cos(),
+        0.0,
+    );
     assert!(
         (solution.elbow - chain.rest.upper_arm.position)
             .normalize()
