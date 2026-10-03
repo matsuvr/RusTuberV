@@ -174,12 +174,8 @@ pub enum AvatarLifecycleState {
 /// Calibration state for the UI.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CalibrationViewModel {
-    /// Whether calibration is collecting samples.
+    /// Whether a manual recenter is waiting for a valid face observation.
     pub is_calibrating: bool,
-    /// Samples collected.
-    pub samples_collected: u32,
-    /// Target samples.
-    pub samples_target: u32,
     /// Quality score in 0..1.
     pub quality_score: Option<f32>,
     /// Last rejection reason.
@@ -209,6 +205,8 @@ pub enum TrackingState {
     Idle,
     /// Initializing.
     Initializing,
+    /// Camera and inference are running, waiting for a face.
+    WaitingForFace,
     /// Tracking.
     Tracking,
     /// Face lost.

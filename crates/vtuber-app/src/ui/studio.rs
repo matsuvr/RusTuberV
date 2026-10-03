@@ -593,6 +593,8 @@ pub(crate) fn render_studio(
     let previous_monitor_rect = state.monitor_image_rect;
     let mut monitor_rect = previous_monitor_rect;
     let mut draw_workspace = |ui: &mut Ui| {
+        let mut workspace = ui.new_child(egui::UiBuilder::new().id(Id::new("studio_workspace")));
+        let ui = &mut workspace;
         egui::Panel::top("studio_toolbar")
             .resizable(false)
             .frame(panel_frame(250))
@@ -649,85 +651,90 @@ pub(crate) fn render_studio(
         egui::CentralPanel::default()
             .frame(panel_frame(247))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt(("studio_detail", vm.pane as u8))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new(page_title(vm.pane, lang)).size(26.0).strong());
-                        if let Some(detail) = font_error {
-                            section(ui, "Font could not be loaded", |ui| {
-                                ui.label(detail);
-                                ui.horizontal(|ui| {
-                                    if ui.button("Japanese").clicked() {
-                                        state.emit(UiAction::SetLanguage(UiLanguage::Ja));
-                                    }
-                                    if ui.button("English").clicked() {
-                                        state.emit(UiAction::SetLanguage(UiLanguage::En));
-                                    }
-                                });
-                            });
-                        }
-                        if let Some(error) = error {
-                            section(
-                                ui,
-                                lang.pick(
-                                    "操作を確認してください",
-                                    "Check this operation",
-                                    "请检查此操作",
-                                    "작업을 확인하세요",
-                                ),
-                                |ui| {
-                                    ui.label(&error.user_message);
-                                    for action in &error.suggested_actions {
-                                        let label = match action {
-                                            UiAction::RefreshCameras => lang.pick(
-                                                "カメラを再検出",
-                                                "Refresh cameras",
-                                                "重新检测摄像头",
-                                                "카메라 새로 고침",
-                                            ),
-                                            UiAction::RetryAfterError => {
-                                                lang.pick("再試行", "Retry", "重试", "다시 시도")
-                                            }
-                                            UiAction::DismissError => {
-                                                lang.pick("閉じる", "Dismiss", "关闭", "닫기")
-                                            }
-                                            _ => continue,
-                                        };
-                                        if ui.button(label).clicked() {
-                                            state.emit(action.clone());
+                ui.push_id(("studio_page", vm.pane as u8), |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("studio_detail", vm.pane as u8))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(RichText::new(page_title(vm.pane, lang)).size(26.0).strong());
+                            if let Some(detail) = font_error {
+                                section(ui, "Font could not be loaded", |ui| {
+                                    ui.label(detail);
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Japanese").clicked() {
+                                            state.emit(UiAction::SetLanguage(UiLanguage::Ja));
                                         }
-                                    }
-                                },
-                            );
-                        }
-                        match vm.pane {
-                            Pane::VrmCamera => {
-                                vrm_page(ui, vm, state, dialog_active, lang);
-                                camera_select_page(ui, vm, state, dialog_active, lang);
-                                render_rich_look_controls(ui, vm, state, lang);
+                                        if ui.button("English").clicked() {
+                                            state.emit(UiAction::SetLanguage(UiLanguage::En));
+                                        }
+                                    });
+                                });
                             }
-                            Pane::PoseCamera => {
-                                calibration_page(ui, vm, state, lang);
-                                camera_status_page(
+                            if let Some(error) = error {
+                                section(
                                     ui,
-                                    vm,
-                                    state,
-                                    preview,
-                                    landmarks,
-                                    camera_texture,
-                                    avatar_mirror,
-                                    lang,
+                                    lang.pick(
+                                        "操作を確認してください",
+                                        "Check this operation",
+                                        "请检查此操作",
+                                        "작업을 확인하세요",
+                                    ),
+                                    |ui| {
+                                        ui.label(&error.user_message);
+                                        for action in &error.suggested_actions {
+                                            let label = match action {
+                                                UiAction::RefreshCameras => lang.pick(
+                                                    "カメラを再検出",
+                                                    "Refresh cameras",
+                                                    "重新检测摄像头",
+                                                    "카메라 새로 고침",
+                                                ),
+                                                UiAction::RetryAfterError => lang.pick(
+                                                    "再試行",
+                                                    "Retry",
+                                                    "重试",
+                                                    "다시 시도",
+                                                ),
+                                                UiAction::DismissError => {
+                                                    lang.pick("閉じる", "Dismiss", "关闭", "닫기")
+                                                }
+                                                _ => continue,
+                                            };
+                                            if ui.button(label).clicked() {
+                                                state.emit(action.clone());
+                                            }
+                                        }
+                                    },
                                 );
                             }
-                            Pane::ExpressionKeys => expression_keys_page(ui, vm, state, lang),
-                            Pane::NdiOutput => output_page(ui, vm, state, lang),
-                            Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
-                            Pane::OssLicenses => oss_licenses_page(ui, lang),
-                        }
-                        ui.add_space(16.0);
-                    });
+                            match vm.pane {
+                                Pane::VrmCamera => {
+                                    vrm_page(ui, vm, state, dialog_active, lang);
+                                    camera_select_page(ui, vm, state, dialog_active, lang);
+                                    render_rich_look_controls(ui, vm, state, lang);
+                                }
+                                Pane::PoseCamera => {
+                                    calibration_page(ui, vm, state, lang);
+                                    camera_status_page(
+                                        ui,
+                                        vm,
+                                        state,
+                                        preview,
+                                        landmarks,
+                                        camera_texture,
+                                        avatar_mirror,
+                                        lang,
+                                    );
+                                }
+                                Pane::ExpressionKeys => expression_keys_page(ui, vm, state, lang),
+                                Pane::NdiOutput => output_page(ui, vm, state, lang),
+                                Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
+                                Pane::OssLicenses => oss_licenses_page(ui, lang),
+                            }
+                            ui.add_space(16.0);
+                        });
+                });
             });
     };
     if transitioning {
@@ -743,10 +750,10 @@ pub(crate) fn render_studio(
             1.0 - collapse,
         );
         root.multiply_opacity(1.0 - fade);
-        root.with_visual_transform(transform, |ui| draw_workspace(ui));
+        root.with_visual_transform(transform, &mut draw_workspace);
         transition_input_blocker(ctx, viewport);
     } else {
-        draw_workspace(&mut root);
+        root.with_visual_transform(egui::emath::TSTransform::IDENTITY, &mut draw_workspace);
     }
     state.monitor_image_rect = monitor_rect;
     let over_ui = ctx
@@ -1544,15 +1551,12 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
         |ui| {
             ui.label(lang.pick("カメラに向かい、自然な表情で開始してください。映像を表示する必要はありません。", "Face the camera with a relaxed expression. There is no need to reveal the camera image.", "面向摄像头，保持自然表情后开始。无需显示摄像头影像。", "카메라를 향해 편안한 표정으로 시작하세요. 카메라 영상을 표시할 필요는 없습니다."));
             if vm.calibration.is_calibrating {
-                let value = if vm.calibration.samples_target > 0 {
-                    vm.calibration.samples_collected as f32 / vm.calibration.samples_target as f32
-                } else {
-                    0.0
-                };
-                ui.add(egui::ProgressBar::new(value.clamp(0.0, 1.0)).text(format!(
-                    "{} / {}",
-                    vm.calibration.samples_collected, vm.calibration.samples_target
-                )));
+                ui.label(lang.pick(
+                    "顔を検出したら中立姿勢を更新します。カメラに顔を映してください。",
+                    "The neutral pose will update when a face is detected. Face the camera.",
+                    "检测到脸部后将更新自然姿势。请面向摄像头。",
+                    "얼굴이 감지되면 중립 자세를 갱신합니다. 카메라를 바라보세요.",
+                ));
                 if ui
                     .button(lang.pick("キャンセル", "Cancel", "取消", "취소"))
                     .clicked()
@@ -1573,6 +1577,14 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                     state.emit(UiAction::RetryCalibration);
                 }
             } else {
+                if vm.tracking.state == TrackingState::WaitingForFace {
+                    ui.label(lang.pick(
+                        "顔の検出待ちです。最初に検出した顔から中立姿勢を自動設定します。",
+                        "Waiting for a face. The first detected face sets the neutral pose automatically.",
+                        "正在等待检测脸部。首次检测到的脸部会自动设置自然姿势。",
+                        "얼굴 감지를 기다리고 있습니다. 처음 감지된 얼굴로 중립 자세를 자동 설정합니다.",
+                    ));
+                }
                 if primary_button(
                     ui,
                     lang.pick(
@@ -2276,6 +2288,12 @@ fn diagnostics_page(
                 TrackingState::Initializing => {
                     lang.pick("初期化中", "Initializing", "初始化中", "초기화 중")
                 }
+                TrackingState::WaitingForFace => lang.pick(
+                    "顔の検出待ち（カメラに顔を映してください）",
+                    "Waiting for a face (face the camera)",
+                    "等待检测脸部（请面向摄像头）",
+                    "얼굴 감지 대기 중 (카메라를 바라보세요)",
+                ),
                 TrackingState::Tracking => lang.pick("追跡中", "Tracking", "跟踪中", "트래킹 중"),
                 TrackingState::Lost => lang.pick(
                     "顔を検出できません",

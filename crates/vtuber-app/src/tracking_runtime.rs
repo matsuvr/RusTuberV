@@ -238,7 +238,8 @@ pub fn tracking_bridge_system(
     let pipeline_failed = pipeline_state == crate::orchestrator::PipelineState::Failed;
     if capture_inactive || pipeline_failed {
         tracking.invalidate_session(now);
-        view_model.tracking = tracking_view(TrackingState::Starting, 0.0);
+        tracking.recenter_requested = false;
+        view_model.tracking = crate::ui_model::TrackingViewModel::default();
         view_model.calibration = calibration_view(&tracking);
         set_debug_cached(
             &mut tracking.diagnostics_cache.tracking_state,
@@ -347,7 +348,14 @@ pub fn tracking_bridge_system(
     }
 
     view_model.calibration = calibration_view(&tracking);
-    view_model.tracking = tracking_view(update.state, update.confidence.frame_confidence);
+    view_model.tracking = tracking_view(
+        if pipeline_state == crate::orchestrator::PipelineState::Starting {
+            TrackingState::Starting
+        } else {
+            update.state
+        },
+        update.confidence.frame_confidence,
+    );
     set_debug_cached(
         &mut tracking.diagnostics_cache.tracking_state,
         update.state,
@@ -376,10 +384,7 @@ pub fn tracking_bridge_system(
 fn calibration_view(runtime: &TrackingRuntime) -> CalibrationViewModel {
     let recent = runtime.auto_neutral.recent_sample_count();
     CalibrationViewModel {
-        is_calibrating: runtime.recenter_requested
-            || runtime.auto_neutral.state() == AutoNeutralState::WaitingForFace,
-        samples_collected: recent.min(u32::MAX as usize) as u32,
-        samples_target: vtuber_tracking::AUTO_NEUTRAL_MIN_SAMPLES as u32,
+        is_calibrating: runtime.recenter_requested,
         quality_score: (recent > 0).then(|| {
             (recent as f32 / vtuber_tracking::AUTO_NEUTRAL_MIN_SAMPLES as f32).clamp(0.0, 1.0)
         }),
@@ -394,7 +399,8 @@ fn tracking_view(state: TrackingState, confidence: f32) -> crate::ui_model::Trac
             UiTrackingState::Tracking
         }
         TrackingState::LostHold | TrackingState::ReturningNeutral => UiTrackingState::Lost,
-        TrackingState::Starting | TrackingState::Searching => UiTrackingState::Initializing,
+        TrackingState::Starting => UiTrackingState::Initializing,
+        TrackingState::Searching => UiTrackingState::WaitingForFace,
     };
     crate::ui_model::TrackingViewModel {
         is_tracking: matches!(state, UiTrackingState::Tracking),
@@ -532,7 +538,8 @@ mod tests {
     #[test]
     fn no_face_is_not_reported_as_detected_while_searching() {
         let view = tracking_view(TrackingState::Searching, 0.0);
-        assert_eq!(view.state, UiTrackingState::Initializing);
+        assert_eq!(view.state, UiTrackingState::WaitingForFace);
         assert!(!view.face_detected);
+        assert!(!calibration_view(&TrackingRuntime::default()).is_calibrating);
     }
 }

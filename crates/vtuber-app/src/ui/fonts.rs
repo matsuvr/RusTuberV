@@ -148,7 +148,14 @@ pub(crate) fn configure_fonts(
     }
     let ctx = contexts.ctx_mut()?;
     if state.attempted_language.is_none() {
-        ctx.set_visuals(egui::Visuals::light());
+        let mut visuals = egui::Visuals::light();
+        visuals.weak_text_color = Some(egui::Color32::from_gray(85));
+        ctx.set_visuals(visuals);
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style
+                .text_styles
+                .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
+        });
     }
     state.attempted_language = Some(language);
     // The bundled font is applied no matter what the system fonts did, so a
