@@ -277,7 +277,7 @@ pub(crate) fn sync_capture_diagnostics(
         rate_counter.record(frame.captured_at.0);
         *last_seq = Some(frame.seq);
     }
-    diagnostics.capture_rate = rate_counter.rate_hz(monotonic_now().0) as f32;
+    diagnostics.capture_rate = rate_counter.prune_and_calculate_rate_hz(monotonic_now().0) as f32;
     let state = capture.state();
     if cached_state.as_ref() != Some(&state) {
         diagnostics.capture_state = format!("{state:?}");
@@ -594,7 +594,7 @@ mod preview_tests {
     }
 
     #[test]
-    fn preview_image_remains_mutable_in_main_world() {
+    fn preview_image_enables_main_and_render_world_asset_usage() {
         let image = preview_image(&rgb_frame()).expect("valid RGB frame should produce an image");
         assert!(
             image
@@ -609,7 +609,7 @@ mod preview_tests {
     }
 
     #[test]
-    fn preview_image_uses_privacy_dimensions_data_limit_and_linear_magnification() {
+    fn preview_image_has_48_by_27_rgba_data_and_linear_sampler_for_720p() {
         let image = preview_image(&solid_rgb_frame(1280, 720, [10, 20, 30]))
             .expect("valid RGB frame should produce a privacy image");
 
@@ -647,7 +647,7 @@ mod preview_tests {
     }
 
     #[test]
-    fn hidden_preview_does_not_upload_and_visible_updates_reuse_the_handle() {
+    fn hidden_preview_keeps_width_and_visible_update_reuses_handle() {
         let mut app = App::new();
         app.init_resource::<Assets<Image>>()
             .init_resource::<PreviewState>()
@@ -688,7 +688,7 @@ mod preview_tests {
     }
 
     #[test]
-    fn preview_upload_keeps_the_existing_target_fps_throttle() {
+    fn immediate_second_preview_update_keeps_first_frame_at_one_fps() {
         let mut app = App::new();
         app.init_resource::<Assets<Image>>()
             .init_resource::<PreviewState>()

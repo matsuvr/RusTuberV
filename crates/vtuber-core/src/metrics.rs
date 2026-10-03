@@ -1,7 +1,8 @@
-//! Fixed-size metrics collection for acceptance testing.
+//! Latency statistics and event rates for runtime diagnostics and acceptance tests.
 //!
-//! Provides ring-buffer based statistics for latency, rates, and counters.
-//! All values use monotonic timestamps within the same clock domain.
+//! [`FixedStats`] retains a fixed number of samples; [`RateCounter`] retains
+//! event timestamps until they expire. Timestamp-based measurements use one
+//! monotonic clock domain.
 
 /// Fixed-size ring buffer for computing running statistics.
 #[derive(Clone, Debug)]
@@ -143,9 +144,9 @@ impl StageTimestamps {
         self.applied_ns.saturating_sub(self.captured_ns) as f64 / 1_000_000.0
     }
 
-    /// Inference duration in milliseconds.
+    /// Capture-to-inference-completion latency in milliseconds.
     #[must_use]
-    pub fn inference_ms(&self) -> f64 {
+    pub fn capture_to_inference_ms(&self) -> f64 {
         self.inference_done_ns.saturating_sub(self.captured_ns) as f64 / 1_000_000.0
     }
 
@@ -160,7 +161,7 @@ impl StageTimestamps {
 #[derive(Clone, Debug)]
 pub struct RateCounter {
     window_ns: u64,
-    events: Vec<u64>,
+    event_timestamps_ns: Vec<u64>,
 }
 
 impl RateCounter {
@@ -169,39 +170,44 @@ impl RateCounter {
     pub fn new(window_ns: u64) -> Self {
         Self {
             window_ns,
-            events: Vec::new(),
+            event_timestamps_ns: Vec::new(),
         }
     }
 
-    /// Record an event at the given timestamp.
+    /// Records an event and removes timestamps older than its time window.
     pub fn record(&mut self, timestamp_ns: u64) {
-        self.events.push(timestamp_ns);
-        self.prune(timestamp_ns);
+        self.event_timestamps_ns.push(timestamp_ns);
+        self.prune_expired_events(timestamp_ns);
     }
 
-    /// Current rate in events per second.
+    /// Removes expired events, then calculates the retained count per second.
+    ///
+    /// The elapsed window is `min(now_ns, window_ns)`, measured from the clock
+    /// origin until a full window has elapsed. An empty count or zero elapsed
+    /// window returns zero.
     #[must_use]
-    pub fn rate_hz(&mut self, now_ns: u64) -> f64 {
-        self.prune(now_ns);
-        if self.events.is_empty() {
+    pub fn prune_and_calculate_rate_hz(&mut self, now_ns: u64) -> f64 {
+        self.prune_expired_events(now_ns);
+        if self.event_timestamps_ns.is_empty() {
             return 0.0;
         }
-        let window = now_ns.min(self.window_ns);
-        if window == 0 {
+        let elapsed_window_ns = now_ns.min(self.window_ns);
+        if elapsed_window_ns == 0 {
             return 0.0;
         }
-        self.events.len() as f64 * 1_000_000_000.0 / window as f64
+        self.event_timestamps_ns.len() as f64 * 1_000_000_000.0 / elapsed_window_ns as f64
     }
 
-    /// Remove events outside the window.
-    fn prune(&mut self, now_ns: u64) {
+    /// Removes timestamps before the saturating window cutoff, keeping its boundary.
+    fn prune_expired_events(&mut self, now_ns: u64) {
         let cutoff = now_ns.saturating_sub(self.window_ns);
-        self.events.retain(|&t| t >= cutoff);
+        self.event_timestamps_ns
+            .retain(|&timestamp_ns| timestamp_ns >= cutoff);
     }
 
     /// Reset the counter.
     pub fn reset(&mut self) {
-        self.events.clear();
+        self.event_timestamps_ns.clear();
     }
 }
 
@@ -296,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_timestamps_capture_to_apply() {
+    fn stage_timestamps_measure_capture_and_apply_latencies() {
         let ts = StageTimestamps {
             captured_ns: 1_000_000_000,
             inference_done_ns: 1_020_000_000,
@@ -304,26 +310,26 @@ mod tests {
             applied_ns: 1_030_000_000,
         };
         assert!((ts.capture_to_apply_ms() - 30.0).abs() < 0.01);
-        assert!((ts.inference_ms() - 20.0).abs() < 0.01);
+        assert!((ts.capture_to_inference_ms() - 20.0).abs() < 0.01);
         assert!((ts.apply_delay_ms() - 5.0).abs() < 0.01);
     }
 
     #[test]
-    fn stage_timestamps_zero_on_invalid() {
+    fn stage_latencies_are_zero_for_nonpositive_intervals() {
         let ts = StageTimestamps {
             captured_ns: 100,
             inference_done_ns: 50, // before capture
             control_frame_ns: 0,
             applied_ns: 0,
         };
-        assert_eq!(ts.inference_ms(), 0.0);
+        assert_eq!(ts.capture_to_inference_ms(), 0.0);
         assert_eq!(ts.apply_delay_ms(), 0.0);
     }
 
     #[test]
     fn rate_counter_empty() {
         let mut counter = RateCounter::new(1_000_000_000); // 1 second window
-        assert_eq!(counter.rate_hz(0), 0.0);
+        assert_eq!(counter.prune_and_calculate_rate_hz(0), 0.0);
     }
 
     #[test]
@@ -333,17 +339,17 @@ mod tests {
         for i in 0..10 {
             counter.record(i * 100_000_000);
         }
-        let rate = counter.rate_hz(1_000_000_000);
+        let rate = counter.prune_and_calculate_rate_hz(1_000_000_000);
         assert!((rate - 10.0).abs() < 0.1, "expected ~10 Hz, got {rate}");
     }
 
     #[test]
-    fn rate_counter_prunes_old_events() {
+    fn rate_counter_excludes_expired_events() {
         let mut counter = RateCounter::new(1_000_000_000);
-        counter.record(0); // will be pruned (before cutoff at 1s)
-        counter.record(1_500_000_000); // within window at now=2s
-        // Now at 2 seconds, cutoff is 1s. Event at 0 is pruned, event at 1.5s remains.
-        let rate = counter.rate_hz(2_000_000_000);
+        counter.record(0);
+        counter.record(1_500_000_000); // Removes the event at 0, now outside the window.
+        // At 2 seconds, the cutoff is 1 second; the event at 1.5 seconds remains.
+        let rate = counter.prune_and_calculate_rate_hz(2_000_000_000);
         assert!(
             (rate - 1.0).abs() < 0.1,
             "expected ~1 Hz after prune, got {rate}"
@@ -355,6 +361,6 @@ mod tests {
         let mut counter = RateCounter::new(1_000_000_000);
         counter.record(0);
         counter.reset();
-        assert_eq!(counter.rate_hz(0), 0.0);
+        assert_eq!(counter.prune_and_calculate_rate_hz(0), 0.0);
     }
 }

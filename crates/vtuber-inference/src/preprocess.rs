@@ -34,11 +34,13 @@ pub struct PreprocessParams {
 
 impl PreprocessParams {
     /// Builds parameters from a model descriptor.
+    /// Layout validation is performed by [`PreprocessBuffers::for_shape`] or
+    /// [`preprocess_frame`].
     ///
     /// # Errors
     ///
     /// Returns [`InferenceError::UnsupportedInputLayout`] if the descriptor's
-    /// input shape is not a supported `[1, H, W, 3]` or `[1, 3, H, W]` layout.
+    /// input shape does not have exactly four dimensions.
     pub fn from_descriptor(descriptor: &ModelDescriptor) -> Result<Self> {
         let shape: [usize; 4] = descriptor.input_shape.as_slice().try_into().map_err(|_| {
             InferenceError::UnsupportedInputLayout {
@@ -78,6 +80,7 @@ impl PreprocessBuffers {
     }
 
     /// Resizes the internal buffers only if the target size changed.
+    /// Leaves their size and dimensions unchanged if the required length overflows.
     pub fn ensure_size(&mut self, target_w: usize, target_h: usize) {
         if self.target_w == target_w && self.target_h == target_h {
             return;
@@ -110,8 +113,8 @@ impl PreprocessBuffers {
 /// Preprocesses `frame` into reusable buffers and returns a mutable reference
 /// to the tensor backing vector.
 ///
-/// The returned slice has length `target_h * target_w * 3` and is laid out
-/// according to [`PreprocessParams::input_shape`].
+/// The returned vector is the tensor storage owned by `buffers`. Its channel
+/// layout follows [`PreprocessParams::input_shape`].
 ///
 /// # Errors
 ///

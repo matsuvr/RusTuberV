@@ -408,8 +408,8 @@ type BodyTrackingPoseRoot<'a> = (
 
 /// Applies direct pose input to the humanoid upper-body chain and hips.
 ///
-/// Applications normally use [`bevy_vrm1::prelude::VrmPlugin`], which registers
-/// this system after Bevy animation and before VRM constraints. The function
+/// [`crate::VtuberAvatarPlugin`] registers this system after Bevy animation
+/// and before VRM gaze control and constraints. The function
 /// is public so integration tests and custom schedules can verify that path.
 #[expect(
     clippy::too_many_arguments,

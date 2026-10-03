@@ -275,9 +275,8 @@ pub struct ExpressionBindings {
 impl ExpressionBindings {
     /// Builds the deterministic initial assignment from a model catalog.
     ///
-    /// Uses the catalog's stable auto-assignment order and zips it onto the
-    /// fixed key bank. Extra catalog candidates beyond 36 are retained by the
-    /// catalog, not truncated here.
+    /// Assigns the first 36 candidates in the catalog's stable order to the
+    /// fixed key bank. Remaining candidates stay unassigned; the catalog is unchanged.
     #[must_use]
     pub fn default_for(catalog: &AvatarExpressionCatalog) -> Self {
         Self {
@@ -325,8 +324,8 @@ impl ExpressionBindings {
 
     /// Assigns one expression to one key.
     ///
-    /// A single transition: the expression's old key is cleared, the key's
-    /// old expression is cleared, then the new pair is inserted. The same pair
+    /// Vacates the expression's previous key and replaces the target key's
+    /// current expression with the new assignment. The same pair
     /// is a no-op. Vacated keys are never auto-refilled.
     pub fn assign(&mut self, key: ExpressionKey, expression: impl Into<String>) {
         let expression = expression.into();
@@ -361,9 +360,10 @@ impl ExpressionBindings {
         *self = Self::default_for(catalog);
     }
 
-    /// Builds bindings from explicit pairs. Duplicate expressions keep the
-    /// first key in iteration order; duplicates are rejected by the settings
-    /// loader before this is used.
+    /// Builds bindings from explicit pairs in iteration order.
+    ///
+    /// Skips a pair if its expression is already assigned. Otherwise, a later
+    /// pair for the same key replaces that key's previous assignment.
     #[must_use]
     pub fn from_pairs(pairs: impl IntoIterator<Item = (ExpressionKey, String)>) -> Self {
         let mut bindings = Self::default();
@@ -388,7 +388,7 @@ impl ExpressionBindings {
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExpressionBindingStore {
     models: BTreeMap<String, ExpressionBindings>,
-    /// Monotonic change counter for cheap per-frame view-model gating.
+    /// Wrapping change counter used by the view model to detect updates.
     revision: u64,
 }
 
@@ -649,11 +649,10 @@ mod tests {
     }
 
     #[test]
-    fn vacated_keys_are_never_auto_refilled() {
+    fn unassign_leaves_target_empty_and_keeps_other_bindings() {
         let catalog = catalog_with(&["happy", "angry", "sad", "relaxed"]);
         let mut bindings = ExpressionBindings::default_for(&catalog);
-        // Simulate a reload: the default would fill Digit1..4, but the stored
-        // empty first slot must stay empty.
+        // Removing the first assignment leaves the second assignment in place.
         bindings.unassign(ExpressionKey::Digit1);
         assert_eq!(bindings.expression_for(ExpressionKey::Digit1), None);
         assert_eq!(
@@ -682,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn model_a_and_b_bindings_do_not_share_assignments() {
+    fn store_lookup_distinguishes_present_and_missing_model_ids() {
         let catalog = catalog_with(&["happy"]);
         let mut store = ExpressionBindingStore::default();
         store.set("a".into(), ExpressionBindings::default_for(&catalog));
@@ -718,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn can_assign_requires_a_ready_catalog_entry_and_excludes_tongue() {
+    fn can_assign_requires_a_present_catalog_entry() {
         let catalog = catalog_with(&["happy"]);
         assert!(can_assign_expression(Some(&catalog), "happy"));
         assert!(!can_assign_expression(Some(&catalog), "missing"));
@@ -727,16 +726,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_expression_detection_is_exact() {
+    fn unique_bindings_have_no_duplicates_and_from_pairs_skips_repeated_expression() {
         let mut bindings = ExpressionBindings::default();
         bindings.assign(ExpressionKey::Digit1, "happy");
         bindings.assign(ExpressionKey::Digit2, "angry");
         assert!(!bindings.has_duplicate_expressions());
-        // Directly constructing a duplicate is what the loader rejects.
-        let duplicated = ExpressionBindings::from_pairs([
+        // `from_pairs` skips the second assignment of the same expression.
+        let deduplicated = ExpressionBindings::from_pairs([
             (ExpressionKey::Digit1, "happy".to_string()),
             (ExpressionKey::Digit2, "happy".to_string()),
         ]);
-        assert_eq!(duplicated.len(), 1, "from_pairs keeps the first key");
+        assert_eq!(deduplicated.len(), 1, "from_pairs keeps the first key");
     }
 }

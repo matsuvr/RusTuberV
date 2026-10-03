@@ -234,11 +234,11 @@ type BodyTrackingPositionRoot<'a> = (
 /// contact subsequently corrects the pelvis and legs; no camera/projection
 /// property is touched.
 ///
-/// Applications normally use [`bevy_vrm1::prelude::VrmPlugin`], which registers
-/// this system in the correct order.
+/// [`crate::VtuberAvatarPlugin`] registers this system after the direct-pose
+/// writer and before VRM gaze control and constraints.
 #[expect(
     clippy::too_many_arguments,
-    reason = "Bevy's `Query` filter tuple for this system's declared components, with no call site to change"
+    reason = "Bevy injects five root/bone/hierarchy/rest queries, frame time, shared lean bases, and separate root-rest and frame-stamp histories into this system"
 )]
 pub fn apply_direct_body_position(
     vrms: Query<BodyTrackingPositionRoot<'_>, With<BodyTracking>>,

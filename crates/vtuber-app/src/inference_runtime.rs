@@ -245,7 +245,7 @@ pub(crate) fn read_inference_output_system(
     diagnostics.inference_rate = rates
         .rate
         .get_or_insert_with(|| RateCounter::new(1_000_000_000))
-        .rate_hz(now) as f32;
+        .prune_and_calculate_rate_hz(now) as f32;
     diagnostics.inference_state = format!("{:?}", status.state);
     diagnostics.inference_last_source_seq = status.last_source_seq.map(|seq| seq.0);
     diagnostics.inference_frames_processed = status.frames_processed;
@@ -324,14 +324,12 @@ pub(crate) fn read_inference_output_system(
         }
     }
     rates.landmark_last_count = landmark_count;
-    diagnostics.detector_rate = rates
-        .detector_rate
-        .as_mut()
-        .map_or(0.0, |counter| counter.rate_hz(now) as f32);
-    diagnostics.landmark_rate = rates
-        .landmark_rate
-        .as_mut()
-        .map_or(0.0, |counter| counter.rate_hz(now) as f32);
+    diagnostics.detector_rate = rates.detector_rate.as_mut().map_or(0.0, |counter| {
+        counter.prune_and_calculate_rate_hz(now) as f32
+    });
+    diagnostics.landmark_rate = rates.landmark_rate.as_mut().map_or(0.0, |counter| {
+        counter.prune_and_calculate_rate_hz(now) as f32
+    });
     // Stage timing values only change when new samples are recorded, which is
     // exactly when the stage sample counts advance; skip the per-stage string
     // rebuilds while the counts are unchanged.

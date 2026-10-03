@@ -26,7 +26,7 @@ pub struct DiagnosticsSnapshot {
     pub detector_rate: f32,
     /// Crop landmark rate.
     pub landmark_rate: f32,
-    /// Tracking output rate, measured from unique source sequences.
+    /// Tracking control frames produced per second, including updates from held observations.
     pub tracking_rate: f32,
     /// Current capture worker state.
     pub capture_state: String,

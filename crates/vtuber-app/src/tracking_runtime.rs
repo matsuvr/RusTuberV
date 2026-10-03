@@ -342,7 +342,7 @@ pub fn tracking_bridge_system(
         rate.record(now.0);
     }
     if let Some(rate) = tracking_rate.as_mut() {
-        diagnostics.tracking_rate = rate.rate_hz(now.0) as f32;
+        diagnostics.tracking_rate = rate.prune_and_calculate_rate_hz(now.0) as f32;
     } else {
         diagnostics.tracking_rate = 0.0;
     }
