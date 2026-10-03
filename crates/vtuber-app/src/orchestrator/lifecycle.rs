@@ -158,7 +158,8 @@ pub fn sync_avatar_lifecycle_system(
         orchestrator.set_last_error(Some(OrchestratorError::AvatarLifecycleFailed(message)));
     }
 
-    // 2. Read the selected model's settings without changing the accepted model.
+    // 2. Prepare and submit the pending load. Its model becomes active only
+    // after the engine returns an Accepted result.
     if let Some(pending) = orchestrator.take_pending_load_request() {
         match prepare_avatar_load(pending, persistent.as_deref()) {
             Ok((request, submitted)) => {

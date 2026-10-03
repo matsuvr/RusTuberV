@@ -214,7 +214,7 @@ fn invalid_rich_look_edits_keep_live_state_and_saved_bytes() {
 }
 
 #[test]
-fn rich_look_load_errors_reach_ui_without_submitting_new_model() {
+fn rich_look_load_errors_are_recorded_without_submitting_new_model() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings.toml");
     std::fs::write(&path, "broken = [").unwrap();
@@ -233,7 +233,7 @@ fn rich_look_load_errors_reach_ui_without_submitting_new_model() {
 }
 
 #[test]
-fn rich_look_save_errors_reach_ui_and_keep_live_value() {
+fn rich_look_save_errors_are_recorded_and_keep_live_settings() {
     use crate::actions::RichLookChange;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings.toml");
@@ -243,12 +243,16 @@ fn rich_look_save_errors_reach_ui_and_keep_live_value() {
     finish_look_model(&mut app);
     std::fs::create_dir(&path).unwrap();
     look_change(&mut app, RichLookChange::Enabled(true));
+    let live_settings = app
+        .world()
+        .resource::<vtuber_avatar::AvatarLookSettings>()
+        .0;
     save_look(&mut app);
-    assert!(
+    assert_eq!(
         app.world()
             .resource::<vtuber_avatar::AvatarLookSettings>()
-            .0
-            .enabled()
+            .0,
+        live_settings
     );
     assert!(matches!(
         app.world().resource::<Orchestrator>().last_error(),
@@ -256,7 +260,7 @@ fn rich_look_save_errors_reach_ui_and_keep_live_value() {
     ));
 }
 
-fn rich_models(dir: &tempfile::TempDir) -> (ImportedModel, ImportedModel) {
+fn import_two_distinct_models(dir: &tempfile::TempDir) -> (ImportedModel, ImportedModel) {
     let first = write_review_fixture(dir);
     let mut bytes = std::fs::read(&first).unwrap();
     let index = bytes
@@ -345,7 +349,7 @@ fn rejected_switch_keeps_model(binding: bool) {
     use vtuber_avatar::{LoadImportedAvatarResult, RichLookSettings};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.toml");
-    let (a, b) = rich_models(&dir);
+    let (a, b) = import_two_distinct_models(&dir);
     let a_look = RichLookSettings::try_new(true, 0.25).unwrap();
     let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
     let settings = AppSettings::empty_at(&path);
@@ -399,13 +403,13 @@ fn restore_failure_keeps_model(read_error: bool) {
     use vtuber_avatar::{LoadImportedAvatarRequest, RichLookSettings};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.toml");
-    let (a, b) = rich_models(&dir);
+    let (a, b) = import_two_distinct_models(&dir);
     let a_look = RichLookSettings::try_new(true, 0.0).unwrap();
     let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
     let settings = AppSettings::empty_at(&path);
     settings.save_rich_look(a.id.clone(), a_look).unwrap();
     settings.save_rich_look(b.id.clone(), b_look).unwrap();
-    let valid = std::fs::read_to_string(&path).unwrap();
+    let saved_settings_toml = std::fs::read_to_string(&path).unwrap();
     let mut app = rich_look_app(&path);
     app.world_mut().resource_mut::<Orchestrator>().asset_root = dir.path().join("assets");
     import_look_model(&mut app, &a);
@@ -444,7 +448,7 @@ fn restore_failure_keeps_model(read_error: bool) {
     } else {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken = [");
     }
-    std::fs::write(&path, valid).unwrap();
+    std::fs::write(&path, saved_settings_toml).unwrap();
     import_look_model(&mut app, &b);
     finish_look_model(&mut app);
     assert_model_look(&app, &b, b_look);
@@ -456,7 +460,7 @@ fn rich_lifecycle_accepted_switch_restores_and_saves_new_model() {
     use vtuber_avatar::RichLookSettings;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.toml");
-    let (a, b) = rich_models(&dir);
+    let (a, b) = import_two_distinct_models(&dir);
     let a_look = RichLookSettings::try_new(false, 0.25).unwrap();
     let b_look = RichLookSettings::try_new(true, 0.0).unwrap();
     let settings = AppSettings::empty_at(&path);
@@ -509,10 +513,10 @@ fn preview_actions_update_preview_state_and_view_model() {
         .add_systems(Update, process_ui_actions_system);
 
     {
-        let mut actions = app.world_mut().resource_mut::<UiState>();
-        actions.emit(UiAction::TogglePreview);
-        actions.emit(UiAction::ToggleMirror);
-        actions.emit(UiAction::ToggleAvatarMotionMirror);
+        let mut ui_state = app.world_mut().resource_mut::<UiState>();
+        ui_state.emit(UiAction::TogglePreview);
+        ui_state.emit(UiAction::ToggleMirror);
+        ui_state.emit(UiAction::ToggleAvatarMotionMirror);
     }
     app.update();
 
@@ -873,7 +877,7 @@ fn a_refused_arm_tracking_save_keeps_the_runtime_switch() {
 }
 
 #[test]
-fn an_unreadable_settings_path_keeps_the_runtime_switch() {
+fn directory_settings_path_refuses_enabling_arm_tracking() {
     let directory = tempfile::tempdir().expect("temporary settings directory");
     let mut app = arm_tracking_action_app(AppSettings::empty_at(directory.path()));
 
@@ -1127,7 +1131,7 @@ fn format_import_error_not_vrm() {
 fn format_import_error_missing_bone() {
     let err = ModelImportError::MissingRequiredBone("hips".to_string());
     let msg = format_import_error(&err);
-    assert!(msg.contains("hips"));
+    assert_eq!(msg, "Missing required bone: hips");
 }
 
 fn stub_imported_model() -> ImportedModel {
@@ -1208,7 +1212,7 @@ fn orchestrator_retry_after_inference_failure_restarts_only_inference() {
 }
 
 #[test]
-fn inference_failure_requests_reverse_order_capture_shutdown() {
+fn inference_failure_requests_capture_stop_then_reports_failed_state() {
     let mut orch = Orchestrator {
         capture_desired: true,
         capture_ack: true,
@@ -1268,7 +1272,7 @@ fn orchestrator_view_model_reflects_lifecycle_not_import() {
 }
 
 #[test]
-fn orchestrator_view_model_ready_only_when_lifecycle_ready() {
+fn ready_lifecycle_sets_avatar_ready_in_view_model() {
     let orch = Orchestrator {
         imported_model: Some(stub_imported_model()),
         lifecycle_state: AvatarLifecycleState::Ready,
@@ -1417,6 +1421,7 @@ fn import_is_blocked_while_the_review_is_unchecked() {
     orch.process_action(&UiAction::AcceptAvatarImportReview);
 
     assert!(!orch.has_imported_model());
+    assert!(orch.pending_load.is_none());
     assert!(orch.pending_avatar_import.is_some());
 }
 
@@ -1457,7 +1462,7 @@ fn unreviewable_model_is_rejected_without_a_pending_review() {
 }
 
 #[test]
-fn oversized_file_is_rejected_before_reading() {
+fn oversized_file_review_reports_size_limit_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("oversized.vrm");
     let file = std::fs::File::create(&path).unwrap();
@@ -1468,10 +1473,16 @@ fn oversized_file_is_rejected_before_reading() {
     orch.process_action(&UiAction::RequestAvatarImportReview { path });
 
     assert!(orch.pending_avatar_import.is_none());
-    assert!(matches!(
+    let expected = VrmLicenseReviewError::SizeExceeded {
+        size: import::DEFAULT_SIZE_LIMIT + 1,
+        limit: import::DEFAULT_SIZE_LIMIT,
+    };
+    assert_eq!(
         orch.last_error(),
-        Some(OrchestratorError::LicenseReviewFailed(_))
-    ));
+        Some(&OrchestratorError::LicenseReviewFailed(
+            expected.to_string()
+        ))
+    );
 }
 
 fn expression_action_app(settings_path: PathBuf) -> App {
@@ -1609,8 +1620,8 @@ fn assigning_a_far_catalog_expression_persists_and_clears_manual() {
 fn reassign_moves_the_expression_and_vacates_the_old_key() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings.toml");
+    // The fixture catalog defaults to Digit1=happy and Digit2=angry.
     let mut app = expression_action_app(path);
-    // Default: Digit1=happy, Digit2=angry.
     let (model_id, generation) = expression_target(&app);
     app.world_mut()
         .resource_mut::<UiState>()

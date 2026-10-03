@@ -42,7 +42,7 @@ fn a_pre_wired_pose_capture_pair_survives_the_shell_initialization() {
 }
 
 #[test]
-fn the_shell_initialization_wires_a_default_capture_runtime_to_the_pose_slot() {
+fn initialization_creates_default_capture_pose_and_face_runtimes() {
     let mut app = App::new();
     init_tracking_runtimes(&mut app, std::path::PathBuf::from("."));
 
@@ -52,14 +52,12 @@ fn the_shell_initialization_wires_a_default_capture_runtime_to_the_pose_slot() {
             .backend_kind(),
         default_camera_backend()
     );
-    // The Pose consumer and the inference consumer both exist, so the shell
-    // never has to wire anything after startup.
     assert!(app.world().contains_resource::<PoseRuntime>());
     assert!(app.world().contains_resource::<InferenceRuntime>());
 }
 
 #[test]
-fn sync_error_presenter_updates_translated_summary_and_diagnostics() {
+fn sync_error_presenter_records_camera_error_code_and_presentation() {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
         .init_resource::<ErrorPresenter>()

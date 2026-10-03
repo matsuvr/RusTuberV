@@ -3117,7 +3117,7 @@ mod tests {
     }
 
     #[test]
-    fn render_rich_look_controls_renders_in_every_language() {
+    fn rich_look_controls_emit_no_actions_without_input_in_any_language() {
         for lang in [
             UiLanguage::Ja,
             UiLanguage::En,
@@ -3145,7 +3145,7 @@ mod tests {
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 render_rich_look_controls(ui, &off, &mut state, lang);
             });
-            // Rendering alone edits nothing; only a click or drag emits.
+            // Neither enabled nor disabled controls emit actions without input.
             assert!(state.take_actions().is_empty());
         }
     }

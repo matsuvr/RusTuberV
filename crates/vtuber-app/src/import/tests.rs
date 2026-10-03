@@ -64,24 +64,16 @@ fn rejects_invalid_bytes() {
 }
 
 #[test]
-fn idempotent_reimport_no_duplicate_copy() {
+fn import_metadata_file_round_trips() {
     let dir = TempDir::new().unwrap();
-    let source_dir = TempDir::new().unwrap();
-    let path = source_dir.path().join("model.vrm");
-    fs::write(&path, b"x").unwrap();
-    // Not a valid GLB, so use a raw copy path to verify idempotency.
-    let dest_dir = dir.path().join("avatars").join("test");
-    fs::create_dir_all(&dest_dir).unwrap();
-    fs::write(dest_dir.join("model.vrm"), b"x").unwrap();
-
-    let meta_path = dest_dir.join("import.toml");
+    let meta_path = dir.path().join("import.toml");
     let imported = ImportedModel {
         id: "test".into(),
         name: "x".into(),
-        asset_path: dest_dir.join("model.vrm"),
+        asset_path: dir.path().join("model.vrm"),
         meta_path: meta_path.clone(),
         summary: VrmInspectionSummary::default(),
-        original_path: path.clone(),
+        original_path: dir.path().join("source.vrm"),
         size: 1,
     };
     let meta = ImportMeta {
@@ -90,12 +82,9 @@ fn idempotent_reimport_no_duplicate_copy() {
     };
     fs::write(&meta_path, toml::to_string_pretty(&meta).unwrap()).unwrap();
 
-    let before = fs::metadata(dest_dir.join("model.vrm")).unwrap().len();
-    assert_eq!(before, 1);
-    // Re-writing the same fixture does not duplicate because import is
-    // idempotent by sha; here we just assert the meta round-trips.
     let read: ImportMeta = toml::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
     assert_eq!(read.imported, imported);
+    assert_eq!(read.mtime, meta.mtime);
 }
 
 const NON_VRM_GLTF_JSON: &str = r#"{
