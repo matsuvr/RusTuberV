@@ -219,6 +219,7 @@ fn observed_finger_pose(arm: ArmLandmarks) -> Option<HandFingerPose> {
             )?,
         ],
         thumb_spread: (facing * x).atan2(facing * y),
+        thumb_cmc: [0.0; 2],
     })
 }
 

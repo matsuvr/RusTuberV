@@ -77,7 +77,7 @@ def read_clips(archive):
             return result
 
 
-def convert(clip):
+def convert(clip, reference):
     def muscle(finger, channel):
         return clip[f"LeftHand.{finger}.{channel}"]
 
@@ -85,11 +85,17 @@ def convert(clip):
               for joint, maximum in enumerate([90, 100, 60], 1)] for f in FINGERS]
     spreads = [max(-20, min(20, muscle(f, "Spread") * sign * 20))
                for f, sign in zip(FINGERS, [1, 1, -1, -1])]
-    # Unity's thumb 1 is the CMC. The app intentionally leaves that bone at rest.
+    # MCP/IP remain authored flexion amounts.
     thumb = [stretch(muscle("Thumb", "2 Stretched"), 50),
              stretch(muscle("Thumb", "3 Stretched"), 70)]
     thumb_spread = max(20, min(75, 55 + muscle("Thumb", "Spread") * 20))
-    return curls, spreads, thumb, thumb_spread
+    # Retarget normalized muscle differences from the relaxed clip to the
+    # public CMC ranges. Preserve the avatar's own resting base orientation;
+    # do not interpret Unity muscle values as measured anatomical angles.
+    flex = (reference["LeftHand.Thumb.1 Stretched"] - muscle("Thumb", "1 Stretched")) * (0.7 + 0.78) / 2
+    abduct = (muscle("Thumb", "Spread") - reference["LeftHand.Thumb.Spread"]) * (0.78 + 0.5) / 2
+    cmc = [math.degrees(max(-0.78, min(0.7, flex))), math.degrees(max(-0.5, min(0.78, abduct)))]
+    return curls, spreads, thumb, thumb_spread, cmc
 
 
 def radian(value):
@@ -120,12 +126,23 @@ def main():
         "use vtuber_core::arm_tracking::HandFingerPose;", "",
         "pub(super) const POSES: &[(&str, HandFingerPose)] = &[",
     ]
-    poses = [(name, *convert(clips[clip])) for clip, name in CLIPS] + ADDITIONAL
-    for name, fingers, spread, thumb, thumb_spread in poses:
+    # Additional artist-authored CMC poses (degrees), not anatomical coupling
+    # coefficients. The hand model constrains their two oblique hinges.
+    cmc_extra = {
+        "ring_only": [20, -20], "little_only": [20, -20], "ok": [25, -20],
+        "crossed_fingers": [20, -20], "vulcan": [-10, 10], "half_heart": [10, 10],
+        "three_thumb_index_middle": [-15, 5], "i_love_you": [-15, 10],
+        "four_with_thumb": [-15, 5], "open_together": [0, -10],
+        "two_together": [20, -20], "pinch": [20, -15],
+    }
+    poses = [(name, *convert(clips[clip], clips["Defo"])) for clip, name in CLIPS]
+    poses += [(*pose, cmc_extra[pose[0]]) for pose in ADDITIONAL]
+    for name, fingers, spread, thumb, thumb_spread, cmc in poses:
         lines += [f'    ("{name}", HandFingerPose {{',
                   "        fingers: [" + ", ".join(radians(f) for f in fingers) + "],",
                   f"        spread: {radians(spread)},",
                   f"        thumb: {radians(thumb)},",
+                  f"        thumb_cmc: {radians(cmc)},",
                   f"        thumb_spread: {radian(thumb_spread)},",
                   "    }),"]
     lines += ["];", ""]

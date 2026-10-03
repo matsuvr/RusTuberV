@@ -95,6 +95,7 @@ mod tests {
             spread: [0.0; 4],
             thumb: [0.4, 0.4],
             thumb_spread: 0.3,
+            thumb_cmc: [0.0; 2],
         }
     }
 

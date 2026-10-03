@@ -98,3 +98,16 @@ revision. It is 53,305,389 bytes with SHA-256
 redistributed under the upstream Apache-2.0 terms with this notice retained.
 The exact source URL, schema path, and redistribution record are maintained in
 `assets/models/manifest.toml`.
+
+## MyoHub MyoArm anatomical parameters
+
+The CMC joint axes, ranges and hand offsets in `vtuber-avatar/src/thumb.rs`,
+and elbow/radioulnar axes and offsets in `vtuber-avatar/src/arm_anatomy.rs`
+are adapted from `myo_sim/models/arm/assets/myoarm_r_chain.xml` at
+[MyoHub/myo_sim revision 93b0ca8f4ec90c9899ee7f05fee561e9911da91b](https://github.com/MyoHub/myo_sim/tree/93b0ca8f4ec90c9899ee7f05fee561e9911da91b).
+Copyright 2025 Vikash Kumar, Vittorio Caggiano. Apache License, Version 2.0;
+see [the retained license](docs/licenses/myo-sim-Apache-2.0.txt).
+The adaptation maps source joint axes to the VRM's authored metacarpal/palm
+frame, including left-hand reflection. The forearm adapter projects the radial
+rotation onto the VRM ulna centreline and retains the source neutral carrying
+angle. No MuJoCo runtime or meshes are included.

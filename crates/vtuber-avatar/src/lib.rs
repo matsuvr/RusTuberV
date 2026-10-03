@@ -12,6 +12,7 @@
 pub mod tracked_arm;
 
 pub mod arm;
+mod arm_anatomy;
 pub mod arm_motion_geometry;
 pub mod arm_pipeline;
 pub mod arm_pose;
@@ -41,6 +42,7 @@ pub mod pose;
 pub mod render_output;
 mod shoulder;
 mod skeleton;
+mod thumb;
 pub mod tracking_profile;
 pub mod unload;
 pub mod vrm;

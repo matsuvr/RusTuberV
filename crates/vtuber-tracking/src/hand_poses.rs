@@ -85,6 +85,7 @@ fn coordinates(pose: HandFingerPose) -> impl Iterator<Item = f32> {
         .flatten()
         .chain(pose.spread)
         .chain(pose.thumb)
+        .chain(pose.thumb_cmc)
         .chain([pose.thumb_spread])
 }
 
@@ -170,6 +171,9 @@ impl FingerSmootherState {
         for (current, target) in self.0.thumb.iter_mut().zip(pose.thumb) {
             blend(current, target);
         }
+        for (current, target) in self.0.thumb_cmc.iter_mut().zip(pose.thumb_cmc) {
+            blend(current, target);
+        }
         blend(&mut self.0.thumb_spread, pose.thumb_spread);
     }
 
@@ -213,6 +217,8 @@ mod tests {
                 "{name}"
             );
             assert!((0.0..=1.31).contains(&target.thumb_spread), "{name}");
+            assert!((-0.78..=0.7).contains(&target.thumb_cmc[0]), "{name}");
+            assert!((-0.5..=0.78).contains(&target.thumb_cmc[1]), "{name}");
             let mut canonical_result = None;
             for sign in [-1.0, 1.0] {
                 let input = with_flexion_sign(target, sign);
@@ -254,6 +260,7 @@ mod tests {
                     spread: [0.15, -0.12, -0.6, 0.8],
                     thumb,
                     thumb_spread: 0.4,
+                    thumb_cmc: [0.0; 2],
                 };
                 assert_eq!(selected_name(observed), "peace", "{observed:?}");
             }

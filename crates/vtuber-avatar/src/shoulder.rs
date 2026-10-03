@@ -24,7 +24,7 @@ fn sign(chain: &ArmChainBinding) -> f32 {
     }
 }
 
-fn neutral(chain: &ArmChainBinding) -> Option<Quat> {
+pub(crate) fn neutral(chain: &ArmChainBinding) -> Option<Quat> {
     let rest = chain.rest;
     let upper = (rest.elbow.position - rest.upper_arm.position).try_normalize()?;
     let input = ArmIkInput::from_chain(
@@ -34,7 +34,7 @@ fn neutral(chain: &ArmChainBinding) -> Option<Quat> {
             elbow_pole: rest.elbow.position,
         },
     );
-    let hinge = input.elbow_axis.try_normalize()?;
+    let hinge = (input.elbow_axis - upper * upper.dot(input.elbow_axis)).try_normalize()?;
     let source = Mat3::from_cols(upper, hinge, upper.cross(hinge));
     // Both elbows flex toward +Z from -Y. The hinge is an axial vector:
     // reflection across X leaves its X component unchanged.

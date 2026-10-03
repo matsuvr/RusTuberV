@@ -115,9 +115,11 @@ pub struct HandFingerPose {
     /// the palm plane. The Hand Landmarker CMC is not used.
     pub thumb: [f32; 2],
     /// The thumb's in-plane opening, from forward toward across. Used for pose
-    /// recognition only; the avatar keeps CMC at rest and does not transfer
-    /// its opening to the MCP joint.
+    /// recognition only; CMC uses the selected catalog coordinates separately.
     pub thumb_spread: f32,
+    /// Authored CMC [flexion, abduction] in the right-hand model coordinates.
+    /// Independent of raw landmark features; reflected by the avatar axes.
+    pub thumb_cmc: [f32; 2],
 }
 
 /// Shoulder-relative target in units of the subject's calibrated total arm length.
@@ -286,6 +288,7 @@ mod tests {
                 spread: [0.2, 0.0, -0.1, -0.3],
                 thumb: [0.4, 0.5],
                 thumb_spread: 0.25,
+                thumb_cmc: [0.0; 2],
             }),
         };
         let targets = ArmTrackingTargets {

@@ -58,6 +58,8 @@ impl GroundedFeet {
                         start.translation().distance(middle.translation()),
                         middle.translation().distance(end.translation()),
                     ),
+                    neutral_lower: upper_direction,
+                    axial_projection: 1.0,
                     start_rotation: start.rotation(),
                     middle_rotation: middle.rotation(),
                     hinge_axis: skeleton::rest_hinge_axis(
@@ -203,6 +205,7 @@ fn apply_contact(
             start_rotation: upper.rotation(),
             middle_rotation: carry * leg.rest.middle_rotation,
             hinge_axis: carry * leg.rest.hinge_axis,
+            neutral_lower: carry * leg.rest.neutral_lower,
             ..leg.rest
         };
         let solved =

@@ -363,6 +363,8 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
                 .unwrap()
                 .translation()
         };
+        let neutral_bend =
+            (position(lower) - position(upper)).angle_between(position(hand) - position(lower));
         let wrist = turn * (position(hand) - position(upper));
         let pole = turn * (position(lower) - position(upper));
         let mut target = ArmTrackingTarget {
@@ -375,6 +377,7 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
                 spread: [0.0; 4],
                 thumb: [0.0; 2],
                 thumb_spread: 0.0,
+                thumb_cmc: [0.0; 2],
             }),
         };
         let solution = solve_two_bone_arm(ArmIkInput::from_chain(
@@ -389,6 +392,17 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
             solution.lower_arm_global_rotation * lower_rest.global_rotation.inverse() * palm_rest;
         let axis = (solution.wrist - solution.elbow).normalize();
         target.palm_normal = Some((Quat::from_axis_angle(axis, 1.0) * normal).to_array());
+        let palm_forward = ((fingers.index.proximal.unwrap().rest.position - hand_rest.position)
+            .normalize()
+            + (fingers.little.proximal.unwrap().rest.position - hand_rest.position).normalize())
+        .normalize();
+        target.palm_forward = Some(
+            (Quat::from_axis_angle(axis, 1.0)
+                * solution.lower_arm_global_rotation
+                * lower_rest.global_rotation.inverse()
+                * palm_forward)
+                .to_array(),
+        );
         publish(&mut app, Some(target), 1.0);
         for _ in 0..120 {
             app.update();
@@ -429,8 +443,8 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
             assert!((u.length() - 0.25).abs() < EPSILON);
             assert!((l.length() - 0.24).abs() < EPSILON);
             assert!(
-                u.angle_between(l) < 0.05,
-                "return must not fold a straight arm: side {side:?}, tick {tick}"
+                (u.angle_between(l) - neutral_bend).abs() < 0.05,
+                "return must preserve the extended arm's carrying angle: side {side:?}, tick {tick}"
             );
             for (&entity, rest) in entities.iter().zip(&initial) {
                 let local = app.world().get::<Transform>(entity).unwrap();
@@ -736,7 +750,8 @@ fn solver_pose_composes_to_target_wrist_through_non_identity_rest_chain() {
         finger_rest: FingerRestReferences::default(),
     };
     let target = default_arm_target(&chain, ArmPoseProfile::default()).unwrap();
-    let solution = solve_two_bone_arm(ArmIkInput::from_geometry(chain.rest, target)).unwrap();
+    let solution =
+        solve_two_bone_arm(ArmIkInput::from_geometry(chain.rest, target, chain.side)).unwrap();
     let pose = DefaultArmPose::from_chains(generation, Some(chain), None);
     assert!(pose.left.is_some());
     app.world_mut()

@@ -115,7 +115,10 @@ pub fn observed_finger_deltas(
         )
     };
     Some(ResolvedFingerPose {
-        thumb: thumb_deltas(&rest.thumb, [thumb_curl, thumb_ip], normal, weight),
+        thumb: ResolvedFingerJointPose {
+            metacarpal: crate::thumb::cmc_delta(chain, observed.thumb_cmc, weight),
+            ..thumb_deltas(&rest.thumb, [thumb_curl, thumb_ip], normal, weight)
+        },
         index: four(&rest.index, index_curl, index_spread),
         middle: four(&rest.middle, middle_curl, middle_spread),
         ring: four(&rest.ring, ring_curl, ring_spread),
@@ -123,17 +126,8 @@ pub fn observed_finger_deltas(
     })
 }
 
-/// The thumb's two observed joints, on the rig's `metacarpal, proximal,
-/// distal` bones.
-///
-/// There is no observed base rotation, so the metacarpal keeps the rig's rest
-/// pose. Driving it from a Hand Landmarker ray was what made the thumb's root
-/// travel whenever the thumb moved and drove its tip past straight: the ray's
-/// origin is the model-placed CMC, which rides along with the whole thumb.
-/// Authored poses contain flexion amounts, not a replacement for the model's
-/// thumb orientation. Keep its rest elevation and opening: applying a CMC
-/// opening at the MCP instead displaced the skinned thumb root. Thumb spread
-/// is a recognition feature only while the CMC is held at rest.
+/// MCP/IP retain the authored rest basis. CMC is supplied independently by
+/// the public two-axis model, never by redirecting MCP toward a landmark ray.
 fn thumb_deltas(
     finger: &FingerJointRestReferences,
     [mcp, ip]: [f32; 2],
@@ -141,12 +135,7 @@ fn thumb_deltas(
     weight: f32,
 ) -> ResolvedFingerJointPose {
     ResolvedFingerJointPose {
-        // None means "do not write", and leaves the preceding virtual/default
-        // curl on this bone. Write neutral to restore the authored thumb base.
-        metacarpal: finger.metacarpal.map(|joint| ResolvedBoneDelta {
-            entity: joint.entity,
-            delta: Quat::IDENTITY,
-        }),
+        metacarpal: None,
         proximal: crate::arm_pose::resolve_finger_joint(
             finger.proximal,
             finger.distal,
@@ -399,9 +388,14 @@ impl TrackedArmFilter {
 }
 
 fn elbow_flexion(chain: &ArmChainBinding, solution: &ArmIkSolution) -> Option<f32> {
-    let upper = crate::arm::finite_normalized(solution.elbow - chain.rest.upper_arm.position)?;
-    let lower = crate::arm::finite_normalized(solution.wrist - solution.elbow)?;
-    Some(upper.cross(lower).length().atan2(upper.dot(lower)))
+    let input = ArmIkInput::from_chain(
+        chain,
+        ArmIkTarget {
+            wrist: solution.wrist,
+            elbow_pole: solution.elbow,
+        },
+    );
+    Some(crate::skeleton::joint_coordinates(input.skeleton_rest(), solution.skeleton_pose())?.x)
 }
 
 /// Blend the already-filtered shoulder ball joint and elbow hinge back to the
@@ -415,11 +409,20 @@ pub(crate) fn blend_arm_joints(
     weight: f32,
 ) -> Option<ArmIkSolution> {
     let rest = chain.rest;
-    let upper_segment = rest.elbow.position - rest.upper_arm.position;
     let lower_segment = rest.wrist.position - rest.elbow.position;
     let neutral_lower =
         rest.elbow.global_rotation * neutral.lower_arm_delta * rest.elbow.global_rotation.inverse();
-    let neutral_flexion = upper_segment.angle_between(neutral_lower * lower_segment);
+    let input = ArmIkInput::from_chain(
+        chain,
+        ArmIkTarget {
+            wrist: rest.wrist.position,
+            elbow_pole: rest.elbow.position,
+        },
+    );
+    let neutral_flexion = crate::skeleton::hinge_coordinate(
+        input.skeleton_rest(),
+        (neutral_lower * lower_segment).try_normalize()?,
+    )?;
     let flexion = neutral_flexion + (elbow_flexion(chain, observed)? - neutral_flexion) * weight;
     let upper = (rest.upper_arm.global_rotation * neutral.upper_arm_delta)
         .slerp(observed.upper_arm_global_rotation, weight)
@@ -573,7 +576,9 @@ pub fn align_hand_orientation(
     )?;
     let relative = current_forearm.inverse() * observed * offset.inverse();
     let (roll, flexion, deviation) = relative.to_euler(EulerRot::YXZ);
-    let forearm_roll = filter.roll.step(roll, dt_sec) * weight;
+    let anatomical_roll =
+        crate::skeleton::unprojected_roll(roll, crate::arm_anatomy::radius_axial_projection());
+    let forearm_roll = filter.roll.step(anatomical_roll, dt_sec) * weight;
     let flexion = bounded_wrist(
         &mut filter.wrist.flexion,
         flexion,
@@ -1198,7 +1203,7 @@ mod tests {
         assert!(solved.upper_arm_global_rotation.angle_between(end) < 0.001);
         let angle = (solved.elbow - chain.rest.upper_arm.position)
             .angle_between(solved.wrist - solved.elbow);
-        assert!((angle - 1.5).abs() < 0.001);
+        assert!((elbow_flexion(&chain, &solved).unwrap() - 1.5).abs() < 0.001);
         let retained_upper = solved.upper_arm_global_rotation;
         let retained_elbow = angle;
         // A torso turn is removed before composition. It must take effect
@@ -1368,6 +1373,88 @@ mod tests {
     }
 
     #[test]
+    fn cmc_uses_the_two_source_axes_and_preserves_authored_rest() {
+        let mut chain = articulated_chain();
+        chain.side = crate::arm::ArmSide::Right;
+        let wrist = chain.rest.wrist.position;
+        chain
+            .finger_rest
+            .index
+            .proximal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position = wrist + Vec3::new(0.022178, -0.080917, 0.010979);
+        chain
+            .finger_rest
+            .little
+            .proximal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position = wrist + Vec3::new(-0.019501, -0.071168, -0.003387);
+        let base = chain.finger_rest.thumb.metacarpal.as_mut().unwrap();
+        base.rest.global_rotation = Quat::from_euler(EulerRot::XYZ, 0.3, -0.4, 0.6);
+        let origin = base.rest.position;
+        let rest = base.rest.global_rotation;
+        chain
+            .finger_rest
+            .thumb
+            .proximal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position = origin + Vec3::new(0.0165, -0.0292, -0.0127);
+        for (flex, abduct) in [
+            (0.0, 0.0),
+            (0.4, 0.0),
+            (0.0, -0.3),
+            (0.4, -0.3),
+            (2.0, -2.0),
+        ] {
+            let delta = crate::thumb::cmc_delta(&chain, [flex, abduct], 1.0)
+                .unwrap()
+                .delta;
+            let expected = Quat::from_axis_angle(
+                Vec3::new(-0.042399, -0.665286, 0.745384).normalize(),
+                flex.clamp(-0.78, 0.7),
+            ) * Quat::from_axis_angle(
+                Vec3::new(0.495557, 0.731736, 0.467959).normalize(),
+                abduct.clamp(-0.5, 0.78),
+            );
+            assert!((rest * delta * rest.inverse()).angle_between(expected) < 1.0e-3);
+            let mut mirrored = chain;
+            mirrored.side = crate::arm::ArmSide::Left;
+            let reflect_point = |v: Vec3| Vec3::new(-v.x, v.y, v.z);
+            let reflect_rotation = |q: Quat| Quat::from_xyzw(q.x, -q.y, -q.z, q.w);
+            mirrored.rest.wrist.position = reflect_point(wrist);
+            for bone in [
+                &mut mirrored.finger_rest.index.proximal,
+                &mut mirrored.finger_rest.little.proximal,
+                &mut mirrored.finger_rest.thumb.metacarpal,
+                &mut mirrored.finger_rest.thumb.proximal,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bone.rest.position = reflect_point(bone.rest.position);
+                bone.rest.global_rotation = reflect_rotation(bone.rest.global_rotation);
+            }
+            let reflected = crate::thumb::cmc_delta(&mirrored, [flex, abduct], 1.0)
+                .unwrap()
+                .delta;
+            assert!(reflected.angle_between(reflect_rotation(delta)) < 1.0e-3);
+            assert!(
+                crate::thumb::cmc_delta(&chain, [flex, abduct], 0.0)
+                    .unwrap()
+                    .delta
+                    .angle_between(Quat::IDENTITY)
+                    < 1.0e-3
+            );
+        }
+    }
+
+    #[test]
     fn the_thumb_is_not_folded_by_a_four_finger_axis() {
         // The thumb's rest chain runs diagonally and its joints do not share the
         // four fingers' geometry, so its flexion must still resolve to a real
@@ -1414,7 +1501,14 @@ mod tests {
         for spread in [0.35, 0.6, 0.96, 1.22] {
             observed.thumb_spread = spread;
             let pose = resolved_fingers(&chain, observed, 1.0);
-            assert_eq!(pose.thumb.metacarpal.unwrap().delta, Quat::IDENTITY);
+            assert!(
+                pose.thumb
+                    .metacarpal
+                    .unwrap()
+                    .delta
+                    .angle_between(Quat::IDENTITY)
+                    < 1.0e-3
+            );
             assert!(
                 pose.thumb
                     .proximal
@@ -1844,7 +1938,14 @@ mod tests {
                 bent.y < -0.5,
                 "a selected fist must curl palmward, not backward: {bent:?}"
             );
-            assert_eq!(pose.thumb.metacarpal.unwrap().delta, Quat::IDENTITY);
+            assert!(
+                pose.thumb
+                    .metacarpal
+                    .unwrap()
+                    .delta
+                    .angle_between(Quat::IDENTITY)
+                    > 0.1
+            );
         }
     }
 
@@ -2156,14 +2257,26 @@ mod tests {
                     * pose.hand.unwrap()
                     * chain.rest.wrist.global_rotation.inverse()
                     * rest_palm;
-                if (filter.roll.spring.value - r).abs() < 1.0e-5
+                if (crate::skeleton::projected_roll(
+                    filter.roll.spring.value,
+                    crate::arm_anatomy::radius_axial_projection(),
+                ) - r)
+                    .abs()
+                    < 1.0e-5
                     && (filter.wrist.flexion.value - f).abs() < 1.0e-5
                     && (filter.wrist.deviation.value - d).abs() < 1.0e-5
                 {
                     assert!(shown.angle_between(wanted) < 1.0e-3);
                 }
             }
-            assert!((filter.roll.spring.value - r).abs() < 1.0e-5);
+            assert!(
+                (crate::skeleton::projected_roll(
+                    filter.roll.spring.value,
+                    crate::arm_anatomy::radius_axial_projection()
+                ) - r)
+                    .abs()
+                    < 1.0e-5
+            );
             assert!((filter.wrist.flexion.value - f).abs() < 1.0e-5);
             assert!((filter.wrist.deviation.value - d).abs() < 1.0e-5);
         }
@@ -2302,7 +2415,12 @@ mod tests {
             "hand plane must match the observation: {actual:?} != {expected:?}"
         );
         assert!(
-            (twist.forearm_roll - 60.0_f32.to_radians()).abs() < 1.0e-3,
+            (crate::skeleton::projected_roll(
+                twist.forearm_roll,
+                crate::arm_anatomy::radius_axial_projection()
+            ) - 60.0_f32.to_radians())
+            .abs()
+                < 1.0e-3,
             "the wrist must show exactly the observed pronation: {} deg",
             twist.forearm_roll.to_degrees()
         );
@@ -2330,7 +2448,10 @@ mod tests {
             solution.lower_arm_delta, forearm_before,
             "the forearm must take a share of the roll"
         );
-        assert_eq!(hand, Quat::IDENTITY, "wrist has no independent axial DOF");
+        assert!(
+            hand.angle_between(Quat::IDENTITY) < 1.0e-3,
+            "wrist has no independent axial DOF"
+        );
     }
 
     #[test]

@@ -88,6 +88,7 @@ impl ArmTrackingTarget {
                 spread: fingers.spread,
                 thumb: fingers.thumb.map(|angle| mirror.horizontal(angle)),
                 thumb_spread: fingers.thumb_spread,
+                thumb_cmc: fingers.thumb_cmc,
             }),
         }
     }

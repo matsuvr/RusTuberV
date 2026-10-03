@@ -1522,9 +1522,13 @@ mod tests {
                         Vec3::new(side_sign(side) * 0.000532, 0.002478, 0.038959).normalize();
                     let shown = hand * thumb_side;
                     assert!(shown.z > 0.9, "{side:?} {source:?}: thumb side {shown:?}");
-                    assert!(upper.normalize().dot(expected) > 0.998);
-                    assert!(lower.normalize().dot(expected) > 0.998);
-                    assert!(upper.angle_between(lower) < 5.0_f32.to_radians());
+                    // The default wrist keeps its attention-pose direction;
+                    // the two segments retain the model's carrying angle.
+                    assert!(
+                        (upper + lower).normalize().dot(expected) > 0.998,
+                        "{side:?} {source:?}: upper={upper:?} lower={lower:?} wanted={expected:?}"
+                    );
+                    assert!(upper.angle_between(lower) > 5.0_f32.to_radians());
                     assert!((upper.length() - upper_length).abs() < 1.0e-5);
                     assert!((lower.length() - lower_length).abs() < 1.0e-5);
                     assert!(pose.upper_arm_delta.angle_between(lost.upper_arm_delta) < 1.0e-3);
@@ -2301,7 +2305,7 @@ mod tests {
             elbow_pole: chain.rest.upper_arm.position
                 + Vec3::new(across * 0.4, -0.8, 0.0).normalize() * 0.3,
         };
-        let input = ArmIkInput::from_geometry(chain.rest, target);
+        let input = ArmIkInput::from_geometry(chain.rest, target, chain.side);
         let solution = crate::arm::solve_two_bone_arm(input).expect("two-bone solve");
         (chain, input, solution)
     }
@@ -2313,7 +2317,7 @@ mod tests {
         // touched by the 85-degree limit.
         let target = crate::arm::default_arm_target(&chain, ArmPoseProfile::default())
             .expect("legacy target");
-        let relaxed_input = ArmIkInput::from_geometry(chain.rest, target);
+        let relaxed_input = ArmIkInput::from_geometry(chain.rest, target, chain.side);
         let mut relaxed = crate::arm::solve_two_bone_arm(relaxed_input).expect("solve");
         let descent =
             upper_arm_descent_radians(&relaxed_input, &relaxed).expect("measurable descent");
@@ -2398,7 +2402,7 @@ mod tests {
                 + Vec3::new(0.2, 0.9, 0.1).normalize() * chain.rest.total_arm_length * 0.98,
             elbow_pole: chain.rest.elbow.position + Vec3::NEG_Z * 0.05,
         };
-        let input = ArmIkInput::from_geometry(chain.rest, target);
+        let input = ArmIkInput::from_geometry(chain.rest, target, chain.side);
         let mut solution = crate::arm::solve_two_bone_arm(input).expect("solve");
         let before = solution;
         assert!(!clamp_upper_arm_swing(
@@ -2529,6 +2533,7 @@ mod tests {
                 spread: [0.0; 4],
                 thumb: [0.3, 0.3],
                 thumb_spread: 0.0,
+                thumb_cmc: [0.0; 2],
             }),
         };
         let resolve = |fingers: f32| {
@@ -2594,7 +2599,7 @@ mod tests {
         };
         let geometrized =
             crate::tracked_arm::tracked_arm_ik_target(chain.rest, target, Quat::IDENTITY);
-        let raw_input = ArmIkInput::from_geometry(chain.rest, geometrized);
+        let raw_input = ArmIkInput::from_geometry(chain.rest, geometrized, chain.side);
         let raw = crate::arm::solve_two_bone_arm(raw_input).expect("solve");
         let raw_descent = upper_arm_descent_radians(&raw_input, &raw).expect("descent");
         assert!(

@@ -394,6 +394,8 @@ pub struct ArmIkInput {
     /// Fixed elbow flexion axis in model/rest space. It is transformed by the
     /// upper-arm rotation, never inferred again from a solved forearm twist.
     pub elbow_axis: Vec3,
+    /// Source-model neutral ulna direction in immutable rest space.
+    pub neutral_forearm: Vec3,
 }
 
 impl ArmIkInput {
@@ -403,9 +405,10 @@ impl ArmIkInput {
     /// Slightly bent authored T-poses do not redefine the anatomical hinge;
     /// shared FK removes the rest bend before applying flexion about this axis.
     #[must_use]
-    pub fn from_geometry(geometry: ArmRestGeometry, target: ArmIkTarget) -> Self {
+    pub fn from_geometry(geometry: ArmRestGeometry, target: ArmIkTarget, side: ArmSide) -> Self {
         let upper = geometry.elbow.position - geometry.upper_arm.position;
-        let elbow_axis = finite_normalized(upper.cross(Vec3::Z)).unwrap_or(Vec3::ZERO);
+        let (elbow_axis, neutral_forearm) =
+            crate::arm_anatomy::elbow_geometry(upper, side).unwrap_or((Vec3::ZERO, Vec3::ZERO));
         Self {
             shoulder: geometry.upper_arm.position,
             rest_elbow: geometry.elbow.position,
@@ -418,13 +421,14 @@ impl ArmIkInput {
             upper_arm_rest_global_rotation: geometry.upper_arm.global_rotation,
             lower_arm_rest_global_rotation: geometry.elbow.global_rotation,
             elbow_axis,
+            neutral_forearm,
         }
     }
 
     /// Creates solver input using the bound rig's fixed anatomical bend frame.
     #[must_use]
     pub fn from_chain(chain: &ArmChainBinding, target: ArmIkTarget) -> Self {
-        Self::from_geometry(chain.rest, target)
+        Self::from_geometry(chain.rest, target, chain.side)
     }
 }
 
@@ -522,11 +526,18 @@ pub(crate) fn neutral_elbow_pole(chain: &ArmChainBinding, wrist: Vec3) -> Option
             elbow_pole: rest.elbow.position,
         },
     );
-    let lowered = rotation_arc(upper, Vec3::NEG_Y);
-    let aimed = rotation_arc(Vec3::NEG_Y, direction);
-    let hinge = aimed * lowered * input.elbow_axis;
-    let bend = finite_normalized(direction.cross(hinge))?;
-    Some(rest.upper_arm.position + bend * rest.upper_arm_length)
+    let lowered = crate::shoulder::neutral(chain)? * rest.upper_arm.global_rotation.inverse();
+    let flexion = crate::skeleton::flexion_for_reach(
+        input.skeleton_rest(),
+        wrist.distance(rest.upper_arm.position),
+        ARM_IK_EPSILON,
+    )
+    .ok()? as f32;
+    let lower = Quat::from_axis_angle(input.elbow_axis, flexion) * input.neutral_forearm;
+    let neutral_wrist = lowered * (upper * rest.upper_arm_length + lower * rest.forearm_length);
+    let aimed = rotation_arc(neutral_wrist.normalize(), direction);
+    let elbow = aimed * lowered * upper * rest.upper_arm_length;
+    Some(rest.upper_arm.position + elbow)
 }
 
 /// Solves a deterministic constant-time analytic two-bone arm IK problem.
@@ -563,6 +574,8 @@ impl ArmIkInput {
             start_rotation: self.upper_arm_rest_global_rotation,
             middle_rotation: self.lower_arm_rest_global_rotation,
             hinge_axis: self.elbow_axis,
+            neutral_lower: self.neutral_forearm,
+            axial_projection: crate::arm_anatomy::radius_axial_projection(),
             flexion_limit: ELBOW_FLEXION_LIMIT_RAD,
             axial_limit: FOREARM_ROLL_LIMIT_RAD,
         }

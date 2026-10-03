@@ -126,3 +126,30 @@ OK、指クロス、Vulcan、両手ハートの片側、親指を含む三本指
   rustfmt確認、`git diff --check` が成功。
 - `cargo build -p vtuber-desktop -j 1` が成功し、`target/debug/RusTuberV.exe` を更新。
 - 実カメラ・VRMの目視とmacOS実行は未確認。
+
+## 2026-10-04: CMCの2自由度 (#255)
+
+元ZIPを再確認し、上記SHA-256と一致した。認識に使う19角度と4観測確認は変更せず、
+表示カタログにCMC flexion/abductionの2角度を追加する。生のMediaPipe CMC位置は
+使わない。20クリップは、元の`Thumb.1 Stretched`と`Thumb.Spread`を`Defo`からの
+差として変換する。Unity正規化muscle値からの変換幅は採用CMC可動域の半幅
+（flexion 0.74 rad、abduction 0.64 rad）である。Unityのavatar solverを再現した
+値や人の測定値ではなく、既存のpose adaptationにCMCを追加したもの。
+残る12種類のCMCは変換スクリプト内に明示した作画用角度で、人体連成の係数ではない。
+全32ポーズのCMCを同じ0.06秒の一次補間・欠測weightで処理する。
+
+採用軸・範囲はMyoHub MyoArmRight_v0.01、revision
+`93b0ca8f4ec90c9899ee7f05fee561e9911da91b` の `myoarm_r_chain.xml`、
+`firstmc_r`にあるCMC flexion→abductionの2斜交軸である。flexion [-0.78,0.7] rad、
+abduction [-0.5,0.78] rad。出典は[公開XML](https://github.com/MyoHub/myo_sim/blob/93b0ca8f4ec90c9899ee7f05fee561e9911da91b/myo_sim/models/arm/assets/myoarm_r_chain.xml)。
+Apache-2.0表記・著作権表示・ライセンスはTHIRD_PARTY_NOTICESとdocs/licensesに保持する。
+
+sourceのCMC→MCP軸と掌法線の基底から、各VRMの同じrest基底へ軸を写す。
+左手では極性の骨方向と軸性の回転軸を区別して反射する。metacarpalにだけ
+2軸回転を適用し、MCP/IPは従来のrest相対屈曲を維持する。これによりsourceの
+thumb restをモデルへ押し付けず、各モデルのrest仰角・開きを保つ。
+
+数値確認: source2軸の単独/複合、範囲外入力の制限、非identity rest、左右反射、
+weight 0の復帰を確認する。握り/親指立て/OK/つまみの実VRM目視、および
+指先接触を保証する#257への接続は未実施。元ポーズを移植するだけでは
+モデルごとに異なる指長での接触は保証できず、#255全体の完了とはしない。
