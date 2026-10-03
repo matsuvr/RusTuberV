@@ -139,6 +139,9 @@ pub struct ArmTrackingTarget {
     /// geometry's index/pinky cross product, so no per-side sign is applied.
     /// `None` means "no palm observation", never a fabricated neutral twist.
     pub palm_normal: Option<[f32; 3]>,
+    /// Palm long axis from wrist toward the index/little MCP bisector.
+    /// A polar vector, unlike the axial palm normal.
+    pub palm_forward: Option<[f32; 3]>,
     /// Observed finger articulation, when the hand's landmarks defined it.
     ///
     /// `None` means "no finger observation", never a fabricated rest pose; the
@@ -277,6 +280,7 @@ mod tests {
             wrist: [0.3, 0.2, 0.4],
             elbow_pole: [0.5, -0.1, 0.2],
             palm_normal: Some([0.1, 0.2, -0.9]),
+            palm_forward: Some([0.2, 0.9, 0.1]),
             fingers: Some(HandFingerPose {
                 fingers: [[0.1, 0.2, 0.3]; 4],
                 spread: [0.2, 0.0, -0.1, -0.3],
@@ -292,6 +296,7 @@ mod tests {
         assert_eq!(mirrored.left, None);
         assert_eq!(mirrored.right.unwrap().wrist, [-0.3, 0.2, 0.4]);
         assert_eq!(mirrored.right.unwrap().elbow_pole, [-0.5, -0.1, 0.2]);
+        assert_eq!(mirrored.right.unwrap().palm_forward, Some([-0.2, 0.9, 0.1]));
         assert_eq!(mirrored.right.unwrap().palm_normal, Some([0.1, -0.2, 0.9]));
         // Local normal components and signed bends reverse on reflection.
         let fingers = mirrored.right.unwrap().fingers.unwrap();
@@ -328,6 +333,7 @@ mod tests {
             wrist: [0.0; 3],
             elbow_pole: [0.0; 3],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let frame = ArmControlFrame {

@@ -3,7 +3,7 @@
 //! This module never writes Transforms. Live integration must route its output
 //! through the existing arm compositor, not register another bone writer.
 
-use bevy::prelude::{Quat, Vec3};
+use bevy::prelude::{EulerRot, Mat3, Quat, Vec3};
 use nalgebra::{Quaternion, UnitQuaternion};
 use vtuber_core::arm_tracking::{ArmTrackingTarget, HandFingerPose};
 use vtuber_tracking::filter::{
@@ -40,8 +40,8 @@ pub fn tracking_to_rest_rotation(
 
 /// Converts an observed solve into rest-relative local joint rotations.
 /// The shoulder centre is observed, but clavicle/scapular articulation is not;
-/// their authored rest pose is retained. The wrist is reset to its rest pose
-/// because independent wrist articulation is not present in the input. Forearm
+/// their authored rest pose is retained. The compositor installs the independently
+/// filtered two-axis wrist delta after this conversion. Forearm
 /// axial rotation is already in `solution` and is not copied to the wrist joint.
 pub fn resolved_tracked_arm_pose(
     chain: &ArmChainBinding,
@@ -356,7 +356,7 @@ fn avatar_rotation(rotation: UnitQuaternion<f32>) -> Quat {
 pub(crate) struct TrackedArmFilter {
     upper: Option<RotationSpring>,
     elbow: Option<ScalarSpring>,
-    pub(crate) roll: PalmRollFilter,
+    pub(crate) hand: HandOrientationFilter,
 }
 
 impl TrackedArmFilter {
@@ -449,7 +449,7 @@ pub(crate) fn arm_from_joints(
 /// a free-spinning phase. Project it into the joint's range before the
 /// critically damped second-order step (the same one the tracking channels
 /// use). `value` is also what
-/// [`align_palm_twist`] applied last, so the filter keeps running across ticks
+/// the palm solve applied last, so the filter keeps running across ticks
 /// whether or not a new camera frame arrived.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PalmRollFilter {
@@ -488,29 +488,69 @@ impl PalmRollFilter {
     }
 }
 
-/// One resolved forearm pronation/supination and neutral wrist output.
+/// One resolved forearm pronation/supination and two-axis wrist output.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PalmTwist {
-    /// Neutral wrist delta. Forearm pronation is inherited through FK.
+    /// Rest-relative wrist delta. Forearm pronation is inherited through FK.
     pub hand: Option<Quat>,
     /// Forearm axial coordinate, bounded by [`FOREARM_ROLL_LIMIT_RAD`].
     pub forearm_roll: f32,
 }
 
-/// Applies observed pronation/supination to the forearm's longitudinal axis.
-/// The shared two-bone IK defines the humeral orientation and fixed elbow
-/// flexion plane. The remaining signed palm rotation is a radioulnar DOF.
-/// Its bounded, filtered coordinate never changes the shoulder or elbow
-/// positions; the hand inherits it through the existing hierarchy. No axial
-/// hand-local rotation is added. Missing palm geometry returns `None`.
-#[must_use]
-pub fn align_palm_twist(
+/// Two wrist hinges. Holzbaur 2005: flexion/extension +/-70 degrees,
+/// radial deviation -10 and ulnar deviation +25 degrees. No axial wrist DOF.
+#[derive(Debug, Clone, Copy, Default)]
+struct WristFilter {
+    flexion: ScalarSpring,
+    deviation: ScalarSpring,
+}
+
+/// Render-clock state for forearm pronation and the two wrist hinges.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HandOrientationFilter {
+    roll: PalmRollFilter,
+    wrist: WristFilter,
+}
+
+fn bounded_wrist(spring: &mut ScalarSpring, target: f32, min: f32, max: f32, dt: f32) -> f32 {
+    spring.step(target.clamp(min, max), dt, PALM_ROLL_TIME_CONSTANT_SEC);
+    spring.value = spring.value.clamp(min, max);
+    if spring.value <= min || spring.value >= max {
+        spring.velocity = 0.0;
+    }
+    spring.value
+}
+
+/// Orthonormal palm frame; the normal and forward are independent observations
+/// but their filter outputs need orthogonalization before matrix conversion.
+fn palm_frame(normal: Vec3, forward: Vec3) -> Option<Quat> {
+    let forward = forward.try_normalize()?;
+    let across = forward.cross(normal).try_normalize()?;
+    Some(Quat::from_mat3(&Mat3::from_cols(
+        across,
+        forward,
+        across.cross(forward),
+    )))
+}
+
+fn rest_palm_forward(chain: &ArmChainBinding) -> Option<Vec3> {
+    let wrist = chain.rest.wrist.position;
+    let index = (chain.finger_rest.index.proximal?.rest.position - wrist).try_normalize()?;
+    let little = (chain.finger_rest.little.proximal?.rest.position - wrist).try_normalize()?;
+    (index + little).try_normalize()
+}
+
+/// Joint coordinates are Y (radioulnar), X (wrist flexion), Z (deviation),
+/// in a forearm frame defined from the immutable rest geometry. The authored
+/// palm-to-forearm offset is removed before decomposition and restored by FK.
+/// The hand inherits all pronation from its parent; it receives only X/Z.
+pub fn align_hand_orientation(
     chain: &ArmChainBinding,
     solution: &mut ArmIkSolution,
-    palm_normal: [f32; 3],
+    (normal, forward): ([f32; 3], [f32; 3]),
     tracking_to_rest: Quat,
     weight: f32,
-    roll_filter: &mut PalmRollFilter,
+    filter: &mut HandOrientationFilter,
     dt_sec: f32,
 ) -> Option<PalmTwist> {
     if !weight.is_finite() || weight <= f32::EPSILON || !tracking_to_rest.is_finite() {
@@ -518,30 +558,48 @@ pub fn align_palm_twist(
     }
     let weight = weight.clamp(0.0, 1.0);
     let rest_normal = rest_palm_normal(chain)?;
-    let axis = crate::arm::finite_normalized(solution.wrist - solution.elbow)?;
-    let observed = crate::arm::finite_normalized(tracking_to_rest * Vec3::from(palm_normal))?;
-    let rest_hand = chain.rest.wrist.global_rotation;
-    let current = crate::arm::finite_normalized(
-        hand_global(chain, solution) * (rest_hand.inverse() * rest_normal),
+    let rest_palm = palm_frame(rest_normal, rest_palm_forward(chain)?)?;
+    let forearm = palm_frame(
+        rest_normal,
+        chain.rest.wrist.position - chain.rest.elbow.position,
     )?;
-    let observed_perp = crate::arm::finite_normalized(observed - axis * observed.dot(axis))?;
-    let current_perp = crate::arm::finite_normalized(current - axis * current.dot(axis))?;
-    let measured = axis
-        .dot(current_perp.cross(observed_perp))
-        .atan2(current_perp.dot(observed_perp));
-    if !measured.is_finite() {
-        return None;
-    }
-    let filtered = roll_filter.step(measured, dt_sec);
-    let forearm_roll = filtered * weight;
-    // The hand follows the forearm rigidly. Axial rotation belongs to the
-    // radioulnar joint; adding a hand-local roll invents a third wrist DOF.
-    let hand = Some(Quat::IDENTITY);
+    let offset = forearm.inverse() * rest_palm;
+    let lower_model =
+        solution.lower_arm_global_rotation * chain.rest.elbow.global_rotation.inverse();
+    let current_forearm = lower_model * forearm;
+    let observed = palm_frame(
+        tracking_to_rest * Vec3::from(normal),
+        tracking_to_rest * Vec3::from(forward),
+    )?;
+    let relative = current_forearm.inverse() * observed * offset.inverse();
+    let (roll, flexion, deviation) = relative.to_euler(EulerRot::YXZ);
+    let forearm_roll = filter.roll.step(roll, dt_sec) * weight;
+    let flexion = bounded_wrist(
+        &mut filter.wrist.flexion,
+        flexion,
+        -70_f32.to_radians(),
+        70_f32.to_radians(),
+        dt_sec,
+    ) * weight;
+    let deviation = bounded_wrist(
+        &mut filter.wrist.deviation,
+        deviation,
+        -10_f32.to_radians(),
+        25_f32.to_radians(),
+        dt_sec,
+    ) * weight;
+    let wrist = Quat::from_rotation_x(flexion) * Quat::from_rotation_z(deviation);
+    let wrist_in_rest = forearm * wrist * forearm.inverse();
+    let hand = Some(crate::skeleton::rest_delta(
+        wrist_in_rest,
+        chain.rest.wrist.global_rotation,
+    ));
     roll_forearm(chain, solution, forearm_roll);
     Some(PalmTwist { hand, forearm_roll })
 }
 
 /// The hand bone's model-space orientation with its authored rest-relative pose.
+#[cfg(test)]
 fn hand_global(chain: &ArmChainBinding, solution: &ArmIkSolution) -> Quat {
     solution.lower_arm_global_rotation
         * (chain.rest.elbow.global_rotation.inverse() * chain.rest.wrist.global_rotation)
@@ -623,6 +681,7 @@ mod tests {
             wrist: [0.4, -0.3, 0.5],
             elbow_pole: [0.7, -0.5, -0.1],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         }
     }
@@ -712,6 +771,7 @@ mod tests {
             wrist: [3.0, 0.0, 0.0],
             elbow_pole: [0.5, -0.5, 0.0],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let solution = solve_tracked_arm(&chain(), far, Quat::IDENTITY).unwrap();
@@ -1060,7 +1120,7 @@ mod tests {
                 palm.to_array(),
                 Quat::IDENTITY,
                 1.0,
-                &mut filter.roll,
+                &mut filter.hand.roll,
                 1.0 / 60.0,
             )
             .unwrap();
@@ -1657,7 +1717,7 @@ mod tests {
                 // remaining share must still reach the hand, which is all this
                 // test needs: whether it lands at the wrist's limit or inside
                 // it is the separate palm-twist tests' business.
-                assert_eq!(hand_delta.unwrap(), Quat::IDENTITY);
+                assert!(hand_delta.unwrap().angle_between(Quat::IDENTITY) < 1.0e-3);
             }
             near(solution.elbow, positions.0);
             near(solution.wrist, positions.1);
@@ -1984,6 +2044,7 @@ mod tests {
             wrist: [0.9, -0.05, 0.05],
             elbow_pole: [0.5, 0.4, 0.0],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         }
     }
@@ -2004,8 +2065,108 @@ mod tests {
         (chain, solution, reference)
     }
 
+    fn align_palm_twist(
+        chain: &ArmChainBinding,
+        solution: &mut ArmIkSolution,
+        normal: [f32; 3],
+        tracking_to_rest: Quat,
+        weight: f32,
+        roll_filter: &mut PalmRollFilter,
+        dt_sec: f32,
+    ) -> Option<PalmTwist> {
+        let axis = (solution.wrist - solution.elbow).try_normalize()?;
+        let current_normal = hand_global(chain, solution)
+            * chain.rest.wrist.global_rotation.inverse()
+            * rest_palm_normal(chain)?;
+        let desired = tracking_to_rest * Vec3::from(normal);
+        let a = crate::arm::finite_normalized(current_normal - axis * current_normal.dot(axis))?;
+        let b = crate::arm::finite_normalized(desired - axis * desired.dot(axis))?;
+        let roll = axis.dot(a.cross(b)).atan2(a.dot(b));
+        let current_forward = hand_global(chain, solution)
+            * chain.rest.wrist.global_rotation.inverse()
+            * rest_palm_forward(chain)?;
+        let forward =
+            tracking_to_rest.inverse() * Quat::from_axis_angle(axis, roll) * current_forward;
+        let mut filter = HandOrientationFilter {
+            roll: *roll_filter,
+            ..Default::default()
+        };
+        let result = align_hand_orientation(
+            chain,
+            solution,
+            (normal, forward.to_array()),
+            tracking_to_rest,
+            weight,
+            &mut filter,
+            dt_sec,
+        );
+        *roll_filter = filter.roll;
+        result
+    }
+
     fn perpendicular(value: Vec3, axis: Vec3) -> Vec3 {
         (value - axis * value.dot(axis)).normalize()
+    }
+
+    #[test]
+    fn full_palm_separates_roll_flexion_and_deviation_with_authored_rest() {
+        let (mut chain, _, _) = oriented();
+        chain.rest.elbow.global_rotation = Quat::from_euler(EulerRot::XYZ, 0.4, -0.3, 0.2);
+        chain.rest.wrist.global_rotation = Quat::from_euler(EulerRot::XYZ, -0.2, 0.6, 0.1);
+        let base = solve_tracked_arm(&chain, bent_target(), Quat::IDENTITY).unwrap();
+        let rest_normal = rest_palm_normal(&chain).unwrap();
+        let rest_palm = palm_frame(rest_normal, rest_palm_forward(&chain).unwrap()).unwrap();
+        let rest_forearm = palm_frame(
+            rest_normal,
+            chain.rest.wrist.position - chain.rest.elbow.position,
+        )
+        .unwrap();
+        let offset = rest_forearm.inverse() * rest_palm;
+        let frame = base.lower_arm_global_rotation
+            * chain.rest.elbow.global_rotation.inverse()
+            * rest_forearm;
+        let view = Quat::from_rotation_y(0.8);
+        let mut filter = HandOrientationFilter::default();
+        for (r, f, d) in [
+            (0.5, 0.0, 0.0),
+            (0.0, 0.6, 0.0),
+            (0.0, 0.0, 0.3),
+            (0.5, 0.6, 0.3),
+            (0.0, 0.0, 0.0),
+        ] {
+            let wanted = frame * Quat::from_euler(EulerRot::YXZ, r, f, d) * offset;
+            for _ in 0..180 {
+                let mut solution = base;
+                let pose = align_hand_orientation(
+                    &chain,
+                    &mut solution,
+                    (
+                        (view.inverse() * wanted * Vec3::Z).to_array(),
+                        (view.inverse() * wanted * Vec3::Y).to_array(),
+                    ),
+                    view,
+                    1.0,
+                    &mut filter,
+                    1.0 / 60.0,
+                )
+                .unwrap();
+                near(solution.elbow, base.elbow);
+                near(solution.wrist, base.wrist);
+                let shown = hand_global(&chain, &solution)
+                    * pose.hand.unwrap()
+                    * chain.rest.wrist.global_rotation.inverse()
+                    * rest_palm;
+                if (filter.roll.spring.value - r).abs() < 1.0e-5
+                    && (filter.wrist.flexion.value - f).abs() < 1.0e-5
+                    && (filter.wrist.deviation.value - d).abs() < 1.0e-5
+                {
+                    assert!(shown.angle_between(wanted) < 1.0e-3);
+                }
+            }
+            assert!((filter.roll.spring.value - r).abs() < 1.0e-5);
+            assert!((filter.wrist.flexion.value - f).abs() < 1.0e-5);
+            assert!((filter.wrist.deviation.value - d).abs() < 1.0e-5);
+        }
     }
 
     #[test]

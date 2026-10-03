@@ -204,6 +204,7 @@ fn observed_target() -> ArmTrackingTarget {
         wrist: [0.30, -0.24, 0.05],
         elbow_pole: [0.16, -0.10, 0.02],
         palm_normal: Some([0.10, 0.20, -0.90]),
+        palm_forward: None,
         fingers: None,
     }
 }
@@ -232,9 +233,10 @@ fn the_live_stage_order_keeps_palm_roll_state_and_returns_from_a_turn() {
         });
         *chain
     };
-    let publish = |app: &mut App, seq, palm_normal| {
+    let publish = |app: &mut App, seq, palm_normal, palm_forward| {
         let target = ArmTrackingTarget {
             palm_normal,
+            palm_forward,
             ..observed_target()
         };
         set_control(
@@ -271,7 +273,7 @@ fn the_live_stage_order_keeps_palm_roll_state_and_returns_from_a_turn() {
             .normalize();
         (hand * (chain.rest.wrist.global_rotation.inverse() * rest_normal)).normalize()
     };
-    publish(&mut app, 1, None);
+    publish(&mut app, 1, None, None);
     app.update();
     let baseline = resolved_targets(&app, &rig).left.unwrap();
     let normal = palm(baseline);
@@ -282,8 +284,15 @@ fn the_live_stage_order_keeps_palm_roll_state_and_returns_from_a_turn() {
         * baseline.lower_arm_delta
         * chain.rest.elbow.global_rotation.inverse();
     let axis = (u * l * (chain.rest.wrist.position - chain.rest.elbow.position)).normalize();
-    let turned = Quat::from_axis_angle(axis, 60.0_f32.to_radians()) * normal;
-    publish(&mut app, 2, Some(turned.to_array()));
+    let rotation = Quat::from_axis_angle(axis, 60.0_f32.to_radians());
+    let forward = u * l * Vec3::X;
+    let turned = rotation * normal;
+    publish(
+        &mut app,
+        2,
+        Some(turned.to_array()),
+        Some((rotation * forward).to_array()),
+    );
     for _ in 0..120 {
         app.update();
     }
@@ -293,13 +302,17 @@ fn the_live_stage_order_keeps_palm_roll_state_and_returns_from_a_turn() {
         "the composed hand must reach the observed palm, got {:?}",
         palm(pose)
     );
-    assert_eq!(
-        pose.hand.unwrap().delta,
-        Quat::IDENTITY,
+    assert!(
+        pose.hand.unwrap().delta.angle_between(Quat::IDENTITY) < 1.0e-3,
         "pronation belongs to the forearm"
     );
     assert!(pose.upper_arm_delta.dot(baseline.upper_arm_delta).abs() > 1.0 - 1.0e-6);
-    publish(&mut app, 3, Some(normal.to_array()));
+    publish(
+        &mut app,
+        3,
+        Some(normal.to_array()),
+        Some(forward.to_array()),
+    );
     for _ in 0..120 {
         app.update();
     }
@@ -451,6 +464,7 @@ fn opposed_bend_planes_resolve_and_return_instead_of_freezing() {
                 wrist: to_tracking(virtual_target.wrist),
                 elbow_pole: to_tracking(virtual_target.wrist * 2.0 - virtual_target.elbow_pole),
                 palm_normal: None,
+                palm_forward: None,
                 fingers: None,
             },
             neutral,

@@ -103,6 +103,7 @@ mod tests {
             wrist: [0.1, 0.2, 0.3],
             elbow_pole: [0.2, 0.3, 0.4],
             palm_normal: Some([0.0, 1.0, 0.0]),
+            palm_forward: None,
             fingers: Some(pose(fingers)),
         }
     }

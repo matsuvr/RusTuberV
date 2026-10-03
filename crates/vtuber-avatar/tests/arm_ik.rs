@@ -195,7 +195,7 @@ fn elbow_flexion_uses_one_rest_axis_across_poles_and_non_identity_bone_axes() {
 #[test]
 fn anterior_elbow_flexion_preserves_both_palm_surfaces_without_a_humeral_half_turn() {
     use vtuber_avatar::FingerJointRestBinding;
-    use vtuber_avatar::tracked_arm::{PalmRollFilter, align_palm_twist};
+    use vtuber_avatar::tracked_arm::{HandOrientationFilter, align_hand_orientation};
 
     for side in [ArmSide::Left, ArmSide::Right] {
         let sign = if side == ArmSide::Left { 1.0 } else { -1.0 };
@@ -231,21 +231,24 @@ fn anterior_elbow_flexion_preserves_both_palm_surfaces_without_a_humeral_half_tu
             let pronation = Quat::from_axis_angle(axis, roll.to_radians());
             let observed = pronation * flexion * rest_normal;
             let expected_palm = pronation * flexion * physical_palm;
-            let mut filter = PalmRollFilter::default();
+            let mut filter = HandOrientationFilter::default();
             let mut solution = base;
             for _ in 0..120 {
                 solution = base;
-                let twist = align_palm_twist(
+                let twist = align_hand_orientation(
                     &chain,
                     &mut solution,
-                    observed.to_array(),
+                    (
+                        observed.to_array(),
+                        (pronation * flexion * forearm.normalize()).to_array(),
+                    ),
                     Quat::IDENTITY,
                     1.0,
                     &mut filter,
                     1.0 / 60.0,
                 )
                 .unwrap();
-                assert_eq!(twist.hand, Some(Quat::IDENTITY));
+                assert!(twist.hand.unwrap().angle_between(Quat::IDENTITY) < 1.0e-3);
             }
             let lower_model =
                 solution.lower_arm_global_rotation * chain.rest.elbow.global_rotation.inverse();

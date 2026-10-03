@@ -1163,17 +1163,20 @@ fn resolve_tracked_side(
     // Measure pronation against the observed skeleton, before returning its
     // shoulder/elbow toward neutral. A held camera-space palm must not become
     // a new twist target as the returning arm changes its orientation.
-    let twist = target.palm_normal.and_then(|palm_normal| {
-        crate::tracked_arm::align_palm_twist(
-            chain,
-            &mut solution,
-            palm_normal,
-            tracking_to_rest,
-            weights.palm.min(wrist_weight),
-            &mut filter.roll,
-            dt_sec,
-        )
-    });
+    let twist = target
+        .palm_normal
+        .zip(target.palm_forward)
+        .and_then(|palm| {
+            crate::tracked_arm::align_hand_orientation(
+                chain,
+                &mut solution,
+                palm,
+                tracking_to_rest,
+                weights.palm.min(wrist_weight),
+                &mut filter.hand,
+                dt_sec,
+            )
+        });
     if let Some((pose, _)) = neutral.as_ref() {
         solution = crate::tracked_arm::blend_arm_joints(chain, &solution, pose, wrist_weight)?;
         if let Some(twist) = twist {
@@ -1186,6 +1189,9 @@ fn resolve_tracked_side(
         crate::tracked_arm::observed_finger_deltas(chain, fingers, weights.fingers)
     });
     let mut pose = crate::tracked_arm::resolved_tracked_arm_pose(chain, solution, fingers).ok()?;
+    if let Some(hand) = pose.hand.as_mut() {
+        hand.delta = twist.and_then(|value| value.hand).unwrap_or(Quat::IDENTITY);
+    }
     if let Some((neutral, _)) = neutral {
         pose.shoulder = neutral
             .shoulder
@@ -1369,6 +1375,7 @@ mod tests {
                         (Quat::from_axis_angle(forearm, (degrees as f32).to_radians()) * Vec3::X)
                             .to_array(),
                     ),
+                    palm_forward: Some(forearm.to_array()),
                     fingers: None,
                 };
                 let (targets, weights) = MotionMirror::new(mirrored).arms(
@@ -1400,13 +1407,23 @@ mod tests {
                     )
                     .unwrap();
                     let (upper, lower, orientation) = pose_segments(&chain, &pose);
-                    let normal = orientation * rest_palm_normal(&chain).unwrap();
+                    let wrist_delta = chain.rest.wrist.global_rotation
+                        * pose.hand.unwrap().delta
+                        * chain.rest.wrist.global_rotation.inverse();
+                    let normal = orientation * wrist_delta * rest_palm_normal(&chain).unwrap();
                     let project = |v: Vec3| (v - forearm * v.dot(forearm)).normalize();
                     let normal = project(normal);
                     assert!((upper.length() - chain.rest.upper_arm_length).abs() < 1.0e-5);
                     assert!((lower.length() - chain.rest.forearm_length).abs() < 1.0e-5);
                     assert!((upper.angle_between(lower).to_degrees() - 120.0).abs() < 0.01);
-                    assert_eq!(pose.hand.unwrap().delta, Quat::IDENTITY);
+                    // A real rig has an authored palm/forearm offset. The new
+                    // long-axis observation corrects it at the wrist, without
+                    // adding the missing third (axial) wrist freedom.
+                    let y = (chain.rest.wrist.position - chain.rest.elbow.position).normalize();
+                    let x = y.cross(rest_palm_normal(&chain).unwrap()).normalize();
+                    let frame = Quat::from_mat3(&bevy::prelude::Mat3::from_cols(x, y, x.cross(y)));
+                    let wrist = frame.inverse() * wrist_delta * frame;
+                    assert!(wrist.to_euler(bevy::prelude::EulerRot::YXZ).0.abs() < 1.0e-5);
                     if let Some(previous) = previous_pose {
                         assert!(
                             pose.upper_arm_delta.dot(previous.upper_arm_delta).abs() > 1.0 - 1.0e-6
@@ -1536,6 +1553,7 @@ mod tests {
                 wrist: [-side_sign(side) * 0.09, 0.03, 0.65],
                 elbow_pole: [side_sign(side) * 0.10, -0.25, 0.08],
                 palm_normal: None,
+                palm_forward: None,
                 fingers: None,
             };
             let mut filter = crate::tracked_arm::TrackedArmFilter::default();
@@ -2505,6 +2523,7 @@ mod tests {
             wrist: [0.4, -0.3, 0.5],
             elbow_pole: [0.7, -0.5, -0.1],
             palm_normal: None,
+            palm_forward: None,
             fingers: Some(vtuber_core::arm_tracking::HandFingerPose {
                 fingers: [[0.9, 0.9, 0.4]; 4],
                 spread: [0.0; 4],
@@ -2570,6 +2589,7 @@ mod tests {
             wrist: [-0.55, 0.10, 0.55],
             elbow_pole: [-0.20, -0.40, -0.20],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let geometrized =
@@ -2649,6 +2669,7 @@ mod tests {
             wrist: (turn * (initial.wrist - origin) / chain.rest.total_arm_length).to_array(),
             elbow_pole: (turn * (initial.elbow - origin) / chain.rest.total_arm_length).to_array(),
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let resolve = |weights, filter: &mut crate::tracked_arm::TrackedArmFilter| {
@@ -2748,6 +2769,7 @@ mod tests {
             wrist: [0.4, -0.3, 0.5],
             elbow_pole: [0.7, -0.5, -0.1],
             palm_normal: Some([0.0, 0.0, 1.0]),
+            palm_forward: Some([1.0, 0.0, 0.0]),
             fingers: None,
         };
         let weights = |palm| ArmBlendWeight {
@@ -2777,13 +2799,14 @@ mod tests {
         let no_palm = resolve(
             ArmTrackingTarget {
                 palm_normal: None,
+                palm_forward: None,
                 ..target
             },
             1.0,
         )
         .expect("tracked pose");
 
-        assert_eq!(tracked.hand.unwrap().delta, Quat::IDENTITY);
+        assert!(tracked.hand.unwrap().delta.is_finite());
         assert_eq!(default_twist.hand.unwrap().delta, Quat::IDENTITY);
         assert_eq!(no_palm, default_twist);
         // Pronation changes the forearm, without an axial wrist correction.

@@ -77,8 +77,19 @@ pub fn retarget_arm_landmarks(
         wrist: offset(arm.wrist.meters),
         elbow_pole: offset(arm.elbow.meters),
         palm_normal: observed_palm_normal(arm),
+        palm_forward: observed_palm_forward(arm),
         fingers: observed_finger_pose(arm),
     }
+}
+
+/// Long axis from hand-internal differences; never mixes Pose and Hand origins.
+fn observed_palm_forward(arm: ArmLandmarks) -> Option<[f32; 3]> {
+    let hand = arm.hand?;
+    let wrist = vector(hand.landmarks.get(HAND_WRIST)?.meters);
+    let index = finite_normalized(vector(hand.landmarks.get(HAND_INDEX_MCP)?.meters) - wrist)?;
+    let little = finite_normalized(vector(hand.landmarks.get(HAND_PINKY_MCP)?.meters) - wrist)?;
+    let forward = finite_normalized(index + little)?;
+    Some([forward.x, -forward.y, -forward.z])
 }
 
 /// Palm-plane normal from the hand landmarks, in the canonical basis.
@@ -438,6 +449,7 @@ struct ArmSmootherState {
     wrist: VectorSpring,
     elbow: VectorSpring,
     palm: Option<DirectionSmootherState>,
+    forward: Option<DirectionSmootherState>,
     fingers: Option<FingerSmootherState>,
     /// Bend-plane direction emitted on the previous tick, used to rate-limit
     /// the next one.
@@ -452,6 +464,10 @@ impl ArmSmootherState {
             elbow: VectorSpring::new(vector(target.elbow_pole)),
             palm: target
                 .palm_normal
+                .and_then(unit_direction)
+                .map(DirectionSmootherState::new),
+            forward: target
+                .palm_forward
                 .and_then(unit_direction)
                 .map(DirectionSmootherState::new),
             fingers: target.fingers.map(FingerSmootherState::new),
@@ -477,6 +493,15 @@ impl ArmSmootherState {
         if let (Some(palm), Some(normal)) = (self.palm.as_mut(), target.palm_normal) {
             palm.step(normal, dt_sec, ARM_PALM_TIME_CONSTANT_SEC);
         }
+        if self.forward.is_none() {
+            self.forward = target
+                .palm_forward
+                .and_then(unit_direction)
+                .map(DirectionSmootherState::new);
+        }
+        if let (Some(forward), Some(measured)) = (self.forward.as_mut(), target.palm_forward) {
+            forward.step(measured, dt_sec, ARM_PALM_TIME_CONSTANT_SEC);
+        }
         if self.fingers.is_none() {
             self.fingers = target.fingers.map(FingerSmootherState::new);
         }
@@ -498,6 +523,7 @@ impl ArmSmootherState {
             wrist: array(self.wrist.position),
             elbow_pole: array(plane),
             palm_normal,
+            palm_forward: self.forward.and_then(DirectionSmootherState::normalized),
             fingers,
         }
     }
@@ -955,6 +981,7 @@ impl ArmSideState {
         let palm_observed = hand_usable && target.palm_normal.is_some();
         if !hand_usable {
             target.palm_normal = None;
+            target.palm_forward = None;
             target.fingers = None;
         }
         // Only a confirmed authored pose reaches the render-clock filter.
@@ -1195,6 +1222,7 @@ mod tests {
             wrist: [value; 3],
             elbow_pole: [value; 3],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         }
     }
@@ -1283,6 +1311,14 @@ mod tests {
         };
         let target = retarget_arm_landmarks(posed, reference);
         near(target.palm_normal.unwrap(), [0.0, 0.0, -1.0]);
+        near(
+            target.palm_forward.unwrap(),
+            [
+                std::f32::consts::FRAC_1_SQRT_2,
+                -std::f32::consts::FRAC_1_SQRT_2,
+                0.0,
+            ],
+        );
 
         // A rigid translation of the whole hand keeps the normal fixed.
         let shift =
@@ -1310,6 +1346,11 @@ mod tests {
             target.palm_normal.unwrap(),
         );
         assert_eq!(retarget_arm_landmarks(arm(), reference).palm_normal, None);
+
+        assert_eq!(
+            retarget_arm_landmarks(translated, reference).palm_forward,
+            target.palm_forward
+        );
 
         // Collinear MCPs span no plane: no fabricated normal.
         let flat = ArmLandmarks {
@@ -1470,6 +1511,7 @@ mod tests {
             wrist: [value, 0.0, 0.0],
             elbow_pole: [value, 0.0, 0.0],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let dt = 1.0 / 60.0;
@@ -1637,6 +1679,7 @@ mod tests {
             wrist: [0.0, 0.0, 1.0],
             elbow_pole: pole,
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let dt = 1.0 / 60.0;
@@ -2908,6 +2951,7 @@ mod tests {
                 wrist: [0.0, 0.0, 0.6],
                 elbow_pole: [1.0, 0.0, 0.0],
                 palm_normal: None,
+                palm_forward: None,
                 fingers: None,
             },
         )
@@ -2917,6 +2961,7 @@ mod tests {
             wrist: [0.0, 0.0, 0.6],
             elbow_pole: [-1.0, 0.2, 0.0],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let crossed = stabilize_elbow_pole(Some(established), opposed).expect("plane");
@@ -2938,6 +2983,7 @@ mod tests {
                     wrist: [0.0, 0.0, 0.0],
                     elbow_pole: [0.1, 0.2, 0.0],
                     palm_normal: None,
+                    palm_forward: None,
                     fingers: None,
                 },
             ),
@@ -2954,6 +3000,7 @@ mod tests {
             wrist: [0.6, 0.0, 0.0],
             elbow_pole: [0.3, 0.5, 0.0],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let established = stabilize_elbow_pole(None, bent).expect("a bent arm defines a plane");
@@ -2961,6 +3008,7 @@ mod tests {
             wrist: [1.05, 0.0, 0.0],
             elbow_pole: [0.3, -0.5, 0.0],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let held =

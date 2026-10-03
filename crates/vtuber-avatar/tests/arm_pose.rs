@@ -369,6 +369,7 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
             wrist: (wrist / 0.49).to_array(),
             elbow_pole: (pole / 0.49).to_array(),
             palm_normal: None,
+            palm_forward: None,
             fingers: Some(HandFingerPose {
                 fingers: [[0.8, 0.9, 0.4]; 4],
                 spread: [0.0; 4],
