@@ -318,52 +318,7 @@ pub fn solve_tracked_arm(
     .ok_or(ArmIkError::DegenerateGeometry)
 }
 
-/// Holzbaur's thoracohumeral elevation plane: lateral = 0, anterior = 90
-/// degrees, cross-body limit = 130 (Xu et al., 2012, doi:10.1016/j.jbiomech.2012.08.018).
-/// This is a directional limit, not a limit on the axial rotation of the humerus.
-/// Work in the parent-compensated model/rest frame, so anterior follows the
-/// chest rather than the camera when the torso turns.
-fn constrain_shoulder_rotation(chain: &ArmChainBinding, rotation: Quat) -> Option<Quat> {
-    let rest = chain.rest;
-    let rest_direction = (rest.elbow.position - rest.upper_arm.position).try_normalize()?;
-    let direction = rotation * rest.upper_arm.global_rotation.inverse() * rest_direction;
-    let side = match chain.side {
-        crate::arm::ArmSide::Left => 1.0,
-        crate::arm::ArmSide::Right => -1.0,
-    };
-    let lateral = side * direction.x;
-    let anterior = direction.z;
-    let min_plane = -90.0_f32.to_radians();
-    let max_plane = 130.0_f32.to_radians();
-    let center = (min_plane + max_plane) * 0.5;
-    let (sin_center, cos_center) = center.sin_cos();
-    // Center the angular chart on the allowed sector. In particular, depth
-    // noise at +/-180 degrees must select the same anterior crossing limit.
-    let plane = (anterior * cos_center - lateral * sin_center)
-        .atan2(lateral * cos_center + anterior * sin_center)
-        + center;
-    let limited = plane.clamp(min_plane, max_plane);
-    if plane == limited {
-        return Some(rotation);
-    }
-    let (sin_plane, cos_plane) = limited.sin_cos();
-    let horizontal = lateral.hypot(anterior);
-    let bounded = Vec3::new(
-        side * horizontal * cos_plane,
-        direction.y,
-        horizontal * sin_plane,
-    );
-    // Preserve elevation and transport the existing hinge with the shortest
-    // swing. Unlike a yaw of the entire joint frame, this correction tends to
-    // identity at the arm-down/up singularity, without an arbitrary hold band.
-    // The centered chart bounds this correction to 70 degrees, so the two
-    // directions cannot be antiparallel. Keep even tiny corrections instead
-    // of from_rotation_arc's near-parallel identity approximation.
-    let cross = direction.cross(bounded);
-    let swing =
-        Quat::from_xyzw(cross.x, cross.y, cross.z, 1.0 + direction.dot(bounded)).normalize();
-    Some((swing * rotation).normalize())
-}
+use crate::shoulder::constrain as constrain_shoulder_rotation;
 
 /// Render-clock time constant of the forearm pronation filter.
 ///
@@ -472,7 +427,7 @@ pub(crate) fn blend_arm_joints(
     arm_from_joints(chain, upper, flexion)
 }
 
-fn arm_from_joints(
+pub(crate) fn arm_from_joints(
     chain: &ArmChainBinding,
     upper_global: Quat,
     elbow_angle: f32,
@@ -720,12 +675,33 @@ mod tests {
         let view_to_model = Quat::from_rotation_x(-0.1);
         let tracking_to_rest =
             tracking_to_rest_rotation(parent_rest, parent_current, view_to_model);
-        let solution = solve_tracked_arm(&chain(), target(), tracking_to_rest).unwrap();
+        // A reachable anatomical pose, so this checks coordinate compensation
+        // without also asking the solver to exceed the shoulder rotation limit.
+        let upper = crate::shoulder::from_coordinates(
+            &chain(),
+            crate::shoulder::ShoulderCoordinates {
+                plane: Some(40.0_f32.to_radians()),
+                elevation: 45.0_f32.to_radians(),
+                axial: -30.0_f32.to_radians(),
+            },
+        )
+        .unwrap();
+        let expected = arm_from_joints(&chain(), upper, 1.0).unwrap();
+        let offset = |point: Vec3| {
+            (tracking_to_rest.inverse() * (point - rest.upper_arm.position) / rest.total_arm_length)
+                .to_array()
+        };
+        let target = ArmTrackingTarget {
+            wrist: offset(expected.wrist),
+            elbow_pole: offset(expected.elbow),
+            ..target()
+        };
+        let solution = solve_tracked_arm(&chain(), target, tracking_to_rest).unwrap();
         let displayed_offset =
             (parent_current * parent_rest.inverse()) * (solution.wrist - rest.upper_arm.position);
         near(
             displayed_offset,
-            view_to_model * Vec3::new(0.4, -0.3, 0.5) * rest.total_arm_length,
+            view_to_model * Vec3::from(target.wrist) * rest.total_arm_length,
         );
     }
 
@@ -777,9 +753,15 @@ mod tests {
             for degrees in [-80.0_f32, 0.0, 90.0, 120.0, 150.0, 179.99, 180.01, 195.0] {
                 let (sin, cos) = degrees.to_radians().sin_cos();
                 let direction = Vec3::new(sign * cos, -0.7, sin).normalize();
-                let upper = Quat::from_axis_angle(direction, 0.5)
-                    * Quat::from_rotation_arc(sign * Vec3::X, direction)
-                    * chain.rest.upper_arm.global_rotation;
+                let upper = crate::shoulder::from_coordinates(
+                    &chain,
+                    crate::shoulder::ShoulderCoordinates {
+                        plane: Some(degrees.to_radians()),
+                        elevation: (-direction.y).acos(),
+                        axial: -30.0_f32.to_radians(),
+                    },
+                )
+                .unwrap();
                 let bounded = constrain_shoulder_rotation(&chain, upper).unwrap();
                 let solution = arm_from_joints(&chain, upper, 1.2).unwrap();
                 let actual = (solution.elbow - chain.rest.upper_arm.position).normalize();
@@ -825,6 +807,73 @@ mod tests {
                 .unwrap()
         };
         assert!(crossing(-0.00001).angle_between(crossing(0.00001)) < 0.001);
+    }
+
+    #[test]
+    fn shoulder_globe_roundtrip_and_axial_limits_do_not_change_elbow_or_forearm_roll() {
+        use crate::shoulder::{ShoulderCoordinates, coordinates, from_coordinates};
+        for side in [crate::arm::ArmSide::Left, crate::arm::ArmSide::Right] {
+            let mut chain = chain();
+            chain.side = side;
+            let sign = if side == crate::arm::ArmSide::Left {
+                1.0
+            } else {
+                -1.0
+            };
+            chain.rest.elbow.position.x = chain.rest.upper_arm.position.x + sign * 0.4;
+            chain.rest.wrist.position.x = chain.rest.upper_arm.position.x + sign * 0.7;
+            chain.rest.upper_arm.global_rotation =
+                Quat::from_euler(bevy::prelude::EulerRot::XYZ, 0.3, -0.6, 0.9);
+            for elevation in [0.0_f32, 0.001, 50.0, 90.0, 179.0] {
+                for axial in [-120.0_f32, -40.0, 0.0, 15.0, 60.0] {
+                    let rotation = from_coordinates(
+                        &chain,
+                        ShoulderCoordinates {
+                            plane: Some(50.0_f32.to_radians()),
+                            elevation: elevation.to_radians(),
+                            axial: axial.to_radians(),
+                        },
+                    )
+                    .unwrap();
+                    let recovered = coordinates(&chain, rotation).unwrap();
+                    assert!(
+                        rotation
+                            .dot(from_coordinates(&chain, recovered).unwrap())
+                            .abs()
+                            > 1.0 - 1.0e-6
+                    );
+                    let bounded = constrain_shoulder_rotation(&chain, rotation).unwrap();
+                    let actual = coordinates(&chain, bounded).unwrap();
+                    assert!((actual.axial.to_degrees() - axial.clamp(-90.0, 20.0)).abs() < 0.003);
+                    let solved = arm_from_joints(&chain, rotation, 1.0).unwrap();
+                    let input = ArmIkInput::from_chain(
+                        &chain,
+                        ArmIkTarget {
+                            wrist: solved.wrist,
+                            elbow_pole: solved.elbow,
+                        },
+                    );
+                    let joints = crate::skeleton::joint_coordinates(
+                        input.skeleton_rest(),
+                        solved.skeleton_pose(),
+                    )
+                    .unwrap();
+                    assert!((joints.x - 1.0).abs() < 1.0e-5);
+                    assert!(joints.y.abs() < 1.0e-5);
+                }
+            }
+            assert!(
+                from_coordinates(
+                    &chain,
+                    ShoulderCoordinates {
+                        plane: None,
+                        elevation: std::f32::consts::PI,
+                        axial: 0.0,
+                    }
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]
@@ -1062,8 +1111,19 @@ mod tests {
     #[test]
     fn proximal_intent_follows_motion_without_damping_the_parent_compensation() {
         let chain = articulated_chain();
-        let start = Quat::from_rotation_z(0.3);
-        let end = Quat::from_rotation_z(0.8) * Quat::from_rotation_x(0.4);
+        let anatomical = |plane: f32, elevation: f32, axial: f32| {
+            crate::shoulder::from_coordinates(
+                &chain,
+                crate::shoulder::ShoulderCoordinates {
+                    plane: Some(plane.to_radians()),
+                    elevation: elevation.to_radians(),
+                    axial: axial.to_radians(),
+                },
+            )
+            .unwrap()
+        };
+        let start = anatomical(0.0, 50.0, -20.0);
+        let end = anatomical(30.0, 65.0, -20.0);
         let mut filter = TrackedArmFilter::default();
         let mut solved = arm_from_joints(&chain, start, 0.8).unwrap();
         filter

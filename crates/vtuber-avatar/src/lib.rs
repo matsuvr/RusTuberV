@@ -39,6 +39,7 @@ pub mod placeholder;
 pub mod plugin;
 pub mod pose;
 pub mod render_output;
+mod shoulder;
 mod skeleton;
 pub mod tracking_profile;
 pub mod unload;

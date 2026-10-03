@@ -589,6 +589,12 @@ pub(crate) fn solve_stage(
         &input,
         crate::arm_pipeline::MAX_ARM_DROP_RADIANS,
     );
+    let joints =
+        crate::skeleton::joint_coordinates(input.skeleton_rest(), solution.skeleton_pose())
+            .ok_or(crate::arm_pipeline::ArmPipelineError::DegenerateSolvedPose)?;
+    solution =
+        crate::tracked_arm::arm_from_joints(chain, solution.upper_arm_global_rotation, joints.x)
+            .ok_or(crate::arm_pipeline::ArmPipelineError::DegenerateSolvedPose)?;
     resolved_from_solution(chain, &solution, profile)
 }
 
