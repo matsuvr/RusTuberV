@@ -57,15 +57,14 @@ pub fn build_privacy_preview(
         let source_y_range = block_range(output_y, source_height, output_height);
         for output_x in 0..output_width {
             let source_x_range = block_range(output_x, source_width, output_width);
+            let sample_count = source_x_range.len() as u128 * source_y_range.len() as u128;
             let mut sums = [0_u128; 4];
-            let mut sample_count = 0_u128;
 
             for source_y in source_y_range.clone() {
                 for source_x in source_x_range.clone() {
                     for (sum, value) in sums.iter_mut().zip(pixels.rgba(source_x, source_y)?) {
                         *sum += u128::from(value);
                     }
-                    sample_count += 1;
                 }
             }
 

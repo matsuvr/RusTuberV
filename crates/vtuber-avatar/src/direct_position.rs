@@ -204,6 +204,18 @@ pub(crate) fn register_direct_position(app: &mut App) {
         );
 }
 
+/// Root-level position input, optional profile and upper-body bone bindings.
+type BodyTrackingPositionRoot<'a> = (
+    Entity,
+    &'a BodyTrackingPositionInput,
+    Option<&'a BodyTrackingPositionProfile>,
+    &'a HeadBoneEntity,
+    Option<&'a NeckBoneEntity>,
+    Option<&'a UpperChestBoneEntity>,
+    Option<&'a ChestBoneEntity>,
+    Option<&'a SpineBoneEntity>,
+);
+
 /// Applies the position-aware upper-body solve on top of direct body tracking.
 ///
 /// The system runs immediately after
@@ -229,19 +241,7 @@ pub(crate) fn register_direct_position(app: &mut App) {
     reason = "Bevy's `Query` filter tuple for this system's declared components, with no call site to change"
 )]
 pub fn apply_direct_body_position(
-    vrms: Query<
-        (
-            Entity,
-            &BodyTrackingPositionInput,
-            Option<&BodyTrackingPositionProfile>,
-            &HeadBoneEntity,
-            Option<&NeckBoneEntity>,
-            Option<&UpperChestBoneEntity>,
-            Option<&ChestBoneEntity>,
-            Option<&SpineBoneEntity>,
-        ),
-        With<BodyTracking>,
-    >,
+    vrms: Query<BodyTrackingPositionRoot<'_>, With<BodyTracking>>,
     mut root_transforms: Query<(&mut Transform, &mut GlobalTransform), With<Vrm>>,
     child_ofs: Query<&ChildOf>,
     mut transforms: Query<(&mut Transform, &mut GlobalTransform), Without<Vrm>>,

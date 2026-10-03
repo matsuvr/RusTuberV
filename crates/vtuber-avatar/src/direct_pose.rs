@@ -393,26 +393,30 @@ fn direct_tracking_target(
     finite_normalized_or(rest_tf.rotation * local_delta, rest_tf.rotation)
 }
 
+/// Root-level pose input, optional profile and upper-body bone bindings.
+type BodyTrackingPoseRoot<'a> = (
+    Entity,
+    &'a BodyTrackingPoseInput,
+    Option<&'a BodyTrackingProfile>,
+    &'a HeadBoneEntity,
+    Option<&'a NeckBoneEntity>,
+    Option<&'a UpperChestBoneEntity>,
+    Option<&'a ChestBoneEntity>,
+    Option<&'a SpineBoneEntity>,
+    Option<&'a HipsBoneEntity>,
+);
+
 /// Applies direct pose input to the humanoid upper-body chain and hips.
 ///
 /// Applications normally use [`bevy_vrm1::prelude::VrmPlugin`], which registers
 /// this system after Bevy animation and before VRM constraints. The function
 /// is public so integration tests and custom schedules can verify that path.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy injects five independent root/bone/hierarchy/rest queries, frame time, and separate bone and root-rotation histories into this system"
+)]
 pub fn apply_direct_body_tracking(
-    vrms: Query<
-        (
-            Entity,
-            &BodyTrackingPoseInput,
-            Option<&BodyTrackingProfile>,
-            &HeadBoneEntity,
-            Option<&NeckBoneEntity>,
-            Option<&UpperChestBoneEntity>,
-            Option<&ChestBoneEntity>,
-            Option<&SpineBoneEntity>,
-            Option<&HipsBoneEntity>,
-        ),
-        With<BodyTracking>,
-    >,
+    vrms: Query<BodyTrackingPoseRoot<'_>, With<BodyTracking>>,
     root_globals: Query<&GlobalTransform, With<Vrm>>,
     mut transforms: Query<(&mut Transform, &mut GlobalTransform), Without<Vrm>>,
     child_ofs: Query<&ChildOf>,

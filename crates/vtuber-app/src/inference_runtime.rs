@@ -179,11 +179,10 @@ pub fn inference_bridge_system(
             orchestrator.pipeline_state(),
             PipelineState::Stopping | PipelineState::Failed
         )
+        && let Err(error) = inference.stop_model()
     {
-        if let Err(error) = inference.stop_model() {
-            orchestrator.fail_inference(error);
-            return;
-        }
+        orchestrator.fail_inference(error);
+        return;
     }
 
     if orchestrator.capture_desired() {

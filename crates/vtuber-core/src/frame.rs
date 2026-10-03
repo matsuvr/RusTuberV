@@ -130,12 +130,13 @@ impl FramePixels<'_> {
     where
         Self: 'a,
     {
-        let length = self
-            .width()
+        let width = self.width();
+        let length = width
             .checked_mul(self.height())
             .and_then(|n| n.checked_mul(3))
             .ok_or(FrameLayoutError::SizeOverflow)?;
-        if self.frame.format == PixelFormat::Rgb8 && self.frame.stride_bytes == self.width() * 3 {
+        let row_bytes = width * 3;
+        if self.frame.format == PixelFormat::Rgb8 && self.frame.stride_bytes == row_bytes {
             return self
                 .frame
                 .data
@@ -143,9 +144,11 @@ impl FramePixels<'_> {
                 .ok_or(FrameLayoutError::PixelOutOfBounds);
         }
         staging.resize(length, 0);
-        for (index, destination) in staging.chunks_exact_mut(3).enumerate() {
-            let [r, g, b, _] = self.rgba(index % self.width(), index / self.width())?;
-            destination.copy_from_slice(&[r, g, b]);
+        for (y, row) in staging.chunks_exact_mut(row_bytes).enumerate() {
+            for (x, destination) in row.chunks_exact_mut(3).enumerate() {
+                let [r, g, b, _] = self.rgba(x, y)?;
+                destination.copy_from_slice(&[r, g, b]);
+            }
         }
         Ok(staging)
     }

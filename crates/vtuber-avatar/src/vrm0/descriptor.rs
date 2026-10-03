@@ -742,13 +742,13 @@ fn legacy_curve_is_linear(curve: &[Value]) -> bool {
     };
     const EPSILON: f64 = 1.0e-6;
 
-    let Some(first_time) = first.get(0).and_then(Value::as_f64) else {
+    let Some(first_time) = first.first().and_then(Value::as_f64) else {
         return false;
     };
     let Some(first_value) = first.get(1).and_then(Value::as_f64) else {
         return false;
     };
-    let Some(last_time) = last.get(0).and_then(Value::as_f64) else {
+    let Some(last_time) = last.first().and_then(Value::as_f64) else {
         return false;
     };
     let Some(last_value) = last.get(1).and_then(Value::as_f64) else {
@@ -766,7 +766,7 @@ fn legacy_curve_is_linear(curve: &[Value]) -> bool {
     // endpoint tangents may be zero because they are not used outside the
     // interval; the tangents joining each adjacent pair must be one.
     if keys.iter().any(|key| {
-        let Some(time) = key.get(0).and_then(Value::as_f64) else {
+        let Some(time) = key.first().and_then(Value::as_f64) else {
             return true;
         };
         let Some(value) = key.get(1).and_then(Value::as_f64) else {
@@ -779,14 +779,14 @@ fn legacy_curve_is_linear(curve: &[Value]) -> bool {
     keys.windows(2).all(|pair| {
         let Some(left_time) = pair
             .first()
-            .and_then(|key| key.get(0))
+            .and_then(|key| key.first())
             .and_then(Value::as_f64)
         else {
             return false;
         };
         let Some(right_time) = pair
             .get(1)
-            .and_then(|key| key.get(0))
+            .and_then(|key| key.first())
             .and_then(Value::as_f64)
         else {
             return false;

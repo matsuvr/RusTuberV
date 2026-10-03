@@ -92,15 +92,13 @@ impl FixedStats {
         if self.count == 0 {
             return 0.0;
         }
-        let mut sorted: Vec<f64> = self.buffer.iter().take(self.count).copied().collect();
-        sorted.sort_by(f64::total_cmp);
         let rank = (p * self.count as f64).ceil() as usize;
         let index = rank.saturating_sub(1).min(self.count - 1);
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "`index` is clamped to `self.count - 1` and `sorted` holds exactly the first `self.count` values"
-        )]
-        sorted[index]
+        let mut values: Vec<f64> = self.buffer.iter().take(self.count).copied().collect();
+        // Only the requested rank is needed. `index` is in bounds because
+        // `values` contains exactly `self.count` values and the count is nonzero.
+        let (_, percentile, _) = values.select_nth_unstable_by(index, f64::total_cmp);
+        *percentile
     }
 
     /// p50 (median).
@@ -142,31 +140,19 @@ impl StageTimestamps {
     /// Capture-to-apply latency in milliseconds.
     #[must_use]
     pub fn capture_to_apply_ms(&self) -> f64 {
-        if self.applied_ns >= self.captured_ns {
-            (self.applied_ns - self.captured_ns) as f64 / 1_000_000.0
-        } else {
-            0.0
-        }
+        self.applied_ns.saturating_sub(self.captured_ns) as f64 / 1_000_000.0
     }
 
     /// Inference duration in milliseconds.
     #[must_use]
     pub fn inference_ms(&self) -> f64 {
-        if self.inference_done_ns >= self.captured_ns {
-            (self.inference_done_ns - self.captured_ns) as f64 / 1_000_000.0
-        } else {
-            0.0
-        }
+        self.inference_done_ns.saturating_sub(self.captured_ns) as f64 / 1_000_000.0
     }
 
     /// Apply delay (control frame to apply) in milliseconds.
     #[must_use]
     pub fn apply_delay_ms(&self) -> f64 {
-        if self.applied_ns >= self.control_frame_ns {
-            (self.applied_ns - self.control_frame_ns) as f64 / 1_000_000.0
-        } else {
-            0.0
-        }
+        self.applied_ns.saturating_sub(self.control_frame_ns) as f64 / 1_000_000.0
     }
 }
 
@@ -200,11 +186,7 @@ impl RateCounter {
         if self.events.is_empty() {
             return 0.0;
         }
-        let window = if now_ns > self.window_ns {
-            self.window_ns
-        } else {
-            now_ns
-        };
+        let window = now_ns.min(self.window_ns);
         if window == 0 {
             return 0.0;
         }

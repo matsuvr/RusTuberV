@@ -280,14 +280,13 @@ impl ExpressionBindings {
     /// catalog, not truncated here.
     #[must_use]
     pub fn default_for(catalog: &AvatarExpressionCatalog) -> Self {
-        let mut bindings = Self::default();
-        for (key, expression) in ExpressionKey::ALL
-            .into_iter()
-            .zip(catalog.auto_assignable_ids())
-        {
-            bindings.keys.insert(key, expression.to_owned());
+        Self {
+            keys: ExpressionKey::ALL
+                .into_iter()
+                .zip(catalog.auto_assignable_ids())
+                .map(|(key, expression)| (key, expression.to_owned()))
+                .collect(),
         }
-        bindings
     }
 
     /// Iterates assignments in key order.
@@ -337,7 +336,6 @@ impl ExpressionBindings {
         if let Some(old_key) = self.key_for(&expression) {
             self.keys.remove(&old_key);
         }
-        self.keys.remove(&key);
         self.keys.insert(key, expression);
     }
 

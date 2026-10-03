@@ -70,15 +70,18 @@ struct AppliedEyeGaze {
     last_delta: Quat,
 }
 
+/// Root-level gaze input, mapping and optional eye-bone bindings.
+type DirectLookRoot<'a> = (
+    Entity,
+    &'a DirectLookAtInput,
+    &'a LookAtProperties,
+    Option<&'a LeftEyeBoneEntity>,
+    Option<&'a RightEyeBoneEntity>,
+);
+
 fn track_direct_look_at(
     mut commands: Commands,
-    vrms: Query<(
-        Entity,
-        &DirectLookAtInput,
-        &LookAtProperties,
-        Option<&LeftEyeBoneEntity>,
-        Option<&RightEyeBoneEntity>,
-    )>,
+    vrms: Query<DirectLookRoot<'_>>,
     eyes: Query<(
         &Transform,
         &RestTransform,
