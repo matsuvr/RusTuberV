@@ -378,10 +378,10 @@ fn apply_shoulder_elevation_trim(
 /// push the arm into the torso mesh when body-follow translation or hand
 /// target compensation pulls the arm across the body.
 ///
-/// This bounds the *solved* arm, whose pose comes from the shortest arc off the
-/// authored rest pose. It is not applied to an observed arm: there the descent
-/// is a measurement, and the limit's own signed angle wraps at a half turn, so
-/// applying it made an arm crossing the body jump. See
+/// This bounds the virtual arm. Observed arms instead limit the elevation
+/// plane relative to the chest: they can cross the body when the elbow is in
+/// front. Reusing this coronal bound prevented crossing and jumped at the
+/// signed angle's half-turn wrap. See
 /// [`resolve_tracked_side`].
 pub const MAX_ARM_DROP_RADIANS: f32 = 85.0_f32.to_radians();
 
@@ -955,11 +955,8 @@ pub fn update_tracked_arm_targets(
     // sequence only advances when the camera does, but the render-clock
     // smoothing advances the targets each tick.
     let mirrored = mirror.as_deref().is_none_or(|mirror| mirror.is_enabled());
-    let (frame_targets, frame_weights) = if mirrored {
-        (frame.targets.mirrored(), frame.weights.mirrored())
-    } else {
-        (frame.targets, frame.weights)
-    };
+    let (frame_targets, frame_weights) =
+        vtuber_core::mirror::MotionMirror::new(mirrored).arms(frame.targets, frame.weights);
 
     let profile = overrides
         .as_deref()
@@ -1305,6 +1302,134 @@ mod tests {
             .distance(chain.rest.wrist.position);
         chain.rest.total_arm_length = chain.rest.upper_arm_length + chain.rest.forearm_length;
         chain
+    }
+
+    #[test]
+    fn palm_to_back_turn_keeps_its_direction_on_the_recorded_rig_and_its_mirror() {
+        use crate::arm::{FingerJointRestBinding, rest_palm_normal};
+        use vtuber_core::arm_tracking::{
+            ArmBlendWeight, ArmBlendWeights, ArmTrackingTarget, ArmTrackingTargets,
+        };
+        use vtuber_core::mirror::MotionMirror;
+
+        // 2026-10-03 18:47 log, model a91e2969. The authored elbow bends
+        // mostly upward by a few millimetres; its segment cross product is
+        // 73 degrees away from the anatomical anterior flexion plane.
+        for mirrored in [false, true] {
+            let side = if mirrored {
+                ArmSide::Right
+            } else {
+                ArmSide::Left
+            };
+            let mut chain = logged_model_chain(side);
+            let point = |x, y, z| Vec3::new(side_sign(side) * x, y, z);
+            chain.rest.upper_arm.position = point(0.084835, 1.056020, -0.020731);
+            chain.rest.elbow.position = point(0.267107, 1.048425, -0.021421);
+            chain.rest.wrist.position = point(0.442552, 1.050134, -0.019305);
+            chain.rest.upper_arm_length = chain
+                .rest
+                .upper_arm
+                .position
+                .distance(chain.rest.elbow.position);
+            chain.rest.forearm_length = chain
+                .rest
+                .elbow
+                .position
+                .distance(chain.rest.wrist.position);
+            chain.rest.total_arm_length = chain.rest.upper_arm_length + chain.rest.forearm_length;
+            chain.finger_rest.index.proximal = Some(FingerJointRestBinding {
+                entity: chain.hand,
+                rest: rest_bone(point(0.507350, 1.046863, -0.003236)),
+            });
+            chain.finger_rest.little.proximal = Some(FingerJointRestBinding {
+                entity: chain.hand,
+                rest: rest_bone(point(0.500417, 1.043589, -0.043314)),
+            });
+            let geometry = crate::arm_motion_geometry::build_arm_motion_rest_geometry(
+                side,
+                &chain.rest,
+                Some(Vec3::Y * 0.7),
+                Some(Quat::IDENTITY),
+                None,
+            );
+            // A physical 120-degree elbow: upper arm down, forearm raised
+            // in the sagittal plane. Input normals come from this anatomical
+            // frame, never from the solver being tested.
+            let forearm = Vec3::new(0.0, 0.5, 3.0_f32.sqrt() * 0.5);
+            let elbow = Vec3::NEG_Y * chain.rest.upper_arm_length;
+            let wrist = elbow + forearm * chain.rest.forearm_length;
+            let mut filter = crate::tracked_arm::TrackedArmFilter::default();
+            let mut previous_palm: Option<Vec3> = None;
+            let mut previous_pose: Option<crate::arm_pose::ResolvedArmPose> = None;
+            for degrees in (-75..=75).chain((-75..75).rev()) {
+                let target = ArmTrackingTarget {
+                    wrist: (wrist / chain.rest.total_arm_length).to_array(),
+                    elbow_pole: (elbow / chain.rest.total_arm_length).to_array(),
+                    palm_normal: Some(
+                        (Quat::from_axis_angle(forearm, (degrees as f32).to_radians()) * Vec3::X)
+                            .to_array(),
+                    ),
+                    fingers: None,
+                };
+                let (targets, weights) = MotionMirror::new(mirrored).arms(
+                    ArmTrackingTargets {
+                        left: Some(target),
+                        right: None,
+                    },
+                    ArmBlendWeights {
+                        left: ArmBlendWeight::ONE,
+                        right: ArmBlendWeight::ZERO,
+                    },
+                );
+                let (target, weights) = if mirrored {
+                    (targets.right.unwrap(), weights.right)
+                } else {
+                    (targets.left.unwrap(), weights.left)
+                };
+                for tick in 0..90 {
+                    let pose = resolve_tracked_side(
+                        Some(&chain),
+                        Some(&geometry),
+                        DynamicArmProfile::default(),
+                        0.7,
+                        Some(target),
+                        weights,
+                        Quat::IDENTITY,
+                        &mut filter,
+                        1.0 / 60.0,
+                    )
+                    .unwrap();
+                    let (upper, lower, orientation) = pose_segments(&chain, &pose);
+                    let normal = orientation * rest_palm_normal(&chain).unwrap();
+                    let project = |v: Vec3| (v - forearm * v.dot(forearm)).normalize();
+                    let normal = project(normal);
+                    assert!((upper.length() - chain.rest.upper_arm_length).abs() < 1.0e-5);
+                    assert!((lower.length() - chain.rest.forearm_length).abs() < 1.0e-5);
+                    assert!((upper.angle_between(lower).to_degrees() - 120.0).abs() < 0.01);
+                    assert_eq!(pose.hand.unwrap().delta, Quat::IDENTITY);
+                    if let Some(previous) = previous_pose {
+                        assert!(
+                            pose.upper_arm_delta.dot(previous.upper_arm_delta).abs() > 1.0 - 1.0e-6
+                        );
+                    }
+                    if tick == 89 {
+                        let wanted = project(Vec3::from(target.palm_normal.unwrap()));
+                        assert!(
+                            normal.dot(wanted) > 0.9999,
+                            "mirror={mirrored} angle={degrees}: {normal:?} != {wanted:?}"
+                        );
+                        if let Some(previous) = previous_palm {
+                            assert!(
+                                normal.dot(previous) > 0.999,
+                                "palm must not reverse across an angle branch"
+                            );
+                        }
+                        previous_palm = Some(normal);
+                    }
+                    previous_pose = Some(pose);
+                }
+            }
+        }
     }
 
     fn pose_segments(
@@ -2438,11 +2563,7 @@ mod tests {
     }
 
     #[test]
-    fn tracked_side_shows_the_measured_arm_rather_than_clamping_it() {
-        // Stage 3b bounds the *solved* arm, whose pose is the shortest arc off
-        // the authored rest pose. An observation is a measurement, so it is
-        // shown as measured even where it crosses the body and the limit would
-        // otherwise pull the arm back.
+    fn tracked_side_crosses_in_front_instead_of_using_the_virtual_drop_limit() {
         let chain = sample_chain(ArmSide::Left);
         let target = vtuber_core::arm_tracking::ArmTrackingTarget {
             wrist: [-0.55, 0.10, 0.55],
@@ -2474,10 +2595,27 @@ mod tests {
         )
         .expect("tracked pose");
 
+        let direction = observed_upper_direction(&chain, &pose);
+        assert!(direction.x < 0.0, "crossing must remain possible");
+        assert!(
+            direction.z > 0.0,
+            "the elbow must move in front of the chest"
+        );
+        assert!((direction.z.atan2(direction.x).to_degrees() - 130.0).abs() < 0.001);
+        let upper = chain.rest.upper_arm.global_rotation
+            * pose.upper_arm_delta
+            * chain.rest.upper_arm.global_rotation.inverse();
+        let lower = chain.rest.elbow.global_rotation
+            * pose.lower_arm_delta
+            * chain.rest.elbow.global_rotation.inverse();
+        let elbow = chain.rest.upper_arm.position
+            + upper * (chain.rest.elbow.position - chain.rest.upper_arm.position);
+        let wrist = elbow + upper * lower * (chain.rest.wrist.position - chain.rest.elbow.position);
+        assert!(wrist.z > chain.rest.upper_arm.position.z);
+        assert!((elbow.distance(wrist) - chain.rest.forearm_length).abs() < 1.0e-6);
         near(
-            observed_upper_direction(&chain, &pose),
-            crate::arm::finite_normalized(raw.elbow - chain.rest.upper_arm.position)
-                .expect("raw upper-arm direction"),
+            pose.lower_arm_delta * Vec3::X,
+            raw.lower_arm_delta * Vec3::X,
         );
     }
 

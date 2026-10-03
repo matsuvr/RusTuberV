@@ -255,7 +255,12 @@ impl HeadTranslationSignal {
     pub const fn mirrored(self) -> Self {
         match self.state {
             HeadTranslationState::Unavailable => Self::UNAVAILABLE,
-            _ => Self::available(-self.x_meters, self.y_meters, self.z_meters, self.state),
+            _ => Self::available(
+                crate::mirror::MotionMirror::new(true).horizontal(self.x_meters),
+                self.y_meters,
+                self.z_meters,
+                self.state,
+            ),
         }
     }
 

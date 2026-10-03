@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{ExpressionEntityMap, ModifyExpressions, VrmExpression};
 use vtuber_core::{
-    ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS, Arkit52Coefficients, ArkitBlendshape, AvatarControlFrame,
-    ExpressionCoefficients,
+    Arkit52Coefficients, ArkitBlendshape, AvatarControlFrame, ExpressionCoefficients,
 };
 
 use crate::binding::AvatarBinding;
@@ -370,19 +369,8 @@ fn face_input(
     frame: &AvatarControlFrame,
     mirrored: bool,
 ) -> (ExpressionCoefficients, Option<Arkit52Coefficients>) {
-    let mut expressions = frame.expressions;
-    let mut detailed_face = frame.detailed_face;
-    if mirrored {
-        // Tracking stays canonical. Both face routes reflect anatomical sides
-        // exactly once here; LookAt and manual expressions have their own input.
-        std::mem::swap(&mut expressions.blink_left, &mut expressions.blink_right);
-        if let Some(coefficients) = &mut detailed_face {
-            for &(left, right) in ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS {
-                coefficients.swap(left, right);
-            }
-        }
-    }
-    (expressions, detailed_face)
+    vtuber_core::mirror::MotionMirror::new(mirrored)
+        .expressions(frame.expressions, frame.detailed_face)
 }
 
 fn look_at_expression_commands(
@@ -411,6 +399,7 @@ mod tests {
     )] // tests may panic (AGENTS.md)
     use super::*;
     use bevy_vrm1::prelude::VrmExpression;
+    use vtuber_core::ARKIT_NON_TONGUE_LEFT_RIGHT_PAIRS;
     use vtuber_core::{
         AvatarControlFrame, ExpressionCoefficients, FrameSeq, GazeSignal, HeadPose,
         HeadTranslationSignal, MonoTimeNs, TrackingState,

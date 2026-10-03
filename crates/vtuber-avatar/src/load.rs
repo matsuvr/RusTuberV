@@ -172,16 +172,7 @@ impl AssetPathError {
     }
 }
 
-/// The engine-facing description of an imported avatar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Component)]
-pub enum ExpectedVrmGeneration {
-    /// The preflight source was VRM 0.x.
-    Vrm0,
-    /// The preflight source was VRM 1.0.
-    Vrm1,
-}
-
-/// The engine-facing description of an imported avatar.
+/// A prepared VRM 1.0 model to load; the original format belongs to import metadata.
 #[derive(Clone, Debug, PartialEq, Component)]
 pub struct ImportedAvatar {
     /// Stable asset identifier.
@@ -190,8 +181,6 @@ pub struct ImportedAvatar {
     pub asset_path: UserAssetPath,
     /// User-facing model name.
     pub name: String,
-    /// Generation established by app-side preflight.
-    pub expected_generation: ExpectedVrmGeneration,
     /// Import warnings established by app-side preflight.
     pub warnings: Vec<VrmCompatibilityWarning>,
     /// Source expression facts parsed from the managed model
@@ -203,17 +192,11 @@ pub struct ImportedAvatar {
 impl ImportedAvatar {
     /// Creates a new imported avatar descriptor.
     #[must_use]
-    pub fn new(
-        id: AvatarAssetId,
-        asset_path: UserAssetPath,
-        name: impl Into<String>,
-        expected_generation: ExpectedVrmGeneration,
-    ) -> Self {
+    pub fn new(id: AvatarAssetId, asset_path: UserAssetPath, name: impl Into<String>) -> Self {
         Self {
             id,
             asset_path,
             name: name.into(),
-            expected_generation,
             warnings: Vec::new(),
             expressions: SourceExpressions::default(),
         }
@@ -386,7 +369,6 @@ pub fn handle_load_imported_avatar_requests(
                     request_id: request.request_id,
                 },
                 request.imported.id.clone(),
-                request.imported.expected_generation,
                 VrmSourceWarnings(request.imported.warnings.clone()),
                 VrmSourceExpressions(request.imported.expressions.clone()),
                 VrmHandle(asset_server.load(asset_path)),
@@ -465,12 +447,7 @@ mod tests {
         let asset_path = UserAssetPath::avatar_model_path(&id).expect("test path is valid");
         LoadImportedAvatarRequest {
             request_id,
-            imported: ImportedAvatar::new(
-                id,
-                asset_path,
-                "Test Model",
-                ExpectedVrmGeneration::Vrm1,
-            ),
+            imported: ImportedAvatar::new(id, asset_path, "Test Model"),
         }
     }
 

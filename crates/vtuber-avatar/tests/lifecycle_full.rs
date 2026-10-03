@@ -20,7 +20,6 @@ use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 use bevy_vrm1::vrm::spring_bone::{SpringCenterNode, SpringColliders, VrmSpringBonePlugin};
 
-use vtuber_avatar::ExpectedVrmGeneration;
 use vtuber_avatar::bind::BindTriggered;
 use vtuber_avatar::binding::{AvatarBinding, bind_humanoid_bones};
 use vtuber_avatar::lifecycle::{
@@ -165,13 +164,7 @@ fn count_spring_roots(app: &mut App) -> usize {
         .count()
 }
 
-#[derive(Clone, Copy, Debug)]
-enum SyntheticGeneration {
-    Vrm0,
-    Vrm1,
-}
-
-fn spawn_generation_avatar_root(app: &mut App, generation: SyntheticGeneration) -> Entity {
+fn spawn_prepared_avatar_root(app: &mut App) -> Entity {
     let head = spawn_bone(app);
     let root = app
         .world_mut()
@@ -181,14 +174,12 @@ fn spawn_generation_avatar_root(app: &mut App, generation: SyntheticGeneration) 
             Visibility::Hidden,
             Vrm,
             VrmHandle(Handle::default()),
-            ExpectedVrmGeneration::from(generation),
             HeadBoneEntity(head),
             ExpressionEntityMap(bevy::platform::collections::HashMap::new()),
         ))
         .id();
 
-    // Converted models carry no runtime basis entity: both generations share
-    // the same initialized shape and differ only in the source record.
+    // Prepared models share one VRM 1.0 hierarchy with no runtime basis entity.
     app.world_mut().entity_mut(head).insert(ChildOf(root));
     app.world_mut().entity_mut(head).insert(SpringRoot {
         joints: SpringJoints(vec![head]),
@@ -198,20 +189,7 @@ fn spawn_generation_avatar_root(app: &mut App, generation: SyntheticGeneration) 
     root
 }
 
-impl From<SyntheticGeneration> for ExpectedVrmGeneration {
-    fn from(generation: SyntheticGeneration) -> Self {
-        match generation {
-            SyntheticGeneration::Vrm0 => ExpectedVrmGeneration::Vrm0,
-            SyntheticGeneration::Vrm1 => ExpectedVrmGeneration::Vrm1,
-        }
-    }
-}
-
-fn assert_generation_state(app: &mut App, root: Entity, generation: SyntheticGeneration) {
-    assert_eq!(
-        app.world().get::<ExpectedVrmGeneration>(root).copied(),
-        Some(ExpectedVrmGeneration::from(generation))
-    );
+fn assert_prepared_state(app: &mut App) {
     assert_eq!(count_active_markers(app), 1);
     assert_eq!(count_spring_roots(app), 1);
     assert_eq!(
@@ -623,35 +601,15 @@ fn full_lifecycle_snapshot_reflects_state() {
     assert!(snap.capabilities.is_none());
 }
 
-/// Runs the revised Issue #31 transition matrix twice in one process. The
-/// synthetic roots carry the source-generation record the real import owns,
-/// so stale avatar, expression, and SpringBone state is checked directly
-/// after every unload and replacement.
+/// Replacement and unload of prepared VRM 1.0 roots leave no owned state.
 #[test]
-fn generation_transition_matrix_has_no_stale_avatar_state() {
-    let sequences = vec![
-        vec![SyntheticGeneration::Vrm0],
-        vec![SyntheticGeneration::Vrm1],
-        vec![SyntheticGeneration::Vrm0, SyntheticGeneration::Vrm0],
-        vec![SyntheticGeneration::Vrm1, SyntheticGeneration::Vrm1],
-        vec![
-            SyntheticGeneration::Vrm1,
-            SyntheticGeneration::Vrm0,
-            SyntheticGeneration::Vrm1,
-        ],
-        vec![
-            SyntheticGeneration::Vrm0,
-            SyntheticGeneration::Vrm1,
-            SyntheticGeneration::Vrm0,
-        ],
-    ];
-
+fn prepared_model_replacement_has_no_stale_avatar_state() {
     let mut app = test_app();
     for _repetition in 0..2 {
-        for sequence in &sequences {
+        for count in 1..=3 {
             let mut previous_root = None;
-            for (index, generation) in sequence.iter().copied().enumerate() {
-                let root = spawn_generation_avatar_root(&mut app, generation);
+            for index in 0..count {
+                let root = spawn_prepared_avatar_root(&mut app);
                 if index == 0 {
                     load_root(&mut app, root);
                 } else {
@@ -671,11 +629,11 @@ fn generation_transition_matrix_has_no_stale_avatar_state() {
                     );
                 }
 
-                assert_generation_state(&mut app, root, generation);
+                assert_prepared_state(&mut app);
                 simulate_initialized_and_bind(&mut app, root);
                 finish_ready(&mut app);
                 assert_ready(&app, root);
-                assert_generation_state(&mut app, root, generation);
+                assert_prepared_state(&mut app);
                 previous_root = Some(root);
             }
 

@@ -11,7 +11,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use vtuber_avatar::vrm0::descriptor::VrmParseError;
+pub use vtuber_avatar::vrm::VrmGeneration;
+use vtuber_avatar::vrm::{VrmParseError, VrmPrepareError};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,7 @@ mod morph;
 mod runtime;
 
 pub use inspection::inspect_vrm;
-pub use morph::normalize_vrm_morph_targets;
+use morph::normalize_vrm_morph_targets;
 use morph::over_limit_morph_target_count;
 pub use runtime::{
     ensure_managed_model_ready, read_runtime_expression_facts, runtime_ready_source_bytes,
@@ -127,6 +128,9 @@ pub enum ModelImportError {
 impl From<VrmParseError> for ModelImportError {
     fn from(error: VrmParseError) -> Self {
         match error {
+            VrmParseError::InvalidMorphTargetIndex { mesh, index } => {
+                Self::InvalidMorphTargetIndex { mesh, index }
+            }
             VrmParseError::DuplicateBone(name) => Self::DuplicateHumanBone(name),
             VrmParseError::MissingField(path) => {
                 if let Some(name) = path.strip_prefix("humanoid.humanBones.") {
@@ -150,6 +154,18 @@ impl From<VrmParseError> for ModelImportError {
                 reason: error.to_string(),
             },
             VrmParseError::UnsupportedVersion(version) => Self::UnsupportedVersion(version),
+        }
+    }
+}
+
+impl From<VrmPrepareError> for ModelImportError {
+    fn from(error: VrmPrepareError) -> Self {
+        match error {
+            VrmPrepareError::Descriptor(error) => error.into(),
+            VrmPrepareError::Glb(error) => Self::GlbParse(error.to_string()),
+            VrmPrepareError::InvalidField { path, reason } => {
+                Self::InvalidVrmField { path, reason }
+            }
         }
     }
 }
@@ -179,18 +195,7 @@ impl ModelImportError {
     }
 }
 
-/// Supported VRM generation detected by preflight.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum VrmGeneration {
-    /// Legacy VRM 0.x using the root `VRM` extension.
-    Vrm0,
-    /// VRM 1.0 using the root `VRMC_vrm` extension.
-    #[default]
-    Vrm1,
-}
-
-/// Summary returned after a successful inspection.
+/// Source provenance and capabilities inspected from the prepared VRM 1.0 document.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VrmInspectionSummary {
@@ -220,25 +225,20 @@ pub struct VrmInspectionSummary {
     /// Whether the model declares a material extension understood by the
     /// runtime compatibility layer.
     pub has_mtoon_materials: bool,
-    /// Number of material entries classified as legacy/modern MToon.
+    /// Number of prepared VRM 1.0 MToon materials.
     pub mtoon_material_count: usize,
     /// Number of material entries classified as unlit.
     pub unlit_material_count: usize,
     /// Number of material entries that use the StandardMaterial fallback.
     pub fallback_material_count: usize,
-    /// Number of source-declared SpringBone groups/springs.
-    ///
-    /// This is an input inventory, not the number of runtime-normalized
-    /// `SpringRoot` entities created after hierarchy expansion.
+    /// Number of springs in the prepared VRMC_springBone extension.
+    /// This is document inventory; runtime entities are reported separately.
     pub spring_chain_count: usize,
-    /// Number of source-declared SpringBone joint/root references.
-    ///
-    /// For VRM 0.x this counts `secondaryAnimation.boneGroups[*].bones`,
-    /// which are root references rather than expanded ordered chains.
+    /// Number of ordered joint references after legacy hierarchy expansion.
     pub spring_joint_count: usize,
-    /// Number of source-declared SpringBone colliders.
+    /// Number of colliders in the prepared VRMC_springBone extension.
     pub spring_collider_count: usize,
-    /// Number of source-declared SpringBone center-space declarations.
+    /// Number of prepared springs declaring a center node.
     pub spring_center_count: usize,
     /// Humanoid node indices.
     pub humanoid_nodes: HumanoidNodes,
@@ -293,10 +293,10 @@ pub struct ImportMeta {
 /// A metadata file is written at `asset_root/avatars/<sha256>/import.toml`.
 ///
 /// VRM 0.x sources are converted into VRM 1.0-shaped bytes by
-/// `vtuber_avatar::convert_vrm0_to_vrm1` before storing, so the unmodified
+/// `vtuber_avatar::vrm::prepare_vrm_document` before inspection and storage, so the
 /// upstream runtime loads the managed copy directly. When the source declares
 /// more morph targets per mesh than the Bevy runtime supports, the stored
-/// copy is additionally normalized by [`normalize_vrm_morph_targets`]; the
+/// copy is additionally normalized to the runtime morph-target limit; the
 /// identity hash always refers to the original source bytes.
 pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
     source: P,
@@ -330,26 +330,10 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
         });
     }
 
-    let summary = inspect_vrm(source)?;
-
     let source_bytes = fs::read(source)?;
     let id = format!("{:x}", Sha256::digest(&source_bytes));
-    let runtime_bytes = runtime_ready_source_bytes(&source_bytes, summary.generation)?;
-    let stored_bytes = match normalize_vrm_morph_targets(&runtime_bytes)? {
-        Some(normalized) => normalized,
-        None => {
-            if let Some(target_count) = over_limit_morph_target_count(&runtime_bytes) {
-                return Err(ModelImportError::InvalidVrmField {
-                    path: "meshes[*].primitives[*].targets".to_string(),
-                    reason: format!(
-                        "{target_count} morph targets exceed the runtime limit of \
-                         {MAX_MORPH_TARGETS} and cannot be reduced without changing the default shape or animation"
-                    ),
-                });
-            }
-            runtime_bytes
-        }
-    };
+    let (summary, runtime_bytes) = inspection::prepare_and_inspect_vrm(source, &source_bytes)?;
+    let stored_bytes = runtime::finish_runtime_bytes(runtime_bytes)?;
 
     let dest_dir = asset_root.as_ref().join("avatars").join(&id);
     fs::create_dir_all(&dest_dir)?;

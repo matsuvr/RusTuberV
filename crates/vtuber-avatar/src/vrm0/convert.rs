@@ -1,35 +1,8 @@
-//! VRM 0.x managed-copy conversion for import-time use.
-//!
-//! Converts a VRM 0.x source file into VRM 1.0-shaped bytes so the unmodified
-//! upstream runtime can load it without any vendored loader or ECS patch.
-//! The source file is never overwritten: the caller stores the converted
-//! bytes as the managed copy (the same slot the morph-target normalization
-//! already rewrites).
-//!
-//! Conversion outline:
-//! - parse the GLB and require the root `VRM` extension without `VRMC_vrm`;
-//! - normalize humanoid, expressions, look-at, first-person, and spring bone
-//!   through the ported descriptor layers and inject them as `VRMC_vrm` and
-//!   `VRMC_springBone`;
-//! - migrate each `VRM/MToon` `materialProperties` entry into a
-//!   `VRMC_materials_mtoon` extension and map the legacy base/alpha/sided/UV
-//!   facts onto standard glTF material fields; tag known unlit shaders with
-//!   `KHR_materials_unlit`;
-//! - bake the VRM 0.x `Y = pi` basis into the scene root nodes so the stored
-//!   model faces the canonical direction with no runtime basis entity;
-//! - drop the root `VRM` extension object so the managed copy is unambiguous.
-//!
-//! Legacy material/texture expression binds and normal-map (`_BumpMap`)
-//! details cannot be represented by the upstream contract and are dropped;
-//! the import diagnostics already report the unsupported properties.
+//! VRM 0.x to VRM 1.0 conversion, used only at the import boundary.
+//! Coordinates, bones, expressions, materials and springs are converted here;
+//! all later preparation and runtime systems consume the resulting VRM 1.0.
 
-use crate::glb::{Glb, GlbError};
-use anyhow::Context;
-use serde_json::{Map, Value};
-
-use super::descriptor::{
-    LegacyShaderKind, VrmParseError, classify_legacy_shader, parse_runtime_descriptor,
-};
+use super::descriptor::{LegacyShaderKind, classify_legacy_shader, parse_vrm0};
 use super::materials::{
     LegacyAlphaMode, convert_legacy_material_properties_with_render_queue_offset,
     legacy_alpha_mode, plan_legacy_render_queue_offsets,
@@ -37,86 +10,35 @@ use super::materials::{
 use super::normalize::{
     normalized_legacy_expressions, normalized_legacy_spring_bone, normalized_legacy_vrm,
 };
+use crate::vrm::{VrmGeneration, VrmParseError, VrmPrepareError, VrmSourceInfo};
+use anyhow::Context;
+use serde_json::{Map, Value};
 
-/// Errors that can occur while converting a VRM 0.x source file.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Vrm0ConvertError {
-    /// GLB container or JSON failure.
-    Glb(GlbError),
-    /// VRM descriptor validation failure.
-    Descriptor(VrmParseError),
-    /// The input has no root `VRM` extension or already carries `VRMC_vrm`.
-    NotVrm0,
-    /// A VRM field cannot be normalized into the VRM 1.0 shape.
-    InvalidField {
-        /// JSON field path.
-        path: String,
-        /// Stable validation reason.
-        reason: String,
-    },
-}
-
-impl std::fmt::Display for Vrm0ConvertError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Glb(error) => error.fmt(f),
-            Self::Descriptor(error) => error.fmt(f),
-            Self::NotVrm0 => write!(f, "file is not a VRM 0.x model"),
-            Self::InvalidField { path, reason } => {
-                write!(f, "invalid VRM field {path}: {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Vrm0ConvertError {}
-
-impl From<GlbError> for Vrm0ConvertError {
-    fn from(error: GlbError) -> Self {
-        Self::Glb(error)
-    }
-}
-
-/// Converts VRM 0.x `bytes` into VRM 1.0-shaped bytes.
-///
-/// Returns `Ok(None)` when the input carries no root `VRM` extension (not a
-/// VRM 0.x source). Returns `Err` when the input claims to be VRM 0.x but
-/// cannot be normalized.
-pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
-    let mut glb = Glb::parse(bytes)?;
-    let document = &mut glb.document;
-    let extensions = document
-        .get("extensions")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let Some(legacy) = extensions.get("VRM").cloned() else {
-        return Ok(None);
-    };
-    if extensions.contains_key("VRMC_vrm") {
-        return Err(Vrm0ConvertError::NotVrm0);
-    }
-
-    let descriptor = parse_runtime_descriptor(document).map_err(Vrm0ConvertError::Descriptor)?;
+pub(crate) fn convert_vrm0_document(
+    document: &mut Value,
+) -> Result<VrmSourceInfo, VrmPrepareError> {
+    let legacy =
+        document
+            .pointer("/extensions/VRM")
+            .cloned()
+            .ok_or(VrmPrepareError::Descriptor(
+                VrmParseError::MissingGeneration,
+            ))?;
+    let descriptor = parse_vrm0(document, &legacy).map_err(VrmPrepareError::Descriptor)?;
     let vrmc = normalized_legacy_vrm(&descriptor);
     let spring = normalized_legacy_spring_bone(document, &legacy).map_err(invalid_field)?;
 
     convert_materials(document, &legacy)?;
     bake_y_pi_basis(document);
     let mut vrmc_value =
-        serde_json::to_value(&vrmc).map_err(|error| Vrm0ConvertError::InvalidField {
+        serde_json::to_value(&vrmc).map_err(|error| VrmPrepareError::InvalidField {
             path: "extensions.VRMC_vrm".to_string(),
             reason: error.to_string(),
         })?;
     // The upstream `Expressions` type cannot carry material color binds or
     // the custom-origin record, so the expression section is built as raw
     // JSON and injected over the (null) placeholder.
-    let expressions = normalized_legacy_expressions(&legacy, document).map_err(|error| {
-        Vrm0ConvertError::InvalidField {
-            path: "extensions.VRM.blendShapeMaster".to_string(),
-            reason: error.to_string(),
-        }
-    })?;
+    let expressions = normalized_legacy_expressions(&legacy, document).map_err(invalid_field)?;
     if let Some(expressions) = expressions
         && let Some(slot) = vrmc_value.get_mut("expressions")
     {
@@ -127,7 +49,7 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
         inject_extension(
             document,
             "VRMC_springBone",
-            serde_json::to_value(&spring).map_err(|error| Vrm0ConvertError::InvalidField {
+            serde_json::to_value(&spring).map_err(|error| VrmPrepareError::InvalidField {
                 path: "extensions.VRMC_springBone".to_string(),
                 reason: error.to_string(),
             })?,
@@ -135,75 +57,53 @@ pub fn convert_vrm0_to_vrm1(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Convert
     }
     remove_root_extension(document, "VRM");
 
-    Ok(Some(glb.to_vec()?))
+    Ok(VrmSourceInfo {
+        generation: VrmGeneration::Vrm0,
+        exporter_version: descriptor
+            .legacy_meta
+            .and_then(|meta| meta.exporter_version),
+        compatibility_warnings: descriptor.compatibility_warnings,
+    })
 }
 
-/// Prepares a managed model copy for the unmodified upstream runtime.
-///
-/// The adaptation is selected from the root extension actually present:
-/// - root `VRM` without `VRMC_vrm`: VRM 0.x → VRM 1.0 conversion;
-/// - root `VRMC_vrm`: correct legacy thumb names in previously converted copies,
-///   then apply VRM 1.0 expression adaptation
-///   ([`crate::vrm1::adapt_vrm1_expressions`]).
-///
-/// Returns `Ok(None)` when neither shape is present or the input already
-/// satisfies the runtime contract. The managed copy alone carries everything
-/// the adaptation needs; the original source file is not required.
-pub fn prepare_managed_vrm_bytes(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
-    let mut glb = Glb::parse(bytes)?;
-    let document = &mut glb.document;
-    let extensions = document.get("extensions").and_then(Value::as_object);
-    let has_legacy = extensions.is_some_and(|extensions| extensions.contains_key("VRM"));
-    let has_modern = extensions.is_some_and(|extensions| extensions.contains_key("VRMC_vrm"));
-    match (has_legacy, has_modern) {
-        (true, false) => convert_vrm0_to_vrm1(bytes),
-        (false, true) => {
-            // Existing managed copies also went through the old converter,
-            // which left VRM 0.x thumb names inside VRMC_vrm. Repair the names
-            // before the upstream loader binds the CMC as the MCP joint.
-            let mut changed = false;
-            if let Some(bones) = document
-                .pointer_mut("/extensions/VRMC_vrm/humanoid/humanBones")
-                .and_then(Value::as_object_mut)
-            {
-                for (metacarpal, proximal, intermediate) in [
-                    (
-                        "leftThumbMetacarpal",
-                        "leftThumbProximal",
-                        "leftThumbIntermediate",
-                    ),
-                    (
-                        "rightThumbMetacarpal",
-                        "rightThumbProximal",
-                        "rightThumbIntermediate",
-                    ),
-                ] {
-                    if let Some(mcp) = bones.remove(intermediate) {
-                        if let Some(cmc) = bones.remove(proximal) {
-                            bones.insert(metacarpal.to_owned(), cmc);
-                        }
-                        bones.insert(proximal.to_owned(), mcp);
-                        changed = true;
-                    }
+/// Repairs thumb names emitted by the old converter in existing managed copies.
+pub(crate) fn repair_converted_thumb_names(document: &mut Value) -> bool {
+    let mut changed = false;
+    if let Some(bones) = document
+        .pointer_mut("/extensions/VRMC_vrm/humanoid/humanBones")
+        .and_then(Value::as_object_mut)
+    {
+        for (metacarpal, proximal, intermediate) in [
+            (
+                "leftThumbMetacarpal",
+                "leftThumbProximal",
+                "leftThumbIntermediate",
+            ),
+            (
+                "rightThumbMetacarpal",
+                "rightThumbProximal",
+                "rightThumbIntermediate",
+            ),
+        ] {
+            if let Some(mcp) = bones.remove(intermediate) {
+                if let Some(cmc) = bones.remove(proximal) {
+                    bones.insert(metacarpal.to_owned(), cmc);
                 }
-            }
-            if changed {
-                let normalized = glb.to_vec()?;
-                Ok(Some(
-                    crate::vrm1::adapt_vrm1_expressions(&normalized)?.unwrap_or(normalized),
-                ))
-            } else {
-                crate::vrm1::adapt_vrm1_expressions(bytes)
+                bones.insert(proximal.to_owned(), mcp);
+                changed = true;
             }
         }
-        _ => Ok(None),
     }
+    changed
 }
 
-fn invalid_field(error: anyhow::Error) -> Vrm0ConvertError {
-    Vrm0ConvertError::InvalidField {
-        path: "extensions.VRM".to_string(),
-        reason: error.to_string(),
+fn invalid_field(error: anyhow::Error) -> VrmPrepareError {
+    match error.downcast::<VrmParseError>() {
+        Ok(error) => VrmPrepareError::Descriptor(error),
+        Err(error) => VrmPrepareError::InvalidField {
+            path: "extensions.VRM".to_string(),
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -240,7 +140,7 @@ const VRM1_MATERIAL_KEYS: [&str; 25] = [
     "giEqualizationFactor",
 ];
 
-fn convert_materials(document: &mut Value, legacy: &Value) -> Result<(), Vrm0ConvertError> {
+fn convert_materials(document: &mut Value, legacy: &Value) -> Result<(), VrmPrepareError> {
     let Some(entries) = legacy.get("materialProperties").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -606,7 +506,7 @@ fn bake_y_pi_basis(document: &mut Value) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-    use super::*;
+    use crate::{glb::Glb, prepare_managed_vrm_bytes};
     use serde_json::json;
 
     #[test]
@@ -640,7 +540,7 @@ mod tests {
     fn loading_an_existing_managed_copy_repairs_legacy_thumb_names_once() {
         let source = json!({
             "asset": {"version": "2.0"},
-            "extensions": {"VRMC_vrm": {"humanoid": {"humanBones": {
+            "extensions": {"VRMC_vrm": {"specVersion": "1.0", "humanoid": {"humanBones": {
                 "leftThumbProximal": {"node": 77},
                 "leftThumbIntermediate": {"node": 78},
                 "leftThumbDistal": {"node": 79},

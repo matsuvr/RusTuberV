@@ -67,6 +67,7 @@ impl GroundedFeet {
                     )?,
                     // Flexion extent of the OpenSim Gait2392 knee coordinate.
                     flexion_limit: 120.0_f32.to_radians(),
+                    axial_limit: 0.0,
                 },
             })
         };

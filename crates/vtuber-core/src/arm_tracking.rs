@@ -105,14 +105,15 @@ pub struct HandFingerPose {
     /// Each proximal segment's in-plane angle from forward toward across.
     /// Spread is independent of MCP elevation and compared to the rig's rest.
     pub spread: [f32; 4],
-    /// Thumb `[mcp, ip]`, mirroring the four fingers' shape: MCP is the
-    /// signed elevation of the MCP-to-IP segment from the palm plane, and IP
-    /// is the signed bend about that segment cross palm normal. The Hand
-    /// Landmarker CMC is not read, because it is a model-placed point rather
-    /// than a detected joint.
+    /// Thumb `[mcp, ip]` coordinates. Raw landmark features use the signed
+    /// MCP-to-IP elevation and the signed IP bend. After pose selection these
+    /// are authored flexion amounts applied relative to the rig's resting
+    /// thumb, preserving its base orientation rather than flattening it into
+    /// the palm plane. The Hand Landmarker CMC is not used.
     pub thumb: [f32; 2],
-    /// The thumb's in-plane opening, from forward toward across, compared to
-    /// the rig's rest exactly like the four fingers' spread.
+    /// The thumb's in-plane opening, from forward toward across. Used for pose
+    /// recognition only; the avatar keeps CMC at rest and does not transfer
+    /// its opening to the MCP joint.
     pub thumb_spread: f32,
 }
 
@@ -142,31 +143,6 @@ pub struct ArmTrackingTarget {
     pub fingers: Option<HandFingerPose>,
 }
 
-impl ArmTrackingTarget {
-    /// Reflects both offsets in the sagittal plane. Pair mirroring must also swap sides.
-    ///
-    /// The palm normal is the cross product of two landmark directions, so a
-    /// reflection flips its sign in addition to reflecting it: `n -> -R n`,
-    /// which is `[x, -y, -z]` in the canonical basis. Hand-local normal
-    /// components and signed bends reverse; hand-local spread is unchanged.
-    #[must_use]
-    pub fn mirrored(self) -> Self {
-        let reflect = |[x, y, z]: [f32; 3]| [-x, y, z];
-        let reflect_axial = |[x, y, z]: [f32; 3]| [x, -y, -z];
-        Self {
-            wrist: reflect(self.wrist),
-            elbow_pole: reflect(self.elbow_pole),
-            palm_normal: self.palm_normal.map(reflect_axial),
-            fingers: self.fingers.map(|fingers| HandFingerPose {
-                fingers: fingers.fingers.map(|angles| angles.map(|angle| -angle)),
-                spread: fingers.spread,
-                thumb: fingers.thumb.map(|angle| -angle),
-                thumb_spread: fingers.thumb_spread,
-            }),
-        }
-    }
-}
-
 /// Per-side targets after tracking's visibility and temporal policy.
 ///
 /// None is an absent arm target, never a fabricated target at the origin.
@@ -176,17 +152,6 @@ pub struct ArmTrackingTargets {
     pub left: Option<ArmTrackingTarget>,
     /// Target for the anatomical right arm.
     pub right: Option<ArmTrackingTarget>,
-}
-
-impl ArmTrackingTargets {
-    /// Semantic mirroring: reflect positions AND exchange anatomical sides once.
-    #[must_use]
-    pub fn mirrored(self) -> Self {
-        Self {
-            left: self.right.map(ArmTrackingTarget::mirrored),
-            right: self.left.map(ArmTrackingTarget::mirrored),
-        }
-    }
 }
 
 /// How much an observed channel should replace the avatar's virtual arm.
@@ -242,17 +207,6 @@ pub struct ArmBlendWeights {
     pub left: ArmBlendWeight,
     /// Weight for the subject's right arm.
     pub right: ArmBlendWeight,
-}
-
-impl ArmBlendWeights {
-    /// Exchanges anatomical sides without reflecting either weight.
-    #[must_use]
-    pub fn mirrored(self) -> Self {
-        Self {
-            left: self.right,
-            right: self.left,
-        }
-    }
 }
 
 /// One observation's result, ready for the avatar's existing arm compositor.

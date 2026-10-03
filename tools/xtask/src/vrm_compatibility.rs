@@ -146,11 +146,9 @@ fn load_and_inspect(
     // below.
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let runtime_bytes = vtuber_app::import::runtime_ready_source_bytes(&bytes, summary.generation)
+    let runtime_bytes = vtuber_app::import::runtime_ready_source_bytes(&bytes)
         .map_err(|error| format!("failed to convert {}: {error}", path.display()))?;
-    let normalized = vtuber_app::import::normalize_vrm_morph_targets(&runtime_bytes)
-        .map_err(|error| format!("failed to normalize {}: {error}", path.display()))?;
-    let staged_bytes = normalized.as_ref().unwrap_or(&runtime_bytes);
+    let staged_bytes = &runtime_bytes;
     // Stage a temp copy whenever the runtime bytes differ from the source
     // file (VRM 0.x conversion and/or morph normalization).
     let staged_temp: Option<tempfile::NamedTempFile> = if staged_bytes != &bytes {
@@ -172,7 +170,6 @@ fn load_and_inspect(
         .unwrap_or(path);
     let model = ModelPath {
         path: model_path.to_string_lossy().to_string(),
-        generation: summary.generation,
         warnings: summary.compatibility_warnings.clone(),
     };
 
@@ -218,7 +215,6 @@ fn load_and_inspect(
 #[derive(Resource, Debug, Clone)]
 struct ModelPath {
     path: String,
-    generation: vtuber_app::import::VrmGeneration,
     warnings: Vec<vtuber_avatar::VrmCompatibilityWarning>,
 }
 
@@ -234,10 +230,6 @@ fn spawn_model(mut commands: Commands, asset_server: Res<AssetServer>, model: Re
     let handle: Handle<VrmAsset> = asset_server.load(model.path.clone());
     commands.spawn((
         VrmHandle(handle),
-        match model.generation {
-            vtuber_app::import::VrmGeneration::Vrm0 => vtuber_avatar::ExpectedVrmGeneration::Vrm0,
-            vtuber_app::import::VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
-        },
         vtuber_avatar::VrmSourceWarnings(model.warnings.clone()),
         vtuber_avatar::VrmSourceExpressions(expressions),
     ));

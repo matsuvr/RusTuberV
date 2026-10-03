@@ -124,7 +124,7 @@ fn direct_look_at_input(
         properties.range_map_vertical_up.input_max_value
     }
     .max(0.0);
-    let horizontal_sign = if mirrored { 1.0 } else { -1.0 };
+    let horizontal_sign = vtuber_core::mirror::MotionMirror::new(mirrored).horizontal(-1.0);
     DirectLookAtInput {
         // DirectLookAt uses model-left-positive yaw, hence the opposite sign
         // from BodyTracking's semantic yaw. Mirroring reverses only this axis.

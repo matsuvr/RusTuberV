@@ -46,16 +46,7 @@ fn run_with_root(path: &Path, managed_root: &Path) -> Result<(), String> {
     let asset_id = AvatarAssetId::new(&imported.id);
     let asset_path = UserAssetPath::avatar_model_path(&asset_id)
         .map_err(|error| format!("failed to construct managed asset path: {error}"))?;
-    let expected_generation = match imported.summary.generation {
-        vtuber_app::import::VrmGeneration::Vrm0 => vtuber_avatar::ExpectedVrmGeneration::Vrm0,
-        vtuber_app::import::VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
-    };
-    let imported_avatar = ImportedAvatar::new(
-        asset_id,
-        asset_path,
-        imported.name.clone(),
-        expected_generation,
-    );
+    let imported_avatar = ImportedAvatar::new(asset_id, asset_path, imported.name.clone());
 
     let managed_root_string = managed_root
         .to_str()

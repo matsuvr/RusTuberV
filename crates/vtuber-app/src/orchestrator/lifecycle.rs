@@ -4,7 +4,6 @@ use bevy::prelude::*;
 use vtuber_avatar::{AvatarAssetId, AvatarLifecycle};
 
 use super::{Orchestrator, OrchestratorError, PendingLoadRequest, SubmittedAvatarLoad};
-use crate::import::VrmGeneration;
 use crate::settings::AppSettings;
 use crate::ui_model::{AvatarLifecycleState, UiViewModel};
 
@@ -51,14 +50,9 @@ fn prepare_avatar_load(
     // also fails the runtime asset load, so the facts are best-effort here.
     let expressions =
         crate::import::read_runtime_expression_facts(&pending.model.asset_path).unwrap_or_default();
-    let expected_generation = match pending.model.summary.generation {
-        VrmGeneration::Vrm0 => vtuber_avatar::ExpectedVrmGeneration::Vrm0,
-        VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
-    };
-    let imported =
-        vtuber_avatar::ImportedAvatar::new(id, path, &pending.model.name, expected_generation)
-            .with_warnings(pending.model.summary.compatibility_warnings.clone())
-            .with_expressions(expressions);
+    let imported = vtuber_avatar::ImportedAvatar::new(id, path, &pending.model.name)
+        .with_warnings(pending.model.summary.compatibility_warnings.clone())
+        .with_expressions(expressions);
     Ok((
         vtuber_avatar::LoadImportedAvatarRequest {
             request_id: pending.request_id,

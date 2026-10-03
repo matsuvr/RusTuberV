@@ -5,24 +5,15 @@
 //! serialized back into the managed glTF JSON, so the upstream runtime loads
 //! the converted model without any vendored loader or ECS patch.
 //!
-//! Differences from the vendored shape are upstream-driven, not behavioral:
-//! upstream `Expressions` carries a single `preset` map (standard and custom
-//! entries share it, standards win on collision) and upstream `VrmPreset`
-//! carries morph binds only. Legacy `materialValues` color binds are
-//! therefore written as `materialColorBinds` next to the morph binds and the
-//! custom-origin record is kept under `custom`: both are ignored by upstream
-//! serde but preserved for the application's source-facts parser and the
-//! app-side material bind writer (`expression::material`). The custom-origin
-//! record carries [`crate::vrm1::MERGED_CUSTOM_MARKER`], so a later VRM 1.0
-//! adaptation pass on this already-converted copy keeps the origin instead of
-//! treating the `preset` copy as a genuine standard/custom collision.
+//! This converter emits VRM 1.0 preset/custom expressions and material color
+//! binds. The shared VRM 1.0 preparation owns upstream-specific adaptation.
 //!
 //! The managed copy's `VRMC_vrm.meta` is a rendering-input record only. VRM
 //! 0.x permission strings that map onto VRM 1.0 fields are carried through
 //! unchanged; fields with no VRM 0.x counterpart default to `false`, which
 //! records no permission instead of inventing one. The author's original
 //! license facts stay in the source file, the import summary, and the
-//! diagnostics retained on the root.
+//! license review.
 use std::collections::BTreeSet;
 
 use anyhow::Context;
@@ -34,10 +25,11 @@ use bevy_vrm1::prelude::{
 };
 use serde_json::{Value, json};
 
-use super::descriptor::{VrmFirstPersonFlag, VrmLookAtType, VrmRuntimeDescriptor};
+use super::descriptor::{Vrm0Descriptor, VrmFirstPersonFlag, VrmLookAtType};
+use crate::vrm::VrmParseError;
 
 type AppResult<T> = anyhow::Result<T>;
-pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> VrmcVrm {
+pub(super) fn normalized_legacy_vrm(descriptor: &Vrm0Descriptor) -> VrmcVrm {
     let human_bones = descriptor
         .humanoid
         .human_bones
@@ -138,12 +130,9 @@ pub(crate) fn normalized_legacy_vrm(descriptor: &VrmRuntimeDescriptor) -> VrmcVr
 
 /// Builds the `VRMC_vrm.expressions` JSON for the converted managed copy.
 ///
-/// Every expression enters `preset` (the only map the upstream runtime
-/// reads), and custom-origin expressions additionally appear under `custom`
-/// as the provenance record, marked with [`crate::vrm1::MERGED_CUSTOM_MARKER`]
-/// so re-running the VRM 1.0 adaptation on this output is a no-op. Legacy
-/// `materialValues` color binds are converted into `materialColorBinds`;
-/// nothing from the source section is silently dropped.
+/// Standards enter `preset`, author-defined expressions enter `custom`.
+/// The shared VRM 1.0 preparation adapts both source formats for upstream.
+/// Supported legacy material colors become `materialColorBinds`.
 pub(crate) fn normalized_legacy_expressions(
     legacy: &Value,
     root: &Value,
@@ -184,7 +173,7 @@ pub(crate) fn normalized_legacy_expressions(
                 .map(|(name, index)| (name, index, false)),
         )
     {
-        if preset.contains_key(&name) {
+        if preset.contains_key(&name) || custom.contains_key(&name) {
             continue;
         }
         let group = &groups[group_index];
@@ -243,24 +232,11 @@ pub(crate) fn normalized_legacy_expressions(
             "isBinary": group.get("isBinary").and_then(Value::as_bool).unwrap_or(false),
             "morphTargetBinds": morph_target_binds,
             "materialColorBinds": material_color_binds,
-            "overrideBlink": "none",
-            "overrideLookAt": "none",
-            "overrideMouth": "none",
         });
-        preset.insert(name.clone(), entry.clone());
-        if !is_standard {
-            // Same output contract as `crate::vrm1::adapt_vrm1_expressions`:
-            // the origin record is marked, so a later adaptation pass on this
-            // converted copy recognizes its own merge and does not delete the
-            // record as a genuine standard/custom collision.
-            let mut record = entry;
-            if let Some(object) = record.as_object_mut() {
-                object.insert(
-                    crate::vrm1::MERGED_CUSTOM_MARKER.to_string(),
-                    Value::Bool(true),
-                );
-            }
-            custom.insert(name, record);
+        if is_standard {
+            preset.insert(name, entry);
+        } else {
+            custom.insert(name, entry);
         }
     }
     let mut expressions = serde_json::Map::new();
@@ -640,7 +616,11 @@ fn validate_node_index(root: &Value, index: usize, path: &str) -> AppResult<()> 
         .context("glTF nodes array is required for legacy VRM normalization")?
         .len();
     if index >= count {
-        return Err(anyhow::anyhow!("invalid index {path}={index}"));
+        return Err(VrmParseError::InvalidIndex {
+            path: path.into(),
+            index,
+        }
+        .into());
     }
     Ok(())
 }
@@ -651,7 +631,11 @@ fn validate_mesh_index(root: &Value, index: usize, path: &str) -> AppResult<()> 
         .context("glTF meshes array is required for legacy VRM normalization")?
         .len();
     if index >= count {
-        return Err(anyhow::anyhow!("invalid index {path}={index}"));
+        return Err(VrmParseError::InvalidIndex {
+            path: path.into(),
+            index,
+        }
+        .into());
     }
     Ok(())
 }
@@ -695,9 +679,11 @@ fn validate_morph_target_index(
         })
         .unwrap_or(0);
     if morph_index >= count {
-        return Err(anyhow::anyhow!(
-            "invalid index {path}={morph_index}; mesh {mesh} has {count} morph targets"
-        ));
+        return Err(VrmParseError::InvalidMorphTargetIndex {
+            mesh,
+            index: morph_index,
+        }
+        .into());
     }
     Ok(())
 }

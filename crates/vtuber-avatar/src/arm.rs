@@ -18,6 +18,8 @@ pub enum ArmSide {
 /// Elbow flexion range in the selected Holzbaur upper-extremity model
 /// (2005, p. 831): full extension to 130 degrees, without hyperextension.
 pub(crate) const ELBOW_FLEXION_LIMIT_RAD: f32 = 130.0_f32.to_radians();
+/// Radioulnar coordinate range from Holzbaur et al. (2005), p. 831.
+pub(crate) const FOREARM_ROLL_LIMIT_RAD: f32 = 90.0_f32.to_radians();
 
 /// Entity references for one finger's authored joints.
 ///
@@ -395,16 +397,13 @@ pub struct ArmIkInput {
 impl ArmIkInput {
     /// Creates solver input from cached immutable arm geometry.
     ///
-    /// Bent rest segments define the elbow hinge. For a straight VRM T-pose,
-    /// positive flexion bends toward the model's +Z anterior direction. Palm
-    /// winding and forearm pronation do not choose the elbow's flexion axis.
+    /// Positive flexion bends toward the VRM model's +Z anterior direction.
+    /// Slightly bent authored T-poses do not redefine the anatomical hinge;
+    /// shared FK removes the rest bend before applying flexion about this axis.
     #[must_use]
     pub fn from_geometry(geometry: ArmRestGeometry, target: ArmIkTarget) -> Self {
         let upper = geometry.elbow.position - geometry.upper_arm.position;
-        let lower = geometry.wrist.position - geometry.elbow.position;
-        let elbow_axis =
-            crate::skeleton::rest_hinge_axis(upper, lower, finite_normalized(upper.cross(Vec3::Z)))
-                .unwrap_or(Vec3::ZERO);
+        let elbow_axis = finite_normalized(upper.cross(Vec3::Z)).unwrap_or(Vec3::ZERO);
         Self {
             shoulder: geometry.upper_arm.position,
             rest_elbow: geometry.elbow.position,
@@ -563,6 +562,7 @@ impl ArmIkInput {
             middle_rotation: self.lower_arm_rest_global_rotation,
             hinge_axis: self.elbow_axis,
             flexion_limit: ELBOW_FLEXION_LIMIT_RAD,
+            axial_limit: FOREARM_ROLL_LIMIT_RAD,
         }
     }
 

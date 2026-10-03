@@ -37,6 +37,7 @@ use crate::body_scale::{BodyScaleMeters, DEFAULT_BODY_SCALE_METERS};
 use crate::lifecycle::{AvatarGeneration, AvatarLifecycle, AvatarLifecycleState};
 use crate::mirror::AvatarMotionMirror;
 use crate::unload::{ActiveControlFrame, ControlFrameError, resolve_control_target};
+use vtuber_core::mirror::MotionMirror;
 
 /// Typed profiles for the shaping/split pipeline.
 ///
@@ -147,18 +148,18 @@ fn position_channels(
     if !available {
         return None;
     }
-    let sign = if mirrored { -1.0 } else { 1.0 };
+    let mirror = MotionMirror::new(mirrored);
     Some((
-        Vec3::new(
-            sign * targets.head.translation.x,
+        Vec3::from(mirror.polar([
+            targets.head.translation.x,
             targets.head.translation.y,
             targets.head.translation.z,
-        ),
-        Vec3::new(
-            sign * targets.body_compensation.x,
+        ])),
+        Vec3::from(mirror.polar([
+            targets.body_compensation.x,
             targets.body_compensation.y,
             targets.body_compensation.z,
-        ),
+        ])),
     ))
 }
 
@@ -272,7 +273,7 @@ pub fn update_body_tracking_position_input(
             let (head_offset, body_offset) = follow.advance(
                 binding.generation,
                 Vec3::new(
-                    sign_for(mirrored) * idle.translation_x,
+                    MotionMirror::new(mirrored).horizontal(idle.translation_x),
                     idle.translation_y,
                     idle.translation_z,
                 ),
@@ -313,7 +314,7 @@ pub fn update_body_tracking_position_input(
     let idle = idle_state.target();
     let blend = idle_state.blend().clamp(0.0, 1.0);
     let idle_head = Vec3::new(
-        sign_for(mirrored) * idle.translation_x,
+        MotionMirror::new(mirrored).horizontal(idle.translation_x),
         idle.translation_y,
         idle.translation_z,
     );
@@ -351,10 +352,6 @@ pub fn update_body_tracking_position_input(
     } else {
         metrics.frames_unavailable += 1;
     }
-}
-
-fn sign_for(mirrored: bool) -> f32 {
-    if mirrored { -1.0 } else { 1.0 }
 }
 
 /// Generation-scoped tracking-loss idle episode state.

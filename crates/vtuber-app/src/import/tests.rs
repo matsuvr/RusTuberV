@@ -313,7 +313,7 @@ fn accepts_legacy_bone_look_at_during_preflight() {
         inspect_vrm(&path).unwrap().look_at_type.as_deref(),
         Some("bone")
     );
-    let converted = vtuber_avatar::convert_vrm0_to_vrm1(&fs::read(path).unwrap())
+    let converted = vtuber_avatar::prepare_managed_vrm_bytes(&fs::read(path).unwrap())
         .unwrap()
         .unwrap();
     let document = Glb::parse(&converted).unwrap().document;
@@ -402,7 +402,7 @@ fn repairs_corrupt_existing_cached_file() {
     // the adapted runtime bytes rather than the raw source.
     assert_eq!(
         fs::read(&repaired.asset_path).unwrap(),
-        runtime_ready_source_bytes(&fs::read(source).unwrap(), VrmGeneration::Vrm1).unwrap()
+        runtime_ready_source_bytes(&fs::read(source).unwrap()).unwrap()
     );
 }
 
@@ -619,7 +619,7 @@ fn ensure_managed_model_ready_adapts_stale_vrm1_copies_without_the_original() {
     let asset_root = dir.path().join("asset-root");
     let imported = import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
     let source_bytes = fs::read(&source).unwrap();
-    let expected = runtime_ready_source_bytes(&source_bytes, VrmGeneration::Vrm1).unwrap();
+    let expected = runtime_ready_source_bytes(&source_bytes).unwrap();
 
     // Simulate a managed copy stored before the VRM 1.0 adaptation (the
     // raw source passthrough) with the original moved away: the managed
@@ -652,7 +652,7 @@ fn ensure_managed_model_ready_converts_vrm0_copies_without_the_original() {
     let asset_root = dir.path().join("asset-root");
     let imported = import_vrm(&source, &asset_root, DEFAULT_SIZE_LIMIT).expect("fixture imports");
     let source_bytes = fs::read(&source).unwrap();
-    let expected = runtime_ready_source_bytes(&source_bytes, VrmGeneration::Vrm0).unwrap();
+    let expected = runtime_ready_source_bytes(&source_bytes).unwrap();
 
     // Simulate an unconverted VRM 0.x managed copy with no original.
     fs::write(&imported.asset_path, &source_bytes).unwrap();
@@ -734,7 +734,10 @@ fn normalization_bails_when_referenced_binds_alone_exceed_the_limit() {
     let bind_indices: Vec<usize> = (0..MAX_MORPH_TARGETS + 4).collect();
     let source = over_limit_vrm0_fixture(&dir, 300, &bind_indices);
     let bytes = fs::read(&source).unwrap();
-    assert!(normalize_vrm_morph_targets(&bytes).unwrap().is_none());
+    let prepared = vtuber_avatar::prepare_managed_vrm_bytes(&bytes)
+        .unwrap()
+        .unwrap();
+    assert!(normalize_vrm_morph_targets(&prepared).unwrap().is_none());
 
     let error = import_vrm(&source, dir.path().join("asset-root"), DEFAULT_SIZE_LIMIT)
         .expect_err("an over-limit model that cannot be reduced must not be cached raw");
@@ -858,9 +861,7 @@ fn reduction_preserves_mesh_and_node_default_shapes() {
     let mut weights = vec![0.0_f32; 300];
     weights[299] = 1.0;
     root["nodes"][3]["weights"] = serde_json::json!(weights);
-    let normalized = normalize_vrm_morph_targets(&glb.to_vec().unwrap())
-        .unwrap()
-        .unwrap();
+    let normalized = runtime_ready_source_bytes(&glb.to_vec().unwrap()).unwrap();
     let after = Glb::parse(&normalized).unwrap().document;
     assert_eq!(
         after["meshes"][0]["weights"],
@@ -907,7 +908,10 @@ fn normalization_bails_on_morph_weight_animations() {
     }]);
     let bytes = glb.to_vec().unwrap();
     assert_eq!(over_limit_morph_target_count(&bytes), Some(300));
-    assert!(normalize_vrm_morph_targets(&bytes).unwrap().is_none());
+    let prepared = vtuber_avatar::prepare_managed_vrm_bytes(&bytes)
+        .unwrap()
+        .unwrap();
+    assert!(normalize_vrm_morph_targets(&prepared).unwrap().is_none());
 }
 
 fn over_limit_vrm1_fixture(dir: &TempDir) -> PathBuf {
@@ -962,4 +966,56 @@ fn import_remaps_vrm1_node_based_binds() {
         .as_array()
         .unwrap();
     assert_eq!(targets.len(), 2);
+}
+
+#[test]
+fn inspection_and_runtime_use_the_same_prepared_vrm1_for_both_source_formats() {
+    let dir = TempDir::new().unwrap();
+    for source in [vrm0_fixture(&dir), vrm1_fixture(&dir)] {
+        let original = fs::read(&source).unwrap();
+        let mut summary = inspect_vrm(&source).unwrap();
+        let prepared = runtime_ready_source_bytes(&original).unwrap();
+        let runtime_path = dir.path().join("prepared.vrm");
+        fs::write(&runtime_path, &prepared).unwrap();
+        let runtime_summary = inspect_vrm(&runtime_path).unwrap();
+        // Only source provenance differs. Capabilities are read after conversion.
+        summary.generation = VrmGeneration::Vrm1;
+        summary.spec_version = "1.0".into();
+        summary.exporter_version = None;
+        summary.compatibility_warnings.clear();
+        assert_eq!(summary, runtime_summary);
+        assert_eq!(runtime_ready_source_bytes(&prepared).unwrap(), prepared);
+        let imported = import_vrm(&source, dir.path().join("managed"), DEFAULT_SIZE_LIMIT).unwrap();
+        assert_eq!(fs::read(&imported.asset_path).unwrap(), prepared);
+        assert!(!ensure_managed_model_ready(&imported.asset_path).unwrap());
+        assert_eq!(fs::read(&source).unwrap(), original);
+    }
+}
+
+#[test]
+fn invalid_formats_fail_both_import_and_existing_managed_preparation() {
+    let dir = TempDir::new().unwrap();
+    for (extensions, code) in [
+        (serde_json::json!({}), "MODEL_NOT_VRM"),
+        (
+            serde_json::json!({"VRM": {}, "VRMC_vrm": {"specVersion": "1.0"}}),
+            "MODEL_AMBIGUOUS_VRM_VERSION",
+        ),
+        (
+            serde_json::json!({"VRMC_vrm": {"specVersion": "2.0"}}),
+            "MODEL_UNSUPPORTED_VERSION",
+        ),
+    ] {
+        let mut root: Value = serde_json::from_str(VRM1_GLTF_JSON).unwrap();
+        root["extensions"] = extensions;
+        let path = write_glb_fixture(&dir, "invalid.vrm", &root.to_string());
+        let original = fs::read(&path).unwrap();
+        assert_eq!(inspect_vrm(&path).unwrap_err().code(), code);
+        assert_eq!(
+            runtime_ready_source_bytes(&original).unwrap_err().code(),
+            code
+        );
+        assert_eq!(ensure_managed_model_ready(&path).unwrap_err().code(), code);
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
 }

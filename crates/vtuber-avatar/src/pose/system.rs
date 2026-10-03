@@ -20,6 +20,7 @@ use crate::binding::AvatarBinding;
 use crate::lifecycle::{AvatarLifecycle, AvatarLifecycleState};
 use crate::mirror::AvatarMotionMirror;
 use crate::unload::{ActiveControlFrame, ControlFrameError, resolve_control_target};
+use vtuber_core::mirror::MotionMirror;
 
 /// Metrics for the pose apply system, useful for diagnostics.
 #[derive(Resource, Debug, Clone)]
@@ -183,9 +184,8 @@ pub fn update_body_tracking_pose_input(
                 && idle_state.blend() > 0.0
             {
                 let idle = idle_state.target();
-                let horizontal_sign = if mirrored { -1.0 } else { 1.0 };
                 *input = BodyTrackingPoseInput {
-                    yaw_radians: horizontal_sign * idle.yaw_radians,
+                    yaw_radians: MotionMirror::new(mirrored).horizontal(idle.yaw_radians),
                     pitch_radians: idle.pitch_radians,
                     roll_radians: 0.0,
                     weight: idle_state.blend().clamp(0.0, 1.0),
@@ -210,7 +210,7 @@ pub fn update_body_tracking_pose_input(
         let blend = idle_state.blend();
         if blend > 0.0 {
             let idle = idle_state.target();
-            let horizontal_sign = if mirrored { -1.0 } else { 1.0 };
+            let horizontal_sign = MotionMirror::new(mirrored).horizontal(1.0);
             *input = fade_pose_input(*input, idle, horizontal_sign, blend);
         }
     }
@@ -249,12 +249,12 @@ fn fade_pose_input(
 }
 
 fn body_tracking_input(frame: &AvatarControlFrame, mirrored: bool) -> BodyTrackingPoseInput {
-    let horizontal_sign = if mirrored { -1.0 } else { 1.0 };
+    let mirror = MotionMirror::new(mirrored);
     BodyTrackingPoseInput {
         // A horizontal reflection preserves pitch but reverses yaw and roll.
-        yaw_radians: horizontal_sign * frame.head.yaw_rad,
+        yaw_radians: mirror.horizontal(frame.head.yaw_rad),
         pitch_radians: frame.head.pitch_rad,
-        roll_radians: horizontal_sign * frame.head.roll_rad,
+        roll_radians: mirror.horizontal(frame.head.roll_rad),
         weight: frame.confidence,
         // The control frame already carries the loss glide and a confidence
         // that decays to zero. Marking the input inactive during loss would
@@ -450,17 +450,9 @@ pub fn debug_arm_frame_probe(
         .frame
         .filter(|_| control.generation == binding.map(|binding| binding.generation));
     // Mirrored, because the mirror decides which observed side drives which bone.
-    let (targets, weights) = match frame {
-        Some(_) if mirrored => (
-            frame.map_or_else(Default::default, |frame| frame.targets.mirrored()),
-            frame.map_or_else(Default::default, |frame| frame.weights.mirrored()),
-        ),
-        Some(_) => (
-            frame.map_or_else(Default::default, |frame| frame.targets),
-            frame.map_or_else(Default::default, |frame| frame.weights),
-        ),
-        None => (Default::default(), Default::default()),
-    };
+    let (targets, weights) = frame.map_or_else(Default::default, |frame| {
+        MotionMirror::new(mirrored).arms(frame.targets, frame.weights)
+    });
 
     let mut line = format!(
         "[arm] frame={}|src={:?} mirror={mirrored}",

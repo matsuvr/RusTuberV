@@ -28,10 +28,9 @@ use vtuber_core::arm_tracking::{
 };
 use vtuber_core::{FrameSeq, MonoTimeNs};
 
-use crate::filter::damped::{
-    DEFAULT_MAX_DT_SEC, ScalarSpring, VectorSpring, critically_damped_step,
-};
+use crate::filter::damped::{DEFAULT_MAX_DT_SEC, VectorSpring, critically_damped_step};
 use crate::filter::time::bounded_dt;
+use crate::hand_poses::{FingerSmootherState, HandPoseSelector};
 use crate::loss_blend::{LossBlend, LossBlendProfile};
 
 /// A fixed subject arm length measured at calibration, never remeasured per tick.
@@ -139,8 +138,9 @@ const FINGER_FLEXION_LIMIT_RAD: [f32; 3] = [1.75, 1.92, 1.05];
 /// joint, and a real thumb stops well short of a finger's middle joint.
 const THUMB_IP_FLEXION_LIMIT_RAD: f32 = 1.22;
 
-/// Extract signed bends and spread in the observed palm frame before smoothing.
-/// A rigid hand rotation therefore cannot become finger articulation.
+/// Extract signed bends and spread as features for the pose selector.
+/// These raw measurements are not sent to the avatar. A rigid hand rotation
+/// cannot change the hand-local features used to choose an authored pose.
 fn observed_finger_pose(arm: ArmLandmarks) -> Option<HandFingerPose> {
     let landmarks = arm.hand?.landmarks;
     let point = |index: usize| landmarks.get(index).map(|value| vector(value.meters));
@@ -331,68 +331,6 @@ const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.05;
 /// times as long, which read as the palm lagging behind the wrist rather than
 /// as a smoother plane.
 const ARM_PALM_TIME_CONSTANT_SEC: f32 = 0.10;
-
-/// Time constant of the observed finger joints, in seconds.
-///
-/// Deliberately the shortest of the observed channels: a finger curl is small
-/// and its endpoints are what a viewer reads, so a long response would smear a
-/// fist open instead of merely adding lag. The per-joint angles are already
-/// single observations of a joint angle rather than a position, so almost no
-/// noise suppression is owed here.
-const ARM_FINGER_TIME_CONSTANT_SEC: f32 = 0.04;
-
-/// Render-clock critically damped state for one observed hand's finger joints.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct FingerSmootherState {
-    /// Index, middle, ring, and little flexion as `(mcp, pip, dip)` radians.
-    fingers: [VectorSpring; 4],
-    /// In-plane opening of each proximal segment.
-    spread: [ScalarSpring; 4],
-    /// Thumb flexion as `(mcp, ip)` radians.
-    thumb: [ScalarSpring; 2],
-    /// The thumb's in-plane opening.
-    thumb_spread: ScalarSpring,
-}
-
-impl FingerSmootherState {
-    /// Seeds at the first adopted observation; later ticks advance it.
-    fn new(pose: HandFingerPose) -> Self {
-        Self {
-            fingers: pose.fingers.map(|value| VectorSpring::new(vector(value))),
-            spread: pose.spread.map(ScalarSpring::new),
-            thumb: pose.thumb.map(ScalarSpring::new),
-            thumb_spread: ScalarSpring::new(pose.thumb_spread),
-        }
-    }
-
-    fn step(&mut self, pose: HandFingerPose, dt_sec: f32) {
-        for (smoother, curl) in self.fingers.iter_mut().zip(pose.fingers) {
-            if curl.iter().all(|value| value.is_finite()) {
-                smoother.step(vector(curl), dt_sec, ARM_FINGER_TIME_CONSTANT_SEC);
-            }
-        }
-        for (smoother, angle) in self.spread.iter_mut().zip(pose.spread) {
-            smoother.step(angle, dt_sec, ARM_FINGER_TIME_CONSTANT_SEC);
-        }
-        for (smoother, angle) in self.thumb.iter_mut().zip(pose.thumb) {
-            smoother.step(angle, dt_sec, ARM_FINGER_TIME_CONSTANT_SEC);
-        }
-        self.thumb_spread
-            .step(pose.thumb_spread, dt_sec, ARM_FINGER_TIME_CONSTANT_SEC);
-    }
-
-    /// The smoothed articulation. A lost observation holds the last values,
-    /// exactly like the palm channel holds its normal while its weight decays.
-    #[must_use]
-    fn output(self) -> HandFingerPose {
-        HandFingerPose {
-            fingers: self.fingers.map(|smoother| array(smoother.position)),
-            spread: self.spread.map(|smoother| smoother.value),
-            thumb: self.thumb.map(|smoother| smoother.value),
-            thumb_spread: self.thumb_spread.value,
-        }
-    }
-}
 
 /// Visibility at or above which an arm observation counts as good.
 const ARM_ENTER_VISIBILITY: f32 = 0.7;
@@ -917,6 +855,7 @@ struct ArmSideState {
     pole_blend: LossBlend,
     palm_blend: LossBlend,
     fingers_blend: LossBlend,
+    finger_poses: HandPoseSelector,
 }
 
 impl ArmSideState {
@@ -934,6 +873,7 @@ impl ArmSideState {
             pole_blend: LossBlend::new(),
             palm_blend: LossBlend::new(),
             fingers_blend: LossBlend::new(),
+            finger_poses: HandPoseSelector::new(),
         }
     }
 
@@ -957,7 +897,12 @@ impl ArmSideState {
     /// allows in one observation is quarantined as a detection teleport; the
     /// first usable observation after a real loss is instead accepted as a
     /// reacquisition.
-    fn consume(&mut self, arm: Option<&ArmLandmarks>, profile: &ArmTrackingProfile) {
+    fn consume(
+        &mut self,
+        arm: Option<&ArmLandmarks>,
+        profile: &ArmTrackingProfile,
+        flexion_sign: f32,
+    ) {
         let quality = arm.map(|value| assess_arm_observation(value, profile));
         // Only the Pose joint visibilities rank how well located the arm is.
         // The Hand Landmarker adds presence, not a score: its handedness
@@ -984,11 +929,13 @@ impl ArmSideState {
 
         let Some(reference) = self.calibration.confirmed_length() else {
             self.presence = ChannelPresence::NONE;
+            self.finger_poses.interrupt();
             return;
         };
         let Some(arm) = arm.filter(|_| wrist_usable) else {
             self.wrist_lost = true;
             self.presence = ChannelPresence::NONE;
+            self.finger_poses.interrupt();
             return;
         };
 
@@ -999,17 +946,21 @@ impl ArmSideState {
             });
         if teleported {
             self.presence = ChannelPresence::NONE;
+            self.finger_poses.interrupt();
             return;
         }
         self.wrist_lost = false;
 
         let mut target = target;
         let palm_observed = hand_usable && target.palm_normal.is_some();
-        let fingers_observed = hand_usable && target.fingers.is_some();
         if !hand_usable {
             target.palm_normal = None;
             target.fingers = None;
         }
+        // Only a confirmed authored pose reaches the render-clock filter.
+        // The raw angles above are classification features, never bone targets.
+        target.fingers = self.finger_poses.observe(target.fingers, flexion_sign);
+        let fingers_observed = target.fingers.is_some();
         let mut elbow_tracked = false;
         if elbow_usable && let Some(pole) = stabilize_elbow_pole(self.last_pole, target) {
             target.elbow_pole = pole;
@@ -1059,6 +1010,7 @@ impl ArmSideState {
     }
 
     fn advance_without_observation(&mut self, now: MonoTimeNs, profile: &ArmTrackingProfile) {
+        self.finger_poses.interrupt();
         self.wrist_blend.advance(now, false, &profile.blend);
         self.pole_blend.advance(now, false, &profile.blend);
         self.palm_blend.advance(now, false, &profile.blend);
@@ -1149,8 +1101,11 @@ pub fn step_arm_tracking(
             Some(value) => (Some(&value.left), Some(&value.right)),
             None => (None, None),
         };
-        state.left.consume(left, profile);
-        state.right.consume(right, profile);
+        // In a palms-down T-pose, left points +X and the thumb points +Z:
+        // index cross little is +Y (dorsal), so inward flexion is negative.
+        // The right hand reverses that sign. Presentation mirroring is later.
+        state.left.consume(left, profile, -1.0);
+        state.right.consume(right, profile, 1.0);
     }
     state.left.advance(now, render_dt_ns, profile);
     state.right.advance(now, render_dt_ns, profile);
@@ -2371,6 +2326,69 @@ mod tests {
             state.left.output.unwrap().fingers.is_some(),
             "the last articulation is held while the weight returns to the rest pose"
         );
+    }
+
+    #[test]
+    fn finger_pose_switches_count_camera_frames_and_leave_the_other_hand_alone() {
+        let profile = ArmTrackingProfile::default();
+        let open = ArmLandmarks {
+            hand: Some(flat_hand([[0.0; 3]; 4], [0.0; 2])),
+            ..arm()
+        };
+        let closed = ArmLandmarks {
+            hand: Some(flat_hand([[-1.5, -1.6, -1.0]; 4], [-0.7, -1.0])),
+            ..arm()
+        };
+        let mut right = open;
+        for point in &mut right.hand.as_mut().unwrap().landmarks {
+            point.meters[0] = -point.meters[0];
+        }
+        let mut state = ArmTrackingState::new();
+        for seq in 0..TRACKED_FRAMES {
+            let now = seq * OBSERVATION_STEP_NS;
+            let frame = pose_frame(seq, now, Some(observation(open, right)));
+            state = step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile).0;
+        }
+        let initial = state.left.source.unwrap().fingers.unwrap();
+        let initial_right = state.right.source.unwrap().fingers.unwrap();
+        assert_eq!(
+            state.left.source.unwrap().mirrored().fingers,
+            Some(initial_right)
+        );
+
+        // Even 120 render ticks of a changed camera frame count only once.
+        let frame = pose_frame(500, SETTLED_NS, Some(observation(closed, right)));
+        for tick in 0..120 {
+            let now = SETTLED_NS + tick * 8_333_333;
+            state = step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile).0;
+            assert_eq!(state.left.source.unwrap().fingers, Some(initial));
+            assert_eq!(state.right.source.unwrap().fingers, Some(initial_right));
+        }
+        for seq in 1..=3 {
+            let now = SETTLED_NS + 1_000_000_000 + seq * OBSERVATION_STEP_NS;
+            let frame = pose_frame(500 + seq, now, Some(observation(closed, right)));
+            state = step_arm_tracking(&state, Some(&frame), MonoTimeNs(now), &profile).0;
+            let source = state.left.source.unwrap().fingers.unwrap();
+            if seq < 3 {
+                assert_eq!(source, initial);
+            } else {
+                assert_ne!(
+                    source, initial,
+                    "four new observations adopt the closed pose"
+                );
+                assert_ne!(
+                    state.left.output.unwrap().fingers,
+                    Some(source),
+                    "transition is blended"
+                );
+                assert_ne!(
+                    Some(source),
+                    observed_finger_pose(closed),
+                    "raw angles never pass through"
+                );
+            }
+            assert_eq!(state.right.source.unwrap().fingers, Some(initial_right));
+        }
     }
 
     #[test]

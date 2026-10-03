@@ -12,11 +12,11 @@ use vtuber_tracking::filter::{
     time::bounded_dt,
 };
 
-use crate::arm::rest_palm_normal;
 use crate::arm::{
     ArmChainBinding, ArmIkError, ArmIkInput, ArmIkSolution, ArmIkTarget, ArmRestGeometry,
     FingerJointRestReferences, solve_two_bone_arm,
 };
+use crate::arm::{FOREARM_ROLL_LIMIT_RAD, rest_palm_normal};
 use crate::arm_pipeline::ArmPipelineError;
 use crate::arm_pose::{
     ResolvedArmPose, ResolvedBoneDelta, ResolvedFingerJointPose, ResolvedFingerPose,
@@ -115,13 +115,7 @@ pub fn observed_finger_deltas(
         )
     };
     Some(ResolvedFingerPose {
-        thumb: thumb_deltas(
-            &rest.thumb,
-            [thumb_curl, thumb_ip],
-            across * observed.thumb_spread.sin() + forward * observed.thumb_spread.cos(),
-            normal,
-            weight,
-        ),
+        thumb: thumb_deltas(&rest.thumb, [thumb_curl, thumb_ip], normal, weight),
         index: four(&rest.index, index_curl, index_spread),
         middle: four(&rest.middle, middle_curl, middle_spread),
         ring: four(&rest.ring, ring_curl, ring_spread),
@@ -136,33 +130,16 @@ pub fn observed_finger_deltas(
 /// pose. Driving it from a Hand Landmarker ray was what made the thumb's root
 /// travel whenever the thumb moved and drove its tip past straight: the ray's
 /// origin is the model-placed CMC, which rides along with the whole thumb.
-/// The metacarpal also has no `intermediate` child to carry a knuckle, so the
-/// proximal joint bends about the segment to the distal bone instead.
+/// Authored poses contain flexion amounts, not a replacement for the model's
+/// thumb orientation. Keep its rest elevation and opening: applying a CMC
+/// opening at the MCP instead displaced the skinned thumb root. Thumb spread
+/// is a recognition feature only while the CMC is held at rest.
 fn thumb_deltas(
     finger: &FingerJointRestReferences,
     [mcp, ip]: [f32; 2],
-    direction: Vec3,
     normal: Vec3,
     weight: f32,
 ) -> ResolvedFingerJointPose {
-    let knuckle = (|| {
-        let joint = finger.proximal?;
-        let segment =
-            crate::arm::finite_normalized(finger.distal?.rest.position - joint.rest.position)?;
-        let rest_elevation = segment.dot(normal).clamp(-1.0, 1.0).asin();
-        let curl = crate::arm_pose::resolve_finger_joint(
-            finger.proximal,
-            finger.distal,
-            finger.metacarpal,
-            (mcp - rest_elevation) * weight,
-            normal,
-        )?;
-        let opening = opening_delta(finger.proximal, finger.distal, direction, normal, weight)?;
-        Some(ResolvedBoneDelta {
-            entity: joint.entity,
-            delta: opening.delta * curl.delta,
-        })
-    })();
     ResolvedFingerJointPose {
         // None means "do not write", and leaves the preceding virtual/default
         // curl on this bone. Write neutral to restore the authored thumb base.
@@ -170,7 +147,13 @@ fn thumb_deltas(
             entity: joint.entity,
             delta: Quat::IDENTITY,
         }),
-        proximal: knuckle,
+        proximal: crate::arm_pose::resolve_finger_joint(
+            finger.proximal,
+            finger.distal,
+            finger.metacarpal,
+            mcp * weight,
+            normal,
+        ),
         intermediate: None,
         distal: observed_joint_bend(finger.distal, None, finger.proximal, ip, normal, weight),
     }
@@ -314,7 +297,7 @@ pub fn tracked_arm_ik_target(
 
 /// Solves an observed arm with the existing constant-time two-bone implementation.
 ///
-/// This raw solve deliberately omits virtual-hand swivel, torso lag, shoulder
+/// This solve deliberately omits virtual-hand swivel, torso lag, shoulder
 /// trim. Those modifiers need tracked-source semantics
 /// before being enabled, otherwise they can move a hand away from its target.
 /// The compositor filters the solved ball/hinge angles after this solve and
@@ -326,12 +309,61 @@ pub fn solve_tracked_arm(
     tracking_to_rest: Quat,
 ) -> Result<ArmIkSolution, ArmIkError> {
     let target = tracked_arm_ik_target(chain.rest, target, tracking_to_rest);
-    solve_two_bone_arm(ArmIkInput::from_chain(chain, target))
+    let solution = solve_two_bone_arm(ArmIkInput::from_chain(chain, target))?;
+    arm_from_joints(
+        chain,
+        solution.upper_arm_global_rotation,
+        elbow_flexion(chain, &solution).ok_or(ArmIkError::DegenerateGeometry)?,
+    )
+    .ok_or(ArmIkError::DegenerateGeometry)
 }
 
-/// Forearm pronation/supination range of the Holzbaur upper-extremity model
-/// (2005, p. 831). This is a radioulnar coordinate, not an axial wrist DOF.
-const FOREARM_ROLL_LIMIT_RAD: f32 = 90.0_f32.to_radians();
+/// Holzbaur's thoracohumeral elevation plane: lateral = 0, anterior = 90
+/// degrees, cross-body limit = 130 (Xu et al., 2012, doi:10.1016/j.jbiomech.2012.08.018).
+/// This is a directional limit, not a limit on the axial rotation of the humerus.
+/// Work in the parent-compensated model/rest frame, so anterior follows the
+/// chest rather than the camera when the torso turns.
+fn constrain_shoulder_rotation(chain: &ArmChainBinding, rotation: Quat) -> Option<Quat> {
+    let rest = chain.rest;
+    let rest_direction = (rest.elbow.position - rest.upper_arm.position).try_normalize()?;
+    let direction = rotation * rest.upper_arm.global_rotation.inverse() * rest_direction;
+    let side = match chain.side {
+        crate::arm::ArmSide::Left => 1.0,
+        crate::arm::ArmSide::Right => -1.0,
+    };
+    let lateral = side * direction.x;
+    let anterior = direction.z;
+    let min_plane = -90.0_f32.to_radians();
+    let max_plane = 130.0_f32.to_radians();
+    let center = (min_plane + max_plane) * 0.5;
+    let (sin_center, cos_center) = center.sin_cos();
+    // Center the angular chart on the allowed sector. In particular, depth
+    // noise at +/-180 degrees must select the same anterior crossing limit.
+    let plane = (anterior * cos_center - lateral * sin_center)
+        .atan2(lateral * cos_center + anterior * sin_center)
+        + center;
+    let limited = plane.clamp(min_plane, max_plane);
+    if plane == limited {
+        return Some(rotation);
+    }
+    let (sin_plane, cos_plane) = limited.sin_cos();
+    let horizontal = lateral.hypot(anterior);
+    let bounded = Vec3::new(
+        side * horizontal * cos_plane,
+        direction.y,
+        horizontal * sin_plane,
+    );
+    // Preserve elevation and transport the existing hinge with the shortest
+    // swing. Unlike a yaw of the entire joint frame, this correction tends to
+    // identity at the arm-down/up singularity, without an arbitrary hold band.
+    // The centered chart bounds this correction to 70 degrees, so the two
+    // directions cannot be antiparallel. Keep even tiny corrections instead
+    // of from_rotation_arc's near-parallel identity approximation.
+    let cross = direction.cross(bounded);
+    let swing =
+        Quat::from_xyzw(cross.x, cross.y, cross.z, 1.0 + direction.dot(bounded)).normalize();
+    Some((swing * rotation).normalize())
+}
 
 /// Render-clock time constant of the forearm pronation filter.
 ///
@@ -383,7 +415,8 @@ impl TrackedArmFilter {
         let dt = bounded_dt(dt_sec, DEFAULT_MAX_DT_SEC);
         // Store the arm in the canonical observation frame. A turning torso
         // must not become a new joint target or get delayed by this filter.
-        let measured_upper = tracking_to_rest.inverse() * solution.upper_arm_global_rotation;
+        let measured_upper = tracking_to_rest.inverse()
+            * constrain_shoulder_rotation(chain, solution.upper_arm_global_rotation)?;
         let upper = if let Some(upper) = self.upper.as_mut() {
             avatar_rotation(upper.step_world(
                 spring_rotation(measured_upper),
@@ -394,7 +427,11 @@ impl TrackedArmFilter {
             self.upper = Some(RotationSpring::new(spring_rotation(measured_upper)));
             measured_upper
         };
-        let upper = tracking_to_rest * upper;
+        let upper = constrain_shoulder_rotation(chain, tracking_to_rest * upper)?;
+        // A spherical interpolation can leave the allowed sector even when
+        // its endpoints are valid. Retain the bounded joint in the spring,
+        // rather than applying a separate correction to the displayed bones.
+        self.upper.as_mut()?.value = spring_rotation(tracking_to_rest.inverse() * upper);
         let measured = elbow_flexion(chain, solution)?;
         let elbow = self
             .elbow
@@ -447,6 +484,7 @@ fn arm_from_joints(
             elbow_pole: chain.rest.elbow.position,
         },
     );
+    let upper_global = constrain_shoulder_rotation(chain, upper_global)?;
     let pose = crate::skeleton::from_joints(input.skeleton_rest(), upper_global, elbow_angle, 0.0)?;
     Some(input.solution_from_skeleton(pose))
 }
@@ -717,6 +755,120 @@ mod tests {
             finger_rest: crate::arm::FingerRestReferences::default(),
             rest,
             capabilities: crate::arm::ArmChainCapabilities::default(),
+        }
+    }
+
+    #[test]
+    fn shoulder_plane_preserves_valid_poses_and_brings_medial_elbows_forward() {
+        for side in [crate::arm::ArmSide::Left, crate::arm::ArmSide::Right] {
+            let sign = if side == crate::arm::ArmSide::Left {
+                1.0
+            } else {
+                -1.0
+            };
+            let mut chain = chain();
+            chain.side = side;
+            chain.rest.elbow.position.x = chain.rest.upper_arm.position.x + sign * 0.4;
+            chain.rest.wrist.position.x = chain.rest.upper_arm.position.x + sign * 0.7;
+            chain.rest.upper_arm.global_rotation =
+                Quat::from_rotation_y(1.1) * Quat::from_rotation_z(-0.2);
+            chain.rest.elbow.global_rotation =
+                Quat::from_rotation_x(-0.7) * Quat::from_rotation_z(0.4);
+            for degrees in [-80.0_f32, 0.0, 90.0, 120.0, 150.0, 179.99, 180.01, 195.0] {
+                let (sin, cos) = degrees.to_radians().sin_cos();
+                let direction = Vec3::new(sign * cos, -0.7, sin).normalize();
+                let upper = Quat::from_axis_angle(direction, 0.5)
+                    * Quat::from_rotation_arc(sign * Vec3::X, direction)
+                    * chain.rest.upper_arm.global_rotation;
+                let bounded = constrain_shoulder_rotation(&chain, upper).unwrap();
+                let solution = arm_from_joints(&chain, upper, 1.2).unwrap();
+                let actual = (solution.elbow - chain.rest.upper_arm.position).normalize();
+                assert!((actual.y - direction.y).abs() < 1.0e-6);
+                if degrees <= 130.0 {
+                    assert_eq!(
+                        bounded, upper,
+                        "valid swing and axial roll must be untouched"
+                    );
+                } else {
+                    assert!(actual.z > 0.0);
+                    assert!((actual.z.atan2(sign * actual.x).to_degrees() - 130.0).abs() < 0.001);
+                }
+                assert!((elbow_flexion(&chain, &solution).unwrap() - 1.2).abs() < 1.0e-5);
+                let pose = resolved_tracked_arm_pose(&chain, solution, None).unwrap();
+                let [origin, elbow, wrist] = composed_joints(&chain, pose);
+                near(elbow, solution.elbow);
+                near(wrist, solution.wrist);
+                assert!((origin.distance(elbow) - 0.4).abs() < 1.0e-6);
+                assert!((elbow.distance(wrist) - 0.3).abs() < 1.0e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn shoulder_crossing_is_continuous_through_arm_down_and_depth_sign_change() {
+        let chain = chain();
+        let mut previous = None::<Quat>;
+        // Cross the 90-degree lowered position without a finite shoulder
+        // yaw appearing when the elevation plane changes from 0 to 180.
+        for step in 0..=400 {
+            let descent = (88.0 + step as f32 * 0.01).to_radians();
+            let rotation = Quat::from_rotation_z(-descent);
+            let bounded = constrain_shoulder_rotation(&chain, rotation).unwrap();
+            if let Some(previous) = previous {
+                assert!(previous.angle_between(bounded) < 0.002);
+            }
+            previous = Some(bounded);
+        }
+        let crossing = |z| {
+            let direction = Vec3::new(-0.6, -0.8, z).normalize();
+            constrain_shoulder_rotation(&chain, Quat::from_rotation_arc(Vec3::X, direction))
+                .unwrap()
+        };
+        assert!(crossing(-0.00001).angle_between(crossing(0.00001)) < 0.001);
+    }
+
+    #[test]
+    fn shoulder_filter_and_loss_blend_keep_crossings_inside_the_joint_limit() {
+        let chain = chain();
+        let neutral = arm_from_joints(&chain, Quat::from_rotation_z(-0.6), 0.8).unwrap();
+        let neutral = resolved_tracked_arm_pose(&chain, neutral, None).unwrap();
+        let mut filter = TrackedArmFilter::default();
+        for tick in 0..360 {
+            // Unconstrained IK observations, including a small depth sign
+            // change. Supply them before the production joint filter.
+            let descent = if tick < 180 {
+                tick as f32
+            } else {
+                (360 - tick) as f32
+            };
+            let raw = Quat::from_rotation_y(if tick % 2 == 0 { 0.001 } else { -0.001 })
+                * Quat::from_rotation_z(-descent.to_radians());
+            let input = ArmIkInput::from_chain(
+                &chain,
+                ArmIkTarget {
+                    wrist: chain.rest.wrist.position,
+                    elbow_pole: chain.rest.elbow.position,
+                },
+            );
+            let mut solution = input.solution_from_skeleton(
+                crate::skeleton::from_joints(input.skeleton_rest(), raw, 0.8, 0.0).unwrap(),
+            );
+            filter
+                .stabilize(&chain, &mut solution, Quat::IDENTITY, 1.0 / 60.0)
+                .unwrap();
+            let retained = avatar_rotation(filter.upper.unwrap().value);
+            assert!(retained.angle_between(solution.upper_arm_global_rotation) < 0.001);
+            for weight in [1.0, 0.75, 0.5, 0.25, 0.0] {
+                let blended = blend_arm_joints(&chain, &solution, &neutral, weight).unwrap();
+                let direction = (blended.elbow - chain.rest.upper_arm.position).normalize();
+                if direction.x < -1.0e-5 {
+                    assert!(
+                        direction.z >= -direction.x * 50.0_f32.to_radians().tan() - 1.0e-5,
+                        "tick {tick}, weight {weight}, direction {direction:?}"
+                    );
+                }
+                assert!((elbow_flexion(&chain, &blended).unwrap() - 0.8).abs() < 1.0e-5);
+            }
         }
     }
 
@@ -1115,19 +1267,51 @@ mod tests {
     }
 
     #[test]
-    fn the_thumb_opens_relative_to_the_models_own_rest_spread() {
-        let chain = articulated_chain();
-        let rest_direction = (chain.finger_rest.thumb.distal.unwrap().rest.position
-            - chain.finger_rest.thumb.proximal.unwrap().rest.position)
-            .normalize();
+    fn thumb_spread_cannot_replace_the_authored_base_direction() {
+        let mut chain = articulated_chain();
+        // Non-flat thumb like Sapphy: fixed poses must not flatten its rest
+        // elevation or apply their 35–70 degree opening at the MCP.
+        chain
+            .finger_rest
+            .thumb
+            .proximal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position
+            .y -= 0.01;
+        chain
+            .finger_rest
+            .thumb
+            .distal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position
+            .y -= 0.016;
         let mut observed = straight_fingers();
-        let angle: f32 = 0.3;
-        observed.thumb_spread += angle;
-        let pose = resolved_fingers(&chain, observed, 1.0);
-        let opened = pose.thumb.proximal.unwrap();
-        let expected =
-            Quat::from_axis_angle(rest_palm_normal(&chain).unwrap(), -angle) * rest_direction;
-        near(opened.delta * rest_direction, expected);
+        observed.thumb = [0.0, 0.0];
+        for spread in [0.35, 0.6, 0.96, 1.22] {
+            observed.thumb_spread = spread;
+            let pose = resolved_fingers(&chain, observed, 1.0);
+            assert_eq!(pose.thumb.metacarpal.unwrap().delta, Quat::IDENTITY);
+            assert!(
+                pose.thumb
+                    .proximal
+                    .unwrap()
+                    .delta
+                    .angle_between(Quat::IDENTITY)
+                    < 1e-6
+            );
+            assert!(
+                pose.thumb
+                    .distal
+                    .unwrap()
+                    .delta
+                    .angle_between(Quat::IDENTITY)
+                    < 1e-6
+            );
+        }
     }
 
     #[test]
@@ -1274,10 +1458,9 @@ mod tests {
     }
 
     #[test]
-    fn an_oblique_thumb_moves_only_at_its_two_joints_through_tracking() {
-        // The thumb's real motion is strongly oblique to the palm. A whole
-        // thumb rotated about its base must show up at the two joints, with the
-        // base left at rest, or the avatar's thumb root swings with it.
+    fn thumb_opening_is_not_reassigned_to_the_mcp_joint() {
+        // Keep base opening as a recognition feature. Its absence from the
+        // rig's allowed motion must not move the MCP sideways in its place.
         let chain = articulated_chain();
         let normal = rest_palm_normal(&chain).unwrap();
         let origin = chain.finger_rest.thumb.metacarpal.unwrap().rest.position;
@@ -1286,7 +1469,7 @@ mod tests {
 
         for (opening, elevation) in [(0.35, 0.0), (0.0, 0.6), (0.35, 0.6), (-0.35, -0.6)] {
             // Keep the CMC, palm, arm and four fingers fixed, and rotate the
-            // whole thumb about the CMC so the joints have to absorb it.
+            // whole thumb about the CMC to separate opening from flexion.
             let mut observed_chain = chain;
             let segment = observed_chain
                 .finger_rest
@@ -1334,7 +1517,14 @@ mod tests {
                         .expect("the thumb has a knuckle")
                         .delta
                         .angle_between(Quat::IDENTITY);
-                    assert!(moved > 1.0e-3, "the swing must reach the knuckle: {moved}");
+                    if elevation == 0.0 {
+                        assert!(moved < 1.0e-5, "opening must not rotate the MCP: {moved}");
+                    } else {
+                        assert!(
+                            moved > 1.0e-3,
+                            "flexion must still reach the knuckle: {moved}"
+                        );
+                    }
                 }
                 // The four fingers are untouched by any of this.
                 for finger in [
@@ -1411,6 +1601,129 @@ mod tests {
             }
             near(solution.elbow, positions.0);
             near(solution.wrist, positions.1);
+        }
+    }
+
+    #[test]
+    fn selected_fist_curls_into_both_palms_in_a_palms_down_t_pose() {
+        use vtuber_core::arm_tracking::{
+            ArmLandmarks, HandWorldLandmarks, PoseArmFrame, PoseArmObservation, PoseWorldLandmark,
+        };
+        use vtuber_core::{FrameSeq, MonoTimeNs};
+        use vtuber_tracking::arm_tracking::{
+            ArmTrackingProfile, ArmTrackingState, step_arm_tracking,
+        };
+
+        let point = |v: Vec3| PoseWorldLandmark {
+            meters: [v.x, -v.y, -v.z],
+            visibility: Some(1.0),
+            presence: Some(1.0),
+        };
+        let mut state = ArmTrackingState::new();
+        let profile = ArmTrackingProfile::default();
+        for reflected in [false, true] {
+            let sign = if reflected { -1.0 } else { 1.0 };
+            let mut chain = articulated_chain();
+            chain.side = if reflected {
+                crate::arm::ArmSide::Right
+            } else {
+                crate::arm::ArmSide::Left
+            };
+            for bone in [
+                &mut chain.rest.upper_arm,
+                &mut chain.rest.elbow,
+                &mut chain.rest.wrist,
+            ] {
+                bone.position.x *= sign;
+            }
+            for row in [
+                &mut chain.finger_rest.thumb,
+                &mut chain.finger_rest.index,
+                &mut chain.finger_rest.middle,
+                &mut chain.finger_rest.ring,
+                &mut chain.finger_rest.little,
+            ] {
+                for joint in [
+                    &mut row.metacarpal,
+                    &mut row.proximal,
+                    &mut row.intermediate,
+                    &mut row.distal,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    joint.rest.position.x *= sign;
+                }
+            }
+            let wrist = chain.rest.wrist.position;
+            let mut landmarks = [point(wrist); 21];
+            for (start, row) in [
+                (5, chain.finger_rest.index),
+                (9, chain.finger_rest.middle),
+                (13, chain.finger_rest.ring),
+                (17, chain.finger_rest.little),
+            ] {
+                let mut position = row.proximal.unwrap().rest.position;
+                landmarks[start] = point(position);
+                // The left hand points +X with thumb +Z in the VRM T-pose.
+                // Both palms face DOWN (-Y), regardless of the cross-product sign.
+                for (step, heading) in [1.4_f32, 2.9, 3.8].into_iter().enumerate() {
+                    position += Vec3::new(sign * heading.cos(), -heading.sin(), 0.0) * 0.02;
+                    landmarks[start + step + 1] = point(position);
+                }
+            }
+            let thumb = chain.finger_rest.thumb;
+            let a = thumb.proximal.unwrap().rest.position;
+            let b = thumb.distal.unwrap().rest.position;
+            for (i, position) in [thumb.metacarpal.unwrap().rest.position, a, b, b + (b - a)]
+                .into_iter()
+                .enumerate()
+            {
+                landmarks[1 + i] = point(position);
+            }
+            let arm = ArmLandmarks {
+                shoulder: point(chain.rest.upper_arm.position),
+                elbow: point(chain.rest.elbow.position),
+                wrist: point(wrist),
+                hand: Some(HandWorldLandmarks {
+                    landmarks,
+                    handedness_score: None,
+                }),
+            };
+            state.reset();
+            let mut control = None;
+            for seq in 1..=90 {
+                let now = MonoTimeNs(seq * 33_333_333);
+                let frame = PoseArmFrame {
+                    source_seq: FrameSeq(seq),
+                    captured_at: now,
+                    inference_finished_at: now,
+                    observation: Some(PoseArmObservation {
+                        left: arm,
+                        right: arm,
+                    }),
+                };
+                (state, control) = step_arm_tracking(&state, Some(&frame), now, &profile);
+            }
+            let targets = control.unwrap().targets;
+            let target = if reflected {
+                targets.right
+            } else {
+                targets.left
+            }
+            .unwrap();
+            let pose = observed_finger_deltas(&chain, target.fingers.unwrap(), 1.0).unwrap();
+            let joint = chain.finger_rest.index.proximal.unwrap();
+            let ray = (chain.finger_rest.index.intermediate.unwrap().rest.position
+                - joint.rest.position)
+                .normalize();
+            let rotation = joint.rest.global_rotation;
+            let bent = rotation * pose.index.proximal.unwrap().delta * rotation.inverse() * ray;
+            assert!(
+                bent.y < -0.5,
+                "a selected fist must curl palmward, not backward: {bent:?}"
+            );
+            assert_eq!(pose.thumb.metacarpal.unwrap().delta, Quat::IDENTITY);
         }
     }
 
@@ -1647,6 +1960,35 @@ mod tests {
             .unwrap(),
             crate::arm::finite_normalized(solution.wrist - solution.elbow).unwrap(),
         );
+    }
+
+    #[test]
+    fn downstream_forearm_rotation_cannot_exceed_the_skeletal_joint_limit() {
+        for sign in [-1.0, 1.0] {
+            let (chain, mut solution, _) = oriented();
+            let base = solution;
+            assert!(roll_forearm(
+                &chain,
+                &mut solution,
+                sign * FOREARM_ROLL_LIMIT_RAD
+            ));
+            assert!(roll_forearm(
+                &chain,
+                &mut solution,
+                sign * FOREARM_ROLL_LIMIT_RAD
+            ));
+            let input = ArmIkInput::from_chain(
+                &chain,
+                tracked_arm_ik_target(chain.rest, bent_target(), Quat::IDENTITY),
+            );
+            let joints =
+                crate::skeleton::joint_coordinates(input.skeleton_rest(), solution.skeleton_pose())
+                    .unwrap();
+            assert!((joints.y - sign * FOREARM_ROLL_LIMIT_RAD).abs() < 1.0e-5);
+            near(solution.elbow, base.elbow);
+            near(solution.wrist, base.wrist);
+            assert_eq!(solution.upper_arm_delta, base.upper_arm_delta);
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! VRM generation descriptor and legacy compatibility diagnostics.
+//! VRM 0.x conversion data and compatibility diagnostics.
 //!
 //! Moved from the removed vendored bevy_vrm1 patch (see #91). This module is
 //! intentionally free of Bevy entities, assets, and systems: it parses the
@@ -6,8 +6,8 @@
 //! diagnostics the import pipeline surfaces before the unmodified upstream
 //! runtime loads the converted model.
 use std::collections::BTreeMap;
-use std::fmt;
 
+use crate::vrm::VrmParseError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -114,34 +114,9 @@ impl VrmCompatibilityWarning {
     }
 }
 
-/// VRM generation represented by a normalized descriptor.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VrmGeneration {
-    /// Legacy VRM 0.x using the root VRM extension.
-    Vrm0,
-    /// VRM 1.0 using the root `VRMC_vrm` extension.
-    Vrm1,
-}
-
-/// Single coordinate correction applied to a legacy VRM scene.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum CoordinateBasis {
-    /// VRM 0.x faces -Z and is placed below a Y=pi basis entity.
-    Vrm0Y180,
-    /// VRM 1.0 uses the application's canonical glTF basis unchanged.
-    Vrm1Identity,
-}
-
-/// Data-only descriptor shared by the VRM 0.x and VRM 1.0 runtime paths.
+/// Data used only while converting a VRM 0.x document to VRM 1.0.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct VrmRuntimeDescriptor {
-    /// Detected VRM generation.
-    pub generation: VrmGeneration,
-    /// Stable source version marker (0.x for VRM 0.x).
-    pub spec_version: String,
-    /// Coordinate basis to apply at the scene boundary.
-    pub coordinate_basis: CoordinateBasis,
+pub(super) struct Vrm0Descriptor {
     /// Model metadata.
     pub meta: VrmMeta,
     /// Source-only VRM 0.x metadata retained for diagnostics and reports.
@@ -276,76 +251,7 @@ pub struct VrmRangeMap {
     pub output_scale: f32,
 }
 
-/// Errors returned by the pure core descriptor parser.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum VrmParseError {
-    /// No supported root extension was found.
-    MissingGeneration,
-    /// Both generation roots were supplied.
-    AmbiguousGeneration,
-    /// VRM 1.0 declared an unsupported version.
-    UnsupportedVersion(String),
-    /// A required field was not present.
-    MissingField(String),
-    /// A field had an invalid JSON type or value.
-    InvalidField {
-        /// JSON field path.
-        path: String,
-        /// Stable validation reason.
-        reason: String,
-    },
-    /// A glTF index was outside the referenced array.
-    InvalidIndex {
-        /// JSON field path.
-        path: String,
-        /// Index that was out of range.
-        index: usize,
-    },
-    /// A legacy human bone was declared more than once.
-    DuplicateBone(String),
-}
-
-impl fmt::Display for VrmParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingGeneration => write!(f, "missing VRM or VRMC_vrm extension"),
-            Self::AmbiguousGeneration => {
-                write!(f, "both VRM and VRMC_vrm extensions are present")
-            }
-            Self::UnsupportedVersion(version) => {
-                write!(f, "unsupported VRMC_vrm specVersion {version}")
-            }
-            Self::MissingField(path) => write!(f, "missing required field {path}"),
-            Self::InvalidField { path, reason } => write!(f, "invalid field {path}: {reason}"),
-            Self::InvalidIndex { path, index } => {
-                write!(f, "invalid index {path}={index}")
-            }
-            Self::DuplicateBone(name) => write!(f, "duplicate Humanoid bone {name}"),
-        }
-    }
-}
-
-impl std::error::Error for VrmParseError {}
-
-/// Parses either the glTF root JSON or a root JSON object containing the
-/// extensions member into a common core descriptor.
-pub fn parse_runtime_descriptor(root: &Value) -> Result<VrmRuntimeDescriptor, VrmParseError> {
-    let extensions = root
-        .get("extensions")
-        .and_then(Value::as_object)
-        .ok_or(VrmParseError::MissingGeneration)?;
-    let legacy = extensions.get("VRM");
-    let modern = extensions.get("VRMC_vrm");
-
-    match (legacy, modern) {
-        (Some(_), Some(_)) => Err(VrmParseError::AmbiguousGeneration),
-        (Some(vrm), None) => parse_vrm0(root, vrm),
-        (None, Some(vrmc)) => parse_vrm1(vrmc),
-        (None, None) => Err(VrmParseError::MissingGeneration),
-    }
-}
-
-fn parse_vrm0(root: &Value, vrm: &Value) -> Result<VrmRuntimeDescriptor, VrmParseError> {
+pub(super) fn parse_vrm0(root: &Value, vrm: &Value) -> Result<Vrm0Descriptor, VrmParseError> {
     let meta = parse_vrm0_meta(vrm.get("meta"));
     let legacy_meta = Some(parse_vrm0_meta_diagnostics(vrm));
     let humanoid = parse_vrm0_humanoid(root, vrm.get("humanoid"))?;
@@ -379,42 +285,13 @@ fn parse_vrm0(root: &Value, vrm: &Value) -> Result<VrmRuntimeDescriptor, VrmPars
 
     let compatibility_warnings = collect_legacy_compatibility_warnings(root, vrm);
 
-    Ok(VrmRuntimeDescriptor {
-        generation: VrmGeneration::Vrm0,
-        spec_version: "0.x".into(),
-        coordinate_basis: CoordinateBasis::Vrm0Y180,
+    Ok(Vrm0Descriptor {
         meta,
         legacy_meta,
         humanoid,
         first_person,
         look_at,
         compatibility_warnings,
-    })
-}
-
-fn parse_vrm1(vrmc: &Value) -> Result<VrmRuntimeDescriptor, VrmParseError> {
-    let spec_version = required_string(vrmc, "specVersion")?;
-    if spec_version != "1.0" {
-        return Err(VrmParseError::UnsupportedVersion(spec_version));
-    }
-    let meta = parse_vrm1_meta(vrmc.get("meta"));
-    let humanoid = parse_vrm1_humanoid(vrmc.get("humanoid"))?;
-    let first_person = vrmc
-        .get("firstPerson")
-        .map(parse_vrm1_first_person)
-        .transpose()?;
-    let look_at = vrmc.get("lookAt").map(parse_vrm1_look_at).transpose()?;
-
-    Ok(VrmRuntimeDescriptor {
-        generation: VrmGeneration::Vrm1,
-        spec_version,
-        coordinate_basis: CoordinateBasis::Vrm1Identity,
-        meta,
-        legacy_meta: None,
-        humanoid,
-        first_person,
-        look_at,
-        compatibility_warnings: Vec::new(),
     })
 }
 
@@ -808,27 +685,6 @@ fn legacy_curve_is_linear(curve: &[Value]) -> bool {
     })
 }
 
-fn parse_vrm1_meta(meta: Option<&Value>) -> VrmMeta {
-    let Some(meta) = meta.and_then(Value::as_object) else {
-        return VrmMeta::default();
-    };
-    VrmMeta {
-        name: string_field(meta, "name"),
-        authors: meta
-            .get("authors")
-            .and_then(Value::as_array)
-            .map(|authors| {
-                authors
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        license_url: string_field(meta, "licenseUrl"),
-    }
-}
-
 fn parse_vrm0_humanoid(
     root: &Value,
     humanoid: Option<&Value>,
@@ -849,24 +705,6 @@ fn parse_vrm0_humanoid(
         if human_bones.insert(name.to_string(), node).is_some() {
             return Err(VrmParseError::DuplicateBone(name.into()));
         }
-    }
-    require_humanoid_bones(&human_bones)?;
-    Ok(VrmHumanoid { human_bones })
-}
-
-fn parse_vrm1_humanoid(humanoid: Option<&Value>) -> Result<VrmHumanoid, VrmParseError> {
-    let bones = humanoid
-        .and_then(|value| value.get("humanBones"))
-        .and_then(Value::as_object)
-        .ok_or_else(|| VrmParseError::MissingField("VRMC_vrm.humanoid.humanBones".into()))?;
-    let mut human_bones = BTreeMap::new();
-    for (name, bone) in bones {
-        let node = required_usize(
-            bone,
-            "node",
-            &format!("VRMC_vrm.humanoid.humanBones.{name}.node"),
-        )?;
-        human_bones.insert(name.clone(), node);
     }
     require_humanoid_bones(&human_bones)?;
     Ok(VrmHumanoid { human_bones })
@@ -923,26 +761,6 @@ fn parse_vrm0_first_person(root: &Value, value: &Value) -> Result<VrmFirstPerson
     Ok(VrmFirstPerson {
         first_person_bone,
         first_person_bone_offset,
-        mesh_annotations,
-    })
-}
-
-fn parse_vrm1_first_person(value: &Value) -> Result<VrmFirstPerson, VrmParseError> {
-    let mut mesh_annotations = Vec::new();
-    if let Some(annotations) = value.get("meshAnnotations").and_then(Value::as_array) {
-        for (index, annotation) in annotations.iter().enumerate() {
-            let path = format!("VRMC_vrm.firstPerson.meshAnnotations[{index}]");
-            let node = required_usize(annotation, "node", &format!("{path}.node"))?;
-            let flag = parse_first_person_flag(
-                annotation.get("firstPersonFlag"),
-                &format!("{path}.firstPersonFlag"),
-            )?;
-            mesh_annotations.push(VrmMeshAnnotation { node, flag });
-        }
-    }
-    Ok(VrmFirstPerson {
-        first_person_bone: None,
-        first_person_bone_offset: None,
         mesh_annotations,
     })
 }
@@ -1075,57 +893,6 @@ fn parse_vrm0_range_map(
     })
 }
 
-fn parse_vrm1_look_at(value: &Value) -> Result<VrmLookAt, VrmParseError> {
-    let r#type = match required_string(value, "type")?.as_str() {
-        "bone" | "Bone" => VrmLookAtType::Bone,
-        "expression" | "Expression" => VrmLookAtType::Expression,
-        other => {
-            return Err(VrmParseError::InvalidField {
-                path: "VRMC_vrm.lookAt.type".into(),
-                reason: format!("unknown look-at type {other}"),
-            });
-        }
-    };
-    Ok(VrmLookAt {
-        r#type,
-        offset_from_head_bone: array3(value, "offsetFromHeadBone", "VRMC_vrm.lookAt")?,
-        range_map_horizontal_inner: parse_vrm1_range_map(
-            value,
-            "rangeMapHorizontalInner",
-            "VRMC_vrm.lookAt.rangeMapHorizontalInner",
-        )?,
-        range_map_horizontal_outer: parse_vrm1_range_map(
-            value,
-            "rangeMapHorizontalOuter",
-            "VRMC_vrm.lookAt.rangeMapHorizontalOuter",
-        )?,
-        range_map_vertical_down: parse_vrm1_range_map(
-            value,
-            "rangeMapVerticalDown",
-            "VRMC_vrm.lookAt.rangeMapVerticalDown",
-        )?,
-        range_map_vertical_up: parse_vrm1_range_map(
-            value,
-            "rangeMapVerticalUp",
-            "VRMC_vrm.lookAt.rangeMapVerticalUp",
-        )?,
-    })
-}
-
-fn parse_vrm1_range_map(
-    value: &Value,
-    field: &str,
-    path: &str,
-) -> Result<VrmRangeMap, VrmParseError> {
-    let range = value
-        .get(field)
-        .ok_or_else(|| VrmParseError::MissingField(path.into()))?;
-    Ok(VrmRangeMap {
-        input_max_value: required_f32(range, "inputMaxValue", &format!("{path}.inputMaxValue"))?,
-        output_scale: required_f32(range, "outputScale", &format!("{path}.outputScale"))?,
-    })
-}
-
 fn string_field(values: &Map<String, Value>, field: &str) -> Option<String> {
     values.get(field).and_then(Value::as_str).map(String::from)
 }
@@ -1217,29 +984,4 @@ fn mesh_instance_nodes(root: &Value, mesh: usize, path: &str) -> Result<Vec<usiz
         })
         .collect::<Vec<_>>();
     Ok(instances)
-}
-
-fn array3(value: &Value, field: &str, parent_path: &str) -> Result<[f32; 3], VrmParseError> {
-    let values = value
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| VrmParseError::MissingField(format!("{parent_path}.{field}")))?;
-    if values.len() != 3 {
-        return Err(VrmParseError::InvalidField {
-            path: format!("{parent_path}.{field}"),
-            reason: "expected three numbers".into(),
-        });
-    }
-    let mut result = [0.0; 3];
-    for (index, (slot, value)) in result.iter_mut().zip(values.iter()).enumerate() {
-        *slot = value
-            .as_f64()
-            .map(|value| value as f32)
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| VrmParseError::InvalidField {
-                path: format!("{parent_path}.{field}[{index}]"),
-                reason: "expected a finite number".into(),
-            })?;
-    }
-    Ok(result)
 }

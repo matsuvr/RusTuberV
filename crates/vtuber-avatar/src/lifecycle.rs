@@ -905,12 +905,7 @@ mod tests {
         let asset_path = UserAssetPath::avatar_model_path(&id).expect("test path is valid");
         LoadImportedAvatarRequest {
             request_id,
-            imported: ImportedAvatar::new(
-                id,
-                asset_path,
-                "Test Model",
-                crate::load::ExpectedVrmGeneration::Vrm1,
-            ),
+            imported: ImportedAvatar::new(id, asset_path, "Test Model"),
         }
     }
 

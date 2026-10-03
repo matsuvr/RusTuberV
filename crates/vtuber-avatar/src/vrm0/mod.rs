@@ -4,16 +4,12 @@
 //! unmodified upstream runtime loads them without any vendored loader or ECS
 //! patch. The modules below are ported from the removed vendored patch and
 //! retargeted at file conversion (see each module's docs); [`convert`] ties
-//! them together over raw GLB bytes.
+//! them together over the GLB JSON document.
 
-pub mod convert;
-pub mod descriptor;
-pub mod expression_id;
-pub mod materials;
+pub(crate) mod convert;
+pub(crate) mod descriptor;
+pub(crate) mod expression_id;
+pub(crate) mod materials;
 pub(crate) mod normalize;
 
-pub use convert::{Vrm0ConvertError, convert_vrm0_to_vrm1, prepare_managed_vrm_bytes};
-pub use descriptor::{
-    LegacyShaderKind, VrmCompatibilityWarning, VrmCompatibilityWarningCode, classify_legacy_shader,
-    collect_legacy_compatibility_warnings,
-};
+pub use descriptor::{VrmCompatibilityWarning, VrmCompatibilityWarningCode};

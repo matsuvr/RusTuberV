@@ -42,7 +42,8 @@ pub mod render_output;
 mod skeleton;
 pub mod tracking_profile;
 pub mod unload;
-pub mod vrm0;
+pub mod vrm;
+mod vrm0;
 pub mod vrm1;
 
 pub use arm::{
@@ -118,7 +119,7 @@ pub use framing::camera_reset::ResetCameraRequest;
 pub use idle::{IDLE_PROCEDURAL_AMPLITUDE_METERS, IdleMotionProfile, IdleMotionProfileError};
 pub use lifecycle::*;
 pub use load::{
-    AssetPathError, AvatarAssetId, ExpectedVrmGeneration, ImportedAvatar, LoadImportedAvatarError,
+    AssetPathError, AvatarAssetId, ImportedAvatar, LoadImportedAvatarError,
     LoadImportedAvatarRequest, LoadImportedAvatarResult, PendingAvatarLoad, UserAssetPath,
     VrmSourceExpressions,
 };
@@ -143,9 +144,6 @@ pub use tracking_profile::{
 pub use unload::{
     ActiveControlFrame, ControlFrameError, set_active_control_frame, tag_control_frame,
 };
-pub use vrm0::{
-    LegacyShaderKind, Vrm0ConvertError, VrmCompatibilityWarning, VrmCompatibilityWarningCode,
-    classify_legacy_shader, collect_legacy_compatibility_warnings, convert_vrm0_to_vrm1,
-    prepare_managed_vrm_bytes,
-};
-pub use vrm1::adapt_vrm1_expressions;
+pub use vrm0::{VrmCompatibilityWarning, VrmCompatibilityWarningCode};
+
+pub use vrm::{VrmPrepareError, prepare_managed_vrm_bytes};

@@ -2,6 +2,8 @@
 //!
 //! Tracking keeps its canonical, unmirrored camera-coordinate contract. This
 //! adapter-local resource selects how that contract is presented by the avatar.
+//! All coordinate reflection and side exchange is implemented in
+//! [`vtuber_core::mirror::MotionMirror`]; this resource only stores the UI policy.
 
 use bevy::prelude::*;
 

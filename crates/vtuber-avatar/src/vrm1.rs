@@ -34,9 +34,6 @@
 
 use serde_json::{Map, Value};
 
-use crate::glb::Glb;
-use crate::vrm0::convert::Vrm0ConvertError;
-
 /// Managed-copy marker written into `custom` entries this adaptation merged
 /// into `preset`.
 ///
@@ -47,24 +44,19 @@ use crate::vrm0::convert::Vrm0ConvertError;
 /// format.
 pub const MERGED_CUSTOM_MARKER: &str = "vtuberManagedCustomOrigin";
 
-/// Adapts `VRMC_vrm.expressions` of a VRM 1.0 GLB to the upstream contract.
-///
-/// Returns `Ok(None)` when the input is not a VRM 1.0 GLB or already
-/// satisfies the contract, so callers can pass the source through unchanged.
-/// Returns `Err` when the input cannot be parsed as a GLB.
-pub fn adapt_vrm1_expressions(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0ConvertError> {
-    let mut glb = Glb::parse(bytes)?;
-    let document = &mut glb.document;
+/// Adapts a converted or native VRM 1.0 document to the upstream expression contract.
+/// Returns whether the document changed.
+pub(crate) fn adapt_vrm1_expressions(document: &mut Value) -> bool {
     let Some(vrmc) = document
         .get_mut("extensions")
         .and_then(Value::as_object_mut)
         .and_then(|extensions| extensions.get_mut("VRMC_vrm"))
         .and_then(Value::as_object_mut)
     else {
-        return Ok(None);
+        return false;
     };
     let Some(expressions) = vrmc.get_mut("expressions").and_then(Value::as_object_mut) else {
-        return Ok(None);
+        return false;
     };
 
     let preset_present = expressions.contains_key("preset");
@@ -124,7 +116,7 @@ pub fn adapt_vrm1_expressions(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Conve
     }
 
     if !changed {
-        return Ok(None);
+        return false;
     }
     expressions.insert("preset".to_string(), Value::Object(preset));
     if custom.is_empty() {
@@ -133,7 +125,7 @@ pub fn adapt_vrm1_expressions(bytes: &[u8]) -> Result<Option<Vec<u8>>, Vrm0Conve
         expressions.insert("custom".to_string(), Value::Object(custom));
     }
 
-    Ok(Some(glb.to_vec()?))
+    true
 }
 
 #[cfg(test)]
@@ -145,6 +137,16 @@ mod tests {
         clippy::indexing_slicing
     )]
     use super::*;
+    use crate::glb::{Glb, GlbError};
+
+    fn adapt_vrm1_expressions(bytes: &[u8]) -> Result<Option<Vec<u8>>, GlbError> {
+        let mut glb = Glb::parse(bytes)?;
+        if super::adapt_vrm1_expressions(&mut glb.document) {
+            Ok(Some(glb.to_vec()?))
+        } else {
+            Ok(None)
+        }
+    }
 
     fn glb(vrmc: Value) -> Vec<u8> {
         let document = serde_json::json!({

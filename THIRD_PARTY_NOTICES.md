@@ -1,5 +1,17 @@
 # Third-party notices
 
+## UmebocDC hand poses (converted data)
+
+`crates/vtuber-tracking/src/hand_poses/catalog.rs` includes 20 adapted poses
+derived from UmebocDC's `UmebocDC_Hand.211010` (2021-10-10). The user-supplied
+archive's `Memo.txt` identifies the distribution, including its animation clips,
+as CC0. See [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
+
+Only converted hand-local joint angles are included. The original Unity package,
+animation clips, models, and textures are not redistributed. The conversion and
+12 additional app-authored poses are described in
+[the hand-pose ADR](docs/adr/2026-10-03-hand-pose-library.md).
+
 ## bevy_vrm1 (temporary transparency patch)
 
 The VRM runtime is based on [not-elm/bevy_vrm1](https://github.com/not-elm/bevy_vrm1)

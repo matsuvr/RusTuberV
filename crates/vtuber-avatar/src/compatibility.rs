@@ -4,18 +4,15 @@
 //! capabilities are present. It is used by the compatibility runner and by
 //! unit tests to guard against upstream behaviour changes at the pinned tag.
 //!
-//! Generation and import warnings are source records: the import pipeline
-//! converts VRM 0.x sources into VRM 1.0-shaped managed copies, so the
-//! runtime boundary itself no longer reports a generation. The expected
-//! generation and the preflight warnings travel on the avatar root
-//! (`ExpectedVrmGeneration`, [`VrmSourceWarnings`]).
+//! All loaded models are prepared VRM 1.0. Conversion warnings are retained
+//! for diagnostics; the original file format stays in import metadata.
 
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
 use crate::capabilities::PerfectSyncCapabilities;
 use crate::expression::material::VrmMaterialIndex;
-use crate::load::{ExpectedVrmGeneration, VrmSourceExpressions};
+use crate::load::VrmSourceExpressions;
 use crate::vrm0::VrmCompatibilityWarning;
 
 /// Plugin that installs compatibility-report systems.
@@ -40,7 +37,6 @@ pub struct VrmSourceWarnings(pub Vec<VrmCompatibilityWarning>);
 /// Bone capability tuple used when querying a freshly-initialized VRM.
 type InitializedVrmBones<'w, 's> = (
     Entity,
-    Option<&'static ExpectedVrmGeneration>,
     Option<&'static VrmSourceWarnings>,
     Option<&'static HeadBoneEntity>,
     Option<&'static NeckBoneEntity>,
@@ -56,8 +52,6 @@ type InitializedVrmBones<'w, 's> = (
 pub struct VrmCompatibilityReport {
     /// Active runtime root owning this report.
     pub root: Option<Entity>,
-    /// Generation recorded by app-side inspection at import.
-    pub generation: Option<ExpectedVrmGeneration>,
     /// Whether a `Vrm` component was observed.
     pub vrm_loaded: bool,
     /// Whether the `Initialized` marker was observed.
@@ -136,7 +130,6 @@ fn inspect_initialized_vrm(
     }
     for (
         entity,
-        expected_generation,
         source_warnings,
         head,
         neck,
@@ -150,7 +143,6 @@ fn inspect_initialized_vrm(
         report.root = Some(entity);
         report.vrm_loaded = true;
         report.initialized = true;
-        report.generation = expected_generation.copied();
         report.has_head = head.is_some();
         report.has_neck = neck.is_some();
         report.has_left_eye = left_eye.is_some();
@@ -252,7 +244,6 @@ mod tests {
             .spawn((
                 Vrm,
                 Initialized,
-                ExpectedVrmGeneration::Vrm0,
                 VrmSourceWarnings(vec![VrmCompatibilityWarning::new(
                     crate::vrm0::VrmCompatibilityWarningCode::EmptyLegacyExpressionName,
                     "old-root",

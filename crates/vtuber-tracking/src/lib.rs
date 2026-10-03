@@ -28,6 +28,8 @@ pub mod eye_geometry;
 pub mod filter;
 /// Pure hand-pose policy for isolated gestures that must not be emitted.
 pub mod gesture_safety;
+/// Authored hand-pose selection and transitions used by observed arm tracking.
+mod hand_poses;
 /// Unified tracking-loss hold / return / reacquire ramp.
 pub mod loss_blend;
 /// Loss hold, neutral decay, and recovery blend.

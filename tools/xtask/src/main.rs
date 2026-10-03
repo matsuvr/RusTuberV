@@ -231,7 +231,7 @@ fn print_result(result: &vrm_compatibility::CompatibilityResult) {
                 summary.fallback_material_count
             );
             println!(
-                "    spring source-declared inventory: groups_or_springs={}, joint_or_root_references={}, colliders={}, centers={}",
+                "    spring prepared VRM 1.0 inventory: springs={}, joints={}, colliders={}, centers={}",
                 summary.spring_chain_count,
                 summary.spring_joint_count,
                 summary.spring_collider_count,
@@ -289,7 +289,7 @@ fn print_result(result: &vrm_compatibility::CompatibilityResult) {
                 "    machine.material_fallback_count={}",
                 summary.fallback_material_count
             );
-            println!("    machine.spring_inventory_semantics=source_declared_inventory");
+            println!("    machine.spring_inventory_semantics=prepared_vrm1_inventory");
             println!(
                 "    machine.spring_chain_count={}",
                 summary.spring_chain_count
@@ -328,7 +328,7 @@ fn print_result(result: &vrm_compatibility::CompatibilityResult) {
     if let Some(report) = &result.runtime {
         println!("  runtime:");
         println!("    initialized: {}", report.initialized);
-        println!("    generation: {:?}", report.generation);
+        println!("    format: VRM 1.0");
         println!("    head: {}", report.has_head);
         println!("    neck: {}", report.has_neck);
         println!("    leftEye: {}", report.has_left_eye);
@@ -347,7 +347,7 @@ fn print_result(result: &vrm_compatibility::CompatibilityResult) {
             report.spring_root_count
         );
         println!("    machine.initialized={}", report.initialized);
-        println!("    machine.generation={:?}", report.generation);
+        println!("    machine.runtime_format=VRM1");
         println!("    machine.head={}", report.has_head);
         println!("    machine.neck={}", report.has_neck);
         println!("    machine.left_eye={}", report.has_left_eye);

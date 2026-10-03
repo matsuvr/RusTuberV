@@ -6,7 +6,7 @@ use vtuber_avatar::glb::Glb;
 
 use super::{MAX_MORPH_TARGETS, ModelImportError};
 
-/// Rewrites a GLB so that no mesh carries more than [`MAX_MORPH_TARGETS`]
+/// Rewrites a prepared VRM 1.0 GLB so that no mesh carries more than [`MAX_MORPH_TARGETS`]
 /// morph targets, which is the hard limit the Bevy runtime imposes at load.
 ///
 /// Morph targets with no VRM expression bind or nonzero default weight are dropped from
@@ -15,7 +15,9 @@ use super::{MAX_MORPH_TARGETS, ModelImportError};
 /// rewritten safely: GLBs without an excess mesh, models
 /// that animate morph weights, and meshes whose referenced bind set alone
 /// exceeds the limit together with the nonzero defaults. Invalid containers return `Err`.
-pub fn normalize_vrm_morph_targets(bytes: &[u8]) -> Result<Option<Vec<u8>>, ModelImportError> {
+pub(super) fn normalize_vrm_morph_targets(
+    bytes: &[u8],
+) -> Result<Option<Vec<u8>>, ModelImportError> {
     let mut glb =
         Glb::parse(bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
     if has_morph_weight_animation(&glb.document) {
@@ -61,36 +63,12 @@ fn has_morph_weight_animation(root: &Value) -> bool {
 }
 
 /// Collects morph targets needed by VRM expression binds and authored defaults,
-/// keyed by glTF mesh index. VRM 0.x binds are mesh-indexed; VRM 1.0 binds
-/// are node-indexed and resolved through the node's mesh.
+/// keyed by glTF mesh index. VRM 1.0 binds are resolved through each node's mesh.
 fn collect_morph_references(root: &Value) -> BTreeMap<usize, BTreeSet<usize>> {
     let mut references: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     let mut record = |mesh: usize, index: usize| {
         references.entry(mesh).or_default().insert(index);
     };
-
-    if let Some(groups) = root
-        .get("extensions")
-        .and_then(|extensions| extensions.get("VRM"))
-        .and_then(|vrm| vrm.get("blendShapeMaster"))
-        .and_then(|master| master.get("blendShapeGroups"))
-        .and_then(Value::as_array)
-    {
-        for bind in groups
-            .iter()
-            .filter_map(|group| group.get("binds"))
-            .filter_map(Value::as_array)
-            .flatten()
-        {
-            let mesh = bind.get("mesh").and_then(Value::as_u64);
-            let index = bind.get("index").and_then(Value::as_u64);
-            if let (Some(mesh), Some(index)) = (mesh, index)
-                && let (Ok(mesh), Ok(index)) = (usize::try_from(mesh), usize::try_from(index))
-            {
-                record(mesh, index);
-            }
-        }
-    }
 
     for bind in vrm1_morph_target_binds(root) {
         let node = bind.get("node").and_then(Value::as_u64);
@@ -242,7 +220,6 @@ fn apply_morph_reduction(root: &mut Value, plan: &BTreeMap<usize, MorphReduction
             }
         }
     }
-    remap_legacy_binds(root, plan);
     remap_vrm1_binds(root, plan);
 }
 
@@ -298,26 +275,6 @@ fn reduce_meshes(root: &mut Value, plan: &BTreeMap<usize, MorphReductionPlan>) {
             }
             None => {}
         }
-    }
-}
-
-fn remap_legacy_binds(root: &mut Value, plan: &BTreeMap<usize, MorphReductionPlan>) {
-    let Some(groups) = root
-        .get_mut("extensions")
-        .and_then(|extensions| extensions.get_mut("VRM"))
-        .and_then(|vrm| vrm.get_mut("blendShapeMaster"))
-        .and_then(|master| master.get_mut("blendShapeGroups"))
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    for group in groups {
-        let Some(binds) = group.get_mut("binds").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        binds.retain_mut(|bind| {
-            remap_bind(bind, plan, |bind| bind.get("mesh").and_then(Value::as_u64)).unwrap_or(true)
-        });
     }
 }
 

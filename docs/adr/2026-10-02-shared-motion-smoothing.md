@@ -8,11 +8,13 @@
 `vtuber-tracking::filter`に計算と保持状態をまとめ、各チャンネルから呼び出す。
 
 - `damped`: 既存の臨界減衰式と、scalar・vector・Quaternionの保持状態。
-  頭、観測手首・肘位置、指の関節座標、肩、肘屈伸、前腕回内/回外が使う。
+  頭、観測手首・肘位置、肩、肘屈伸、前腕回内/回外が使う。
   掌法線は単位球面の最短回転を解き、同じvector減衰式を使う。
 - `exponential`: 時定数と半減期の指数平滑化、最短角度の追従。
   頭位置、translation shaping、胴体位置、視線、上半身の関節角、表情が使う。
   標準表情とARKit表情のattack/release選択も同じparamsのメソッドにまとめる。
+  指は[2026-10-03の固定ポーズ選択](2026-10-03-hand-pose-library.md)から、
+  確定したポーズへの行き過ぎのない一次補間にも使う。
 - `time`: 経過秒・既存の最大dt・遷移進捗・smoothstep。
   頭・位置・表情・腕、欠測のhold/return/acquire、腕のsource遷移、idle補間が使う。
 

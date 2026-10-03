@@ -91,11 +91,7 @@ pub(crate) fn observe_initialized(
     // active root. The `Without<BindTriggered>` filter and `Added<Initialized>`
     // filter together ensure this path runs at most once per root.
     //
-    // Generation agreement is established before the runtime boundary: the
-    // import pipeline converts VRM 0.x sources to VRM 1.0-shaped managed
-    // copies, so the unmodified upstream runtime always initializes VRM 1.0
-    // content. `ExpectedVrmGeneration` on the root remains the source record
-    // for UI and diagnostics.
+    // Import prepares every model as VRM 1.0 before this common lifecycle.
     for entity in newly_initialized.iter() {
         if lifecycle.active_root() != Some(entity) {
             continue;
@@ -117,7 +113,6 @@ mod tests {
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
     use super::*;
-    use crate::load::ExpectedVrmGeneration;
     use bevy::asset::AssetApp;
 
     fn test_app() -> App {
@@ -273,25 +268,17 @@ mod tests {
     }
 
     #[test]
-    fn expected_generation_needs_no_runtime_basis_to_bind() {
-        // VRM 0.x sources are converted to VRM 1.0-shaped managed copies at
-        // import, so the runtime boundary reports no generation of its own.
-        // An expected-generation record alone must not block binding.
-        for expected in [ExpectedVrmGeneration::Vrm0, ExpectedVrmGeneration::Vrm1] {
-            let mut app = test_app();
-            let root = spawn_active_root(&mut app);
-            app.world_mut()
-                .entity_mut(root)
-                .insert((expected, Initialized));
-            app.world_mut()
-                .resource_mut::<AvatarLifecycle>()
-                .request_load(root)
-                .unwrap();
-            app.update();
-
-            let lifecycle = app.world().resource::<AvatarLifecycle>();
-            assert_eq!(lifecycle.state(), AvatarLifecycleState::Binding);
-            assert!(lifecycle.failure().is_none());
-        }
+    fn prepared_vrm_binds_without_source_format_state() {
+        let mut app = test_app();
+        let root = spawn_active_root(&mut app);
+        app.world_mut().entity_mut(root).insert(Initialized);
+        app.world_mut()
+            .resource_mut::<AvatarLifecycle>()
+            .request_load(root)
+            .unwrap();
+        app.update();
+        let lifecycle = app.world().resource::<AvatarLifecycle>();
+        assert_eq!(lifecycle.state(), AvatarLifecycleState::Binding);
+        assert!(lifecycle.failure().is_none());
     }
 }

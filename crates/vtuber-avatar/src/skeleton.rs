@@ -19,6 +19,7 @@ pub(crate) struct TwoBoneRest {
     pub middle_rotation: Quat,
     pub hinge_axis: Vec3,
     pub flexion_limit: f32,
+    pub axial_limit: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,11 +77,19 @@ pub(crate) fn from_joints(
     let upper_dir = upper.try_normalize()?;
     let lower_dir = lower.try_normalize()?;
     let axis = rest.hinge_axis.try_normalize()?;
-    let rest_angle = axis
-        .dot(upper_dir.cross(lower_dir))
-        .atan2(upper_dir.dot(lower_dir));
-    let hinge = Quat::from_axis_angle(axis, flexion.clamp(0.0, rest.flexion_limit) - rest_angle);
-    let relative = hinge * Quat::from_axis_angle(lower_dir, axial_roll);
+    // Authored segment offsets need not lie in the anatomical flexion plane.
+    // Remove that rest bend before applying the fixed hinge, rather than
+    // allowing a small off-plane offset to redefine the joint's axis.
+    let rest_to_straight = Quat::from_rotation_arc(lower_dir, upper_dir);
+    let hinge =
+        Quat::from_axis_angle(axis, flexion.clamp(0.0, rest.flexion_limit)) * rest_to_straight;
+    // The final FK reconstruction owns the limits, including calls made by
+    // damping, loss blending and forearm alignment after the analytic solve.
+    let relative = hinge
+        * Quat::from_axis_angle(
+            lower_dir,
+            axial_roll.clamp(-rest.axial_limit, rest.axial_limit),
+        );
     let start_model = start_rotation * rest.start_rotation.inverse();
     let middle = rest.start + start_model * upper;
     let end = middle + start_model * hinge * lower;

@@ -113,12 +113,7 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     let asset_id = vtuber_avatar::AvatarAssetId::new(&imported.id);
     let asset_path = UserAssetPath::avatar_model_path(&asset_id)
         .map_err(|error| RenderError::Failed(format!("asset path failed: {error}")))?;
-    let expected = match imported.summary.generation {
-        vtuber_app::import::VrmGeneration::Vrm0 => vtuber_avatar::ExpectedVrmGeneration::Vrm0,
-        vtuber_app::import::VrmGeneration::Vrm1 => vtuber_avatar::ExpectedVrmGeneration::Vrm1,
-    };
-    let imported_avatar =
-        ImportedAvatar::new(asset_id, asset_path, imported.name.clone(), expected);
+    let imported_avatar = ImportedAvatar::new(asset_id, asset_path, imported.name.clone());
 
     let managed_root_string = managed_root
         .to_str()

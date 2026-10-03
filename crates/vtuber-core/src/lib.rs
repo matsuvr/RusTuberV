@@ -20,6 +20,8 @@
 
 /// Engine-neutral pose-arm observations and targets.
 pub mod arm_tracking;
+/// Shared sagittal reflection for positions, axial directions and anatomical sides.
+pub mod mirror;
 
 /// Decoded image layout and pixel reading.
 pub mod frame;
