@@ -1,7 +1,8 @@
 //! Capture runtime — bridges the orchestrator to an explicitly selected backend.
 //!
-//! Manages the [`CaptureController`] lifecycle and provides Bevy systems for
-//! preview texture updates and diagnostics synchronisation.
+//! Manages the [`CaptureController`](vtuber_camera::capture::CaptureController)
+//! lifecycle and provides Bevy systems for preview texture updates and diagnostics
+//! synchronisation.
 
 use std::sync::Arc;
 

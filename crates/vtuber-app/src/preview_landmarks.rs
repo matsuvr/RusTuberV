@@ -1,8 +1,8 @@
 //! Display-only snapshot of the canonical face landmarks.
 //!
 //! The snapshot is the boundary between inference orchestration and the UI.
-//! It shares the canonical landmark allocation through [`Arc`] and contains
-//! no camera bytes, inference runtime, tracking state, or avatar controls.
+//! It shares the canonical landmark allocation through [`Arc`](std::sync::Arc)
+//! and contains no camera bytes, inference runtime, tracking state, or avatar controls.
 
 use std::sync::Arc;
 

@@ -1,11 +1,31 @@
 //! `vtuber-app`: Bevy orchestration, UI, settings, model import, and diagnostics.
 //!
 //! This crate must not contain model-specific inference math or VRM runtime internals.
+//!
+//! # Application flow
+//!
+//! [`ui::UiShellPlugin`] is the composition point. It creates the shared resources,
+//! delegates worker initialization and scheduling to the private `runtime` module,
+//! and installs the egui rendering and input systems.
+//!
+//! - [`actions::UiAction`] carries UI intent to [`orchestrator::process_ui_actions_system`].
+//! - [`orchestrator::Orchestrator`] owns application state and pending requests.
+//!   Its private modules handle action effects, expression bindings, and avatar loads.
+//! - The capture, inference, Pose, and tracking bridges connect domain workers to
+//!   Bevy resources. [`avatar_bridge`] publishes the resulting control frames.
+//! - [`ui_model::UiViewModel`] is the snapshot consumed by the UI; widgets enqueue
+//!   commands rather than starting workers or persisting settings themselves.
+//!
+//! [`import`] owns the managed model files and exposes inspection and conversion
+//! through one public API. Camera devices stay in `vtuber-camera`, inference
+//! backends in `vtuber-inference`, tracking math in `vtuber-tracking`, and VRM
+//! rendering in `vtuber-avatar`; this crate coordinates those boundaries.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod file_io;
+mod runtime;
 
 /// UI action commands emitted by the UI layer.
 pub mod actions;

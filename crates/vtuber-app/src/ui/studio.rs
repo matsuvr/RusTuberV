@@ -3126,13 +3126,17 @@ mod tests {
         ] {
             let ctx = egui::Context::default();
             let mut state = UiState::default();
-            let mut vm = UiViewModel::default();
-            vm.model_target = Some(crate::actions::ModelActionTarget {
-                model_id: "model".into(),
-                generation: test_generation(),
-            });
-            vm.look.enabled = true;
-            vm.look.strength = 0.5;
+            let vm = UiViewModel {
+                model_target: Some(crate::actions::ModelActionTarget {
+                    model_id: "model".into(),
+                    generation: test_generation(),
+                }),
+                look: crate::ui_model::RichLookViewModel {
+                    enabled: true,
+                    strength: 0.5,
+                },
+                ..Default::default()
+            };
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 render_rich_look_controls(ui, &vm, &mut state, lang);
             });

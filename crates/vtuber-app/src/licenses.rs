@@ -1,8 +1,9 @@
 //! Licenses of everything this application is built from and ships.
 //!
 //! `build.rs` collects the crates listed in `Cargo.lock` into
-//! [`DEPENDENCY_LICENSE_GROUPS`]. The assets this repository ships next to the
-//! executable are listed here, because they are not in the dependency graph.
+//! [`DEPENDENCY_LICENSE_GROUPS`](crate::licenses::DEPENDENCY_LICENSE_GROUPS).
+//! The assets this repository ships next to the executable are listed here,
+//! because they are not in the dependency graph.
 //! Every license body is the verbatim upstream file. The UI only localizes the
 //! headings around it; a license body is never translated.
 
