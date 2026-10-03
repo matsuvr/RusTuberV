@@ -337,6 +337,7 @@ fn camera_loss_returns_the_composed_skeleton_while_the_torso_turns() {
                 generation: Some(generation),
                 view_to_model: Quat::IDENTITY,
                 frame: Some(ArmControlFrame {
+                    thorax: None,
                     source_seq: FrameSeq(1),
                     captured_at: MonoTimeNs(0),
                     produced_at: MonoTimeNs(0),

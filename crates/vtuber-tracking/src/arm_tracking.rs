@@ -1027,6 +1027,7 @@ impl ArmSideState {
 /// hold/return timeline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmTrackingState {
+    thorax: crate::thorax::ThoraxState,
     left: ArmSideState,
     right: ArmSideState,
     last_consumed: Option<(FrameSeq, MonoTimeNs)>,
@@ -1039,6 +1040,7 @@ impl ArmTrackingState {
     pub const fn new() -> Self {
         Self {
             left: ArmSideState::empty(),
+            thorax: crate::thorax::ThoraxState::new(),
             right: ArmSideState::empty(),
             last_consumed: None,
             last_now: None,
@@ -1054,9 +1056,11 @@ impl ArmTrackingState {
     pub fn reset_temporal(&mut self) {
         let left = self.left.calibration;
         let right = self.right.calibration;
+        let thorax = self.thorax;
         self.reset();
         self.left.calibration = left;
         self.right.calibration = right;
+        self.thorax = thorax.without_motion();
     }
 }
 
@@ -1087,6 +1091,8 @@ pub fn step_arm_tracking(
     state.last_now = Some(now);
 
     let Some(frame) = observation else {
+        state.thorax.consume(None, profile.shoulder_visibility);
+        state.thorax.advance(now, render_dt_ns, &profile.blend);
         state.left.advance_without_observation(now, profile);
         state.right.advance_without_observation(now, profile);
         return (state, None);
@@ -1096,6 +1102,9 @@ pub fn step_arm_tracking(
         frame.source_seq.0 > seq.0 && frame.captured_at.0 > captured_at.0
     });
     if is_new {
+        state
+            .thorax
+            .consume(frame.observation.as_ref(), profile.shoulder_visibility);
         state.last_consumed = Some((frame.source_seq, frame.captured_at));
         let (left, right) = match &frame.observation {
             Some(value) => (Some(&value.left), Some(&value.right)),
@@ -1109,11 +1118,13 @@ pub fn step_arm_tracking(
     }
     state.left.advance(now, render_dt_ns, profile);
     state.right.advance(now, render_dt_ns, profile);
+    let thorax = state.thorax.advance(now, render_dt_ns, &profile.blend);
 
     let Some((source_seq, captured_at)) = state.last_consumed else {
         return (state, None);
     };
     let control = ArmControlFrame {
+        thorax,
         source_seq,
         captured_at,
         produced_at: now,
@@ -1526,7 +1537,11 @@ mod tests {
         left: ArmLandmarks,
         right: ArmLandmarks,
     ) -> vtuber_core::arm_tracking::PoseArmObservation {
-        vtuber_core::arm_tracking::PoseArmObservation { left, right }
+        vtuber_core::arm_tracking::PoseArmObservation {
+            hips: None,
+            left,
+            right,
+        }
     }
 
     fn pose_frame(

@@ -178,6 +178,7 @@ fn control_frame(
     weights: ArmBlendWeights,
 ) -> ArmControlFrame {
     ArmControlFrame {
+        thorax: None,
         source_seq: FrameSeq(seq),
         captured_at: MonoTimeNs(0),
         produced_at: MonoTimeNs(0),

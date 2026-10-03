@@ -67,6 +67,9 @@ pub struct ArmLandmarks {
 /// Both anatomical arms from one pose. Left/right are not preview-mirror labels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PoseArmObservation {
+    /// Anatomical left/right hips from the same Pose result. Missing hips
+    /// make thorax orientation unavailable, without invalidating the arms.
+    pub hips: Option<[PoseWorldLandmark; 2]>,
     /// Subject's left arm.
     pub left: ArmLandmarks,
     /// Subject's right arm.
@@ -217,6 +220,8 @@ pub struct ArmBlendWeights {
 /// virtual arm instead", never a hand at the origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmControlFrame {
+    /// Independently observed thorax and shoulder centres, with its own loss weight.
+    pub thorax: Option<ThoraxTarget>,
     /// Sequence of the camera image the observation came from.
     pub source_seq: FrameSeq,
     /// Capture time of the camera image the observation came from.
@@ -227,6 +232,33 @@ pub struct ArmControlFrame {
     pub targets: ArmTrackingTargets,
     /// Per-side per-channel confidence in the targets.
     pub weights: ArmBlendWeights,
+}
+
+/// Calibrated torso proxy from Pose hips and shoulders, not ISB bone markers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThoraxTarget {
+    /// Neutral-relative rotation in the canonical tracking basis, quaternion XYZW.
+    pub rotation: [f32; 4],
+    /// Left/right shoulder displacement in the calibrated thorax frame,
+    /// divided by the fixed neutral shoulder width.
+    pub shoulder_offsets: [[f32; 3]; 2],
+    /// Confidence/loss weight; zero means neutral, not a fabricated observation.
+    pub weight: f32,
+}
+
+impl ThoraxTarget {
+    /// Reflects the rotation and exchanges the two anatomical shoulder centres.
+    #[must_use]
+    pub fn mirrored(self) -> Self {
+        let [x, y, z, w] = self.rotation;
+        let [left, right] = self.shoulder_offsets;
+        let reflect = |[x, y, z]: [f32; 3]| [-x, y, z];
+        Self {
+            rotation: [x, -y, -z, w],
+            shoulder_offsets: [reflect(right), reflect(left)],
+            ..self
+        }
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +331,7 @@ mod tests {
             fingers: None,
         };
         let frame = ArmControlFrame {
+            thorax: None,
             source_seq: FrameSeq(1),
             captured_at: MonoTimeNs(2),
             produced_at: MonoTimeNs(3),
@@ -331,6 +364,7 @@ mod tests {
             captured_at: MonoTimeNs(10),
             inference_finished_at: MonoTimeNs(20),
             observation: Some(PoseArmObservation {
+                hips: None,
                 left: arm,
                 right: arm,
             }),

@@ -168,6 +168,7 @@ pub fn decode_pose_arms(
         Ok(value)
     };
     Ok(PoseArmObservation {
+        hips: Some([point(23)?, point(24)?]),
         left: ArmLandmarks {
             shoulder: point(11)?,
             elbow: point(13)?,

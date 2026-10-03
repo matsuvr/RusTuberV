@@ -173,6 +173,7 @@ mod tests {
             [-0.9, -1.0, -0.6],
         ];
         let input = ArmControlFrame {
+            thorax: None,
             source_seq: FrameSeq(7),
             captured_at: MonoTimeNs(11),
             produced_at: MonoTimeNs(13),
