@@ -694,6 +694,12 @@ SQPの原理: [Nocedal & Wright, Numerical Optimization](https://users.iems.nort
 
 ### 最終候補の実測
 
+以下はBevyのフレーム時計による2026-10-05早朝の測定。
+その後の[OS表示イベントによる再測定](../replay-performance.md#os表示イベントでの再測定2026-10-05)
+では、同時計と実際の表示更新間隔を分けて集計した。以下のフレームp95を
+ディスプレイの表示間隔p95と読み替えない。また当時の測定のAutoVsyncは、後の測定で
+本番Window既定と同じFifoへ修正したため、数値をそのまま前後改善率には使わない。
+
 Windows 11 / i9-13900、プロセス全体を `0x15` の3論理CPUへ制限。
 Sapphy（VRM 0.x）、Vulkan、1920×1080ウィンドウ、通常VSync、
 リッチ表示OFF・NDI送信OFF。カメラ代替入力以外は実際のFace/Pose Full/Handと

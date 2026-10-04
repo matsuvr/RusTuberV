@@ -34,7 +34,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         return Err("usage: cargo xtask tracking-replay <640x360-30fps.rgb> <model.vrm> <new-output-directory> <logical-cpus> <vsync|uncapped>".into());
     };
     let present_mode = match presentation.as_str() {
-        "vsync" => bevy::window::PresentMode::AutoVsync,
+        // Match the desktop's Window default: strict FIFO, not adaptive VSync.
+        "vsync" => bevy::window::PresentMode::Fifo,
         "uncapped" => bevy::window::PresentMode::AutoNoVsync,
         _ => return Err("presentation must be vsync or uncapped".into()),
     };
@@ -93,6 +94,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     primary_window: Some(Window {
                         title: "RusTuberV recorded-camera measurement".into(),
                         present_mode,
+                        // OS display traces require a visible, unoccluded window.
+                        // Keep this bounded measurement above other applications.
+                        window_level: bevy::window::WindowLevel::AlwaysOnTop,
                         ..default()
                     }),
                     ..default()
@@ -133,6 +137,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             pictures: Vec::new(),
             threads,
             presentation: presentation.clone(),
+            video_started_unix_seconds: None,
         })
         .add_systems(First, |mut m: ResMut<Measurement>| m.frame_started = Instant::now())
         // Exit is published before the shell's ordered Last-stage shutdown.
@@ -166,6 +171,7 @@ struct Measurement {
     pictures: Vec<(PathBuf, Image)>,
     threads: usize,
     presentation: String,
+    video_started_unix_seconds: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -239,6 +245,17 @@ fn sample(world: &mut World, m: &mut Measurement) -> Result<bool, String> {
     };
     let now = monotonic_now();
     let seconds = now.0.saturating_sub(start.0) as f64 / 1e9;
+    if m.video_started_unix_seconds.is_none() {
+        // Correlate external presentation traces with the video. Capture this
+        // once; wall-clock reads and adjustments must not drive animation.
+        m.video_started_unix_seconds = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs_f64()
+                - seconds,
+        );
+    }
     if seconds >= m.source.duration().as_secs_f64() {
         return Ok(true);
     }
@@ -386,6 +403,7 @@ fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
         .map(|window| json!({
             "width": window.physical_width(), "height": window.physical_height(),
             "present_mode": format!("{:?}", window.present_mode),
+            "window_level": format!("{:?}", window.window_level),
             "desired_maximum_frame_latency": window.desired_maximum_frame_latency.map(|n| n.get()),
         }));
     let summary = json!({
@@ -394,6 +412,8 @@ fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
         "available_parallelism": std::thread::available_parallelism().ok().map(|v| v.get()),
         "task_thread_budget": m.threads,
         "presentation": m.presentation,
+        "video_started_unix_seconds": m.video_started_unix_seconds,
+        "video_duration_seconds": m.source.duration().as_secs_f64(),
         "task_pool_threads": {
             "compute": bevy::tasks::ComputeTaskPool::get().thread_num(),
             "async_compute": bevy::tasks::AsyncComputeTaskPool::get().thread_num(),
