@@ -578,36 +578,31 @@ pub(crate) fn check_transition(
     check_subdivisions(&check_rom) && check_subdivisions(&check_skin)
 }
 
-fn check_subdivisions(check: &(impl Fn(f32, f32) -> Option<bool> + Sync)) -> bool {
-    let pool = bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
-    let mut intervals = vec![(0.0_f32, 1.0_f32)];
-    let mut remaining = 256;
-    // Independent interval checks share no mutable geometry. Evaluate
-    // each subdivision level together on the same pool used by the SQP.
-    // Budget exhaustion is unresolved; the spatial error budget is not enlarged.
-    while !intervals.is_empty() && remaining > 0 {
-        let count = intervals.len().min(remaining);
-        remaining -= count;
-        let checked = pool.scope(|scope| {
-            for (start, end) in intervals.drain(..count) {
-                scope.spawn(async move { (start, end, check(start, end)) });
-            }
-        });
-        for (start, end, clear) in checked {
-            match clear {
-                Some(true) => {}
-                Some(false) => {
-                    let mid = (start + end) * 0.5;
-                    if mid == start || mid == end {
-                        return false;
-                    }
-                    intervals.push((start, mid));
-                    intervals.push((mid, end));
+fn check_subdivisions(check: &impl Fn(f32, f32) -> Option<bool>) -> bool {
+    let mut intervals = std::collections::VecDeque::from([(0.0_f32, 1.0_f32)]);
+    // Keep the breadth-first order, but stop immediately on a disproved
+    // interval. A parallel batch had to finish
+    // every expensive skin query in its level even after finding a collision.
+    // Bound work on one candidate; the planner can backtrack to a shorter
+    // certified edge instead of spending seconds on an old observation.
+    for _ in 0..32 {
+        let Some((start, end)) = intervals.pop_front() else {
+            return true;
+        };
+        match check(start, end) {
+            Some(true) => {}
+            Some(false) => {
+                let mid = (start + end) * 0.5;
+                if mid == start || mid == end {
+                    return false;
                 }
-                None => return false,
+                intervals.push_back((start, mid));
+                intervals.push_back((mid, end));
             }
+            None => return false,
         }
     }
+    // Unresolved intervals still reject the edge; no constraint is relaxed.
     intervals.is_empty()
 }
 
@@ -623,6 +618,26 @@ mod tests {
     use crate::upper_limb::tests::{chain, state};
     use crate::{arm::ArmSide, collision::CollisionGeometry};
     use std::collections::HashMap;
+
+    #[test]
+    fn subdivision_stops_at_collision_and_never_accepts_an_exhausted_budget() {
+        let calls = std::cell::Cell::new(0);
+        assert!(!check_subdivisions(&|start, end| {
+            calls.set(calls.get() + 1);
+            if start == 0.0 && end == 1.0 {
+                Some(false)
+            } else {
+                None
+            }
+        }));
+        assert_eq!(calls.get(), 2);
+        calls.set(0);
+        assert!(!check_subdivisions(&|_, _| {
+            calls.set(calls.get() + 1);
+            Some(false)
+        }));
+        assert_eq!(calls.get(), 32);
+    }
 
     #[test]
     fn interpolation_stays_between_joint_limits_at_the_end_of_a_segment() {

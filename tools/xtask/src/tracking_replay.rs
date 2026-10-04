@@ -30,8 +30,13 @@ use vtuber_core::{MonoTimeNs, monotonic_now};
 const WARMUP_SECONDS: f64 = 5.0;
 
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
-    let [rgb, model, out, threads] = args else {
-        return Err("usage: cargo xtask tracking-replay <640x360-30fps.rgb> <model.vrm> <new-output-directory> <logical-cpus>".into());
+    let [rgb, model, out, threads, presentation] = args else {
+        return Err("usage: cargo xtask tracking-replay <640x360-30fps.rgb> <model.vrm> <new-output-directory> <logical-cpus> <vsync|uncapped>".into());
+    };
+    let present_mode = match presentation.as_str() {
+        "vsync" => bevy::window::PresentMode::AutoVsync,
+        "uncapped" => bevy::window::PresentMode::AutoNoVsync,
+        _ => return Err("presentation must be vsync or uncapped".into()),
     };
     let threads = threads
         .parse::<std::num::NonZeroUsize>()
@@ -87,6 +92,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "RusTuberV recorded-camera measurement".into(),
+                        present_mode,
                         ..default()
                     }),
                     ..default()
@@ -126,6 +132,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             finished: false,
             pictures: Vec::new(),
             threads,
+            presentation: presentation.clone(),
         })
         .add_systems(First, |mut m: ResMut<Measurement>| m.frame_started = Instant::now())
         // Exit is published before the shell's ordered Last-stage shutdown.
@@ -158,12 +165,14 @@ struct Measurement {
     finished: bool,
     pictures: Vec<(PathBuf, Image)>,
     threads: usize,
+    presentation: String,
 }
 
 #[derive(Serialize)]
 struct Row {
     video_seconds: f64,
     frame_ms: f64,
+    main_interval_ms: f64,
     main_world_ms: f64,
     face_inference_ms: Option<f64>,
     pose_hand_inference_ms: Option<f64>,
@@ -189,7 +198,7 @@ fn measure(world: &mut World) {
             Ok(false) => {}
             Ok(true) => {
                 m.finished = true;
-                match finish(&m) {
+                match finish(world, &m) {
                     Ok(()) => {
                         world.write_message(AppExit::Success);
                     }
@@ -291,7 +300,11 @@ fn sample(world: &mut World, m: &mut Measurement) -> Result<bool, String> {
     let diagnostics = world.resource::<DiagnosticsSnapshot>();
     m.rows.push(Row {
         video_seconds: seconds,
-        frame_ms: now.0.saturating_sub(previous.0) as f64 / 1e6,
+        // Match Bevy's production FPS diagnostic: pipelined rendering sends
+        // its clock to Time<Real>. Last-to-Last also includes varying main
+        // work within the frame and is retained as a separate observation.
+        frame_ms: world.resource::<Time<Real>>().delta_secs_f64() * 1000.0,
+        main_interval_ms: now.0.saturating_sub(previous.0) as f64 / 1e6,
         main_world_ms: m.frame_started.elapsed().as_secs_f64() * 1000.0,
         face_inference_ms: face_ms,
         pose_hand_inference_ms: pose_ms,
@@ -325,7 +338,7 @@ fn distribution(values: impl Iterator<Item = f64>) -> serde_json::Value {
     json!({ "samples": values.len(), "mean": values.iter().sum::<f64>() / values.len() as f64, "p50": percentile(0.5), "p95": percentile(0.95), "p99": percentile(0.99), "max": values.last() })
 }
 
-fn finish(m: &Measurement) -> Result<(), String> {
+fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
     for (path, image) in &m.pictures {
         image
             .clone()
@@ -357,10 +370,30 @@ fn finish(m: &Measurement) -> Result<(), String> {
         return Err("incomplete pipeline: face, Pose/Hand and admitted tracked arms are required; partial trace retained".into());
     }
     let duration = last.video_seconds - first.video_seconds;
+    let adapter = world
+        .get_resource::<bevy::render::renderer::RenderAdapterInfo>()
+        .map(|info| {
+            json!({
+                "name": info.name, "backend": format!("{:?}", info.backend),
+                "device_type": format!("{:?}", info.device_type), "driver": info.driver,
+                "driver_info": info.driver_info,
+            })
+        });
+    let window = world
+        .query_filtered::<&Window, With<bevy::window::PrimaryWindow>>()
+        .iter(world)
+        .next()
+        .map(|window| json!({
+            "width": window.physical_width(), "height": window.physical_height(),
+            "present_mode": format!("{:?}", window.present_mode),
+            "desired_maximum_frame_latency": window.desired_maximum_frame_latency.map(|n| n.get()),
+        }));
     let summary = json!({
+        "adapter": adapter, "window": window,
         "warmup_seconds": WARMUP_SECONDS, "duration_seconds": duration,
         "available_parallelism": std::thread::available_parallelism().ok().map(|v| v.get()),
         "task_thread_budget": m.threads,
+        "presentation": m.presentation,
         "task_pool_threads": {
             "compute": bevy::tasks::ComputeTaskPool::get().thread_num(),
             "async_compute": bevy::tasks::AsyncComputeTaskPool::get().thread_num(),
@@ -370,6 +403,8 @@ fn finish(m: &Measurement) -> Result<(), String> {
         "latency_scope": "scheduled video capture to main-world admitted arm pose; not GPU presentation or photon latency",
         "fps": rows.len() as f64 * 1000.0 / frames_ms,
         "frame_ms": distribution(rows.iter().map(|r| r.frame_ms)),
+        "main_interval_ms": distribution(rows.iter().map(|r| r.main_interval_ms)),
+        "wall_fps": rows.len() as f64 * 1000.0 / rows.iter().map(|r| r.main_interval_ms).sum::<f64>(),
         "main_world_ms": distribution(rows.iter().map(|r| r.main_world_ms)),
         "face_hz": (last.face_frames - first.face_frames) as f64 / duration,
         "pose_hand_hz": (last.pose_hand_frames - first.pose_hand_frames) as f64 / duration,

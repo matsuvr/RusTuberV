@@ -33,22 +33,34 @@ WindowsでRustの`available_parallelism`がaffinity制限前の個数を返す�
 OSスレッド数の合計はCPU予算と一致するとは限らない。
 MediaPipeや描画ドライバーのプロセス内スレッドも同じ
 CPU集合を使う。現在の許可マスクの下位から選び、実際のマスクを記録する。
+`-ProcessorAffinity 0x15` のように3ビットのマスクを指定することもできる。
+このi9-13900では `0x7` は2物理コアを共有する3論理CPU、`0x15` は3物理コアの
+各1スレッドである。CPU番号と物理コアの対応は機種固有なので、他のPCへそのまま
+当てはめない。比較前後で同じマスクを使う。
+今回のPCで記録した比較を再現する場合は、上のコマンドへ
+`-ProcessorAffinity 0x15` を追加する。
 SMT・CPU世代・GPU性能・電力制限は別なので、廉価ノート実機との同等性は主張しない。
 [Windowsのプロセス継承仕様](https://learn.microsoft.com/en-us/windows/win32/procthread/inheritance)
 に従い、親のaffinityは実行後に戻す。
 
 `data/performance/<日時>-<タグ>-<動画名>/` に保存するもの:
 
-- `metadata.json`: 動画・VRM・実行ファイルのSHA-256、Git状態、CPU制限。
+- `metadata.json`: 動画・VRM・実行ファイル・追従設定・モデルmanifestのSHA-256、Git状態、CPU制限。
 - `working-tree.patch`: 追跡対象ファイルの未コミット差分。実行ファイルの内容を証明する
   ものではないので、修正後は再ビルドする。
 - `comparison.csv`: 各回のfps、フレームp95、推論頻度、腕遅延p95。
 - `run-N/summary.json`: 最初の5秒を除いた分布と入力条件。
 - `run-N/frames.jsonl`: 全フレームの時間、推論回数、腕入力番号、最終関節位置・回転。
+- `run-N/tracking_profile.toml`: 実行時の追従設定の写し。
 - `run-N/avatar-XX.png`: 動画時刻に対応する表示画像。PNG圧縮は測定終了後に行う。
 - `run-N.log`: 起動・モデル・推論エラー等。
 
-`fps` / `frame_ms` は本番描画経路を動かしたアプリのフレーム周期。
+`fps` / `frame_ms` は画面内のBevy診断と同じ `Time<Real>` のフレーム周期。
+描画側から渡された時計を使い、平滑化やVirtual Timeの上限で長いフレームを隠さない。
+`wall_fps` / `main_interval_ms` はLastの測定地点同士の実時間間隔も保持する。
+通常は本番と同じVSyncを使う。`-Uncapped` は測定ウィンドウだけVSyncを解除し、
+60Hzの表示上限の背後にどれだけ処理余裕があるかを調べる。結果にはモードを保存し、
+VSyncありと上限解除を直接改善率として比較しない。本番のVSync設定は変えない。
 `main_world_ms` はFirstからLastの計測地点までで、GPUの実描画・表示完了時刻ではない。
 推論時間は新しい完了結果を観測したときだけ集計し、同じ値を描画tickごとに重複計上しない。
 描画が遅く複数結果が飛ばされたとき、その間の各推論時間は復元しない。
@@ -64,3 +76,6 @@ CPU使用率は既存のBevy診断値で、ホスト全体の論理CPU数を分�
 
 物理カメラのセンサー・ドライバー、動画のオフライン復号、NDI送信、画面発光までの
 遅延はこの測定に含まれない。動画と生成ファイルはgitignore対象の `data/` に留める。
+
+3論理CPUでの実測値、採用・撤回した軽量化、内蔵GPUを含む限界は
+[上肢ADRの最終候補の実測](adr/2026-10-03-upper-limb-anatomy.md#最終候補の実測)を参照。

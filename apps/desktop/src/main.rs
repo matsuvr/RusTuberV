@@ -100,10 +100,12 @@ fn run() -> Result<(), StartupError> {
         AssetSourceBuilder::platform_default(asset_source_root(&managed_root)?, None),
     );
 
-    // Keep pose work off the frame pool, but give it half the task-thread
-    // budget on small CPUs. Bevy's four-thread cap and the IO/frame minima
-    // remain in place (a four-thread budget becomes IO 1 / pose 2 / frame 1).
-    let mut pools = bevy::app::TaskPoolOptions::default();
+    // Budget this single-avatar app for three CPUs, including on larger hosts.
+    // The IO/frame minima remain; this is a worker budget, not OS affinity.
+    let mut pools = bevy::app::TaskPoolOptions {
+        max_total_threads: 3,
+        ..default()
+    };
     pools.async_compute.percent = 0.5;
     let mut app = App::new();
     app.insert_resource(sources)

@@ -46,7 +46,7 @@ fn print_help() {
     println!("  mediapipe-pose-probe     Guided MediaPipe neutral-relative pose proof");
     println!("  vrm-render <path> <out>  Render the rich-look switching sequence");
     println!(
-        "  tracking-replay <rgb> <vrm> <out> <cpus>  Measure recorded camera input through the full app"
+        "  tracking-replay <rgb> <vrm> <out> <cpus> <vsync|uncapped>  Measure recorded camera input through the full app"
     );
     println!("  ndi <command>           Stage or verify a Windows NDI release package");
 }

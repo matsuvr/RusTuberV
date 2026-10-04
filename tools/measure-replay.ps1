@@ -3,8 +3,10 @@ param(
     [Parameter(Mandatory = $true)][string]$Model,
     [ValidateRange(1, 20)][int]$Runs = 3,
     [ValidateRange(1, 63)][int]$LogicalProcessors = 3,
+    [long]$ProcessorAffinity = 0,
     [string]$Tag = 'replay',
     [string]$Ffmpeg,
+    [switch]$Uncapped,
     [switch]$NoBuild
 )
 
@@ -12,6 +14,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $repo
 $modelPath = (Resolve-Path -LiteralPath $Model).Path
+$presentation = if ($Uncapped) { 'uncapped' } else { 'vsync' }
 if (!$Ffmpeg) {
     $command = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if ($command) { $Ffmpeg = $command.Source }
@@ -44,21 +47,35 @@ foreach ($clip in $Video) {
     $originalAffinity = $hostProcess.ProcessorAffinity
     $measurementAffinity = 0L
     $selectedProcessors = 0
+    $allowedAffinity = $originalAffinity.ToInt64()
+    if ($ProcessorAffinity -ne 0) {
+        if ($ProcessorAffinity -lt 0 -or ($ProcessorAffinity -band $allowedAffinity) -ne $ProcessorAffinity) {
+            throw 'ProcessorAffinity must be a positive subset of the current process affinity.'
+        }
+        $allowedAffinity = $ProcessorAffinity
+    }
     for ($bit = 0; $bit -lt 63 -and $selectedProcessors -lt $LogicalProcessors; $bit++) {
         $bitMask = 1L -shl $bit
-        if (($originalAffinity.ToInt64() -band $bitMask) -ne 0) {
+        if (($allowedAffinity -band $bitMask) -ne 0) {
             $measurementAffinity = $measurementAffinity -bor $bitMask
             $selectedProcessors++
         }
     }
     if ($selectedProcessors -ne $LogicalProcessors) { throw 'The requested logical CPUs are not available in the current affinity mask.' }
+    if ($ProcessorAffinity -ne 0 -and $measurementAffinity -ne $ProcessorAffinity) {
+        throw 'ProcessorAffinity must contain exactly LogicalProcessors bits.'
+    }
     $runRoot = Join-Path $repo ('data/performance/{0}-{1}-{2}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), ($Tag -replace '[^a-zA-Z0-9_-]', '_'), [IO.Path]::GetFileNameWithoutExtension($videoPath))
     New-Item -ItemType Directory -Path $runRoot | Out-Null
     $metadata = [ordered]@{
         video = $videoPath; video_sha256 = $videoHash; model = $modelPath; model_sha256 = $modelHash
         executable_sha256 = $exeHash; git_head = (& git rev-parse HEAD); git_status = @(& git status --short)
         input = 'RGB8 640x360 30fps'; runs = $Runs; adapter_request = $env:WGPU_ADAPTER_NAME
+        backend_request = $env:WGPU_BACKEND
         logical_processors = $LogicalProcessors; processor_affinity = $measurementAffinity
+        presentation = $presentation
+        tracking_profile_sha256 = if (Test-Path -LiteralPath 'tracking_profile.toml') { (Get-FileHash -LiteralPath 'tracking_profile.toml').Hash.ToLowerInvariant() } else { 'generated default on first run' }
+        model_manifest_sha256 = (Get-FileHash -LiteralPath 'assets/models/manifest.toml').Hash.ToLowerInvariant()
         measurement = 'Real Face/Pose/Hand, tracking, anatomy solver and desktop rendering. Physical camera driver and NDI are excluded.'
     }
     $metadata | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runRoot 'metadata.json') -Encoding UTF8
@@ -74,13 +91,14 @@ foreach ($clip in $Video) {
             # Windows children inherit affinity; set it BEFORE Bevy/MediaPipe start.
             $hostProcess.ProcessorAffinity = [IntPtr]$measurementAffinity
             $ErrorActionPreference = 'Continue'
-            & $exe tracking-replay $rgb $modelPath $out $LogicalProcessors *> $log
+            & $exe tracking-replay $rgb $modelPath $out $LogicalProcessors $presentation *> $log
             $replayExit = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = 'Stop'
             $hostProcess.ProcessorAffinity = $originalAffinity
         }
         if ($replayExit -ne 0) { throw "Replay failed: see $log" }
+        Copy-Item -LiteralPath 'tracking_profile.toml' -Destination (Join-Path $out 'tracking_profile.toml')
         $summary = Get-Content -LiteralPath (Join-Path $out 'summary.json') -Raw | ConvertFrom-Json
         $results += [pscustomobject]@{
             Run = $run; FPS = $summary.fps; FrameP95ms = $summary.frame_ms.p95
