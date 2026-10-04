@@ -6954,6 +6954,7 @@ name = "vtuber-camera"
 version = "0.1.0"
 dependencies = [
  "nokhwa",
+ "nokhwa-bindings-macos",
  "thiserror 2.0.19",
  "vtuber-core",
 ]

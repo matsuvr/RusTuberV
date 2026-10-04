@@ -159,6 +159,8 @@ fn resource_root() -> PathBuf {
     {
         candidates.push(parent.to_path_buf());
         candidates.push(parent.join("resources"));
+        #[cfg(target_os = "macos")]
+        candidates.push(parent.join("../Resources"));
     }
     if let Ok(current_dir) = std::env::current_dir() {
         candidates.push(current_dir);

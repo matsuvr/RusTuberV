@@ -1,5 +1,21 @@
 # Third-party notices
 
+## Bundled UI fonts
+
+The UI embeds the same OTF files on Windows and macOS, without loading system
+fonts. Japanese and English prefer LINE Seed JP, Korean prefers LINE Seed KR,
+and Chinese prefers Noto Sans CJK SC. All three remain available for mixed text.
+
+- `assets/fonts/LINESeedJP_A_OTF_Rg.otf` and `assets/fonts/LINESeedKR-Rg.otf`:
+  © LY Corporation. [LINE Seed](https://seed.line.me/) is licensed under
+  SIL OFL 1.1; see `assets/fonts/LICENSE-LINESeed.txt`.
+- `assets/fonts/NotoSansCJKsc-VF.otf`: © 2014-2021 Adobe
+  (http://www.adobe.com/), with Reserved Font Name 'Source'.
+  [Noto Sans CJK](https://github.com/notofonts/noto-cjk/tree/main/Sans) is
+  licensed under SIL OFL 1.1; see `assets/fonts/LICENSE-NotoSansCJK.txt`.
+
+The license texts are also embedded in the application's OSS licenses view.
+
 ## UmebocDC hand poses (converted data)
 
 `crates/vtuber-tracking/src/hand_poses/catalog.rs` includes 20 adapted poses

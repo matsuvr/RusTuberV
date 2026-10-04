@@ -17,6 +17,7 @@ nokhwa = { version = "=0.10.11", default-features = false, features = ["input-ms
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nokhwa = { version = "=0.10.11", default-features = false, features = ["input-avfoundation", "decoding"] }
+nokhwa-bindings-macos = "=0.2.4"
 
 [dev-dependencies]
 
