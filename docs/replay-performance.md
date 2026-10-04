@@ -154,6 +154,9 @@ Faceは27.57–29.92Hz、Pose/Handは29.92–30.02Hzで継続している。
 「Present API内で33ms待った」「腕交差だけでGPU描画が重くなった」とは説明できない。
 CPU側の処理・スケジューリング・描画同期を区別するには追加のCPUトレースが必要で、
 この記録だけから主因を断定しない。GPU値はOSトレース由来の参考値である。
+追加の `wpr -start CPU -filemode` は、現在の実行環境で
+`Failed to enable the policy to profile system performance`（`0xc5585011`）となり
+開始できなかった。CPUトレースを取得・解析済みとはしない。
 
 標準エンジンの同期方法に照合して、次の2案も各4走行ずつ試した。
 
