@@ -23,6 +23,8 @@ use crate::privacy_preview::build_privacy_preview;
 pub enum CameraBackendKind {
     /// Windows Media Foundation. Failure never falls back to Mock.
     Msmf,
+    /// macOS AVFoundation.
+    AvFoundation,
     /// Explicit development input, not a real camera.
     Mock,
 }
@@ -33,16 +35,19 @@ impl CameraBackendKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Msmf => "MSMF",
+            Self::AvFoundation => "AVFoundation",
             Self::Mock => "Mock",
         }
     }
 }
 
-/// Chooses the implemented OS default; real macOS capture is not implemented.
+/// Chooses the native camera backend on Windows and macOS.
 #[must_use]
 pub const fn default_camera_backend() -> CameraBackendKind {
     if cfg!(target_os = "windows") {
         CameraBackendKind::Msmf
+    } else if cfg!(target_os = "macos") {
+        CameraBackendKind::AvFoundation
     } else {
         CameraBackendKind::Mock
     }
@@ -63,6 +68,8 @@ pub struct CaptureRuntime {
     pose_slot: Option<Arc<LatestSlot<VideoFrame>>>,
     /// Whether the worker thread has been started.
     worker_started: bool,
+    #[cfg(target_os = "macos")]
+    camera_permission: vtuber_camera::backend::avfoundation::CameraPermission,
     /// Last-read generation for the frame slot.
     last_generation: u64,
 }
@@ -94,6 +101,8 @@ impl CaptureRuntime {
         Self {
             controller: CaptureController::with_pose_output(pose_slot.clone()),
             backend,
+            #[cfg(target_os = "macos")]
+            camera_permission: Default::default(),
             pose_slot,
             worker_started: false,
             last_generation: 0,
@@ -139,6 +148,14 @@ impl CaptureRuntime {
                 #[cfg(not(target_os = "windows"))]
                 return Err("MSMF is unavailable on this platform".to_owned());
             }
+            CameraBackendKind::AvFoundation => {
+                #[cfg(target_os = "macos")]
+                self.controller
+                    .start_worker(vtuber_camera::backend::avfoundation::AvFoundationBackend)
+                    .map_err(|error| error.to_string())?;
+                #[cfg(not(target_os = "macos"))]
+                return Err("AVFoundation is unavailable on this platform".to_owned());
+            }
         }
 
         self.worker_started = true;
@@ -163,7 +180,30 @@ impl CaptureRuntime {
                     Err("MSMF is unavailable on this platform".to_owned())
                 }
             }
+            CameraBackendKind::AvFoundation => {
+                #[cfg(target_os = "macos")]
+                {
+                    vtuber_camera::backend::avfoundation::AvFoundationBackend
+                        .enumerate()
+                        .map_err(|error| error.to_string())
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Err("AVFoundation is unavailable on this platform".to_owned())
+                }
+            }
         }
+    }
+
+    fn poll_camera_permission(&mut self) -> Option<Result<(), String>> {
+        #[cfg(target_os = "macos")]
+        if self.backend == CameraBackendKind::AvFoundation {
+            return self
+                .camera_permission
+                .poll()
+                .map(|result| result.map_err(|error| error.to_string()));
+        }
+        Some(Ok(()))
     }
 
     /// Starts capture with the given device.
@@ -397,8 +437,10 @@ pub(crate) fn capture_bridge_system(
     // Handle camera enumeration refresh independently from start/stop
     // acknowledgements. Refreshing while the pipeline is running must not
     // accidentally stop or restart the worker.
-    if orchestrator.camera_refresh_requested() {
-        match capture.enumerate_cameras() {
+    if orchestrator.camera_refresh_requested()
+        && let Some(permission) = capture.poll_camera_permission()
+    {
+        match permission.and_then(|()| capture.enumerate_cameras()) {
             Ok(cameras) => orchestrator.set_camera_list(cameras),
             Err(error) => orchestrator.set_last_error(Some(
                 crate::orchestrator::OrchestratorError::CameraFailed(error),
@@ -495,6 +537,7 @@ mod preview_tests {
     #[test]
     fn backend_names_follow_the_explicit_selection() {
         assert_eq!(CameraBackendKind::Msmf.name(), "MSMF");
+        assert_eq!(CameraBackendKind::AvFoundation.name(), "AVFoundation");
         assert_eq!(CameraBackendKind::Mock.name(), "Mock");
         let runtime = CaptureRuntime::with_backend(CameraBackendKind::Mock);
         assert_eq!(runtime.backend_kind(), CameraBackendKind::Mock);
@@ -510,6 +553,9 @@ mod preview_tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn unimplemented_real_backend_never_silently_switches_to_mock() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(default_camera_backend(), CameraBackendKind::AvFoundation);
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(default_camera_backend(), CameraBackendKind::Mock);
         let mut runtime = CaptureRuntime::with_backend(CameraBackendKind::Msmf);
         assert!(runtime.enumerate_cameras().is_err());

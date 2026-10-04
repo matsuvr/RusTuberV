@@ -2,8 +2,8 @@
 //!
 //! Native camera objects are constructed, opened, used, stopped, and dropped
 //! inside the capture worker. Backend buffers and OS handles are never exposed.
-//! Windows uses the Media Foundation backend. Other desktop targets, including
-//! macOS, currently select an explicit development mock, not a real camera.
+//! Windows uses Media Foundation; macOS uses AVFoundation after authorization.
+//! Other targets select an explicit development mock, not a real camera.
 //! A failed real-camera request never silently changes into a mock request.
 //!
 //! ```no_run

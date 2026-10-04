@@ -6,7 +6,7 @@
 | --- | --- |
 | vtuber-core | Engine- and platform-independent data, validated output frames/signals, slots and worker handles. |
 | vtuber-tracking | Engine-independent calibration, filtering, pose solving and tracking state. |
-| vtuber-camera | Camera ownership and capture worker; Windows Media Foundation and explicit development Mock. |
+| vtuber-camera | Camera ownership and capture worker; Windows Media Foundation, macOS AVFoundation and explicit development Mock. |
 | vtuber-inference | Rust preprocessing and inference workers, including the pinned native MediaPipe Tasks boundary. |
 | vtuber-avatar | VRM/Bevy scene, material, expression and tracking adapters. |
 | vtuber-app | Bevy orchestration, UI, settings, import and worker coordination. |
@@ -16,8 +16,8 @@
 
 The application also uses Bevy entities. Core and tracking remain engine-independent.
 MediaPipe calls native code: the complete inference dependency stack is not pure Rust.
-macOS currently uses an explicit development Mock; a production macOS camera backend
-is unimplemented/deferred. These changes do not claim new hardware or platform support.
+macOS uses AVFoundation after asynchronous camera authorization. Native device objects
+stay inside the capture worker; owned RGB8 frames cross into the shared pipeline.
 
 ## Acceptance, completion and ownership
 
