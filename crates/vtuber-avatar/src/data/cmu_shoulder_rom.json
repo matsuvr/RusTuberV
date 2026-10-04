@@ -1,7 +1,7 @@
 {
   "format": 1,
   "source": "CMU Graphics Lab Motion Capture Database",
-  "coordinates": "right anatomical T-reference, GH full quaternion principal scaled axis, radians",
+  "coordinates": "right anatomical T-reference, clavicle-relative humerus full quaternion principal scaled axis, radians",
   "inputs": [
     {
       "subject": 74,

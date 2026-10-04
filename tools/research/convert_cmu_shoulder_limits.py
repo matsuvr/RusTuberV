@@ -97,7 +97,7 @@ def main():
     axes=np.array([unit(np.array(v,dtype=float)) for v in DIRECTIONS])
     projected=cloud @ axes.T
     output={'format':1,'source':'CMU Graphics Lab Motion Capture Database',
-            'coordinates':'right anatomical T-reference, GH full quaternion principal scaled axis, radians',
+            'coordinates':'right anatomical T-reference, clavicle-relative humerus full quaternion principal scaled axis, radians',
             'inputs':inputs,'axes':axes.tolist(),'min':projected.min(axis=0).tolist(),'max':projected.max(axis=0).tolist()}
     args.output.write_text(json.dumps(output,indent=2)+'\n',encoding='utf-8')
     def rust_float(value):

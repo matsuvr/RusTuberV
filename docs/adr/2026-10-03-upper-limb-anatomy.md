@@ -1,6 +1,6 @@
 # 上肢の関節座標と制約（Epic #248）
 
-状態: 統合実装・確認中。Epic の完了記録ではない。
+状態: #249–#258 の本番統合を実装済み。確認範囲と制約は末尾に記録する。
 
 ## 初期姿勢
 
@@ -255,7 +255,11 @@ second-order correctionに従い、違反した境界の同じJacobianから最�
 大きい補正や未解決の違反を受理しない。数値上の正の余裕は既存のf32丸め幅で、
 人体可動域を緩める係数ではない。
 保持姿勢とneutral側から同じ目標姿勢を解き、許容解のうち残差が小さい方を採用する。
-通常のworkerは採用stepを4回まで進め、未収束の代替候補も次へ引き継ぐ。
+新しい観測seqは採用stepを1回進めて表示へ渡す。同じseqを再描画する間は
+4stepずつ継続し、毎stepのworker/経路の受け渡しで収束を遅らせない。
+新しい入力ではwarm側を優先し、その反復が止まった後、または許容解への
+復帰が必要な場合にneutral側の代替候補も進める。同一seqの継続中は両方を
+進め、未収束の代替候補を次へ引き継ぐ。この予算は人体制約を変えない。
 棄却stepはtrustを数値停止幅まで縮めるので、batch境界で同じ棄却を繰り返さない。
 姿勢が変わらないtrust縮小では同じJacobianを再利用し、採用stepでのみ破棄する。
 代替候補が収束済みで目標が変わった場合だけ、neutralから探索を再開する。
@@ -324,22 +328,69 @@ stepを先行計算する。終点が外部変更で失われた結果は接続�
 描画tickではこの認定済み経路のパラメータとFKだけを更新し、同じ形状クリップを
 繰り返さない。形状変更時は既存の再bindで経路を破棄する。
 
-## 統合版の確認記録（2026-10-04、進行中）
+## 統合版の確認記録（2026-10-04）
 
-Windows x86_64、Bevy 0.19。avatar lib 368件（SOCまでの構成）、
-arm_pose 7件、arm_virtual_hand 3件、body_motion_integration 12件、body_motion_trace 4件、
-schedule 3件を対象に確認する。shape morphの表示weightの反映と再bind、
-指curlからの欠測復帰、workerを通した同一seq保持/左右反射、199.99→200.01度の
-旧分岐と上下の極、quinticの端点速度、途中で胸を横切る経路の拒否を含む。
-CMU JSON/Rustは元ASF/AMCから再生成して完全一致を確認した。
+Windows 11 x86_64、Bevy 0.19、ローカル確認。
 
-既存のvrm-renderに一時的な合成入力を与え、Windows GPU出力を確認する。
-AvatarSample_CとInore（どちらもVRM 1.0）で、初期姿勢、開く、胸前交差、
-胸郭のひねり、握り/親指立て/つまみ/OK、手首屈伸、開いた姿勢への復帰、欠測を対象とする。
-通常の関節接続を誤って非貫通距離ゼロで固定する不具合と、近接した端点の極小面による
-経路判定の不整合をこの描画確認で修正した。確認用の制御入力は本番へ追加しない。
-合成入力によるVRM描画であり、実カメラの認識/追従精度とmacOSは未確認である。
-最終描画と対象ビルドの結果は確認後に追記する。
+- 最終構成の `cargo test -p vtuber-avatar --lib -j 1`: 369件成功。
+  shape morphの表示weightと再bind、固定骨長/斜め肘軸/CMC、連成域、指curlからの
+  欠測復帰、worker経由の同一seq保持/左右反射、199.99→200.01度の旧分岐と上下の極、
+  quinticの端点速度、端点が安全でも途中で胸を横切る経路の拒否を含む。
+- `cargo test -p vtuber-tracking --lib -j 1`: 329件成功。
+  肩/股関節4点fit、肩の前出し残差、胸郭欠測/校正保持、固定手ポーズを含む。
+- 直接の利用側の統合テスト60件成功: arm_ik 9、arm_pose 7、arm_profile 2、
+  arm_virtual_hand 3、binding 14、body_motion_integration 12、body_motion_trace 4、
+  idle_contract 6、schedule 3。
+- `cargo clippy -p vtuber-avatar -p vtuber-app -p xtask --lib --bins -j 1 -- -D warnings` と
+  `cargo build -p vtuber-desktop -j 1` が成功。`target/debug/RusTuberV.exe` を更新した。
+- CMU JSON/Rustは元ASF/AMCから再生成して完全一致を確認。
+  親指カタログは `UmebocDC_Hand.211010.zip` の元曲線から更新した。
+
+既存の `vrm-render` に一時的な合成入力を与え、Windows GPUで連続描画し、
+各入力後のPNGを確認した。制御入力・内部確認API・計測用出力は本番ソースから撤去した。
+VRM 0.xは元の `data/vrm_data/Sapphy.vrm`、VRM 1.0はInoreを使う。
+AvatarSample_Cも途中の確認に使ったが、これはVRM 1.0でありVRM 0.xの証拠には数えない。
+
+Sapphyでは初期姿勢を表示形状の制約内で認定し、その後の18入力（開く、胸前交差、
+交差を浅くする、胸郭0.35 radひねり、開き直し、肩の前出し/戻し、握り、親指立て、
+つまみ、OK、手首屈伸/戻し、欠測/再取得、胸に手を添える、両手を重ねる、挙上）が
+すべて `Feasible { converged: true }` に至った。交差/胸添え/重ねでは残差が
+それぞれ0.3821/0.5881/0.4939残り、観測への一致のために人体制約を緩めていない。
+初期の80度指定は手首目標であり、衣服に触れる場合の最終関節角を80度に強制しない。
+VRM 0.xの衣服の異常な広がりは、collider offsetのZ反転をsceneの正面化と
+区別する修正で解消した（[VRM互換記録](../compatibility/vrm-0x-1x-2026-08-14.md)）。
+
+Inoreでも同じ18入力がすべて `Feasible { converged: true }` に至った。
+交差/胸添え/重ねの残差は0.4737/0.5429/0.4368。非identityの胸restに対しても
+0.35 radの胸郭回転が入り、初期姿勢・袖と前腕の交差・手の接触の描画を確認した。
+握り/親指立て/つまみ/OKは両モデルでCMCを含む表示を確認した。詳細な手の画像は
+近接カメラでも確認し、親指立てを横倒しにするCMC符号の変更は採用していない。
+
+一時コードを外したrelease版 `vrm-managed-compat` も両形式で成功した。
+import→Ready→同一モデルの交換後の別generation、固定長の最終FK、idle、
+45フレームの頭/身体入力、40フレームの欠測、20フレームの再取得を確認した。
+非同期workerの結果をフレーム数だけで判断せず、各区間の最後のsource seqが
+`DynamicArmTargets`へ反映されるまで待ち、実際の頭の回転/再取得後の変化と有限値を検査した。
+入力区間終了後の実測待ち時間は次の通り（秒）。上限10秒の確認中に全件が反映された。
+
+| モデル/世代 | 動作 | 欠測 | 再取得 |
+| --- | ---: | ---: | ---: |
+| Sapphy / 初回 | 5.28 | 3.20 | 4.12 |
+| Sapphy / 交換後 | 4.90 | 3.12 | 5.73 |
+| Inore / 初回 | 3.41 | 0.58 | 1.21 |
+| Inore / 交換後 | 1.36 | 2.02 | 1.04 |
+
+この確認は頭の入力を胸郭観測へ変換したという意味ではない。Pose胸郭入力の
+頭からの独立性はbody integrationの数値確認と、前述の胸郭ひねり描画で別に確認した。
+検証用入力を外したxtaskのreleaseビルド、rustfmt、`git diff --check` も成功した。
+
+接触の多い入力では、認定姿勢を描画しながら数値的な改善が長く続く。
+Sapphyの胸前交差は最終収束まで105.6秒を要した。この値は先に表示された姿勢の
+初動遅延ではなく、固定入力を保持した後の探索完了までの時間である。
+即時収束や実時間追従性能を保証する確認ではない。通常の関節接続を誤って
+距離ゼロに固定する判定、微小面による切断の不整合、肩から頭への補償の先行適用、
+body姿勢を再度animation baseへ採用する累積も統合確認中に修正した。
+実カメラの認識/追従精度とmacOSは未確認である。
 
 SQPの原理: [Nocedal & Wright, Numerical Optimization](https://users.iems.northwestern.edu/~nocedal/book/toc.html)、
 [Cornell CS4220 SQP lecture](https://www.cs.cornell.edu/courses/cs4220/2026sp/lec/2026-04-29.html)。
