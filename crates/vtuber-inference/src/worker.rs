@@ -805,7 +805,6 @@ pub fn run_pose_worker(
     let mut last_processed_seq: Option<FrameSeq> = None;
 
     'worker: while !stop.is_stopped() {
-        let started = Instant::now();
         match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
             Some(ReadResult::New {
                 generation,
@@ -822,6 +821,8 @@ pub fn run_pose_worker(
                 }
                 last_processed_seq = Some(frame.seq);
 
+                // Measure inference work, excluding the wait for the next image.
+                let started = Instant::now();
                 match runtime.infer(&frame) {
                     Ok(pose) => {
                         let elapsed = started.elapsed();
