@@ -102,6 +102,9 @@ fn run() -> Result<(), StartupError> {
 
     let mut app = App::new();
     app.insert_resource(sources)
+        // Avatar output must keep its cadence while OBS or another app has focus.
+        // Window presentation still follows the existing VSync setting.
+        .insert_resource(bevy::winit::WinitSettings::continuous())
         .add_plugins(DefaultPlugins)
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
@@ -133,9 +136,7 @@ fn run() -> Result<(), StartupError> {
     // sine waves so the avatar apply path can be verified without a camera.
     #[cfg(feature = "dev-synthetic-input")]
     {
-        use vtuber_app::synthetic_tracking::{SyntheticTrackingSource, synthetic_tracking_system};
-        app.init_resource::<SyntheticTrackingSource>()
-            .add_systems(Update, synthetic_tracking_system);
+        // UiShellPlugin installs this source once, after the tracking bridge.
         bevy::log::warn!("dev-synthetic-input enabled: using synthetic tracking source");
     }
 

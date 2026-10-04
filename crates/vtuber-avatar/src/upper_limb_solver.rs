@@ -167,7 +167,7 @@ pub enum SolveStatus {
     NoFeasibleSolution,
     /// Render geometry could not be used for collision checks.
     InvalidGeometry(CollisionError),
-    /// The current transition could not be certified collision-free.
+    /// The current transition did not pass the continuous ROM/skin checks.
     BlockedPath,
 }
 
@@ -293,15 +293,14 @@ impl Problem<'_> {
     }
 
     pub fn evaluate(&self, state: [Option<ArmJoints>; 2]) -> Result<Evaluation, CollisionError> {
-        self.evaluate_pairs(state, None)
+        self.evaluate_geometry(self.kinematics(state)?, None)
     }
 
-    fn evaluate_pairs(
+    fn evaluate_geometry(
         &self,
-        state: [Option<ArmJoints>; 2],
+        mut evaluation: Evaluation,
         pairs: Option<&[bool]>,
     ) -> Result<Evaluation, CollisionError> {
-        let mut evaluation = self.kinematics(state)?;
         let length = self
             .chains
             .into_iter()
@@ -355,58 +354,72 @@ impl Problem<'_> {
         let h = f32::EPSILON.cbrt();
         let mut task_columns = Vec::new();
         let mut constraint_columns = Vec::new();
-        let mut columns = bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default)
-            .scope(|scope| {
-                for index in 0..18 {
-                    scope.spawn(async move {
-                        let mut task_column = Vec::new();
-                        let mut constraint_column = Vec::new();
-                        let mut minus = current;
-                        let mut plus = current;
-                        let change =
-                            |state: &mut [Option<ArmJoints>; 2], delta: f32| -> Option<f32> {
-                                if matches!(index % 9, 5 | 6)
-                                    && evaluation.arms.get(index / 9)?.as_ref()?.palm.is_none()
-                                {
-                                    return None;
-                                }
-                                let arm = state.get_mut(index / 9)?.as_mut()?;
-                                *arm.angles.get_mut(index % 9)? += delta;
-                                arm.bound();
-                                arm.angles.get(index % 9).copied()
-                            };
-                        let span = change(&mut plus, h)
-                            .zip(change(&mut minus, -h))
-                            .map(|(a, b)| a - b);
-                        if let Some(span) = span.filter(|v| *v > 0.0) {
-                            let a = self
-                                .evaluate_pairs(minus, Some(&evaluation.contact_pairs))
-                                .ok()?;
-                            let b = self
-                                .evaluate_pairs(plus, Some(&evaluation.contact_pairs))
-                                .ok()?;
-                            task_column.extend(
-                                a.residuals
-                                    .iter()
-                                    .zip(b.residuals)
-                                    .map(|(a, b)| (b - a) / f64::from(span)),
-                            );
-                            constraint_column.extend(
-                                a.constraints
-                                    .iter()
-                                    .zip(b.constraints)
-                                    .map(|(a, b)| (b - a) / f64::from(span)),
-                            );
-                        } else {
-                            task_column
-                                .extend(std::iter::repeat_n(0.0, evaluation.residuals.len()));
-                            constraint_column
-                                .extend(std::iter::repeat_n(0.0, evaluation.constraints.len()));
+        // These jobs belong to the asynchronous pose solve. Sharing the ECS
+        // frame pool lets a render-critical task pick up a long collision job.
+        let mut columns = bevy::tasks::AsyncComputeTaskPool::get_or_init(
+            bevy::tasks::TaskPool::default,
+        )
+        .scope(|scope| {
+            for index in 0..18 {
+                scope.spawn(async move {
+                    let mut task_column = Vec::new();
+                    let mut constraint_column = Vec::new();
+                    let mut minus = current;
+                    let mut plus = current;
+                    let change = |state: &mut [Option<ArmJoints>; 2], delta: f32| -> Option<f32> {
+                        if matches!(index % 9, 5 | 6)
+                            && evaluation.arms.get(index / 9)?.as_ref()?.palm.is_none()
+                        {
+                            return None;
                         }
-                        Some((index, task_column, constraint_column))
-                    });
-                }
-            });
+                        let arm = state.get_mut(index / 9)?.as_mut()?;
+                        *arm.angles.get_mut(index % 9)? += delta;
+                        arm.bound();
+                        arm.angles.get(index % 9).copied()
+                    };
+                    let span = change(&mut plus, h)
+                        .zip(change(&mut minus, -h))
+                        .map(|(a, b)| a - b);
+                    if let Some(span) = span.filter(|v| *v > 0.0) {
+                        let a = self.kinematics(minus).ok()?;
+                        let b = self.kinematics(plus).ok()?;
+                        let moved = a
+                            .arms
+                            .iter()
+                            .zip(&b.arms)
+                            .filter_map(|(a, b)| a.as_ref().zip(b.as_ref()))
+                            .flat_map(|(a, b)| {
+                                a.motion.iter().filter_map(|(bone, motion)| {
+                                    (b.motion.get(bone) != Some(motion)).then_some(*bone)
+                                })
+                            })
+                            .collect();
+                        let pairs = self
+                            .geometry
+                            .differential_pairs(&evaluation.contact_pairs, &moved);
+                        let a = self.evaluate_geometry(a, Some(&pairs)).ok()?;
+                        let b = self.evaluate_geometry(b, Some(&pairs)).ok()?;
+                        task_column.extend(
+                            a.residuals
+                                .iter()
+                                .zip(b.residuals)
+                                .map(|(a, b)| (b - a) / f64::from(span)),
+                        );
+                        constraint_column.extend(
+                            a.constraints
+                                .iter()
+                                .zip(b.constraints)
+                                .map(|(a, b)| (b - a) / f64::from(span)),
+                        );
+                    } else {
+                        task_column.extend(std::iter::repeat_n(0.0, evaluation.residuals.len()));
+                        constraint_column
+                            .extend(std::iter::repeat_n(0.0, evaluation.constraints.len()));
+                    }
+                    Some((index, task_column, constraint_column))
+                });
+            }
+        });
         columns.sort_by_key(|column| column.as_ref().map(|c| c.0));
         for column in columns {
             let (_, tasks, constraints) = column?;
@@ -642,6 +655,10 @@ impl Problem<'_> {
         let mut converged = false;
         let mut accepted_steps = 0;
         let mut linearization = None;
+        // Resolve angles to about 0.006 degrees for avatar display. Finish
+        // feasible SQP steps at display resolution; feasibility/ROM margins
+        // and the finite-difference stencil retain their original precision.
+        const ANGLE_RESOLUTION: f32 = 1.0e-4;
         // Failed proposals contract trust until its numerical stopping
         // threshold. Do not restart that contraction at each work batch:
         // only accepted improvements spend the continuation budget.
@@ -663,7 +680,7 @@ impl Problem<'_> {
                 break;
             };
             let magnitude = delta.iter().copied().map(f32::abs).fold(0.0_f32, f32::max);
-            if magnitude <= 64.0 * f32::EPSILON && within_numeric_margin {
+            if magnitude <= ANGLE_RESOLUTION && within_numeric_margin {
                 converged = true;
                 break;
             }
@@ -729,9 +746,9 @@ impl Problem<'_> {
             }
             if accepted && evaluation.constraints.iter().all(|c| *c >= 0.0) {
                 // Backtracking may make the admitted step much smaller than
-                // the QP proposal. Stop at numerical resolution instead of
-                // queuing the same sub-ulp improvement on every render tick.
-                converged = magnitude * scale <= 64.0 * f32::EPSILON;
+                // the QP proposal. Stop at display resolution instead of
+                // queuing invisible improvements on every render tick.
+                converged = magnitude * scale <= ANGLE_RESOLUTION;
                 if converged {
                     break;
                 }
@@ -739,7 +756,13 @@ impl Problem<'_> {
             if !accepted {
                 trust *= 0.5;
             }
-            if trust <= 64.0 * f32::EPSILON {
+            if trust
+                <= if within_numeric_margin {
+                    ANGLE_RESOLUTION
+                } else {
+                    64.0 * f32::EPSILON
+                }
+            {
                 converged = evaluation.constraints.iter().all(|c| *c >= 0.0);
                 break;
             }

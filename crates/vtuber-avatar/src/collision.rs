@@ -35,6 +35,15 @@ pub(crate) struct SkinVertex {
     pub influences: Vec<(Entity, Vec3, f32)>,
 }
 
+/// Import-only coordinates. Equal joint indices/weights in one primitive
+/// share one affine skin map, even when they blend several bones.
+#[derive(Clone, PartialEq)]
+struct BindVertex {
+    source: Vec3,
+    blend: ([u16; 4], [u32; 4]),
+    skin: SkinVertex,
+}
+
 impl SkinVertex {
     fn posed(
         &self,
@@ -64,6 +73,16 @@ pub(crate) struct JointAllowance {
 pub(crate) struct CollisionGeometry {
     pub hulls: Vec<Hull>,
     pub joints: Vec<JointAllowance>,
+    pairs: Vec<CollisionPair>,
+    bones: Vec<Entity>,
+}
+
+#[derive(Clone, Debug)]
+struct CollisionPair {
+    a: usize,
+    b: usize,
+    joint: Option<usize>,
+    bones: Vec<Entity>,
 }
 
 struct SolverPairs<'a> {
@@ -253,7 +272,7 @@ pub(crate) fn bind_collision_geometry(
         let build = || -> Result<(CollisionGeometry, CollisionMorphs), CollisionError> {
             let mut morph_inputs = CollisionMorphs::default();
             let mut points = HashMap::<(Entity, Entity), Vec<Vec3>>::new();
-            let mut envelopes = HashMap::<(Entity, Entity), Vec<SkinVertex>>::new();
+            let mut envelopes = HashMap::<(Entity, Entity), Vec<BindVertex>>::new();
             let mut joints = connections.clone();
             let mut stack = vec![root.id()];
             while let Some(entity) = stack.pop() {
@@ -362,7 +381,11 @@ pub(crate) fn bind_collision_geometry(
                             }
                             skin_vertices.push((
                                 strongest.1.map(|(b, _)| b),
-                                SkinVertex { point, influences },
+                                BindVertex {
+                                    source: vertex,
+                                    blend: (*indices, weights.map(f32::to_bits)),
+                                    skin: SkinVertex { point, influences },
+                                },
                             ));
                             for joint in &mut joints {
                                 if joint.bones.iter().all(|bone| owners.contains(bone)) {
@@ -393,7 +416,7 @@ pub(crate) fn bind_collision_geometry(
                                     points
                                         .entry((*bone, entity))
                                         .or_default()
-                                        .push(vertex.point);
+                                        .push(vertex.skin.point);
                                     envelopes
                                         .entry((*bone, entity))
                                         .or_default()
@@ -403,8 +426,9 @@ pub(crate) fn bind_collision_geometry(
                             for joint in &mut joints {
                                 if joint.bones.iter().all(|b| owners.contains(b)) {
                                     for (_, vertex) in &corners {
-                                        joint.radius =
-                                            joint.radius.max(vertex.point.distance(joint.pivot));
+                                        joint.radius = joint
+                                            .radius
+                                            .max(vertex.skin.point.distance(joint.pivot));
                                     }
                                 }
                             }
@@ -422,13 +446,17 @@ pub(crate) fn bind_collision_geometry(
                             envelopes
                                 .entry((bone, entity))
                                 .or_default()
-                                .push(SkinVertex {
-                                    point,
-                                    influences: vec![(
-                                        skin_bone(entity, classify(entity)),
+                                .push(BindVertex {
+                                    source: point,
+                                    blend: ([0; 4], [1.0_f32.to_bits(), 0, 0, 0]),
+                                    skin: SkinVertex {
                                         point,
-                                        1.0,
-                                    )],
+                                        influences: vec![(
+                                            skin_bone(entity, classify(entity)),
+                                            point,
+                                            1.0,
+                                        )],
+                                    },
                                 });
                         }
                     }
@@ -461,16 +489,16 @@ pub(crate) fn bind_collision_geometry(
                     .collect();
                 let shape = ConvexPolyhedron::from_convex_hull(&points)
                     .ok_or(CollisionError::InvalidMesh)?;
-                let mut skin = envelopes.remove(&key).unwrap_or_default();
-                skin.sort_by(|a, b| {
-                    a.point
-                        .x
-                        .total_cmp(&b.point.x)
-                        .then(a.point.y.total_cmp(&b.point.y))
-                        .then(a.point.z.total_cmp(&b.point.z))
+                let mut vertices = envelopes.remove(&key).unwrap_or_default();
+                vertices.sort_by(|a, b| {
+                    a.blend
+                        .cmp(&b.blend)
+                        .then(a.source.x.total_cmp(&b.source.x))
+                        .then(a.source.y.total_cmp(&b.source.y))
+                        .then(a.source.z.total_cmp(&b.source.z))
                 });
-                skin.dedup();
-                skin = reduce_rigid_vertices(skin);
+                vertices.dedup();
+                let mut skin = reduce_skin_vertices(vertices);
                 skin.sort_by(|a, b| {
                     a.point
                         .x
@@ -500,7 +528,7 @@ pub(crate) fn bind_collision_geometry(
                     }
                 }
             }
-            Ok((CollisionGeometry { hulls, joints }, morph_inputs))
+            Ok((CollisionGeometry::new(hulls, joints), morph_inputs))
         };
 
         match build() {
@@ -521,26 +549,20 @@ pub(crate) fn bind_collision_geometry(
     }
 }
 
-// Vertices influenced by exactly one joint undergo the same affine map.
-// Their convex interior can never become an extreme point in any candidate.
-// Keep all blended vertices; reducing those by their rest hull would be wrong.
-fn reduce_rigid_vertices(vertices: Vec<SkinVertex>) -> Vec<SkinVertex> {
-    let mut rigid = HashMap::<Entity, Vec<SkinVertex>>::new();
-    let mut result = Vec::new();
+// A fixed set of skin weights is one affine map of source coordinates.
+// Its convex interior stays interior under any bone pose. Group before hull
+// reduction: vertices with different weights cannot share that guarantee.
+fn reduce_skin_vertices(vertices: Vec<BindVertex>) -> Vec<SkinVertex> {
+    let mut groups = std::collections::BTreeMap::<_, Vec<BindVertex>>::new();
     for vertex in vertices {
-        if let [(bone, _, 1.0)] = vertex.influences.as_slice() {
-            rigid.entry(*bone).or_default().push(vertex);
-        } else {
-            result.push(vertex);
-        }
+        groups.entry(vertex.blend).or_default().push(vertex);
     }
-    for vertices in rigid.into_values() {
+    let mut result = Vec::new();
+    for vertices in groups.into_values() {
         let points: Vec<_> = vertices
             .iter()
-            .map(|v| parry3d::math::Vector::from_array(v.point.to_array().map(f64::from)))
+            .map(|v| parry3d::math::Vector::from_array(v.source.to_array().map(f64::from)))
             .collect();
-        // A planar/linear group has no 3D hull; its source vertices still
-        // participate in the full envelope with the other groups.
         if let Some(hull) = ConvexPolyhedron::from_convex_hull(&points) {
             let extreme: std::collections::HashSet<_> = hull
                 .points()
@@ -550,10 +572,11 @@ fn reduce_rigid_vertices(vertices: Vec<SkinVertex>) -> Vec<SkinVertex> {
             result.extend(
                 vertices
                     .into_iter()
-                    .filter(|v| extreme.contains(&v.point.to_array().map(f32::to_bits))),
+                    .filter(|v| extreme.contains(&v.source.to_array().map(f32::to_bits)))
+                    .map(|v| v.skin),
             );
         } else {
-            result.extend(vertices);
+            result.extend(vertices.into_iter().map(|v| v.skin));
         }
     }
     result
@@ -582,9 +605,9 @@ pub enum CollisionError {
 }
 
 impl CollisionGeometry {
-    pub fn bones(&self) -> impl Iterator<Item = Entity> + '_ {
+    pub fn new(hulls: Vec<Hull>, joints: Vec<JointAllowance>) -> Self {
         let mut seen = std::collections::HashSet::new();
-        self.hulls
+        let bones = hulls
             .iter()
             .flat_map(|h| {
                 std::iter::once(h.bone).chain(
@@ -593,7 +616,89 @@ impl CollisionGeometry {
                         .flat_map(|s| s.influences.iter().map(|(b, _, _)| *b)),
                 )
             })
-            .filter(move |bone| seen.insert(*bone))
+            .chain(joints.iter().map(|joint| joint.pivot_bone))
+            .filter(|bone| seen.insert(*bone))
+            .collect();
+        let mut geometry = Self {
+            hulls,
+            joints,
+            pairs: Vec::new(),
+            bones,
+        };
+        let participates = |a: &Hull, b: &Hull| {
+            a.bone != b.bone
+                && !(a.region == Region::Torso && b.region == Region::Torso)
+                && !matches!((a.region,b.region), (Region::Hand(x),Region::Hand(y)) if x==y)
+        };
+        for (i, a) in geometry.hulls.iter().enumerate() {
+            for (j, b) in geometry.hulls.iter().enumerate().skip(i + 1) {
+                if !participates(a, b) {
+                    continue;
+                }
+                let joint = geometry.joints.iter().enumerate().find(|(_, j)| {
+                    if j.bones == [a.bone, b.bone] || j.bones == [b.bone, a.bone] {
+                        return true;
+                    }
+                    // Finger bases share the wrist connection with the
+                    // hand. Their separate hulls must not turn that
+                    // authored connection into forearm self-collision.
+                    let forearm = match (a.region, b.region) {
+                        (Region::Hand(x), Region::Forearm(y)) if x == y => Some((b.bone, x)),
+                        (Region::Forearm(x), Region::Hand(y)) if x == y => Some((a.bone, x)),
+                        _ => None,
+                    };
+                    forearm.is_some_and(|(bone, side)| {
+                        j.bones.contains(&bone)
+                            && j.bones.iter().any(|b| {
+                                geometry
+                                    .hulls
+                                    .iter()
+                                    .any(|h| h.bone == *b && h.region == Region::Hand(side))
+                            })
+                    })
+                });
+                let mut bones: Vec<_> = [a, b]
+                    .into_iter()
+                    .flat_map(|h| {
+                        std::iter::once(h.bone).chain(
+                            h.skin
+                                .iter()
+                                .flat_map(|v| v.influences.iter().map(|(bone, _, _)| *bone)),
+                        )
+                    })
+                    .collect();
+                if let Some((_, joint)) = joint {
+                    bones.push(joint.pivot_bone);
+                }
+                bones.sort_unstable();
+                bones.dedup();
+                geometry.pairs.push(CollisionPair {
+                    a: i,
+                    b: j,
+                    joint: joint.map(|(index, _)| index),
+                    bones,
+                });
+            }
+        }
+        geometry
+    }
+
+    /// A contact has zero derivative when none of its skin influences or
+    /// its allowed joint pivot moves. Do not rerun geometry for those rows.
+    pub fn differential_pairs(
+        &self,
+        active: &[bool],
+        moved: &std::collections::HashSet<Entity>,
+    ) -> Vec<bool> {
+        self.pairs
+            .iter()
+            .zip(active)
+            .map(|(pair, active)| *active && pair.bones.iter().any(|bone| moved.contains(bone)))
+            .collect()
+    }
+
+    pub fn bones(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.bones.iter().copied()
     }
     /// A positive result is separated/within an allowed joint connection;
     /// zero is contact, negative is forbidden volume overlap.
@@ -711,11 +816,6 @@ impl CollisionGeometry {
             motions.borrow_mut().insert(bone, value);
             Some(value)
         };
-        let participates = |a: &Hull, b: &Hull| {
-            a.bone != b.bone
-                && !(a.region == Region::Torso && b.region == Region::Torso)
-                && !matches!((a.region,b.region), (Region::Hand(x),Region::Hand(y)) if x==y)
-        };
         let mut inflated: Vec<Option<PosedHull>> = (0..self.hulls.len()).map(|_| None).collect();
         let pose_hull =
             |i: usize, h: &Hull| -> Result<PosedHull, CollisionError> {
@@ -745,233 +845,245 @@ impl CollisionGeometry {
                 PosedHull::new(points, padding(i))
             };
         let mut clearances = Vec::new();
-        for (i, a) in self.hulls.iter().enumerate() {
-            for (j, b) in self.hulls.iter().enumerate().skip(i + 1) {
-                if !participates(a, b) {
-                    continue;
+        for pair in &self.pairs {
+            let (i, j) = (pair.a, pair.b);
+            let (a, b) = (
+                self.hulls.get(i).ok_or(CollisionError::InvalidMesh)?,
+                self.hulls.get(j).ok_or(CollisionError::InvalidMesh)?,
+            );
+            let frozen = solver
+                .as_ref()
+                .and_then(|s| s.frozen)
+                .and_then(|pairs| pairs.get(clearances.len()))
+                .copied();
+            if frozen == Some(false) {
+                clearances.push(1.0);
+                if let Some(s) = solver.as_mut() {
+                    s.active.push(false);
                 }
-                let frozen = solver
-                    .as_ref()
-                    .and_then(|s| s.frozen)
-                    .and_then(|pairs| pairs.get(clearances.len()))
-                    .copied();
-                if frozen == Some(false) {
-                    clearances.push(1.0);
-                    if let Some(s) = solver.as_mut() {
-                        s.active.push(false);
-                    }
-                    continue;
+                continue;
+            }
+            // Pose a skin only when an evaluated pair needs it. Frozen
+            // inactive pairs are constant; a failed sweep can stop before
+            // touching the remaining render primitives.
+            for (index, hull) in [(i, a), (j, b)] {
+                let slot = inflated.get_mut(index).ok_or(CollisionError::InvalidMesh)?;
+                if slot.is_none() {
+                    *slot = Some(pose_hull(index, hull)?);
                 }
-                // Pose a skin only when an evaluated pair needs it. Frozen
-                // inactive pairs are constant; a failed sweep can stop before
-                // touching the remaining render primitives.
-                for (index, hull) in [(i, a), (j, b)] {
-                    let slot = inflated.get_mut(index).ok_or(CollisionError::InvalidMesh)?;
-                    if slot.is_none() {
-                        *slot = Some(pose_hull(index, hull)?);
-                    }
+            }
+            let margin = solver.as_ref().map_or(0.0, |s| s.margin);
+            let sa = inflated
+                .get(i)
+                .and_then(Option::as_ref)
+                .ok_or(CollisionError::InvalidMesh)?;
+            let sb = inflated
+                .get(j)
+                .and_then(Option::as_ref)
+                .ok_or(CollisionError::InvalidMesh)?;
+            let gap =
+                sa.centre.distance(sb.centre) - sa.radius - sb.radius - sa.padding - sb.padding;
+            if frozen != Some(true) && gap > margin {
+                clearances.push(gap);
+                if let Some(s) = solver.as_mut() {
+                    s.active.push(false);
                 }
-                let margin = solver.as_ref().map_or(0.0, |s| s.margin);
-                let sa = inflated
-                    .get(i)
-                    .and_then(Option::as_ref)
-                    .ok_or(CollisionError::InvalidMesh)?;
-                let sb = inflated
-                    .get(j)
-                    .and_then(Option::as_ref)
-                    .ok_or(CollisionError::InvalidMesh)?;
-                let gap =
-                    sa.centre.distance(sb.centre) - sa.radius - sb.radius - sa.padding - sb.padding;
-                if frozen != Some(true) && gap > margin {
-                    clearances.push(gap);
-                    if let Some(s) = solver.as_mut() {
-                        s.active.push(false);
-                    }
-                    continue;
-                }
-                let joint = self.joints.iter().enumerate().find(|(_, j)| {
-                    if j.bones == [a.bone, b.bone] || j.bones == [b.bone, a.bone] {
-                        return true;
-                    }
-                    // Finger bases share the wrist connection with the
-                    // hand. Their separate hulls must not turn that
-                    // authored connection into forearm self-collision.
-                    let forearm = match (a.region, b.region) {
-                        (Region::Hand(x), Region::Forearm(y)) if x == y => Some((b.bone, x)),
-                        (Region::Forearm(x), Region::Hand(y)) if x == y => Some((a.bone, x)),
-                        _ => None,
-                    };
-                    forearm.is_some_and(|(bone, side)| {
-                        j.bones.contains(&bone)
-                            && j.bones.iter().any(|b| {
-                                self.hulls
-                                    .iter()
-                                    .any(|h| h.bone == *b && h.region == Region::Hand(side))
-                            })
-                    })
-                });
-                // A natural joint allowance moves with its pivot. Enclose the
-                // endpoint skins in that translating frame, including the
-                // pivot's chord error, instead of eroding its ball by the
-                // entire first-order travel of the joint.
-                let relative_joint = if let Some(((index, joint), endpoint)) = joint.zip(endpoint) {
-                    let from = motion(joint.pivot_bone)
-                        .ok_or(CollisionError::MissingBone)?
-                        .point(joint.pivot);
-                    let to = endpoint(joint.pivot_bone)
-                        .ok_or(CollisionError::MissingBone)?
-                        .point(joint.pivot);
-                    Some((
-                        sa.relative_sweep(from, to, joint_padding(index))?,
-                        sb.relative_sweep(from, to, joint_padding(index))?,
-                    ))
+                continue;
+            }
+            let joint = pair
+                .joint
+                .and_then(|index| self.joints.get(index).map(|joint| (index, joint)));
+            // A natural joint allowance moves with its pivot. Enclose the
+            // endpoint skins in that translating frame, including the
+            // pivot's chord error, instead of eroding its ball by the
+            // entire first-order travel of the joint.
+            let relative_joint = if let Some(((index, joint), endpoint)) = joint.zip(endpoint) {
+                let from = motion(joint.pivot_bone)
+                    .ok_or(CollisionError::MissingBone)?
+                    .point(joint.pivot);
+                let to = endpoint(joint.pivot_bone)
+                    .ok_or(CollisionError::MissingBone)?
+                    .point(joint.pivot);
+                Some((
+                    sa.relative_sweep(from, to, joint_padding(index))?,
+                    sb.relative_sweep(from, to, joint_padding(index))?,
+                ))
+            } else {
+                None
+            };
+            let (sa, sb) = relative_joint.as_ref().map_or((sa, sb), |(a, b)| (a, b));
+            let ma = sa.motion();
+            let mb = sb.motion();
+            let joint_pivot = |joint: &JointAllowance| {
+                if relative_joint.is_some() {
+                    Ok(Vec3::ZERO)
                 } else {
-                    None
-                };
-                let (sa, sb) = relative_joint.as_ref().map_or((sa, sb), |(a, b)| (a, b));
-                let ma = sa.motion();
-                let mb = sb.motion();
-                let joint_pivot = |joint: &JointAllowance| {
-                    if relative_joint.is_some() {
-                        Ok(Vec3::ZERO)
-                    } else {
-                        motion(joint.pivot_bone)
-                            .ok_or(CollisionError::MissingBone)
-                            .map(|m| m.point(joint.pivot))
+                    motion(joint.pivot_bone)
+                        .ok_or(CollisionError::MissingBone)
+                        .map(|m| m.point(joint.pivot))
+                }
+            };
+            let joint_padding = |index| {
+                if relative_joint.is_some() {
+                    0.0
+                } else {
+                    joint_padding(index)
+                }
+            };
+            let lo = (sa.min - Vec3::splat(sa.padding)).max(sb.min - Vec3::splat(sb.padding));
+            let hi = (sa.max + Vec3::splat(sa.padding)).min(sb.max + Vec3::splat(sb.padding));
+            let box_gap = (lo - hi).max(Vec3::ZERO).length();
+            if frozen != Some(true) && box_gap > margin {
+                clearances.push(box_gap);
+                if let Some(s) = solver.as_mut() {
+                    s.active.push(false);
+                }
+                continue;
+            }
+            if frozen != Some(true)
+                && let Some((index, joint)) = joint
+            {
+                let pivot = joint_pivot(joint)?;
+                let radius = (lo - pivot).abs().max((hi - pivot).abs()).length();
+                let allowance = joint.radius - joint_padding(index) - radius;
+                if allowance >= margin {
+                    clearances.push(allowance);
+                    if let Some(s) = solver.as_mut() {
+                        s.active.push(false);
                     }
-                };
-                let joint_padding = |index| {
-                    if relative_joint.is_some() {
-                        0.0
-                    } else {
-                        joint_padding(index)
+                    continue;
+                }
+                // A 26-DOP encloses the same posed skin with a fixed number
+                // of support planes (Klosowski et al., 1998). Most natural
+                // joint overlaps fit inside their allowance without building
+                // either full polyhedron. Active finite differences always
+                // use the complete intersection below. Inflate by the stencil
+                // margin too: disjoint coarse hulls must not hide a near contact
+                // outside the joint ball from the solver's active set.
+                let radius = intersection_radius(
+                    [
+                        (sa.joint_bounds(), ma, sa.padding + margin),
+                        (sb.joint_bounds(), mb, sb.padding + margin),
+                    ],
+                    pivot,
+                    joint.radius - joint_padding(index) - margin,
+                );
+                let allowance = joint.radius - joint_padding(index) - radius;
+                if allowance > margin {
+                    clearances.push(allowance);
+                    if let Some(s) = solver.as_mut() {
+                        s.active.push(false);
                     }
-                };
+                    continue;
+                }
+            }
+            let relative = Pose::from_translation(
+                (sb.centre.as_dvec3() - sa.centre.as_dvec3())
+                    .to_array()
+                    .into(),
+            );
+            let prediction =
+                sa.centre.distance(sb.centre) + sa.radius + sb.radius + sa.padding + sb.padding;
+            // GJK queries the same convex envelope directly through its
+            // support map. No candidate-wide QuickHull rebuild is needed.
+            let contact = parry3d::query::details::contact_support_map_support_map(
+                &relative,
+                sa,
+                sb,
+                f64::from(prediction),
+            );
+            // No contact is also returned by EPA when penetration depth
+            // cannot be resolved. Our prediction encloses both bounds,
+            // so use the exact convex SAT in that case as well.
+            let mut distance = contact.map_or(0.0, |c| {
+                // GJK's converged contact distance is an approximation,
+                // not a lower bound for swept-volume admission. Its
+                // normal is a separating-plane candidate: project every
+                // support vertex in f64 to certify any positive gap.
+                let n = bevy::math::DVec3::from_array(c.normal1.to_array());
+                let high = bevy::math::DVec3::from_array(
+                    sa.support_vertex(n.to_array().into()).to_array(),
+                )
+                .dot(n);
+                let low = bevy::math::DVec3::from_array(
+                    sb.support_vertex((-n).to_array().into()).to_array(),
+                )
+                .dot(n);
+                let gap = (((sb.centre - sa.centre).as_dvec3().dot(n) + low - high) / n.length()
+                    - f64::from(sa.padding + sb.padding)) as f32;
+                if gap > 0.0 {
+                    gap
+                } else if c.dist < 0.0 {
+                    c.dist as f32
+                } else {
+                    0.0
+                }
+            });
+            if distance == 0.0 && joint.is_none() {
+                // GJK may report zero for a symmetric, penetrating pair
+                // when its initial simplex contains the origin. SAT on
+                // the actual polyhedra distinguishes volume from contact.
+                distance = polyhedron_separation(sa.polyhedron()?, ma, sb.polyhedron()?, mb)
+                    - sa.padding
+                    - sb.padding;
+            }
+            if distance <= 0.0
+                && let Some((joint_index, joint)) = joint
+            {
+                let pivot_padding = joint_padding(joint_index);
+                let pivot = joint_pivot(joint)?;
+                // A convex intersection is within a ball iff all its
+                // vertices are. Enumerate both sets of clipped edges;
+                // checking only GJK's deepest contact could hide a second
+                // penetration outside the natural joint connection.
                 let lo = (sa.min - Vec3::splat(sa.padding)).max(sb.min - Vec3::splat(sb.padding));
                 let hi = (sa.max + Vec3::splat(sa.padding)).min(sb.max + Vec3::splat(sb.padding));
-                let box_gap = (lo - hi).max(Vec3::ZERO).length();
-                if frozen != Some(true) && box_gap > margin {
-                    clearances.push(box_gap);
-                    if let Some(s) = solver.as_mut() {
-                        s.active.push(false);
-                    }
-                    continue;
-                }
-                if frozen != Some(true)
-                    && let Some((index, joint)) = joint
-                {
-                    let pivot = joint_pivot(joint)?;
-                    let radius = (lo - pivot).abs().max((hi - pivot).abs()).length();
-                    let allowance = joint.radius - joint_padding(index) - radius;
-                    if allowance >= margin {
-                        clearances.push(allowance);
-                        if let Some(s) = solver.as_mut() {
-                            s.active.push(false);
-                        }
-                        continue;
-                    }
-                }
-                let relative = Pose::from_translation(
-                    (sb.centre.as_dvec3() - sa.centre.as_dvec3())
-                        .to_array()
-                        .into(),
-                );
-                let prediction =
-                    sa.centre.distance(sb.centre) + sa.radius + sb.radius + sa.padding + sb.padding;
-                // GJK queries the same convex envelope directly through its
-                // support map. No candidate-wide QuickHull rebuild is needed.
-                let contact = parry3d::query::details::contact_support_map_support_map(
-                    &relative,
-                    sa,
-                    sb,
-                    f64::from(prediction),
-                );
-                // No contact is also returned by EPA when penetration depth
-                // cannot be resolved. Our prediction encloses both bounds,
-                // so use the exact convex SAT in that case as well.
-                let mut distance = contact.map_or(0.0, |c| {
-                    // GJK's converged contact distance is an approximation,
-                    // not a lower bound for swept-volume admission. Its
-                    // normal is a separating-plane candidate: project every
-                    // support vertex in f64 to certify any positive gap.
-                    let n = bevy::math::DVec3::from_array(c.normal1.to_array());
-                    let project = |p: &parry3d::math::Vector| {
-                        bevy::math::DVec3::from_array(p.to_array()).dot(n)
-                    };
-                    let high = sa
-                        .points
-                        .iter()
-                        .map(project)
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let low = sb.points.iter().map(project).fold(f64::INFINITY, f64::min);
-                    let gap = (((sb.centre - sa.centre).as_dvec3().dot(n) + low - high)
-                        / n.length()
-                        - f64::from(sa.padding + sb.padding)) as f32;
-                    if gap > 0.0 {
-                        gap
-                    } else if c.dist < 0.0 {
-                        c.dist as f32
-                    } else {
-                        0.0
-                    }
-                });
-                if distance == 0.0 {
-                    // GJK may report zero for a symmetric, penetrating pair
-                    // when its initial simplex contains the origin. SAT on
-                    // the actual polyhedra distinguishes volume from contact.
+                // The intersection lies inside the intersection of its
+                // AABBs. When even that box is inside the joint ball,
+                // no face clipping or QuickHull is necessary.
+                let box_radius = (lo - pivot).abs().max((hi - pivot).abs()).length();
+                let radius = if solver.is_none() && box_radius <= joint.radius - pivot_padding {
+                    box_radius
+                } else {
+                    intersection_radius(
+                        [
+                            (sa.polyhedron()?, ma, sa.padding),
+                            (sb.polyhedron()?, mb, sb.padding),
+                        ],
+                        pivot,
+                        if frozen == Some(true) {
+                            0.0
+                        } else {
+                            joint.radius - pivot_padding - margin
+                        },
+                    )
+                };
+
+                let allowed = joint.radius - pivot_padding - radius;
+                // A joint-contained intersection is admissible whether
+                // it is a surface or a volume. SAT is needed only outside
+                // that connection when GJK cannot distinguish the two.
+                if distance == 0.0 && allowed < 0.0 {
                     distance = polyhedron_separation(sa.polyhedron()?, ma, sb.polyhedron()?, mb)
                         - sa.padding
                         - sb.padding;
                 }
-                if distance <= 0.0
-                    && let Some((joint_index, joint)) = joint
-                {
-                    let pivot_padding = joint_padding(joint_index);
-                    let pivot = joint_pivot(joint)?;
-                    // A convex intersection is within a ball iff all its
-                    // vertices are. Enumerate both sets of clipped edges;
-                    // checking only GJK's deepest contact could hide a second
-                    // penetration outside the natural joint connection.
-                    let lo =
-                        (sa.min - Vec3::splat(sa.padding)).max(sb.min - Vec3::splat(sb.padding));
-                    let hi =
-                        (sa.max + Vec3::splat(sa.padding)).min(sb.max + Vec3::splat(sb.padding));
-                    // The intersection lies inside the intersection of its
-                    // AABBs. When even that box is inside the joint ball,
-                    // no face clipping or QuickHull is necessary.
-                    let box_radius = (lo - pivot).abs().max((hi - pivot).abs()).length();
-                    let radius = if solver.is_none() && box_radius <= joint.radius - pivot_padding {
-                        box_radius
-                    } else {
-                        intersection_radius(
-                            sa.polyhedron()?,
-                            ma,
-                            sa.padding,
-                            sb.polyhedron()?,
-                            mb,
-                            sb.padding,
-                            pivot,
-                        )
-                    };
-
-                    let allowed = joint.radius - pivot_padding - radius;
-                    distance = if allowed >= 0.0 {
-                        allowed
-                    } else {
-                        distance.max(allowed)
-                    };
-                }
-                if let Some(s) = solver.as_mut() {
-                    // An overlapping broad-phase box does not make the real
-                    // surfaces a contact. Freeze only actual near contacts
-                    // for the finite-difference stencil; all candidate poses
-                    // still evaluate every pair before they are accepted.
-                    s.active.push(frozen == Some(true) || distance <= margin);
-                }
-                clearances.push(distance);
-                if first_violation && distance < 0.0 {
-                    return Ok(clearances);
-                }
+                distance = if allowed >= 0.0 {
+                    allowed
+                } else {
+                    distance.max(allowed)
+                };
+            }
+            if let Some(s) = solver.as_mut() {
+                // An overlapping broad-phase box does not make the real
+                // surfaces a contact. Freeze only actual near contacts
+                // for the finite-difference stencil; all candidate poses
+                // still evaluate every pair before they are accepted.
+                s.active.push(frozen == Some(true) || distance <= margin);
+            }
+            clearances.push(distance);
+            if first_violation && distance < 0.0 {
+                return Ok(clearances);
             }
         }
         Ok(clearances)
@@ -982,6 +1094,7 @@ impl CollisionGeometry {
 /// needed for the natural-joint intersection test or degenerate GJK result.
 struct PosedHull {
     points: Vec<parry3d::math::Vector>,
+    support_bounds: Vec<(parry3d::math::Vector, parry3d::math::Vector)>,
     first: parry3d::math::Vector,
     centre: Vec3,
     radius: f32,
@@ -989,6 +1102,7 @@ struct PosedHull {
     max: Vec3,
     padding: f32,
     faces: std::cell::OnceCell<Result<HullFaces, CollisionError>>,
+    joint_bounds: std::cell::OnceCell<HullFaces>,
 }
 
 impl PosedHull {
@@ -1002,14 +1116,27 @@ impl PosedHull {
             .iter()
             .map(|p| p.distance(centre))
             .fold(0.0_f32, f32::max);
-        let points = points
+        let points: Vec<parry3d::math::Vector> = points
             .into_iter()
             .map(|p| {
                 parry3d::math::Vector::from_array((p.as_dvec3() - centre.as_dvec3()).to_array())
             })
             .collect();
+        let support_bounds = points
+            .chunks(32)
+            .map(|chunk| {
+                chunk.iter().fold(
+                    (
+                        parry3d::math::Vector::splat(f64::INFINITY),
+                        parry3d::math::Vector::splat(f64::NEG_INFINITY),
+                    ),
+                    |(min, max), p| (min.min(*p), max.max(*p)),
+                )
+            })
+            .collect();
         Ok(Self {
             points,
+            support_bounds,
             first: (first.as_dvec3() - centre.as_dvec3()).to_array().into(),
             centre,
             radius,
@@ -1017,6 +1144,7 @@ impl PosedHull {
             max,
             padding,
             faces: Default::default(),
+            joint_bounds: Default::default(),
         })
     }
     fn relative_sweep(&self, from: Vec3, to: Vec3, padding: f32) -> Result<Self, CollisionError> {
@@ -1044,17 +1172,81 @@ impl PosedHull {
             .as_ref()
             .map_err(|e| *e)
     }
+    fn support_vertex(&self, direction: parry3d::math::Vector) -> parry3d::math::Vector {
+        use parry3d::math::Vector;
+        let mut best = (self.first, self.first.dot(direction), 0);
+        let update = |best: &mut (Vector, f64, usize), index, p: Vector| {
+            let projection = p.dot(direction);
+            if projection > best.1 || (projection == best.1 && index < best.2) {
+                *best = (p, projection, index);
+            }
+        };
+        // A real point gives a lower bound; a block's positive AABB corner
+        // gives an upper bound. Keep exact support without scanning every
+        // skin vertex on each GJK iteration.
+        for (index, p) in self.points.iter().copied().enumerate().step_by(32) {
+            update(&mut best, index, p);
+        }
+        for (block, (points, &(min, max))) in
+            self.points.chunks(32).zip(&self.support_bounds).enumerate()
+        {
+            let upper = Vector::select(direction.cmpge(Vector::ZERO), max, min).dot(direction);
+            if upper < best.1 || (upper == best.1 && block * 32 >= best.2) {
+                continue;
+            }
+            for (offset, p) in points.iter().copied().enumerate() {
+                update(&mut best, block * 32 + offset, p);
+            }
+        }
+        best.0
+    }
+    fn joint_bounds(&self) -> &HullFaces {
+        self.joint_bounds.get_or_init(|| {
+            use bevy::math::DVec3;
+            // Only the initial enclosing box is needed by half-space clipping.
+            // Keep its eight corners instead of copying/scanning the skin again.
+            let (min, max) = self.support_bounds.iter().fold(
+                (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+                |(min, max), (a, b)| {
+                    (
+                        min.min(DVec3::from_array(a.to_array())),
+                        max.max(DVec3::from_array(b.to_array())),
+                    )
+                },
+            );
+            let mut points = Vec::with_capacity(8);
+            for x in [min.x, max.x] {
+                for y in [min.y, max.y] {
+                    for z in [min.z, max.z] {
+                        points.push(DVec3::new(x, y, z));
+                    }
+                }
+            }
+            let mut faces = Vec::with_capacity(26);
+            for x in [-1.0, 0.0, 1.0] {
+                for y in [-1.0, 0.0, 1.0] {
+                    for z in [-1.0, 0.0, 1.0] {
+                        if let Some(normal) = DVec3::new(x, y, z).try_normalize() {
+                            let extreme = self.support_vertex(normal.to_array().into());
+                            let support = normal.dot(DVec3::from_array(extreme.to_array()));
+                            faces.push((normal, normal * support));
+                        }
+                    }
+                }
+            }
+            HullFaces {
+                points,
+                faces,
+                edges: Vec::new(),
+            }
+        })
+    }
 }
 
 impl parry3d::shape::SupportMap for PosedHull {
     fn local_support_point(&self, direction: parry3d::math::Vector) -> parry3d::math::Vector {
-        let point = self.points.iter().copied().fold(self.first, |best, p| {
-            if p.dot(direction) > best.dot(direction) {
-                p
-            } else {
-                best
-            }
-        });
+        let point = self.support_vertex(direction);
+        // Preserve the original first-vertex tie rule, including flat faces.
         point
             + direction
                 .try_normalize()
@@ -1178,13 +1370,9 @@ fn polyhedron_separation(a: &HullFaces, ma: BoneMotion, b: &HullFaces, mb: BoneM
 /// edge of that outer polytope. Every retained polygon and cut face belongs
 /// to the same enclosing polytope, including after sweep inflation.
 fn intersection_radius(
-    a: &HullFaces,
-    ma: BoneMotion,
-    padding_a: f32,
-    b: &HullFaces,
-    mb: BoneMotion,
-    padding_b: f32,
+    [(a, ma, padding_a), (b, mb, padding_b)]: [(&HullFaces, BoneMotion, f32); 2],
     pivot: Vec3,
+    stop_radius: f32,
 ) -> f32 {
     use bevy::math::DVec3;
     fn point_order(a: &DVec3, b: &DVec3) -> std::cmp::Ordering {
@@ -1293,6 +1481,15 @@ fn intersection_radius(
                 (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
                 |(min, max), p| (min.min(*p), max.max(*p)),
             );
+            // Each intermediate polytope encloses the final intersection.
+            // Stop once even its box is inside the allowed joint ball.
+            let radius = (bounds.0 - pivot.as_dvec3())
+                .abs()
+                .max((bounds.1 - pivot.as_dvec3()).abs())
+                .length() as f32;
+            if radius < stop_radius {
+                return radius;
+            }
         }
     }
     polygons
@@ -1339,14 +1536,109 @@ mod tests {
     };
 
     #[test]
+    fn sparse_contact_derivatives_keep_minor_skin_influences_and_joint_pivots() {
+        let mut a = hull(1, Region::Torso, Vec3::splat(-0.5), Vec3::splat(0.5));
+        let b = hull(2, Region::Upper(ArmSide::Left), Vec3::ZERO, Vec3::ONE);
+        let minor = Entity::from_raw_u32(4).unwrap();
+        let pivot = Entity::from_raw_u32(5).unwrap();
+        a.skin = a
+            .shape
+            .points()
+            .iter()
+            .map(|p| {
+                let point = Vec3::from_array(p.to_array().map(|v| v as f32));
+                SkinVertex {
+                    point,
+                    influences: vec![(a.bone, point, 0.8), (minor, point, 0.2)],
+                }
+            })
+            .collect();
+        let joint = JointAllowance {
+            bones: [a.bone, b.bone],
+            pivot_bone: pivot,
+            pivot: Vec3::ZERO,
+            radius: 0.1,
+        };
+        let c = hull(
+            3,
+            Region::Forearm(ArmSide::Right),
+            Vec3::splat(0.25),
+            Vec3::splat(0.75),
+        );
+        let geometry = CollisionGeometry::new(vec![a, b, c], vec![joint]);
+        assert!(geometry.bones().any(|bone| bone == pivot));
+        let all = vec![true; geometry.pairs.len()];
+        for id in 1..=6 {
+            let moved = Entity::from_raw_u32(id).unwrap();
+            let sparse =
+                geometry.differential_pairs(&all, &std::collections::HashSet::from([moved]));
+            let evaluate = |delta: f32, pairs: &[bool]| {
+                geometry
+                    .solver_margins(
+                        |bone| {
+                            Some(BoneMotion {
+                                translation: if bone == moved {
+                                    Vec3::new(delta, delta * 0.5, 0.0)
+                                } else {
+                                    Vec3::ZERO
+                                },
+                                ..IDENTITY
+                            })
+                        },
+                        0.01,
+                        Some(pairs),
+                    )
+                    .unwrap()
+                    .0
+            };
+            let derivative = |pairs: &[bool]| {
+                evaluate(0.01, pairs)
+                    .into_iter()
+                    .zip(evaluate(-0.01, pairs))
+                    .map(|(a, b)| (a - b) / 0.02)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(derivative(&all), derivative(&sparse), "bone {id}");
+        }
+    }
+
+    #[test]
+    fn disjoint_joint_bounds_keep_near_contacts_outside_the_allowance_active() {
+        let a = hull(
+            1,
+            Region::Upper(ArmSide::Left),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.51, 0.01, 0.01),
+        );
+        let b = hull(
+            2,
+            Region::Forearm(ArmSide::Left),
+            Vec3::new(0.5105, 0.0, 0.0),
+            Vec3::new(0.5205, 0.01, 0.01),
+        );
+        let joint = JointAllowance {
+            bones: [a.bone, b.bone],
+            pivot_bone: b.bone,
+            pivot: Vec3::ZERO,
+            radius: 0.01,
+        };
+        let geometry = CollisionGeometry::new(vec![a, b], vec![joint]);
+        let (margins, active) = geometry
+            .solver_margins(|_| Some(IDENTITY), 0.001, None)
+            .unwrap();
+        assert_eq!(active, vec![true]);
+        assert!(margins[0] > 0.0 && margins[0] < 0.001);
+    }
+
+    #[test]
     fn solver_pairs_do_not_activate_at_a_bounding_sphere_contact() {
-        let geometry = CollisionGeometry {
-            hulls: vec![
+        let geometry = CollisionGeometry::new(
+            vec![
                 hull(1, Region::Torso, Vec3::splat(-1.0), Vec3::ONE),
                 hull(2, Region::Hand(ArmSide::Left), Vec3::splat(-1.0), Vec3::ONE),
             ],
-            joints: vec![],
-        };
+            vec![],
+        );
         for separation in [3.463, 3.464, 3.465] {
             let motion = |bone| {
                 Some(BoneMotion {
@@ -1375,13 +1667,13 @@ mod tests {
     #[test]
     fn solver_ignores_separated_surfaces_inside_overlapping_aabbs() {
         let size = Vec3::new(1.0, 0.05, 0.1);
-        let geometry = CollisionGeometry {
-            hulls: vec![
+        let geometry = CollisionGeometry::new(
+            vec![
                 hull(1, Region::Torso, -size, size),
                 hull(2, Region::Hand(ArmSide::Left), -size, size),
             ],
-            joints: vec![],
-        };
+            vec![],
+        );
         let motion = |bone| {
             Some(BoneMotion {
                 rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
@@ -1524,10 +1816,7 @@ mod tests {
             Vec3::new(-0.4, 1.05, 0.0),
             Vec3::new(0.4, 1.12, 0.07),
         );
-        let geometry = CollisionGeometry {
-            hulls: vec![body, forearm],
-            joints: vec![],
-        };
+        let geometry = CollisionGeometry::new(vec![body, forearm], vec![]);
         assert!(geometry.clearance(|_| Some(IDENTITY)).unwrap() < -0.01);
         let touch = BoneMotion {
             translation: Vec3::new(0.0, 0.0, 0.12),
@@ -1577,8 +1866,8 @@ mod tests {
             )
             .unwrap()
         };
-        let geometry = CollisionGeometry {
-            hulls: vec![
+        let geometry = CollisionGeometry::new(
+            vec![
                 Hull {
                     bone: a,
                     region: Region::Upper(ArmSide::Left),
@@ -1592,13 +1881,13 @@ mod tests {
                     skin: vec![],
                 },
             ],
-            joints: vec![JointAllowance {
+            vec![JointAllowance {
                 bones: [a, b],
                 pivot_bone: b,
                 pivot: Vec3::ZERO,
                 radius: 0.1,
             }],
-        };
+        );
         // The AABBs overlap far outside the joint; the actual hulls touch
         // only at its pivot. That permitted contact must not pin the IK.
         assert!(geometry.clearance(|_| Some(IDENTITY)).unwrap() > 0.09);
@@ -1624,18 +1913,17 @@ mod tests {
                 .iter()
                 .map(|p| point64(motion, *p).distance(motion.translation.as_dvec3()))
                 .fold(0.0_f64, f64::max);
-            let actual =
-                intersection_radius(&hull, motion, 0.0, &hull, motion, 0.0, motion.translation);
+            let actual = intersection_radius(
+                [(&hull, motion, 0.0), (&hull, motion, 0.0)],
+                motion.translation,
+                0.0,
+            );
             assert!((f64::from(actual) - expected).abs() < 4.0 * f64::from(f32::EPSILON));
             for padding in [1.0e-10, 1.0e-7, 1.0e-4] {
                 let inflated = intersection_radius(
-                    &hull,
-                    motion,
-                    padding,
-                    &hull,
-                    motion,
-                    padding,
+                    [(&hull, motion, padding), (&hull, motion, padding)],
                     motion.translation,
+                    0.0,
                 );
                 assert!(inflated + 4.0 * f32::EPSILON >= actual);
             }
@@ -1669,15 +1957,13 @@ mod tests {
             region: Region::Forearm(ArmSide::Left),
             ..a.clone()
         };
-        let geometry = CollisionGeometry {
-            joints: vec![JointAllowance {
-                bones: [a.bone, b.bone],
-                pivot_bone: b.bone,
-                pivot: Vec3::ZERO,
-                radius: 0.075,
-            }],
-            hulls: vec![a, b],
+        let joint = JointAllowance {
+            bones: [a.bone, b.bone],
+            pivot_bone: b.bone,
+            pivot: Vec3::ZERO,
+            radius: 0.075,
         };
+        let geometry = CollisionGeometry::new(vec![a, b], vec![joint]);
         for i in 0..25 {
             let motion = |bone| {
                 Some(BoneMotion {
@@ -1720,22 +2006,26 @@ mod tests {
             pivot: Vec3::ZERO,
             radius: 0.09,
         };
-        let geometry = CollisionGeometry {
-            hulls: vec![a, b],
-            joints: vec![joint],
-        };
+        let geometry = CollisionGeometry::new(vec![a, b], vec![joint]);
         let clearance = geometry.clearance(|_| Some(IDENTITY)).unwrap();
         assert!(
             clearance > 0.0,
             "joint clearance={clearance}, radius={}",
             intersection_radius(
-                &HullFaces::from_points(geometry.hulls[0].shape.points()).unwrap(),
-                IDENTITY,
+                [
+                    (
+                        &HullFaces::from_points(geometry.hulls[0].shape.points()).unwrap(),
+                        IDENTITY,
+                        0.0
+                    ),
+                    (
+                        &HullFaces::from_points(geometry.hulls[1].shape.points()).unwrap(),
+                        IDENTITY,
+                        0.0
+                    )
+                ],
+                Vec3::ZERO,
                 0.0,
-                &HullFaces::from_points(geometry.hulls[1].shape.points()).unwrap(),
-                IDENTITY,
-                0.0,
-                Vec3::ZERO
             )
         );
         let folded = BoneMotion {
@@ -1786,10 +2076,7 @@ mod tests {
             Vec3::new(-0.18, 0.9, -0.10),
             Vec3::new(0.18, 1.5, 0.10),
         );
-        let geometry = CollisionGeometry {
-            hulls: vec![body, arm.clone()],
-            joints: vec![],
-        };
+        let geometry = CollisionGeometry::new(vec![body, arm.clone()], vec![]);
         assert!(geometry.clearance(|_| Some(IDENTITY)).unwrap() < 0.0);
         let other = hull(
             2,
@@ -1797,11 +2084,68 @@ mod tests {
             Vec3::new(-0.2, 1.05, 0.01),
             Vec3::new(0.2, 1.10, 0.06),
         );
-        let geometry = CollisionGeometry {
-            hulls: vec![arm, other],
-            joints: vec![],
-        };
+        let geometry = CollisionGeometry::new(vec![arm, other], vec![]);
         assert!(geometry.clearance(|_| Some(IDENTITY)).unwrap() < 0.0);
+    }
+
+    #[test]
+    fn equal_blend_weights_preserve_the_posed_hull_after_interior_reduction() {
+        use parry3d::shape::SupportMap;
+        let a = Entity::from_raw_u32(1).unwrap();
+        let b = Entity::from_raw_u32(2).unwrap();
+        let mut vertices = Vec::new();
+        for x in [-1.0, 0.0, 1.0] {
+            for y in [-1.0, 0.0, 1.0] {
+                for z in [-1.0, 0.0, 1.0] {
+                    let source = Vec3::new(x, y, z);
+                    // Different inverse binds still give one affine map for
+                    // this shared weight group, including non-uniform scale.
+                    let pa = source * Vec3::new(2.0, 1.0, 0.5) + Vec3::X;
+                    let pb = Quat::from_rotation_y(0.4) * source + Vec3::Y;
+                    vertices.push(BindVertex {
+                        source,
+                        blend: ([0, 1, 0, 0], [0.4_f32.to_bits(), 0.6_f32.to_bits(), 0, 0]),
+                        skin: SkinVertex {
+                            point: pa * 0.4 + pb * 0.6,
+                            influences: vec![(a, pa, 0.4), (b, pb, 0.6)],
+                        },
+                    });
+                }
+            }
+        }
+        let reduced = reduce_skin_vertices(vertices.clone());
+        assert_eq!(reduced.len(), 8);
+        for angle in [0.0, 0.8, 2.1] {
+            let motion = |bone| {
+                Some(BoneMotion {
+                    rotation: Quat::from_rotation_z(if bone == a { angle } else { -angle }),
+                    translation: if bone == a { Vec3::X } else { Vec3::Z },
+                })
+            };
+            let full = PosedHull::new(
+                vertices
+                    .iter()
+                    .map(|v| v.skin.posed(&motion).unwrap())
+                    .collect(),
+                0.0,
+            )
+            .unwrap();
+            let small = PosedHull::new(
+                reduced.iter().map(|v| v.posed(&motion).unwrap()).collect(),
+                0.0,
+            )
+            .unwrap();
+            for direction in [Vec3::X, Vec3::Y, Vec3::Z, Vec3::ONE, -Vec3::ONE] {
+                let direction =
+                    parry3d::math::Vector::from_array(direction.to_array().map(f64::from));
+                let support = |h: &PosedHull| {
+                    (h.local_support_point(direction)
+                        + parry3d::math::Vector::from_array(h.centre.to_array().map(f64::from)))
+                    .dot(direction)
+                };
+                assert!((support(&full) - support(&small)).abs() < 2.0e-6);
+            }
+        }
     }
 
     #[test]
@@ -1831,7 +2175,20 @@ mod tests {
             point: Vec3::ZERO,
             influences: vec![(a, Vec3::ZERO, 0.5), (b, Vec3::ZERO, 0.5)],
         });
-        let vertices = reduce_rigid_vertices(vertices);
+        let vertices = reduce_skin_vertices(
+            vertices
+                .into_iter()
+                .map(|skin| BindVertex {
+                    source: skin.point,
+                    blend: if skin.influences.len() == 1 {
+                        ([0; 4], [1.0_f32.to_bits(), 0, 0, 0])
+                    } else {
+                        ([0, 1, 0, 0], [0.5_f32.to_bits(), 0.5_f32.to_bits(), 0, 0])
+                    },
+                    skin,
+                })
+                .collect(),
+        );
         let points = vertices
             .iter()
             .map(|v| {
@@ -1847,5 +2204,63 @@ mod tests {
         let cloud = PosedHull::new(points, 0.0).unwrap();
         let support = cloud.local_support_point(parry3d::math::Vector::X);
         assert_eq!(support.x + f64::from(cloud.centre.x), 3.0);
+    }
+
+    #[test]
+    fn bounded_support_matches_the_full_scan_including_flat_face_ties() {
+        use parry3d::{math::Vector, shape::SupportMap};
+        let points: Vec<_> = (-5..=5)
+            .flat_map(|x| {
+                (-4..=4).flat_map(move |y| {
+                    (-3..=3).map(move |z| Vec3::new(x as f32, y as f32, z as f32))
+                })
+            })
+            .collect();
+        let mut points = points;
+        points.rotate_left(119);
+        let hull = PosedHull::new(points, 0.01).unwrap();
+        for x in -3..=3 {
+            for y in -3..=3 {
+                for z in -3..=3 {
+                    let direction = Vector::new(f64::from(x), f64::from(y), f64::from(z));
+                    let expected = hull.points.iter().copied().fold(hull.first, |best, p| {
+                        if p.dot(direction) > best.dot(direction) {
+                            p
+                        } else {
+                            best
+                        }
+                    }) + direction.try_normalize().unwrap_or(Vector::ZERO)
+                        * f64::from(hull.padding);
+                    assert_eq!(hull.local_support_point(direction), expected);
+                }
+            }
+        }
+        let bounds = hull.joint_bounds();
+        for (normal, plane) in &bounds.faces {
+            let support = hull
+                .points
+                .iter()
+                .map(|p| normal.dot(bevy::math::DVec3::from_array(p.to_array())))
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert_eq!(*plane, *normal * support);
+        }
+        let extrema = |points: Vec<bevy::math::DVec3>| {
+            points.into_iter().fold(
+                (
+                    bevy::math::DVec3::splat(f64::INFINITY),
+                    bevy::math::DVec3::splat(f64::NEG_INFINITY),
+                ),
+                |(min, max), p| (min.min(p), max.max(p)),
+            )
+        };
+        assert_eq!(
+            extrema(bounds.points.clone()),
+            extrema(
+                hull.points
+                    .iter()
+                    .map(|p| bevy::math::DVec3::from_array(p.to_array()))
+                    .collect()
+            )
+        );
     }
 }

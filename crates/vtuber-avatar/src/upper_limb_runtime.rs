@@ -22,12 +22,13 @@ pub struct UpperLimbState {
     solved_goals: Option<[Option<ArmGoal>; 2]>,
     refine: bool,
     solved_body: Option<BodyPose>,
-    pending: Option<bevy::tasks::Task<PreparedStep>>,
+    pending: Option<PendingSolve>,
     queued: Option<PreparedStep>,
     geometry: Option<std::sync::Arc<crate::collision::CollisionGeometry>>,
     source_seq: Option<vtuber_core::FrameSeq>,
     neutral: Option<NeutralSolution>,
     secondary: Option<SecondarySolution>,
+    recovery_seed: Option<[Option<ArmJoints>; 2]>,
     body_rig: Option<std::sync::Arc<BodyRig>>,
     producer_body: Option<BodyPose>,
 }
@@ -43,6 +44,7 @@ struct NeutralSolution {
 struct SecondarySolution {
     pose: [Option<ArmJoints>; 2],
     refine: bool,
+    status: SolveStatus,
 }
 
 struct PreparedStep {
@@ -54,6 +56,20 @@ struct PreparedStep {
     source_seq: Option<vtuber_core::FrameSeq>,
     neutral: Option<NeutralSolution>,
     secondary: Option<SecondarySolution>,
+    recovery_seed: Option<[Option<ArmJoints>; 2]>,
+}
+
+struct PendingSolve {
+    task: bevy::tasks::Task<PreparedStep>,
+    obsolete: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    source_seq: Option<vtuber_core::FrameSeq>,
+}
+
+impl Drop for PendingSolve {
+    fn drop(&mut self) {
+        self.obsolete
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Restore the upstream body result before animation/base detection. The
@@ -402,9 +418,29 @@ pub fn update_upper_limb_targets(
         tolerance: 64.0 * f32::EPSILON * extent,
     };
     use bevy::tasks::{AsyncComputeTaskPool, futures_lite::future};
+    let source_seq = frame
+        .map(|f| f.source_seq)
+        .or_else(|| control_current.map(|f| f.source_seq));
+    let body_changed = match (&state.solved_body, &body_pose) {
+        (Some(previous), Some(current)) => !previous.same(current),
+        (None, None) => false,
+        _ => true,
+    };
+    if let Some(pending) = &state.pending
+        && pending.source_seq != source_seq
+        && (state.solved_goals != Some(goals) || body_changed)
+    {
+        // Local steps can finish and be displayed, but an expensive global
+        // route for an observation that has already changed is wasted work.
+        // Damping/idle still evolves after a sample is held. Let that sample's
+        // route finish; cancelling on every such tick would starve the search.
+        pending
+            .obsolete
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut completed_status = None;
     if let Some(pending) = state.pending.as_mut()
-        && let Some(prepared) = future::block_on(future::poll_once(pending))
+        && let Some(prepared) = future::block_on(future::poll_once(&mut pending.task))
     {
         state.queued = Some(prepared);
         state.pending = None;
@@ -428,6 +464,7 @@ pub fn update_upper_limb_targets(
             state.source_seq = prepared.source_seq;
             state.neutral = prepared.neutral;
             state.secondary = prepared.secondary;
+            state.recovery_seed = prepared.recovery_seed;
         } else {
             // An external body/geometry change cancelled the path before the
             // worker's starting point. Never splice a different anchor in.
@@ -437,11 +474,6 @@ pub fn update_upper_limb_targets(
     let mut status = completed_status
         .or(state.status)
         .unwrap_or(SolveStatus::Solving);
-    let body_changed = match (&state.solved_body, &body_pose) {
-        (Some(previous), Some(current)) => !previous.same(current),
-        (None, None) => false,
-        _ => true,
-    };
     if state.pending.is_none()
         && state.queued.is_none()
         && state.solved_goals == Some(goals)
@@ -450,9 +482,7 @@ pub fn update_upper_limb_targets(
     {
         // A new sequence with identical inputs uses the same admitted
         // solution. Retain provenance without solving that pose again.
-        state.source_seq = frame
-            .map(|f| f.source_seq)
-            .or_else(|| control_current.map(|f| f.source_seq));
+        state.source_seq = source_seq;
     }
     if state.pending.is_none()
         && state.queued.is_none()
@@ -465,7 +495,9 @@ pub fn update_upper_limb_targets(
             from: anchor_body.clone().unwrap_or_else(|| to.clone()),
             to,
         });
-        let mut seed = anchor;
+        // Constraint restoration may need more than one work batch. Resume
+        // its candidate without publishing it as a display pose.
+        let mut seed = state.recovery_seed.unwrap_or(anchor);
         for (seed, goal) in seed.iter_mut().zip(neutral) {
             if let Some(goal) = goal {
                 if let Some(current) = seed {
@@ -481,18 +513,29 @@ pub fn update_upper_limb_targets(
         let geometry = std::sync::Arc::clone(geometry);
         let snapshot = body.clone();
         let chains = [binding.left_arm, binding.right_arm];
-        let source_seq = frame
-            .map(|f| f.source_seq)
-            .or_else(|| control_current.map(|f| f.source_seq));
         // Fresh input gets a short first response. Once that sample has been
         // admitted, batch refinement to avoid a path/worker handoff per step.
         let rounds = if source_seq == state.source_seq { 4 } else { 1 };
+        let unchanged = state.solved_goals == Some(goals) && !body_changed;
+        let cached_status = unchanged.then_some(status).filter(|s| {
+            matches!(
+                s,
+                SolveStatus::Feasible {
+                    converged: true,
+                    ..
+                }
+            )
+        });
         let cached_neutral = state.neutral.filter(|n| n.goals == neutral_goals);
         let secondary = state
             .secondary
             .filter(|s| s.refine || state.solved_goals == Some(goals));
-        state.pending = Some(
-            AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default).spawn(async move {
+        let obsolete = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let search_obsolete = std::sync::Arc::clone(&obsolete);
+        state.pending = Some(PendingSolve {
+            obsolete,
+            source_seq,
+            task: AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default).spawn(async move {
                 let neutral_problem = Problem {
                     chains: [chains[0].as_ref(), chains[1].as_ref()],
                     goals: neutral_goals,
@@ -519,6 +562,7 @@ pub fn update_upper_limb_targets(
                             source_seq,
                             neutral: None,
                             secondary: None,
+                            recovery_seed: None,
                         };
                     }
                     NeutralSolution {
@@ -554,7 +598,8 @@ pub fn update_upper_limb_targets(
                     body_curve: body_curve.as_ref(),
                     tolerance: 64.0 * f32::EPSILON * extent,
                 };
-                let (mut next, mut status) = problem.solve(seed, rounds);
+                let (mut next, mut status) = if let Some(status) = cached_status { (seed, status) }
+                    else { problem.solve(seed, rounds) };
                 let unfinished = |from, to, status| from != to && matches!(status,
                     SolveStatus::Feasible { converged: false, .. } | SolveStatus::NoFeasibleSolution);
                 let mut refine = unfinished(seed, next, status);
@@ -568,25 +613,39 @@ pub fn update_upper_limb_targets(
                             seed.rest_curl = goal.neutral.rest_curl;
                         }
                     }
-                    let (alternative, alternative_status) = problem.solve(destination_seed, rounds);
+                    let (alternative, alternative_status) = if unchanged && let Some(previous) = secondary.filter(|s| !s.refine) {
+                        (destination_seed, previous.status)
+                    } else { problem.solve(destination_seed, rounds) };
                     let alternate_refine = unfinished(destination_seed, alternative, alternative_status);
                     if let SolveStatus::Feasible { residual: other, .. } = alternative_status
                         && !matches!(status, SolveStatus::Feasible { residual, .. } if residual <= other + 64.0*f32::EPSILON)
                     {
-                        secondary_next = Some(SecondarySolution { pose: next, refine });
+                        secondary_next = Some(SecondarySolution { pose: next, refine, status });
                         next = alternative;
                         status = alternative_status;
                     } else {
-                        secondary_next = Some(SecondarySolution { pose: alternative, refine: alternate_refine });
+                        secondary_next = Some(SecondarySolution { pose: alternative, refine: alternate_refine, status: alternative_status });
                     }
                     refine |= alternate_refine;
                 }
                 refine |= secondary_next.is_some_and(|s| s.refine);
+                let recovery_seed = (matches!(status, SolveStatus::NoFeasibleSolution)
+                    && unfinished(seed, next, status)).then_some(next);
                 if matches!(status, SolveStatus::Feasible { .. })
                     && (next != path.current || body_curve.as_ref().is_some_and(|c| !c.from.same(&c.to)))
                 {
-                    let admitted = if initial { path.advance(&problem, next, 0.0) } else { path.plan(&problem, next) };
-                    if let Err(error) = admitted { status = error; refine = false; }
+                    let admitted = if initial { path.advance(&problem, next, 0.0).map(|()| true) } else { path.plan(&problem, next, &search_obsolete) };
+                    match admitted {
+                        Err(error) => { status = error; refine = matches!(error, SolveStatus::Solving); }
+                        Ok(false) => {
+                            let endpoint = path.after_current_segment();
+                            if let Ok(evaluation) = problem.kinematics(endpoint.current) {
+                                status = SolveStatus::Feasible { residual: evaluation.error.sqrt() as f32, converged: false };
+                            }
+                            refine = true;
+                        }
+                        Ok(_) => {}
+                    }
                 }
                 if initial
                     && let (
@@ -618,9 +677,10 @@ pub fn update_upper_limb_targets(
                     source_seq,
                     neutral: Some(neutral_solution),
                     secondary: secondary_next,
+                    recovery_seed,
                 }
             }),
-        );
+        });
         state.solved_goals = Some(goals);
         state.solved_body = body_pose;
     }
@@ -689,7 +749,7 @@ fn report(commands: &mut Commands, root: Entity, state: &mut UpperLimbState, sta
                 warn!("Upper-limb collision geometry unavailable: {error:?}")
             }
             SolveStatus::NoFeasibleSolution => warn!("Upper-limb solve has no feasible candidate"),
-            SolveStatus::BlockedPath => warn!("Upper-limb transition has no certified path"),
+            SolveStatus::BlockedPath => warn!("Upper-limb transition has no admissible path"),
             SolveStatus::Feasible {
                 residual,
                 converged,
@@ -730,7 +790,7 @@ mod tests {
             .resource::<UpperLimbState>()
             .pending
             .as_ref()
-            .is_some_and(|t| !t.is_finished())
+            .is_some_and(|t| !t.task.is_finished())
         {
             assert!(
                 std::time::Instant::now() < deadline,
