@@ -1602,7 +1602,9 @@ mod tests {
             bones: [a.bone, b.bone],
             pivot_bone: pivot,
             pivot: Vec3::ZERO,
-            radius: 0.1,
+            // Keep the joint allowance closer than the generic penetration
+            // depth so moving the independent pivot changes the margin.
+            radius: 0.7,
         };
         let c = hull(
             3,
@@ -1646,11 +1648,11 @@ mod tests {
                     .map(|(a, b)| (a - b) / 0.02)
                     .collect::<Vec<_>>()
             };
-            assert_eq!(
-                derivative(&all, false),
-                derivative(&sparse, true),
-                "bone {id}"
-            );
+            let full = derivative(&all, false);
+            if moved == minor || moved == pivot {
+                assert!(full.iter().any(|d| d.abs() > 0.01), "bone {id}");
+            }
+            assert_eq!(full, derivative(&sparse, true), "bone {id}");
         }
     }
 
