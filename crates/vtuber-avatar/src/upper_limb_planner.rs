@@ -1,10 +1,10 @@
 //! RRT-Connect (Kuffner & LaValle, ICRA 2000) for contact-trapped IK branches.
-//! Tree edges use the continuous ROM/skin certificate, never point samples.
+//! Tree edges use the continuous ROM/skin checks, never just point samples.
 
 use crate::{
     upper_limb::{ArmJoints, BOUNDS},
     upper_limb_body::{BodyCurve, BodyPose},
-    upper_limb_path::{certify, interpolate},
+    upper_limb_path::{check_transition, interpolate},
     upper_limb_solver::{Problem, SolveStatus},
 };
 use rand::{RngExt, SeedableRng};
@@ -22,6 +22,7 @@ struct Space<'a, 'b> {
     problem: &'a Problem<'b>,
     from: [Option<ArmJoints>; 2],
     to: [Option<ArmJoints>; 2],
+    obsolete: &'a std::sync::atomic::AtomicBool,
 }
 
 fn coordinates(pose: [Option<ArmJoints>; 2], progress: f32) -> Point {
@@ -94,10 +95,13 @@ impl Space<'_, '_> {
                 .find_map(|a| a.motion.get(&bone).copied())
                 .or_else(|| problem.body.get(&bone).copied())
         }) == Ok(true)
-            && certify(&problem, from, to)
+            && check_transition(&problem, from, to)
     }
 
     fn extend(&self, tree: &mut Vec<Node>, target: Point) -> Option<(usize, bool)> {
+        if self.obsolete.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
         let (parent, nearest) = tree.iter().enumerate().min_by(|(_, a), (_, b)| {
             distance(a.point, target).total_cmp(&distance(b.point, target))
         })?;
@@ -143,12 +147,38 @@ pub(crate) fn connect(
     problem: &Problem<'_>,
     from: [Option<ArmJoints>; 2],
     to: [Option<ArmJoints>; 2],
+    obsolete: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<Waypoint>, SolveStatus> {
-    let space = Space { problem, from, to };
+    let space = Space {
+        problem,
+        from,
+        to,
+        obsolete,
+    };
     let start = coordinates(from, 0.0);
     let goal = coordinates(to, 1.0);
     if space.clear(start, goal) {
         return Ok(vec![space.pose(goal)]);
+    }
+    // A streamed observation need not wait for a complete route. Backtrack
+    // the proposed displacement and admit only the part whose full segment
+    // satisfies the same joint and skin checks. A held target can still use
+    // the global planner to escape a contact-trapped branch.
+    if obsolete.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut amount = 0.5;
+        for _ in 0..8 {
+            let point = std::array::from_fn(|i| {
+                start
+                    .get(i)
+                    .zip(goal.get(i))
+                    .map_or(0.0, |(a, b)| a + (b - a) * amount)
+            });
+            if space.clear(start, point) {
+                return Ok(vec![space.pose(point)]);
+            }
+            amount *= 0.5;
+        }
+        return Err(SolveStatus::Solving);
     }
     let mut a = vec![Node {
         point: start,
@@ -163,6 +193,9 @@ pub(crate) fn connect(
     let mut rng = rand::rngs::SmallRng::seed_from_u64(248);
     let mut reversed = false;
     for _ in 0..2048 {
+        if obsolete.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(SolveStatus::Solving);
+        }
         let sample = std::array::from_fn(|_| rng.random::<f32>());
         if let Some((end_a, _)) = space.extend(&mut a, sample)
             && let Some(target) = a.get(end_a).map(|n| n.point)
@@ -179,6 +212,9 @@ pub(crate) fn connect(
                     // random exploration detours before display.
                     let mut checked = vec![(start, goal)];
                     for _ in 0..32 {
+                        if obsolete.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(SolveStatus::Solving);
+                        }
                         // The only shortcut of a three-node route is the
                         // direct edge already rejected before tree growth.
                         if first.len() <= 3 {

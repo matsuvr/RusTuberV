@@ -178,6 +178,18 @@ impl BodyPose {
     }
 }
 
+/// The product-rule bound is affine in the point's rest-local radius.
+pub(crate) struct PointAcceleration {
+    inverse: Affine3A,
+    coefficients: Vec2,
+}
+
+impl PointAcceleration {
+    pub fn at(&self, point: Vec3) -> f32 {
+        self.coefficients.x * self.inverse.transform_point3(point).length() + self.coefficients.y
+    }
+}
+
 impl BodyCurve {
     pub fn at(&self, t: f32) -> BodyPose {
         self.from.interpolate(&self.to, t)
@@ -187,11 +199,9 @@ impl BodyCurve {
     /// Walk the bone to the common ancestor, then down into the moving chest
     /// frame. Each rotation is a fixed-axis slerp; translated links are affine.
     /// Product-rule bounds include both inverse rotations and translations.
-    pub fn acceleration(&self, bone: Entity, point: Vec3) -> f32 {
+    pub fn acceleration_bound(&self, bone: Entity) -> Option<PointAcceleration> {
         let rig = &self.from.rig;
-        let Some(&index) = rig.indices.get(&bone) else {
-            return 0.0;
-        };
+        let &index = rig.indices.get(&bone)?;
         let ancestors = |mut index: usize| {
             let mut result = Vec::new();
             loop {
@@ -206,19 +216,17 @@ impl BodyCurve {
         let up = ancestors(index);
         let down = ancestors(rig.chest);
         let common = up.iter().copied().find(|i| down.contains(i));
-        let Some(node) = rig.nodes.get(index) else {
-            return f32::INFINITY;
-        };
-        let mut radius = node.rest_inverse.transform_point3(point).length();
-        let mut velocity = 0.0;
-        let mut acceleration = 0.0;
+        let node = rig.nodes.get(index)?;
+        let mut radius = Vec2::X;
+        let mut velocity = Vec2::ZERO;
+        let mut acceleration = Vec2::ZERO;
         let mut step = |index: usize, inverse: bool| {
             let Some((a, b)) = self.from.locals.get(index).zip(self.to.locals.get(index)) else {
                 return;
             };
             let omega = rotation_vector(a.rotation, b.rotation).length();
-            let translation = a.translation.length().max(b.translation.length());
-            let speed = a.translation.distance(b.translation);
+            let translation = Vec2::Y * a.translation.length().max(b.translation.length());
+            let speed = Vec2::Y * a.translation.distance(b.translation);
             let scale = if inverse {
                 a.scale.recip().abs().max_element()
             } else {
@@ -251,7 +259,16 @@ impl BodyCurve {
             step(i, true);
         }
         let (scale, _, _) = rig.chest_rest.to_scale_rotation_translation();
-        acceleration * scale.abs().max_element()
+        Some(PointAcceleration {
+            inverse: node.rest_inverse,
+            coefficients: acceleration * scale.abs().max_element(),
+        })
+    }
+
+    #[cfg(test)]
+    fn acceleration(&self, bone: Entity, point: Vec3) -> f32 {
+        self.acceleration_bound(bone)
+            .map_or(0.0, |bound| bound.at(point))
     }
 }
 
@@ -338,7 +355,8 @@ mod tests {
         let mut path = crate::upper_limb_path::JointPath::default();
         path.current = pose;
         path.body = Some(curve.from.clone());
-        path.plan(&problem, pose).unwrap();
+        path.plan(&problem, pose, &std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
         while path.busy() {
             path.advance(&problem, pose, 1.0 / 60.0).unwrap();
         }

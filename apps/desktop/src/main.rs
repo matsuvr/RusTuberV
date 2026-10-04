@@ -100,9 +100,17 @@ fn run() -> Result<(), StartupError> {
         AssetSourceBuilder::platform_default(asset_source_root(&managed_root)?, None),
     );
 
+    // Keep pose work off the frame pool, but give it half the task-thread
+    // budget on small CPUs. Bevy's four-thread cap and the IO/frame minima
+    // remain in place (a four-thread budget becomes IO 1 / pose 2 / frame 1).
+    let mut pools = bevy::app::TaskPoolOptions::default();
+    pools.async_compute.percent = 0.5;
     let mut app = App::new();
     app.insert_resource(sources)
-        .add_plugins(DefaultPlugins)
+        // Avatar output must keep its cadence while OBS or another app has focus.
+        // Window presentation still follows the existing VSync setting.
+        .insert_resource(bevy::winit::WinitSettings::continuous())
+        .add_plugins(DefaultPlugins.set(bevy::app::TaskPoolPlugin { task_pool_options: pools }))
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
             SystemInformationDiagnosticsPlugin,
@@ -133,9 +141,7 @@ fn run() -> Result<(), StartupError> {
     // sine waves so the avatar apply path can be verified without a camera.
     #[cfg(feature = "dev-synthetic-input")]
     {
-        use vtuber_app::synthetic_tracking::{SyntheticTrackingSource, synthetic_tracking_system};
-        app.init_resource::<SyntheticTrackingSource>()
-            .add_systems(Update, synthetic_tracking_system);
+        // UiShellPlugin installs this source once, after the tracking bridge.
         bevy::log::warn!("dev-synthetic-input enabled: using synthetic tracking source");
     }
 

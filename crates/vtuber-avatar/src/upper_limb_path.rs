@@ -58,15 +58,24 @@ impl JointPath {
         self.segment.is_some()
     }
 
-    /// Install a route whose edges were certified by the same continuous
+    /// Install a route whose edges passed the same continuous
     /// predicate as a direct SQP step. Each junction has zero velocity and
     /// acceleration; no raw interpolation bypasses the constraints.
     pub fn plan(
         &mut self,
         problem: &Problem<'_>,
         target: [Option<ArmJoints>; 2],
-    ) -> Result<(), SolveStatus> {
-        let route = crate::upper_limb_planner::connect(problem, self.current, target)?;
+        obsolete: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, SolveStatus> {
+        let route = crate::upper_limb_planner::connect(problem, self.current, target, obsolete)?;
+        let complete = route.last().is_some_and(|(pose, body)| {
+            *pose == target
+                && match (body, problem.body_curve) {
+                    (Some(body), Some(curve)) => body.same(&curve.to),
+                    (None, None) => true,
+                    _ => false,
+                }
+        });
         let mut from = self.current;
         let mut body = self.body.clone();
         for (to, next_body) in route {
@@ -85,7 +94,7 @@ impl JointPath {
         }
         self.segment = self.queued.pop_front();
         self.response_seconds = RESPONSE_SECONDS;
-        Ok(())
+        Ok(complete)
     }
 
     pub fn advance(
@@ -106,7 +115,7 @@ impl JointPath {
             return Ok(());
         }
         if self.segment.is_none() {
-            if !certify(problem, self.current, target) {
+            if !check_transition(problem, self.current, target) {
                 return Err(SolveStatus::BlockedPath);
             }
             self.segment = Some(Segment {
@@ -123,7 +132,7 @@ impl JointPath {
         };
         segment.elapsed = (segment.elapsed + dt.max(0.0)).min(segment.duration);
         let t = segment.elapsed / segment.duration;
-        let amount = t * t * t * (10.0 + t * (-15.0 + 6.0 * t));
+        let amount = smooth_progress(t);
         // Use the stored endpoint exactly: a + (b-a) need not round to b.
         // The prefetched segment is anchored at that same admitted endpoint.
         let next = if t >= 1.0 {
@@ -132,7 +141,7 @@ impl JointPath {
             interpolate(segment.from, segment.to, amount)
         };
         let next_body = segment.body.as_ref().map(|b| b.at(amount));
-        // The worker certified this complete segment, including the body.
+        // The worker checked this complete segment, including the body.
         // Rendering only advances its parameter; it cannot introduce a new
         // candidate. Repeating convex clipping here would block every tick.
         self.current = next;
@@ -146,8 +155,20 @@ impl JointPath {
     }
 }
 
+fn smooth_progress(t: f32) -> f32 {
+    // The f32 polynomial can exceed one near t=0.996, extrapolating a
+    // certified segment past an endpoint at a joint limit. Evaluate its
+    // mathematical [0, 1] range without that cancellation error.
+    let t = f64::from(t);
+    (t * t * t * (10.0 + t * (-15.0 + 6.0 * t))).clamp(0.0, 1.0) as f32
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    (f64::from(a) + (f64::from(b) - f64::from(a)) * f64::from(t)) as f32
+}
+
 fn fingers(a: HandFingerPose, b: HandFingerPose, t: f32) -> HandFingerPose {
-    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    let lerp = |a, b| lerp(a, b, t);
     let mut out = a;
     for (q, b) in out
         .fingers
@@ -175,15 +196,21 @@ pub(crate) fn interpolate(
     b: [Option<ArmJoints>; 2],
     t: f32,
 ) -> [Option<ArmJoints>; 2] {
+    if t <= 0.0 {
+        return a;
+    }
+    if t >= 1.0 {
+        return b;
+    }
     let mut out = a;
     for ((out, a), b) in out.iter_mut().zip(a).zip(b) {
         *out = match a.zip(b) {
             Some((mut a, b)) => {
                 for (q, target) in a.angles.iter_mut().zip(b.angles) {
-                    *q += (target - *q) * t;
+                    *q = lerp(*q, target, t);
                 }
-                a.finger_weight += (b.finger_weight - a.finger_weight) * t;
-                a.rest_curl += (b.rest_curl - a.rest_curl) * t;
+                a.finger_weight = lerp(a.finger_weight, b.finger_weight, t);
+                a.rest_curl = lerp(a.rest_curl, b.rest_curl, t);
                 a.fingers = match (a.fingers, b.fingers) {
                     (Some(a), Some(b)) => Some(fingers(a, b, t)),
                     (Some(a), None) => Some(a),
@@ -198,7 +225,10 @@ pub(crate) fn interpolate(
     out
 }
 
-pub(crate) fn certify(
+/// Continuous ROM and skin checks. Skin chord bounds allow 0.001 arm
+/// lengths of spatial approximation per hull/pivot; this is not a strict
+/// zero-penetration certificate. See the upper-limb anatomy ADR.
+pub(crate) fn check_transition(
     problem: &Problem<'_>,
     from: [Option<ArmJoints>; 2],
     to: [Option<ArmJoints>; 2],
@@ -381,13 +411,20 @@ pub(crate) fn certify(
         }
     }
     if let Some(curve) = problem.body_curve {
+        // Factor the hierarchy once per bone, not once per skin influence.
+        let bounds: std::collections::HashMap<_, _> = problem
+            .geometry
+            .bones()
+            .filter_map(|bone| curve.acceleration_bound(bone).map(|bound| (bone, bound)))
+            .collect();
+        let acceleration_at = |bone, point| bounds.get(&bone).map_or(0.0, |bound| bound.at(point));
         for (hull, acceleration) in problem.geometry.hulls.iter().zip(&mut accelerations) {
             let bound = if hull.skin.is_empty() {
                 hull.shape
                     .points()
                     .iter()
                     .map(|p| {
-                        curve.acceleration(
+                        acceleration_at(
                             hull.bone,
                             bevy::prelude::Vec3::from_array(p.to_array().map(|v| v as f32)),
                         )
@@ -399,7 +436,7 @@ pub(crate) fn certify(
                     .map(|v| {
                         v.influences
                             .iter()
-                            .map(|(b, p, w)| curve.acceleration(*b, *p) * w)
+                            .map(|(b, p, w)| acceleration_at(*b, *p) * w)
                             .sum::<f32>()
                     })
                     .fold(0.0_f32, f32::max)
@@ -407,58 +444,66 @@ pub(crate) fn certify(
             *acceleration += bound;
         }
         for (joint, acceleration) in problem.geometry.joints.iter().zip(&mut pivot_accelerations) {
-            *acceleration += curve.acceleration(joint.pivot_bone, joint.pivot);
+            *acceleration += acceleration_at(joint.pivot_bone, joint.pivot);
         }
     }
-    let check = |start: f32, end: f32| -> Option<bool> {
-        let mid = (start + end) * 0.5;
-        let state = interpolate(from, to, mid);
-        let Ok(evaluation) = problem.kinematics(state) else {
-            return None;
-        };
-        if !problem.feasible(&evaluation) {
-            return None;
+    let domain = |t| {
+        let mut result = [None; 2];
+        for ((slot, chain), state) in result
+            .iter_mut()
+            .zip(problem.chains)
+            .zip(interpolate(from, to, t))
+        {
+            if let Some((chain, state)) = chain.zip(state) {
+                *slot = Some(state.joint_domain(chain)?);
+            }
         }
-        let endpoint_a = problem.kinematics(interpolate(from, to, start));
-        let endpoint_b = problem.kinematics(interpolate(from, to, end));
-        let (Ok(endpoint_a), Ok(endpoint_b)) = (endpoint_a, endpoint_b) else {
-            return None;
-        };
-        let chart = evaluation
-            .arms
+        Some(result)
+    };
+    let check_rom = |start: f32, end: f32| -> Option<bool> {
+        let mid = domain((start + end) * 0.5)?;
+        let margin = mid
             .iter()
             .flatten()
-            .map(|a| a.chart_margin)
+            .flat_map(|(margins, _)| margins)
+            .copied()
+            .fold(f32::INFINITY, f32::min);
+        if margin < -64.0 * f32::EPSILON {
+            return None;
+        }
+        let endpoint_a = domain(start)?;
+        let endpoint_b = domain(end)?;
+        let chart = mid
+            .iter()
+            .flatten()
+            .map(|(_, chart)| *chart)
             .fold(f32::INFINITY, f32::min);
         let rom_certified = chart >= rom_angle * (end - start) * 0.5
-            && endpoint_a.arms.iter().zip(&endpoint_b.arms).all(|(a, b)| {
+            && endpoint_a.iter().zip(&endpoint_b).all(|(a, b)| {
                 a.as_ref().zip(b.as_ref()).is_none_or(|(a, b)| {
-                    a.joint_margins
-                        .iter()
-                        .zip(b.joint_margins)
-                        .skip(1)
-                        .all(|(a, b)| {
-                            // Retain the slope of each boundary margin. A path
-                            // leaving contact need not pay its maximum chord
-                            // error at the endpoint, where that error is zero.
-                            let curvature = rom_acceleration * (end - start).powi(2);
-                            let t = if curvature > 0.0 {
-                                (0.5 - (b - a) / curvature).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            let minimum = (a + (b - a) * t - curvature * t * (1.0 - t) * 0.5)
-                                .min(*a)
-                                .min(b);
-                            minimum >= 64.0 * f32::EPSILON
-                        })
+                    a.0.iter().zip(b.0).skip(1).all(|(a, b)| {
+                        // Retain the slope of each boundary margin. A path
+                        // leaving contact need not pay its maximum chord
+                        // error at the endpoint, where that error is zero.
+                        let curvature = rom_acceleration * (end - start).powi(2);
+                        let t = if curvature > 0.0 {
+                            (0.5 - (b - a) / curvature).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        let minimum = (a + (b - a) * t - curvature * t * (1.0 - t) * 0.5)
+                            .min(*a)
+                            .min(b);
+                        minimum >= 64.0 * f32::EPSILON
+                    })
                 })
             });
 
-        if !rom_certified {
-            return Some(false);
-        }
-
+        Some(rom_certified)
+    };
+    let check_skin = |start: f32, end: f32| -> Option<bool> {
+        let endpoint_a = problem.kinematics(interpolate(from, to, start)).ok()?;
+        let endpoint_b = problem.kinematics(interpolate(from, to, end)).ok()?;
         let body_a = problem
             .body_curve
             .map(|c| c.at(start).motions())
@@ -480,26 +525,71 @@ pub(crate) fn certify(
         // A twice differentiable point curve stays within M*(b-a)^2/8
         // of its endpoint chord when |x''| <= M. Endpoint hulls preserve
         // tangent motion; an isotropic first-order sweep stalls at contact.
+        // Render-time CCD uses a sub-millimetre spatial resolution, like
+        // the linear contact tolerance in realtime physics engines. Endpoint
+        // collision and continuous ROM checks retain their original precision.
+        let resolution = problem
+            .chains
+            .into_iter()
+            .flatten()
+            .map(|c| c.rest.total_arm_length)
+            .fold(0.0_f32, f32::max)
+            * 0.001;
         let clear = problem.geometry.sweep_is_clear(
             &|bone| motion(&endpoint_a, body_a.as_ref().unwrap_or(problem.body), bone),
             &|bone| motion(&endpoint_b, body_b.as_ref().unwrap_or(problem.body), bone),
-            |i| accelerations.get(i).copied().unwrap_or(0.0) * (end - start).powi(2) / 8.0,
-            |i| pivot_accelerations.get(i).copied().unwrap_or(0.0) * (end - start).powi(2) / 8.0,
+            |i| {
+                (accelerations.get(i).copied().unwrap_or(0.0) * (end - start).powi(2) / 8.0
+                    - resolution)
+                    .max(0.0)
+            },
+            |i| {
+                (pivot_accelerations.get(i).copied().unwrap_or(0.0) * (end - start).powi(2) / 8.0
+                    - resolution)
+                    .max(0.0)
+            },
         );
-        clear.ok()
+        if !clear.ok()? {
+            // An overlapping enclosure is inconclusive, but an actual
+            // midpoint collision disproves the entire edge. Reject it now
+            // instead of spending the subdivision budget on an impossible
+            // certificate (recursive bisection in motion validation).
+            let mid = (start + end) * 0.5;
+            let pose = problem.kinematics(interpolate(from, to, mid)).ok()?;
+            let body = problem
+                .body_curve
+                .map(|c| c.at(mid).motions())
+                .transpose()
+                .ok()?;
+            if !problem
+                .geometry
+                .pose_is_clear(&|bone| motion(&pose, body.as_ref().unwrap_or(problem.body), bone))
+                .ok()?
+            {
+                return None;
+            }
+            return Some(false);
+        }
+        Some(true)
     };
-    let pool = bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+    // ROM and skin constrain the same path, but need not subdivide it at
+    // the same places. A tight angular boundary must not make us skin and
+    // clip the mesh again for every otherwise unnecessary angular interval.
+    check_subdivisions(&check_rom) && check_subdivisions(&check_skin)
+}
+
+fn check_subdivisions(check: &(impl Fn(f32, f32) -> Option<bool> + Sync)) -> bool {
+    let pool = bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
     let mut intervals = vec![(0.0_f32, 1.0_f32)];
     let mut remaining = 256;
-    // Independent interval certificates share no mutable geometry. Evaluate
+    // Independent interval checks share no mutable geometry. Evaluate
     // each subdivision level together on the same pool used by the SQP.
-    // Budget exhaustion is still unresolved, never permission to penetrate.
+    // Budget exhaustion is unresolved; the spatial error budget is not enlarged.
     while !intervals.is_empty() && remaining > 0 {
         let count = intervals.len().min(remaining);
         remaining -= count;
         let checked = pool.scope(|scope| {
             for (start, end) in intervals.drain(..count) {
-                let check = &check;
                 scope.spawn(async move { (start, end, check(start, end)) });
             }
         });
@@ -533,6 +623,27 @@ mod tests {
     use crate::upper_limb::tests::{chain, state};
     use crate::{arm::ArmSide, collision::CollisionGeometry};
     use std::collections::HashMap;
+
+    #[test]
+    fn interpolation_stays_between_joint_limits_at_the_end_of_a_segment() {
+        let mut a = state(0.0, 0.2, 0.0, 0.0);
+        let mut b = a;
+        a.angles = crate::upper_limb::BOUNDS.map(|(lo, _)| lo);
+        b.angles = crate::upper_limb::BOUNDS.map(|(_, hi)| hi);
+        let mut previous = 0.0;
+        for i in 0..=100_000 {
+            let t = i as f32 / 100_000.0;
+            let amount = smooth_progress(t);
+            assert!((previous..=1.0).contains(&amount));
+            previous = amount;
+            let both = interpolate([Some(a), Some(b)], [Some(b), Some(a)], amount);
+            assert!(both.into_iter().flatten().all(|pose| pose.valid()));
+        }
+        assert_eq!(
+            interpolate([Some(a), None], [Some(b), None], 1.0),
+            [Some(b), None]
+        );
+    }
 
     #[test]
     fn render_ticks_keep_the_path_and_endpoint_velocity_is_continuous() {
@@ -607,8 +718,8 @@ mod tests {
             }
         };
         let torso = Entity::from_raw_u32(99).unwrap();
-        let geometry = CollisionGeometry {
-            hulls: vec![
+        let geometry = CollisionGeometry::new(
+            vec![
                 box_hull(
                     chain.hand,
                     Region::Hand(ArmSide::Left),
@@ -617,8 +728,8 @@ mod tests {
                 ),
                 box_hull(torso, Region::Torso, midpoint, 0.04),
             ],
-            joints: vec![],
-        };
+            vec![],
+        );
         let body = HashMap::from([(
             torso,
             BoneMotion {
@@ -644,7 +755,32 @@ mod tests {
         ));
         assert_eq!(path.current, [Some(a), None]);
         let mut planned = path.clone();
-        planned.plan(&problem, [Some(b), None]).unwrap();
+        assert!(
+            !planned
+                .plan(
+                    &problem,
+                    [Some(b), None],
+                    &std::sync::atomic::AtomicBool::new(true)
+                )
+                .unwrap()
+        );
+        assert!(planned.busy());
+        while planned.busy() {
+            planned
+                .advance(&problem, [Some(b), None], 1.0 / 60.0)
+                .unwrap();
+            assert!(problem.feasible(&problem.evaluate(planned.current).unwrap()));
+        }
+        assert_ne!(planned.current, path.current);
+        assert_ne!(planned.current, [Some(b), None]);
+        let mut planned = path.clone();
+        planned
+            .plan(
+                &problem,
+                [Some(b), None],
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap();
         while planned.busy() {
             planned
                 .advance(&problem, [Some(b), None], 1.0 / 60.0)
@@ -653,6 +789,17 @@ mod tests {
         }
         assert_eq!(planned.current, [Some(b), None]);
         let near = state(0.08, 0.72, -0.21, 0.81);
+        // A changing observation may still display a short checked step;
+        // only the now-obsolete global search must be cancelled.
+        let mut direct = path.clone();
+        direct
+            .plan(
+                &problem,
+                [Some(near), None],
+                &std::sync::atomic::AtomicBool::new(true),
+            )
+            .unwrap();
+        assert!(direct.busy());
         for _ in 0..10 {
             path.advance(&problem, [Some(near), None], 1.0 / 60.0)
                 .unwrap();

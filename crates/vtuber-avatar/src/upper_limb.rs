@@ -48,7 +48,6 @@ pub(crate) const BOUNDS: [(f32, f32); 9] = [
 pub(crate) struct ArmCandidate {
     pub joint_margin: f32,
     pub joint_margins: [f32; 27],
-    pub chart_margin: f32,
     pub resolved: ResolvedArmPose,
     pub shoulder: Vec3,
     pub elbow: Vec3,
@@ -120,21 +119,11 @@ impl ArmJoints {
         Some(state)
     }
 
-    pub fn forward(self, chain: &ArmChainBinding) -> Option<ArmCandidate> {
+    fn shoulder_frame(self, chain: &ArmChainBinding) -> Option<(Quat, crate::girdle::GirdlePose)> {
         if !self.valid() {
             return None;
         }
-        let [
-            plane,
-            elevation,
-            axial,
-            flexion,
-            roll,
-            wrist_f,
-            wrist_d,
-            sc_pro,
-            sc_elv,
-        ] = self.angles;
+        let [plane, elevation, axial, _, _, _, _, sc_pro, sc_elv] = self.angles;
         let upper = crate::shoulder::from_coordinates(
             chain,
             crate::shoulder::ShoulderCoordinates {
@@ -143,6 +132,20 @@ impl ArmJoints {
                 axial,
             },
         )?;
+        let girdle =
+            crate::girdle::forward(chain, plane, elevation, Some(Vec2::new(sc_pro, sc_elv)))?;
+        Some((upper, girdle))
+    }
+
+    /// Check the joint domain without constructing hand/finger poses or skin motions.
+    pub fn joint_domain(self, chain: &ArmChainBinding) -> Option<([f32; 27], f32)> {
+        let (upper, girdle) = self.shoulder_frame(chain)?;
+        crate::joint_limits::shoulder_margins(chain, girdle.rotation, upper)
+    }
+
+    pub fn forward(self, chain: &ArmChainBinding) -> Option<ArmCandidate> {
+        let (upper, girdle) = self.shoulder_frame(chain)?;
+        let [_, _, _, flexion, roll, wrist_f, wrist_d, _, _] = self.angles;
         let input = ArmIkInput::from_chain(
             chain,
             ArmIkTarget {
@@ -151,8 +154,6 @@ impl ArmJoints {
             },
         );
         let pose = crate::skeleton::from_joints(input.skeleton_rest(), upper, flexion, roll)?;
-        let girdle =
-            crate::girdle::forward(chain, plane, elevation, Some(Vec2::new(sc_pro, sc_elv)))?;
         let displacement = girdle.centre - chain.rest.upper_arm.position;
         let elbow = pose.middle + displacement;
         let wrist = pose.end + displacement;
@@ -235,12 +236,11 @@ impl ArmJoints {
         add(chain.lower_arm, chain.rest.elbow, elbow, lower_model);
         add(chain.hand, chain.rest.wrist, wrist, hand_model);
         append_fingers(chain, &fingers, hand_model, wrist, &mut motion);
-        let (joint_margins, chart_margin) =
+        let (joint_margins, _) =
             crate::joint_limits::shoulder_margins(chain, girdle.rotation, upper)?;
         Some(ArmCandidate {
             joint_margin: joint_margins.into_iter().fold(f32::INFINITY, f32::min),
             joint_margins,
-            chart_margin,
             resolved,
             shoulder: girdle.centre,
             elbow,
