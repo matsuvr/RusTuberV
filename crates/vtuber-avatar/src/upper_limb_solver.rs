@@ -544,21 +544,25 @@ impl Problem<'_> {
         // soften any human limit. The nonlinear line search checks the result.
         let directions: Vec<_> = rows
             .iter()
-            .map(|row| factor.solve(&DVector::from_column_slice(row)))
-            .collect();
-        let mut delta = free;
-        let mut lambda = vec![0.0_f64; rows.len()];
-        for _ in 0..256 {
-            let mut largest = 0.0_f64;
-            for (((row, margin), direction), lambda) in
-                rows.iter().zip(&margins).zip(&directions).zip(&mut lambda)
-            {
+            .map(|row| {
+                let direction = factor.solve(&DVector::from_column_slice(row));
                 let diagonal = row
                     .iter()
                     .zip(direction.iter())
                     .map(|(a, b)| a * b)
                     .sum::<f64>();
-                if diagonal <= f64::EPSILON {
+                let norm = direction.norm();
+                (direction, diagonal, norm)
+            })
+            .collect();
+        let mut delta = free;
+        let mut lambda = vec![0.0_f64; rows.len()];
+        for _ in 0..256 {
+            let mut largest = 0.0_f64;
+            for (((row, margin), (direction, diagonal, norm)), lambda) in
+                rows.iter().zip(&margins).zip(&directions).zip(&mut lambda)
+            {
+                if *diagonal <= f64::EPSILON {
                     continue;
                 }
                 let slack = row
@@ -569,9 +573,13 @@ impl Problem<'_> {
                     + margin;
                 let next = (*lambda - slack / diagonal).max(0.0);
                 let change = next - *lambda;
-                delta += direction * change;
+                // The direction is constant for all dual sweeps. Update in
+                // place instead of allocating an 18-element vector each time.
+                if change != 0.0 {
+                    delta.axpy(change, direction, 1.0);
+                }
                 *lambda = next;
-                largest = largest.max(change.abs() * direction.norm());
+                largest = largest.max(change.abs() * norm);
             }
             if largest < 64.0 * f64::EPSILON.sqrt() {
                 break;

@@ -120,6 +120,12 @@ impl PoseRuntime {
             && self.lock_status().state != InferenceWorkerState::Failed
     }
 
+    /// Snapshot of the combined Pose/Hand worker timings and progress.
+    #[must_use]
+    pub fn status(&self) -> vtuber_inference::InferenceWorkerStatus {
+        self.lock_status().clone()
+    }
+
     /// Reaps an exited worker and clears its retained observations.
     fn poll_worker_exit(&mut self) -> Result<(), InferenceError> {
         let Some(result) =

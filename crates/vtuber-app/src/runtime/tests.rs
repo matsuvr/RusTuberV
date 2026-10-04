@@ -33,12 +33,12 @@ fn a_pre_wired_pose_capture_pair_survives_the_shell_initialization() {
         &app.world().resource::<PoseRuntime>().frame_slot(),
         &pose_slot
     ));
-    assert_eq!(
+    assert!(matches!(
         app.world()
             .resource::<crate::capture_runtime::CaptureRuntime>()
             .backend_kind(),
         crate::capture_runtime::CameraBackendKind::Mock
-    );
+    ));
 }
 
 #[test]
@@ -49,8 +49,9 @@ fn initialization_creates_default_capture_pose_and_face_runtimes() {
     assert_eq!(
         app.world()
             .resource::<crate::capture_runtime::CaptureRuntime>()
-            .backend_kind(),
-        default_camera_backend()
+            .backend_kind()
+            .name(),
+        default_camera_backend().name()
     );
     assert!(app.world().contains_resource::<PoseRuntime>());
     assert!(app.world().contains_resource::<InferenceRuntime>());

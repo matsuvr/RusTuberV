@@ -16,6 +16,7 @@ mod mediapipe_pose_probe;
 mod ndi;
 mod ndi_output_render;
 mod task_result;
+mod tracking_replay;
 mod vrm_compatibility;
 mod vrm_managed_compatibility;
 mod vrm_render;
@@ -44,6 +45,9 @@ fn print_help() {
     println!("  mediapipe-face-smoke     Windows MSMF MediaPipe Face Landmarker gate");
     println!("  mediapipe-pose-probe     Guided MediaPipe neutral-relative pose proof");
     println!("  vrm-render <path> <out>  Render the rich-look switching sequence");
+    println!(
+        "  tracking-replay <rgb> <vrm> <out> <cpus> <vsync|uncapped>  Measure recorded camera input through the full app"
+    );
     println!("  ndi <command>           Stage or verify a Windows NDI release package");
 }
 
@@ -107,6 +111,7 @@ fn run_task(args: &[String]) -> TaskResult {
         "mediapipe-face-smoke" => completed(mediapipe_face_smoke::run(args)),
         "mediapipe-pose-probe" => completed(mediapipe_pose_probe::run(args)),
         "vrm-render" => vrm_render::run(args),
+        "tracking-replay" => completed(tracking_replay::run(args)),
         "ndi" => ndi::run(args),
         other => Err(TaskError::new(format!("unknown task: {other}"), 1)),
     }
