@@ -75,6 +75,7 @@ pub(crate) struct CollisionGeometry {
     pub joints: Vec<JointAllowance>,
     pairs: Vec<CollisionPair>,
     bones: Vec<Entity>,
+    hull_bones: Vec<Vec<Entity>>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,10 +86,17 @@ struct CollisionPair {
     bones: Vec<Entity>,
 }
 
+/// Shared only while differentiating one fixed configuration. A column may
+/// reuse a hull iff none of its skin influences changed from that configuration.
+pub(crate) struct DifferentialCache {
+    hulls: Vec<std::sync::OnceLock<Result<std::sync::Arc<PosedHull>, CollisionError>>>,
+}
+
 struct SolverPairs<'a> {
     margin: f32,
     frozen: Option<&'a [bool]>,
     active: Vec<bool>,
+    cache: Option<(&'a DifferentialCache, &'a std::collections::HashSet<Entity>)>,
 }
 
 #[derive(Component)]
@@ -619,7 +627,23 @@ impl CollisionGeometry {
             .chain(joints.iter().map(|joint| joint.pivot_bone))
             .filter(|bone| seen.insert(*bone))
             .collect();
+        let hull_bones = hulls
+            .iter()
+            .map(|h| {
+                let mut bones: Vec<_> = std::iter::once(h.bone)
+                    .chain(
+                        h.skin
+                            .iter()
+                            .flat_map(|v| v.influences.iter().map(|(b, _, _)| *b)),
+                    )
+                    .collect();
+                bones.sort_unstable();
+                bones.dedup();
+                bones
+            })
+            .collect();
         let mut geometry = Self {
+            hull_bones,
             hulls,
             joints,
             pairs: Vec::new(),
@@ -657,15 +681,11 @@ impl CollisionGeometry {
                             })
                     })
                 });
-                let mut bones: Vec<_> = [a, b]
+                let mut bones: Vec<_> = [i, j]
                     .into_iter()
-                    .flat_map(|h| {
-                        std::iter::once(h.bone).chain(
-                            h.skin
-                                .iter()
-                                .flat_map(|v| v.influences.iter().map(|(bone, _, _)| *bone)),
-                        )
-                    })
+                    .filter_map(|index| geometry.hull_bones.get(index))
+                    .flatten()
+                    .copied()
                     .collect();
                 if let Some((_, joint)) = joint {
                     bones.push(joint.pivot_bone);
@@ -743,6 +763,12 @@ impl CollisionGeometry {
         self.swept_margins(&motion, None, padding, joint_padding)
     }
 
+    pub fn differential_cache(&self) -> DifferentialCache {
+        DifferentialCache {
+            hulls: (0..self.hulls.len()).map(|_| Default::default()).collect(),
+        }
+    }
+
     /// Freeze the potentially active pairs while differentiating one SQP
     /// problem. Separated broad-phase bounds are feasibility certificates,
     /// not differentiable contact constraints.
@@ -751,11 +777,13 @@ impl CollisionGeometry {
         motion: impl Fn(Entity) -> Option<BoneMotion>,
         margin: f32,
         frozen: Option<&[bool]>,
+        cache: Option<(&DifferentialCache, &std::collections::HashSet<Entity>)>,
     ) -> Result<(Vec<f32>, Vec<bool>), CollisionError> {
         let mut pairs = SolverPairs {
             margin,
             frozen,
             active: Vec::new(),
+            cache,
         };
         let margins =
             self.query_margins(&motion, None, |_| 0.0, |_| 0.0, Some(&mut pairs), false)?;
@@ -816,7 +844,8 @@ impl CollisionGeometry {
             motions.borrow_mut().insert(bone, value);
             Some(value)
         };
-        let mut inflated: Vec<Option<PosedHull>> = (0..self.hulls.len()).map(|_| None).collect();
+        let mut inflated: Vec<Option<std::sync::Arc<PosedHull>>> =
+            (0..self.hulls.len()).map(|_| None).collect();
         let pose_hull =
             |i: usize, h: &Hull| -> Result<PosedHull, CollisionError> {
                 let owner = motion(h.bone).ok_or(CollisionError::MissingBone)?;
@@ -869,17 +898,33 @@ impl CollisionGeometry {
             for (index, hull) in [(i, a), (j, b)] {
                 let slot = inflated.get_mut(index).ok_or(CollisionError::InvalidMesh)?;
                 if slot.is_none() {
-                    *slot = Some(pose_hull(index, hull)?);
+                    let cached =
+                        solver
+                            .as_ref()
+                            .and_then(|s| s.cache)
+                            .and_then(|(cache, moved)| {
+                                self.hull_bones
+                                    .get(index)
+                                    .filter(|bones| bones.iter().all(|b| !moved.contains(b)))
+                                    .and_then(|_| cache.hulls.get(index))
+                            });
+                    *slot = Some(if let Some(cached) = cached {
+                        cached
+                            .get_or_init(|| pose_hull(index, hull).map(std::sync::Arc::new))
+                            .clone()?
+                    } else {
+                        std::sync::Arc::new(pose_hull(index, hull)?)
+                    });
                 }
             }
             let margin = solver.as_ref().map_or(0.0, |s| s.margin);
             let sa = inflated
                 .get(i)
-                .and_then(Option::as_ref)
+                .and_then(Option::as_deref)
                 .ok_or(CollisionError::InvalidMesh)?;
             let sb = inflated
                 .get(j)
-                .and_then(Option::as_ref)
+                .and_then(Option::as_deref)
                 .ok_or(CollisionError::InvalidMesh)?;
             let gap =
                 sa.centre.distance(sb.centre) - sa.radius - sb.radius - sa.padding - sb.padding;
@@ -1101,8 +1146,8 @@ struct PosedHull {
     min: Vec3,
     max: Vec3,
     padding: f32,
-    faces: std::cell::OnceCell<Result<HullFaces, CollisionError>>,
-    joint_bounds: std::cell::OnceCell<HullFaces>,
+    faces: std::sync::OnceLock<Result<HullFaces, CollisionError>>,
+    joint_bounds: std::sync::OnceLock<HullFaces>,
 }
 
 impl PosedHull {
@@ -1568,11 +1613,13 @@ mod tests {
         let geometry = CollisionGeometry::new(vec![a, b, c], vec![joint]);
         assert!(geometry.bones().any(|bone| bone == pivot));
         let all = vec![true; geometry.pairs.len()];
+        let cache = geometry.differential_cache();
         for id in 1..=6 {
             let moved = Entity::from_raw_u32(id).unwrap();
             let sparse =
                 geometry.differential_pairs(&all, &std::collections::HashSet::from([moved]));
-            let evaluate = |delta: f32, pairs: &[bool]| {
+            let changed = std::collections::HashSet::from([moved]);
+            let evaluate = |delta: f32, pairs: &[bool], cached: bool| {
                 geometry
                     .solver_margins(
                         |bone| {
@@ -1587,18 +1634,23 @@ mod tests {
                         },
                         0.01,
                         Some(pairs),
+                        cached.then_some((&cache, &changed)),
                     )
                     .unwrap()
                     .0
             };
-            let derivative = |pairs: &[bool]| {
-                evaluate(0.01, pairs)
+            let derivative = |pairs: &[bool], cached| {
+                evaluate(0.01, pairs, cached)
                     .into_iter()
-                    .zip(evaluate(-0.01, pairs))
+                    .zip(evaluate(-0.01, pairs, cached))
                     .map(|(a, b)| (a - b) / 0.02)
                     .collect::<Vec<_>>()
             };
-            assert_eq!(derivative(&all), derivative(&sparse), "bone {id}");
+            assert_eq!(
+                derivative(&all, false),
+                derivative(&sparse, true),
+                "bone {id}"
+            );
         }
     }
 
@@ -1624,7 +1676,7 @@ mod tests {
         };
         let geometry = CollisionGeometry::new(vec![a, b], vec![joint]);
         let (margins, active) = geometry
-            .solver_margins(|_| Some(IDENTITY), 0.001, None)
+            .solver_margins(|_| Some(IDENTITY), 0.001, None, None)
             .unwrap();
         assert_eq!(active, vec![true]);
         assert!(margins[0] > 0.0 && margins[0] < 0.001);
@@ -1650,15 +1702,15 @@ mod tests {
                     ..IDENTITY
                 })
             };
-            let (_, active) = geometry.solver_margins(motion, 1.0e-5, None).unwrap();
+            let (_, active) = geometry.solver_margins(motion, 1.0e-5, None, None).unwrap();
             assert_eq!(active, vec![false]);
             let (inactive, frozen) = geometry
-                .solver_margins(motion, 1.0e-5, Some(&active))
+                .solver_margins(motion, 1.0e-5, Some(&active), None)
                 .unwrap();
             assert_eq!(inactive, vec![1.0]);
             assert_eq!(frozen, active);
             let (margins, _) = geometry
-                .solver_margins(motion, 1.0e-5, Some(&[true]))
+                .solver_margins(motion, 1.0e-5, Some(&[true]), None)
                 .unwrap();
             assert!((margins[0] - (separation - 2.0)).abs() < 1.0e-5);
         }
@@ -1684,11 +1736,11 @@ mod tests {
                 },
             })
         };
-        let (distances, active) = geometry.solver_margins(motion, 1.0e-3, None).unwrap();
+        let (distances, active) = geometry.solver_margins(motion, 1.0e-3, None, None).unwrap();
         assert!(distances[0] > 0.17);
         assert_eq!(active, vec![false]);
         let (frozen, _) = geometry
-            .solver_margins(motion, 1.0e-3, Some(&active))
+            .solver_margins(motion, 1.0e-3, Some(&active), None)
             .unwrap();
         assert_eq!(frozen, vec![1.0]);
     }

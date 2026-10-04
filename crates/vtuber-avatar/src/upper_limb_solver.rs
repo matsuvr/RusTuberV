@@ -3,7 +3,7 @@
 
 use crate::{
     arm::ArmChainBinding,
-    collision::{BoneMotion, CollisionError, CollisionGeometry},
+    collision::{BoneMotion, CollisionError, CollisionGeometry, DifferentialCache},
     upper_limb::{ArmCandidate, ArmJoints},
 };
 use bevy::prelude::*;
@@ -299,7 +299,11 @@ impl Problem<'_> {
     fn evaluate_geometry(
         &self,
         mut evaluation: Evaluation,
-        pairs: Option<&[bool]>,
+        differential: Option<(
+            &[bool],
+            &DifferentialCache,
+            &std::collections::HashSet<Entity>,
+        )>,
     ) -> Result<Evaluation, CollisionError> {
         let length = self
             .chains
@@ -320,7 +324,8 @@ impl Problem<'_> {
             // reaches them. This selects work, not an anatomical clearance;
             // every nonlinear candidate still checks all pairs.
             length * f32::EPSILON.cbrt(),
-            pairs,
+            differential.map(|(pairs, _, _)| pairs),
+            differential.map(|(_, cache, moved)| (cache, moved)),
         )?;
         evaluation.clearance = margins.iter().copied().fold(f32::INFINITY, f32::min);
         evaluation
@@ -354,6 +359,8 @@ impl Problem<'_> {
         let h = f32::EPSILON.cbrt();
         let mut task_columns = Vec::new();
         let mut constraint_columns = Vec::new();
+        let cache = self.geometry.differential_cache();
+        let cache = &cache;
         // These jobs belong to the asynchronous pose solve. Sharing the ECS
         // frame pool lets a render-critical task pick up a long collision job.
         let mut columns = bevy::tasks::AsyncComputeTaskPool::get_or_init(
@@ -383,22 +390,30 @@ impl Problem<'_> {
                     if let Some(span) = span.filter(|v| *v > 0.0) {
                         let a = self.kinematics(minus).ok()?;
                         let b = self.kinematics(plus).ok()?;
-                        let moved = a
-                            .arms
-                            .iter()
-                            .zip(&b.arms)
-                            .filter_map(|(a, b)| a.as_ref().zip(b.as_ref()))
-                            .flat_map(|(a, b)| {
-                                a.motion.iter().filter_map(|(bone, motion)| {
-                                    (b.motion.get(bone) != Some(motion)).then_some(*bone)
-                                })
+                        let moved = [&a, &b]
+                            .into_iter()
+                            .flat_map(|sample| {
+                                sample
+                                    .arms
+                                    .iter()
+                                    .zip(&evaluation.arms)
+                                    .filter_map(|(sample, base)| sample.as_ref().zip(base.as_ref()))
+                                    .flat_map(|(sample, base)| {
+                                        sample.motion.iter().filter_map(|(bone, motion)| {
+                                            (base.motion.get(bone) != Some(motion)).then_some(*bone)
+                                        })
+                                    })
                             })
                             .collect();
                         let pairs = self
                             .geometry
                             .differential_pairs(&evaluation.contact_pairs, &moved);
-                        let a = self.evaluate_geometry(a, Some(&pairs)).ok()?;
-                        let b = self.evaluate_geometry(b, Some(&pairs)).ok()?;
+                        let a = self
+                            .evaluate_geometry(a, Some((&pairs, cache, &moved)))
+                            .ok()?;
+                        let b = self
+                            .evaluate_geometry(b, Some((&pairs, cache, &moved)))
+                            .ok()?;
                         task_column.extend(
                             a.residuals
                                 .iter()
@@ -587,7 +602,7 @@ impl Problem<'_> {
         &self,
         seed: [Option<ArmJoints>; 2],
     ) -> ([Option<ArmJoints>; 2], SolveStatus) {
-        let (mut pose, mut status) = self.solve(seed, 96);
+        let (mut pose, mut status) = self.solve_at_resolution(seed, 96, 1.0e-4);
         let samples = |index| {
             crate::upper_limb::BOUNDS.get(index).map(|&(lo, hi)| {
                 std::array::from_fn::<_, 5, _>(|i| lo + (hi - lo) * i as f32 / 4.0)
@@ -627,7 +642,7 @@ impl Problem<'_> {
             .into_iter()
             .find(|(candidate, _)| self.evaluate(*candidate).is_ok_and(|v| self.feasible(&v)));
         if let Some((candidate, _)) = best {
-            let (other, other_status) = self.solve(candidate, 96);
+            let (other, other_status) = self.solve_at_resolution(candidate, 96, 1.0e-4);
             if let SolveStatus::Feasible {
                 residual: alternative,
                 ..
@@ -646,6 +661,15 @@ impl Problem<'_> {
         seed: [Option<ArmJoints>; 2],
         rounds: usize,
     ) -> ([Option<ArmJoints>; 2], SolveStatus) {
+        self.solve_at_resolution(seed, rounds, 1.0e-3)
+    }
+
+    fn solve_at_resolution(
+        &self,
+        seed: [Option<ArmJoints>; 2],
+        rounds: usize,
+        angle_resolution: f32,
+    ) -> ([Option<ArmJoints>; 2], SolveStatus) {
         let mut current = seed;
         let mut evaluation = match self.evaluate(current) {
             Ok(v) => v,
@@ -655,10 +679,9 @@ impl Problem<'_> {
         let mut converged = false;
         let mut accepted_steps = 0;
         let mut linearization = None;
-        // Resolve angles to about 0.006 degrees for avatar display. Finish
-        // feasible SQP steps at display resolution; feasibility/ROM margins
-        // and the finite-difference stencil retain their original precision.
-        const ANGLE_RESOLUTION: f32 = 1.0e-4;
+        // Tracking stops at about 0.057 degrees; the cached neutral pose
+        // retains its original 0.006-degree solve so its IK branch does not
+        // change. Feasibility/ROM and the derivative stencil stay unchanged.
         // Failed proposals contract trust until its numerical stopping
         // threshold. Do not restart that contraction at each work batch:
         // only accepted improvements spend the continuation budget.
@@ -680,7 +703,7 @@ impl Problem<'_> {
                 break;
             };
             let magnitude = delta.iter().copied().map(f32::abs).fold(0.0_f32, f32::max);
-            if magnitude <= ANGLE_RESOLUTION && within_numeric_margin {
+            if magnitude <= angle_resolution && within_numeric_margin {
                 converged = true;
                 break;
             }
@@ -748,7 +771,7 @@ impl Problem<'_> {
                 // Backtracking may make the admitted step much smaller than
                 // the QP proposal. Stop at display resolution instead of
                 // queuing invisible improvements on every render tick.
-                converged = magnitude * scale <= ANGLE_RESOLUTION;
+                converged = magnitude * scale <= angle_resolution;
                 if converged {
                     break;
                 }
@@ -758,7 +781,7 @@ impl Problem<'_> {
             }
             if trust
                 <= if within_numeric_margin {
-                    ANGLE_RESOLUTION
+                    angle_resolution
                 } else {
                     64.0 * f32::EPSILON
                 }

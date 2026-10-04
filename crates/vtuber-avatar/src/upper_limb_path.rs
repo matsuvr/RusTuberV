@@ -549,7 +549,28 @@ pub(crate) fn check_transition(
                     .max(0.0)
             },
         );
-        clear.ok()
+        if !clear.ok()? {
+            // An overlapping enclosure is inconclusive, but an actual
+            // midpoint collision disproves the entire edge. Reject it now
+            // instead of spending the subdivision budget on an impossible
+            // certificate (recursive bisection in motion validation).
+            let mid = (start + end) * 0.5;
+            let pose = problem.kinematics(interpolate(from, to, mid)).ok()?;
+            let body = problem
+                .body_curve
+                .map(|c| c.at(mid).motions())
+                .transpose()
+                .ok()?;
+            if !problem
+                .geometry
+                .pose_is_clear(&|bone| motion(&pose, body.as_ref().unwrap_or(problem.body), bone))
+                .ok()?
+            {
+                return None;
+            }
+            return Some(false);
+        }
+        Some(true)
     };
     // ROM and skin constrain the same path, but need not subdivide it at
     // the same places. A tight angular boundary must not make us skin and
