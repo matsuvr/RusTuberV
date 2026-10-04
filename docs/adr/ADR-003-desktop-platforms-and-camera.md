@@ -40,3 +40,12 @@ macOS:
 ## Consequences
 
 OS差は`vtuber-camera`とpackagingに閉じる。GitHub Actionsは利用せず、camera hardwareのない開発者環境ではmock、format selection、compile testだけを行い、実機testは明示的なignored testまたはxtaskでローカル実行する。対象外platformの将来移植だけを目的とした抽象化は作らない。
+
+## macOS実装（2026-10-04）
+
+- macOSの既定backendをAVFoundationに接続。`nokhwa_initialize`の非同期callback完了まで列挙・openを行わず、拒否は既存の`CameraError::PermissionDenied`で伝える。許可待ちで描画threadを止めない。
+- device IDは`AVCaptureDevice.uniqueID`。camera objectはcapture workerで生成・停止・破棄し、AVFoundationのYUYV出力をnokhwaのRGB decoderでowned RGB8へ変換する。
+- nokhwa 0.10.11の`compatible_list_by_resolution`はfourccのfilterが逆、`Closest`は未対応解像度のfps検索に元の要求解像度を使う。そのため同じ依存の`nokhwa-bindings-macos` 0.2.4のsafe APIで実format一覧を取得し、既存の`select_format`で選んだformatを`Exact`で渡す。独自の代替入力は追加しない。
+- `tools/build-macos.sh`は`NSCameraUsageDescription`を含むローカル`.app`を作る。NDIはインストール済みSDKのdylibをrpathから読む。配布用SDK同梱・署名・公証はこのローカルビルドの範囲外。
+
+根拠: [nokhwa初期化API](https://docs.rs/nokhwa/0.10.11/nokhwa/fn.nokhwa_initialize.html)、[Appleのカメラ利用理由キー](https://developer.apple.com/documentation/bundleresources/information-property-list/nscamerausagedescription)、固定依存の`src/backends/capture/avfoundation.rs`と`nokhwa-core/src/types.rs`。

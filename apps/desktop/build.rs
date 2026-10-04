@@ -23,6 +23,20 @@ fn main() {
     println!("cargo:rerun-if-env-changed=NDI_SDK_DIR");
     println!("cargo:rerun-if-env-changed=NDI_RUNTIME_DLL");
 
+    // The macOS SDK uses @rpath/libndi.dylib. Local builds load the installed
+    // SDK runtime, so both cargo run and the .app work without DYLD overrides.
+    if env::var_os("CARGO_FEATURE_NDI_OUTPUT").is_some()
+        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+    {
+        let sdk = env::var_os("NDI_SDK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/Library/NDI SDK for Apple"));
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            sdk.join("lib/macOS").display()
+        );
+    }
+
     if env::var_os("CARGO_FEATURE_NDI_OUTPUT").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
     {

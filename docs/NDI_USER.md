@@ -32,6 +32,29 @@ runtime DLL は application フォルダへ置き、System32 や PATH へは入�
 
 既定の映像 profile は 1920x1080 / 60fps / straight-alpha BGRA です。
 
+### macOSでローカルビルドする場合
+
+NDI SDK for Appleを導入済みのMacでは、リポジトリ直下で次を実行します。
+
+```sh
+bash tools/build-macos.sh
+open target/release/RusTuberV.app
+```
+
+ビルド時に`assets/icons`のPNGからmacOS用アイコンを生成して`.app`へ同梱します。
+この`.app`から起動すると、FinderとDockにアプリアイコンが表示されます。
+アイコン変更後の再ビルドでは、起動中のRusTuberVを終了してから、この`.app`を起動し直してください。
+
+SDKの標準配置は`/Library/NDI SDK for Apple`です。別の場所に導入した場合は、
+ビルド時に`NDI_SDK_DIR`でSDKのルートを指定してください。
+この`.app`はローカル利用向けで、NDI runtimeを同梱せず導入済みSDKから読み込みます。
+
+「VRM・カメラ選択」でVRMを読み込み、モデルの利用条件を確認してから、
+「カメラを再検出」→「MacBook Airのカメラ」などの実機カメラを選びます。
+macOSのカメラ許可が表示された場合は許可してください。
+モデルの準備とカメラ選択が揃うと追従が始まり、「NDI出力」で送信を開始できます。
+`assets/models/*.task`は推論用モデルであり、アバターの`.vrm`ファイルとは別です。
+
 ## 3. 表情キー
 
 モデルが定義した Expression を、次の 36 キーで選べます（数字列のあとに
