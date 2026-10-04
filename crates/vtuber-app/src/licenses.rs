@@ -30,14 +30,35 @@ static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
     },
     LicenseGroup {
         expression: "OFL-1.1",
-        items: &[LicensedItem {
-            name: "LINESeedJP_A_TTF_Rg.ttf",
-            version: "",
-        }],
-        texts: &[LicenseText {
-            file_name: "LICENSE-LINESeedJP.txt",
-            body: include_str!("../../../assets/fonts/LICENSE-LINESeedJP.txt"),
-        }],
+        items: &[
+            LicensedItem {
+                name: "LINESeedJP_A_OTF_Rg.otf",
+                version: "",
+            },
+            LicensedItem {
+                name: "LINESeedKR-Rg.otf",
+                version: "",
+            },
+            LicensedItem {
+                name: "NotoSansCJKsc-VF.otf",
+                version: "",
+            },
+        ],
+        texts: &[
+            LicenseText {
+                file_name: "LICENSE-LINESeed.txt",
+                body: include_str!("../../../assets/fonts/LICENSE-LINESeed.txt"),
+            },
+            LicenseText {
+                file_name: "LICENSE-NotoSansCJK.txt",
+                // Copyright notice from the bundled font's name table;
+                // the upstream license file contains only the OFL text.
+                body: concat!(
+                    "© 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.\n\n",
+                    include_str!("../../../assets/fonts/LICENSE-NotoSansCJK.txt"),
+                ),
+            },
+        ],
     },
     LicenseGroup {
         expression: "Apache-2.0",
@@ -136,13 +157,15 @@ mod tests {
     }
 
     #[test]
-    fn the_bundled_font_and_models_are_listed() {
+    fn the_bundled_fonts_and_models_are_listed() {
         let names: Vec<&str> = bundled_groups()
             .iter()
             .flat_map(|group| group.items.iter().map(|item| item.name))
             .collect();
         assert!(names.contains(&"RusTuberV"));
-        assert!(names.contains(&"LINESeedJP_A_TTF_Rg.ttf"));
+        assert!(names.contains(&"LINESeedJP_A_OTF_Rg.otf"));
+        assert!(names.contains(&"LINESeedKR-Rg.otf"));
+        assert!(names.contains(&"NotoSansCJKsc-VF.otf"));
         assert!(names.contains(&"mediapipe (vendor/mediapipe-rs)"));
         assert!(names.contains(&"assets/models (MediaPipe models)"));
     }

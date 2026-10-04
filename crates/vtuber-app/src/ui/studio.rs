@@ -546,7 +546,6 @@ pub(crate) fn render_studio(
     camera_texture: Option<TextureId>,
     avatar_texture: Option<AvatarPreviewTexture>,
     dialog_active: bool,
-    font_error: Option<&str>,
     lang: UiLanguage,
 ) -> bool {
     let viewport = ctx.viewport_rect();
@@ -658,19 +657,6 @@ pub(crate) fn render_studio(
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(RichText::new(page_title(vm.pane, lang)).size(26.0).strong());
-                            if let Some(detail) = font_error {
-                                section(ui, "Font could not be loaded", |ui| {
-                                    ui.label(detail);
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Japanese").clicked() {
-                                            state.emit(UiAction::SetLanguage(UiLanguage::Ja));
-                                        }
-                                        if ui.button("English").clicked() {
-                                            state.emit(UiAction::SetLanguage(UiLanguage::En));
-                                        }
-                                    });
-                                });
-                            }
                             if let Some(error) = error {
                                 section(
                                     ui,
@@ -2502,7 +2488,6 @@ mod tests {
                     vtuber_core::VideoOutputProfile::default(),
                 )),
                 false,
-                None,
                 UiLanguage::Ja,
             );
         });
@@ -2622,7 +2607,6 @@ mod tests {
                         vtuber_core::VideoOutputProfile::default(),
                     )),
                     false,
-                    None,
                     UiLanguage::Ja,
                 );
             });

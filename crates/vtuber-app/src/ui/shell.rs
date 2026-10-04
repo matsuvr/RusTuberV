@@ -248,7 +248,6 @@ fn ui_render_system(
     landmarks: Res<PreviewLandmarkState>,
     avatar_mirror: Res<AvatarMotionMirror>,
     settings: Res<AppSettings>,
-    fonts: Res<UiFonts>,
     target: Option<Res<AvatarOutputTarget>>,
     mut output: Option<ResMut<AvatarOutputState>>,
     mut file_dialog: ResMut<super::file_dialog::FileDialogState>,
@@ -283,7 +282,6 @@ fn ui_render_system(
         camera_texture,
         avatar_texture,
         file_dialog.is_active(),
-        fonts.error.as_deref(),
         settings.language(),
     );
     hover.set(over_ui);
