@@ -375,6 +375,28 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
         Ok(samples)
     };
 
+    // Observe the actual asynchronous result of each episode's final input.
+    // Render-frame counts alone can end before the constrained worker returns.
+    let await_sample = |app: &mut App, seq: FrameSeq| -> Result<Duration, String> {
+        let started = Instant::now();
+        while app
+            .world()
+            .get::<DynamicArmTargets>(root)
+            .is_none_or(|targets| targets.source_seq != Some(seq))
+        {
+            if started.elapsed() >= Duration::from_secs(10) {
+                return Err(format!(
+                    "sample {seq:?} was not admitted: {:?}",
+                    app.world().get::<UpperLimbSolveStatus>(root)
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(16));
+            app.update();
+            sample_transforms(app)?;
+        }
+        Ok(started.elapsed())
+    };
+
     let push = |app: &mut App,
                 seq: u64,
                 state: TrackingState,
@@ -438,12 +460,21 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
             .rotation;
         head_moved |= initial_head.angle_between(head) > 1.0e-4;
     }
+    let motion_wait = await_sample(app, FrameSeq(MOTION_FRAMES as u64))?;
+    let head = sample_transforms(app)?
+        .first()
+        .ok_or_else(|| "trace sample list was empty".to_owned())?
+        .1
+        .rotation;
+    head_moved |= initial_head.angle_between(head) > 1.0e-4;
     if !head_moved {
         return Err(
             "tracked head rotation did not respond during the paced motion episode".to_owned(),
         );
     }
-    println!("control episode motion verified ({} frames)", MOTION_FRAMES);
+    println!(
+        "control episode motion verified ({MOTION_FRAMES} input frames, {motion_wait:?} awaiting final sample)"
+    );
 
     for seq in 0..LOSS_FRAMES as u64 {
         push(
@@ -457,7 +488,10 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
         app.update();
         sample_transforms(app)?;
     }
-    println!("control episode loss verified ({} frames)", LOSS_FRAMES);
+    let loss_wait = await_sample(app, FrameSeq((MOTION_FRAMES + LOSS_FRAMES) as u64))?;
+    println!(
+        "control episode loss verified ({LOSS_FRAMES} input frames, {loss_wait:?} awaiting final sample)"
+    );
 
     let before = sample_transforms(app)?;
     for seq in 0..REACQUIRE_FRAMES as u64 {
@@ -477,6 +511,8 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
         app.update();
         sample_transforms(app)?;
     }
+    let last_seq = FrameSeq((MOTION_FRAMES + LOSS_FRAMES + REACQUIRE_FRAMES) as u64);
+    let reacquire_wait = await_sample(app, last_seq)?;
     let after = sample_transforms(app)?;
     let moved = before
         .iter()
@@ -486,8 +522,8 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
         return Err("reacquire did not update the tracked pose".to_owned());
     }
     println!(
-        "control episode reacquire verified ({} frames)",
-        REACQUIRE_FRAMES
+        "control episode reacquire verified ({} input frames, {:?} awaiting final sample)",
+        REACQUIRE_FRAMES, reacquire_wait
     );
     Ok(())
 }

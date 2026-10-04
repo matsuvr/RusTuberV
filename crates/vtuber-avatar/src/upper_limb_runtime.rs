@@ -484,6 +484,9 @@ pub fn update_upper_limb_targets(
         let source_seq = frame
             .map(|f| f.source_seq)
             .or_else(|| control_current.map(|f| f.source_seq));
+        // Fresh input gets a short first response. Once that sample has been
+        // admitted, batch refinement to avoid a path/worker handoff per step.
+        let rounds = if source_seq == state.source_seq { 4 } else { 1 };
         let cached_neutral = state.neutral.filter(|n| n.goals == neutral_goals);
         let secondary = state
             .secondary
@@ -551,15 +554,12 @@ pub fn update_upper_limb_targets(
                     body_curve: body_curve.as_ref(),
                     tolerance: 64.0 * f32::EPSILON * extent,
                 };
-                // Continue both local IK branches in bounded batches. A slow
-                // alternate search must not delay the already feasible warm
-                // branch; its unfinished iterate is retained for the next job.
-                let (mut next, mut status) = problem.solve(seed, 4);
+                let (mut next, mut status) = problem.solve(seed, rounds);
                 let unfinished = |from, to, status| from != to && matches!(status,
                     SolveStatus::Feasible { converged: false, .. } | SolveStatus::NoFeasibleSolution);
                 let mut refine = unfinished(seed, next, status);
-                let mut secondary_next = None;
-                if !initial {
+                let mut secondary_next = secondary;
+                if !initial && (rounds > 1 || matches!(status, SolveStatus::NoFeasibleSolution) || !refine) {
                     let mut destination_seed = secondary.map_or_else(|| goals.map(|g| g.map(|g| g.neutral)), |s| s.pose);
                     for (seed, goal) in destination_seed.iter_mut().zip(goals) {
                         if let Some((seed, goal)) = seed.as_mut().zip(goal) {
@@ -568,7 +568,7 @@ pub fn update_upper_limb_targets(
                             seed.rest_curl = goal.neutral.rest_curl;
                         }
                     }
-                    let (alternative, alternative_status) = problem.solve(destination_seed, 4);
+                    let (alternative, alternative_status) = problem.solve(destination_seed, rounds);
                     let alternate_refine = unfinished(destination_seed, alternative, alternative_status);
                     if let SolveStatus::Feasible { residual: other, .. } = alternative_status
                         && !matches!(status, SolveStatus::Feasible { residual, .. } if residual <= other + 64.0*f32::EPSILON)
@@ -581,6 +581,7 @@ pub fn update_upper_limb_targets(
                     }
                     refine |= alternate_refine;
                 }
+                refine |= secondary_next.is_some_and(|s| s.refine);
                 if matches!(status, SolveStatus::Feasible { .. })
                     && (next != path.current || body_curve.as_ref().is_some_and(|c| !c.from.same(&c.to)))
                 {
