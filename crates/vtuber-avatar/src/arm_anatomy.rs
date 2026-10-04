@@ -83,8 +83,8 @@ impl RadiusGeometry {
         )
     }
 
-    /// Preserve the source radius orientation and wrist direction, projecting
-    /// only its varying distance onto the VRM's immutable lower-arm length.
+    /// Compose source radius roll with the shortest correction to its offset
+    /// wrist direction. The caller retains the VRM's fixed lower-arm length.
     pub fn rotation(self, roll: f32) -> Option<Quat> {
         let neutral = (self.origin + self.wrist).try_normalize()?;
         let radius = Quat::from_axis_angle(self.axis, roll);

@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_hand_source_is_authority_when_hips_anchor_is_bound() {
+    fn bound_hips_anchor_produces_a_finite_virtual_hand_target() {
         let (chain, motion) = anchored_motion(ArmSide::Left);
         let input = ArmPipelineInput::binding_time(&chain, &motion, ArmPoseProfile::default());
         let outcome = virtual_hand_target(&input).expect("target resolved");

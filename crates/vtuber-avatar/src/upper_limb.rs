@@ -444,7 +444,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn retained_plane_can_pass_both_poles_without_a_new_coordinate_branch() {
+    fn fixed_plane_fk_is_defined_at_both_poles() {
         let chain = chain(ArmSide::Left);
         for e in [
             0.0,
