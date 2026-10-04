@@ -384,13 +384,11 @@ pub(crate) fn normalized_legacy_spring_bone(
                     node,
                     shape: ColliderShape::Sphere(
                         Sphere {
-                            // VRM 0.x collider offsets are already local to
-                            // the target node. The normalized scene is placed
-                            // below one Y=pi basis root, so converting this
-                            // local value would apply the basis twice. Gravity
-                            // is handled separately as an external/world
-                            // vector below.
-                            offset,
+                            // VRM 0.x stores this extension vector in Unity's
+                            // left-handed coordinates, unlike glTF nodes.
+                            // Convert its local Z before the separate scene
+                            // facing rotation. See three-vrm's _v0Import.
+                            offset: [offset[0], offset[1], -offset[2]],
                             radius,
                         },
                     ),
