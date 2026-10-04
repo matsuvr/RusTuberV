@@ -1,6 +1,7 @@
 # 指追従を定義済みポーズの選択へ変更する
 
-状態: 実装。実カメラ・VRM表示の確認は未実施。
+状態: 実装。2026-10-04に合成入力でWindows GPU上のVRM 0.x/1.0表示を確認。
+実カメラでの認識・追従とmacOSは未確認。確認した手サインは末尾と上肢ADRを参照。
 
 ## 問題と採用方式
 
@@ -23,7 +24,7 @@
   掌側への屈曲は左手で負、右手で正とし、開きは共通にする。その後の表示ミラーは
   既存の左右交換と反射に従う。観測角の絶対値から左右や屈曲方向を推測しない。
 - 欠測時は既存のLossBlendでrestへ戻す。固定骨長・関節自由度・親子FKと
-  唯一のcompositorは維持し、親指metacarpalはrestに置く。
+  唯一のcompositorは維持する。2026-10-04から親指metacarpalに後述のCMCを適用する。
   親指MCPもモデルのrestの仰角・開きを保持し、固定ポーズの屈曲だけを加える。
   親指spreadは認識専用とし、CMCの開きをMCPへ移して代用しない。
 
@@ -126,3 +127,39 @@ OK、指クロス、Vulcan、両手ハートの片側、親指を含む三本指
   rustfmt確認、`git diff --check` が成功。
 - `cargo build -p vtuber-desktop -j 1` が成功し、`target/debug/RusTuberV.exe` を更新。
 - 実カメラ・VRMの目視とmacOS実行は未確認。
+
+## 2026-10-04: CMCの2自由度 (#255)
+
+元ZIPを再確認し、上記SHA-256と一致した。認識に使う19角度と4観測確認は変更せず、
+表示カタログにCMC flexion/abductionの2角度を追加する。生のMediaPipe CMC位置は
+使わない。20クリップは、元の`Thumb.1 Stretched`と`Thumb.Spread`を`Defo`からの
+差として変換する。Unity正規化muscle値からの変換幅は採用CMC可動域の半幅
+（flexion 0.74 rad、abduction 0.64 rad）である。Unityのavatar solverを再現した
+値や人の測定値ではなく、既存のpose adaptationにCMCを追加したもの。
+残る12種類のCMCは変換スクリプト内に明示した作画用角度で、人体連成の係数ではない。
+全32ポーズのCMCを同じ0.06秒の一次補間・欠測weightで処理する。
+
+採用軸・範囲はMyoHub MyoArmRight_v0.01、revision
+`93b0ca8f4ec90c9899ee7f05fee561e9911da91b` の `myoarm_r_chain.xml`、
+`firstmc_r`にあるCMC flexion→abductionの2斜交軸である。flexion [-0.78,0.7] rad、
+abduction [-0.5,0.78] rad。出典は[公開XML](https://github.com/MyoHub/myo_sim/blob/93b0ca8f4ec90c9899ee7f05fee561e9911da91b/myo_sim/models/arm/assets/myoarm_r_chain.xml)。
+Apache-2.0表記・著作権表示・ライセンスはTHIRD_PARTY_NOTICESとdocs/licensesに保持する。
+
+角度の符号もsource FKで照合する。右手のCMC→MCPベクトル
+`(0.0165,-0.0292,-0.0127)` は、負のcmc_flexionで尺側へ、正の
+cmc_abductionで掌側へ動く。元クリップのthumbs-upはDefoより
+`Thumb.1 Stretched`が増え、指の方向へ親指を立てるので負のflexionへ写す。
+`Thumb.Spread`が減る対立方向は正のabductionへ写す。
+追加のOK・つまみは負のflexion・正のabductionを使う。
+
+sourceのCMC→MCP軸と掌法線の基底から、各VRMの同じrest基底へ軸を写す。
+左手では極性の骨方向と軸性の回転軸を区別して反射する。metacarpalにだけ
+2軸回転を適用し、MCP/IPは従来のrest相対屈曲を維持する。これによりsourceの
+thumb restをモデルへ押し付けず、各モデルのrest仰角・開きを保つ。
+
+数値確認ではsource2軸の単独/複合、範囲外入力の制限、非identity rest、左右反射、
+weight 0の復帰を確認した。手指の実際のFK形状を#256/#257の衝突候補へ渡し、
+胸・反対の腕/手との制約と時間更新へ接続した。
+固定ポーズはモデルごとの指長を変えず、OK/つまみの指先一致を解くIKではない。
+#257も同じ手の指先接触の保証を追加するIssueではない。
+握り/親指立て/OK/つまみの描画確認は[上肢の統合記録](2026-10-03-upper-limb-anatomy.md#統合版の確認記録2026-10-04)へまとめる。

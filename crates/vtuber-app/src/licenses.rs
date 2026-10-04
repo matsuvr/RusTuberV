@@ -18,6 +18,34 @@ pub use generated::{LicenseGroup, LicenseText, LicensedItem};
 /// Items this repository ships itself, which `Cargo.lock` does not describe.
 static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
     LicenseGroup {
+        expression: "Apache-2.0",
+        items: &[LicensedItem {
+            name: "MyoArm anatomical parameters (adapted)",
+            version: "93b0ca8",
+        }],
+        texts: &[
+            LicenseText {
+                file_name: "myo-sim-Apache-2.0.txt",
+                body: include_str!("../../../docs/licenses/myo-sim-Apache-2.0.txt"),
+            },
+            LicenseText {
+                file_name: "THIRD_PARTY_NOTICES.md",
+                body: include_str!("../../../THIRD_PARTY_NOTICES.md"),
+            },
+        ],
+    },
+    LicenseGroup {
+        expression: "MIT",
+        items: &[LicensedItem {
+            name: "Daniel Holden Joint Limits method (adapted)",
+            version: "",
+        }],
+        texts: &[LicenseText {
+            file_name: "holden-joint-limits-MIT.txt",
+            body: include_str!("../../../docs/licenses/holden-joint-limits-MIT.txt"),
+        }],
+    },
+    LicenseGroup {
         expression: "MIT",
         items: &[LicensedItem {
             name: "RusTuberV",

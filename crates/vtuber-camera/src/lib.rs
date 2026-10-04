@@ -30,6 +30,8 @@ pub mod format;
 pub mod mock;
 /// Placeholder for camera subsystem.
 pub mod placeholder;
+/// Paced recorded RGB input for whole-application measurements.
+pub mod replay;
 
 /// Platform-specific camera backends.
 pub mod backend;

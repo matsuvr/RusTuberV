@@ -199,6 +199,66 @@ fn assert_relative_quat(actual: Quat, expected: Quat) {
 }
 
 #[test]
+fn observed_chest_and_head_keep_independent_world_rotations() {
+    use vtuber_avatar::{AvatarBinding, AvatarGeneration, AvatarMotionMirror, TrackedArmControl};
+    use vtuber_core::arm_tracking::{ArmControlFrame, ThoraxTarget};
+    for (head_yaw, chest_yaw) in [(0.25, 0.0), (0.0, 0.25), (0.25, -0.2)] {
+        let mut app = build_rig(
+            true,
+            true,
+            live_input(Vec3::new(0.06, 0.02, -0.04), Vec3::ZERO),
+        );
+        app.insert_resource(vtuber_avatar::ArmSourceSelection {
+            mode: vtuber_avatar::ArmPoseSourceKind::TrackedPose,
+            ..Default::default()
+        });
+        let rig = rig_of(&app);
+        let generation = AvatarGeneration(1);
+        app.world_mut()
+            .entity_mut(rig.root)
+            .insert(AvatarBinding::head_only(rig.root, rig.head, generation));
+        app.world_mut()
+            .get_mut::<BodyTrackingPoseInput>(rig.root)
+            .unwrap()
+            .yaw_radians = head_yaw;
+        let mut mirror = AvatarMotionMirror::default();
+        mirror.toggle();
+        app.insert_resource(mirror);
+        app.insert_resource(TrackedArmControl {
+            generation: Some(generation),
+            view_to_model: Quat::IDENTITY,
+            frame: Some(ArmControlFrame {
+                thorax: Some(ThoraxTarget {
+                    rotation: Quat::from_rotation_y(chest_yaw).to_array(),
+                    shoulder_offsets: [[0.0; 3]; 2],
+                    weight: 1.0,
+                }),
+                source_seq: vtuber_core::FrameSeq(1),
+                captured_at: vtuber_core::MonoTimeNs(0),
+                produced_at: vtuber_core::MonoTimeNs(0),
+                targets: Default::default(),
+                weights: Default::default(),
+            }),
+        });
+        for frame in 0..180 {
+            tick(&mut app, frame * FRAME_MILLIS);
+        }
+        let chest = app
+            .world()
+            .get::<GlobalTransform>(rig.upper_chest.unwrap())
+            .unwrap()
+            .rotation();
+        let head = app
+            .world()
+            .get::<GlobalTransform>(rig.head)
+            .unwrap()
+            .rotation();
+        assert!(chest.dot(Quat::from_rotation_y(chest_yaw)).abs() > 1.0 - 1.0e-6);
+        assert!(head.dot(Quat::from_rotation_y(head_yaw)).abs() > 1.0 - 1.0e-6);
+    }
+}
+
+#[test]
 fn lateral_target_keeps_root_x_and_produces_torso_lean() {
     let mut app = build_rig(
         true,

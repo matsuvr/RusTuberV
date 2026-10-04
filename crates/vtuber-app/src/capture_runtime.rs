@@ -19,7 +19,7 @@ use crate::preview::PreviewState;
 use crate::privacy_preview::build_privacy_preview;
 
 /// Camera implementation used consistently for enumeration, startup and diagnostics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum CameraBackendKind {
     /// Windows Media Foundation. Failure never falls back to Mock.
     Msmf,
@@ -27,16 +27,19 @@ pub enum CameraBackendKind {
     AvFoundation,
     /// Explicit development input, not a real camera.
     Mock,
+    /// Explicit recorded input, using the normal capture and inference workers.
+    Replay(vtuber_camera::replay::ReplaySource),
 }
 
 impl CameraBackendKind {
     /// Stable diagnostic name, based on the selected backend rather than the OS.
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::Msmf => "MSMF",
             Self::AvFoundation => "AVFoundation",
             Self::Mock => "Mock",
+            Self::Replay(_) => "Replay",
         }
     }
 }
@@ -111,8 +114,8 @@ impl CaptureRuntime {
 
     /// Returns the backend used by both enumeration and worker startup.
     #[must_use]
-    pub const fn backend_kind(&self) -> CameraBackendKind {
-        self.backend
+    pub const fn backend_kind(&self) -> &CameraBackendKind {
+        &self.backend
     }
 
     /// Returns a reference to the underlying controller.
@@ -135,7 +138,11 @@ impl CaptureRuntime {
             return Ok(());
         }
 
-        match self.backend {
+        match &self.backend {
+            CameraBackendKind::Replay(source) => self
+                .controller
+                .start_worker(source.clone())
+                .map_err(|error| error.to_string())?,
             CameraBackendKind::Mock => self
                 .controller
                 .start_worker(vtuber_camera::mock::MockBackend::default())
@@ -164,7 +171,10 @@ impl CaptureRuntime {
 
     /// Enumerates available cameras.
     pub fn enumerate_cameras(&self) -> Result<Vec<CameraDescriptor>, String> {
-        match self.backend {
+        match &self.backend {
+            CameraBackendKind::Replay(source) => {
+                source.enumerate().map_err(|error| error.to_string())
+            }
             CameraBackendKind::Mock => vtuber_camera::mock::MockBackend::default()
                 .enumerate()
                 .map_err(|error| error.to_string()),
@@ -197,7 +207,7 @@ impl CaptureRuntime {
 
     fn poll_camera_permission(&mut self) -> Option<Result<(), String>> {
         #[cfg(target_os = "macos")]
-        if self.backend == CameraBackendKind::AvFoundation {
+        if matches!(self.backend, CameraBackendKind::AvFoundation) {
             return self
                 .camera_permission
                 .poll()
@@ -540,7 +550,7 @@ mod preview_tests {
         assert_eq!(CameraBackendKind::AvFoundation.name(), "AVFoundation");
         assert_eq!(CameraBackendKind::Mock.name(), "Mock");
         let runtime = CaptureRuntime::with_backend(CameraBackendKind::Mock);
-        assert_eq!(runtime.backend_kind(), CameraBackendKind::Mock);
+        assert!(matches!(runtime.backend_kind(), CameraBackendKind::Mock));
         assert!(
             runtime
                 .enumerate_cameras()
@@ -554,14 +564,17 @@ mod preview_tests {
     #[test]
     fn unimplemented_real_backend_never_silently_switches_to_mock() {
         #[cfg(target_os = "macos")]
-        assert_eq!(default_camera_backend(), CameraBackendKind::AvFoundation);
+        assert!(matches!(
+            default_camera_backend(),
+            CameraBackendKind::AvFoundation
+        ));
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(default_camera_backend(), CameraBackendKind::Mock);
+        assert!(matches!(default_camera_backend(), CameraBackendKind::Mock));
         let mut runtime = CaptureRuntime::with_backend(CameraBackendKind::Msmf);
         assert!(runtime.enumerate_cameras().is_err());
         assert!(runtime.ensure_worker_started().is_err());
         assert!(!runtime.worker_started);
-        assert_eq!(runtime.backend_kind(), CameraBackendKind::Msmf);
+        assert!(matches!(runtime.backend_kind(), CameraBackendKind::Msmf));
     }
 
     /// Waits for one Pose-slot publication and returns the reader cursor.

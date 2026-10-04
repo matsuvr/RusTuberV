@@ -12,6 +12,8 @@ description = "Bevy and bevy_vrm1 adapter for RusTuberV."
 vtuber-core = { path = "../vtuber-core" }
 vtuber-tracking = { path = "../vtuber-tracking" }
 nalgebra = "=0.35.0"
+rand = { version = "=0.10.2", default-features = false }
+parry3d = { package = "parry3d-f64", version = "=0.31.1", default-features = false, features = ["required-features", "std", "alloc"] }
 anyhow = "1"
 serde_json = "1"
 bevy = { workspace = true }

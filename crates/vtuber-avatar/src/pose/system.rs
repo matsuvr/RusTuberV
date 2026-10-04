@@ -810,6 +810,7 @@ mod tests {
     #[test]
     fn tracked_arm_text_reports_sequence_and_channel_weights() {
         let frame = vtuber_core::arm_tracking::ArmControlFrame {
+            thorax: None,
             source_seq: FrameSeq(7),
             captured_at: MonoTimeNs(1),
             produced_at: MonoTimeNs(2),

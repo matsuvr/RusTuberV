@@ -36,8 +36,10 @@ pub fn publish_control_frame_system(
 pub fn sync_avatar_diagnostics(
     lifecycle: Option<Res<AvatarLifecycle>>,
     pose_metrics: Option<Res<PoseApplyMetrics>>,
+    arms: Query<&vtuber_avatar::UpperLimbSolveStatus>,
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
 ) {
+    diagnostics.upper_limb = arms.single().ok().copied();
     if let Some(lifecycle) = lifecycle {
         // The capability summary only changes when the lifecycle resource is
         // mutated (bind/unbind); rebuilding its joined strings every frame is

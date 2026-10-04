@@ -246,6 +246,7 @@ pub fn apply_direct_body_position(
     child_ofs: Query<&ChildOf>,
     mut transforms: Query<(&mut Transform, &mut GlobalTransform), Without<Vrm>>,
     rests: Query<&RestGlobalTransform>,
+    arm_selection: Option<Res<crate::arm_pipeline::ArmSourceSelection>>,
     time: Res<Time>,
     mut lean_bases: ResMut<TorsoLeanBases>,
     mut root_rest_data: Local<HashMap<Entity, (Quat, Vec3, Quat)>>,
@@ -316,7 +317,13 @@ pub fn apply_direct_body_position(
         let root_global_after = *root_global;
 
         // --- Channel 2: bounded torso lean --------------------------------
-        let head_offset_model = match sanitized {
+        // Pose owns the thorax. Face translation (including loss-idle sway)
+        // must not add a second, fabricated chest rotation on top of it.
+        let head_offset_model = match sanitized.filter(|_| {
+            arm_selection.as_ref().is_none_or(|selection| {
+                selection.mode != crate::arm_pipeline::ArmPoseSourceKind::TrackedPose
+            })
+        }) {
             Some((head_residual, _)) => semantic_offset_to_model(head_residual, Quat::IDENTITY),
             None => Vec3::ZERO,
         };

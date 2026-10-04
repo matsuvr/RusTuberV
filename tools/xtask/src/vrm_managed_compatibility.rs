@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bevy::app::{App, PluginGroup, Startup};
 use bevy::asset::io::{AssetSourceBuilder, AssetSourceBuilders};
@@ -15,10 +15,10 @@ use bevy::window::{ExitCondition, WindowPlugin};
 use bevy_vrm1::prelude::{HipsBoneEntity, VrmAsset, VrmHandle};
 use vtuber_app::import::{self, DEFAULT_SIZE_LIMIT};
 use vtuber_avatar::{
-    ArmChainBinding, ArmIkInput, ArmPoseBlendState, ArmPoseProfile, AvatarAssetId, AvatarBinding,
-    AvatarLifecycle, AvatarLifecycleState, DefaultArmPose, IDLE_PROCEDURAL_AMPLITUDE_METERS,
-    IdleMotionProfile, ImportedAvatar, LoadImportedAvatarRequest, ResolvedArmPose, UserAssetPath,
-    VtuberAvatarPlugin, default_arm_target, solve_two_bone_arm,
+    ArmChainBinding, AvatarAssetId, AvatarBinding, AvatarLifecycle, AvatarLifecycleState,
+    DynamicArmTargets, IDLE_PROCEDURAL_AMPLITUDE_METERS, IdleMotionProfile, ImportedAvatar,
+    LoadImportedAvatarRequest, ResolvedArmPose, UpperLimbSolveStatus, UserAssetPath,
+    VtuberAvatarPlugin,
 };
 
 const MAX_COMPAT_FRAMES: usize = 1_200;
@@ -102,6 +102,7 @@ fn run_with_root(path: &Path, managed_root: &Path) -> Result<(), String> {
                     .resource::<AvatarLifecycle>()
                     .active_root()
                     .ok_or_else(|| "lifecycle reached Ready without an active root".to_owned())?;
+                verify_arm_pose(&mut app, root)?;
                 let visibility = app
                     .world()
                     .get::<Visibility>(root)
@@ -110,7 +111,6 @@ fn run_with_root(path: &Path, managed_root: &Path) -> Result<(), String> {
                     return Err(format!("Ready root {root:?} remains Visibility::Hidden"));
                 }
                 println!("managed avatar reached Ready: root={root:?} visibility={visibility:?}");
-                verify_arm_pose(&mut app, root)?;
                 verify_idle_contract(&mut app, root)?;
                 verify_control_episode(&mut app, root)?;
                 let (old_generation, old_root) = {
@@ -135,6 +135,7 @@ fn run_with_root(path: &Path, managed_root: &Path) -> Result<(), String> {
                 println!(
                     "replacement verified: old_root={old_root:?} new_root={new_root:?} generation {old_generation:?} -> {new_generation:?}"
                 );
+                verify_arm_pose(&mut app, new_root)?;
                 verify_idle_contract(&mut app, new_root)?;
                 verify_control_episode(&mut app, new_root)?;
                 return Ok(());
@@ -159,131 +160,80 @@ fn run_with_root(path: &Path, managed_root: &Path) -> Result<(), String> {
 }
 
 fn verify_arm_pose(app: &mut App, root: Entity) -> Result<(), String> {
-    let (binding, default_pose, blend) = {
-        let world = app.world();
-        let binding = world
-            .get::<AvatarBinding>(root)
-            .copied()
-            .ok_or_else(|| format!("Ready root {root:?} has no AvatarBinding"))?;
-        let default_pose = world
-            .get::<DefaultArmPose>(root)
-            .copied()
-            .ok_or_else(|| format!("Ready root {root:?} has no DefaultArmPose"))?;
-        let blend = world
-            .get::<ArmPoseBlendState>(root)
-            .copied()
-            .ok_or_else(|| format!("Ready root {root:?} has no ArmPoseBlendState"))?;
-        (binding, default_pose, blend)
-    };
-
-    if binding.generation != default_pose.generation || binding.generation != blend.generation {
-        return Err(format!(
-            "Ready root {root:?} has inconsistent arm generations: binding={:?} default={:?} blend={:?}",
-            binding.generation, default_pose.generation, blend.generation
-        ));
+    // Collision binding and the constrained producer run after humanoid binding.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        app.update();
+        if app
+            .world()
+            .get::<UpperLimbSolveStatus>(root)
+            .is_some_and(|status| !matches!(status, UpperLimbSolveStatus::Solving))
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("upper-limb initialization timed out".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
-
-    verify_arm_side(
-        "left",
-        binding.left_arm,
-        default_pose.left,
-        blend.current_left(),
-    )?;
-    verify_arm_side(
-        "right",
-        binding.right_arm,
-        default_pose.right,
-        blend.current_right(),
-    )?;
+    let binding = *app
+        .world()
+        .get::<AvatarBinding>(root)
+        .ok_or_else(|| format!("Ready root {root:?} has no binding"))?;
+    let targets = *app
+        .world()
+        .get::<DynamicArmTargets>(root)
+        .ok_or_else(|| format!("Ready root {root:?} has no arm targets"))?;
+    let status = app.world().get::<UpperLimbSolveStatus>(root);
+    if !matches!(status, Some(UpperLimbSolveStatus::Feasible { .. })) {
+        return Err(format!("upper-limb initial pose unresolved: {status:?}"));
+    }
+    if targets.generation != Some(binding.generation) {
+        return Err("arm target generation mismatch".to_owned());
+    }
+    for (side, chain, pose) in [
+        ("left", binding.left_arm, targets.left),
+        ("right", binding.right_arm, targets.right),
+    ] {
+        verify_arm_side(app, side, chain, pose)?;
+    }
     Ok(())
 }
 
 fn verify_arm_side(
+    app: &App,
     side: &str,
     chain: Option<ArmChainBinding>,
-    resolved: Option<ResolvedArmPose>,
-    current: Option<ResolvedArmPose>,
+    pose: Option<ResolvedArmPose>,
 ) -> Result<(), String> {
     let Some(chain) = chain else {
-        if resolved.is_some() || current.is_some() {
-            return Err(format!(
-                "{side} arm has a resolved pose without a complete cached chain"
-            ));
-        }
-        println!("arm pose side={side} unavailable (incomplete or degenerate chain)");
         return Ok(());
     };
-
-    let pose = resolved.ok_or_else(|| {
-        format!("{side} arm has a complete cached chain but no resolved DefaultArmPose")
-    })?;
-    let current = current.ok_or_else(|| format!("{side} arm has no initial blend output"))?;
-    if pose.upper_arm != chain.upper_arm
-        || pose.lower_arm != chain.lower_arm
-        || current.upper_arm != chain.upper_arm
-        || current.lower_arm != chain.lower_arm
+    let pose = pose.ok_or_else(|| format!("{side}: no admitted arm pose"))?;
+    if pose.upper_arm != chain.upper_arm || pose.lower_arm != chain.lower_arm {
+        return Err(format!("{side}: arm pose targets wrong entities"));
+    }
+    let position = |bone| {
+        app.world()
+            .get::<bevy::prelude::GlobalTransform>(bone)
+            .map(|g| g.translation())
+            .ok_or_else(|| format!("{side}: missing bone transform"))
+    };
+    let upper = position(chain.upper_arm)?;
+    let lower = position(chain.lower_arm)?;
+    let wrist = position(chain.hand)?;
+    let tolerance = 64.0 * f32::EPSILON * chain.rest.total_arm_length;
+    if (upper.distance(lower) - chain.rest.upper_arm_length).abs() > tolerance
+        || (lower.distance(wrist) - chain.rest.forearm_length).abs() > tolerance
     {
-        return Err(format!(
-            "{side} arm resolved pose targets the wrong entities"
-        ));
+        return Err(format!("{side}: composed FK changed bone lengths"));
     }
-
-    let target = default_arm_target(&chain, ArmPoseProfile::default())
-        .map_err(|error| format!("{side} arm default target failed: {error}"))?;
-    let input = ArmIkInput::from_geometry(chain.rest, target);
-    let solution = solve_two_bone_arm(input)
-        .map_err(|error| format!("{side} arm IK solve failed: {error}"))?;
-    let upper_direction = solution.elbow - input.shoulder;
-    let lower_direction = solution.wrist - solution.elbow;
-    let bend_sine = upper_direction
-        .try_normalize()
-        .and_then(|upper| {
-            lower_direction
-                .try_normalize()
-                .map(|lower| upper.cross(lower).length())
-        })
-        .ok_or_else(|| format!("{side} arm IK produced a degenerate elbow bend"))?;
-    if !bend_sine.is_finite() || bend_sine <= 1.0e-4 {
-        return Err(format!(
-            "{side} arm IK produced no measurable elbow bend: sine={bend_sine}"
-        ));
-    }
-
-    for (label, rotation) in [
-        ("upper_arm_delta", pose.upper_arm_delta),
-        ("lower_arm_delta", pose.lower_arm_delta),
-        ("current_upper_arm_delta", current.upper_arm_delta),
-        ("current_lower_arm_delta", current.lower_arm_delta),
-    ] {
-        if !rotation.is_finite() || rotation.length_squared() <= f32::EPSILON {
-            return Err(format!("{side} arm {label} is non-finite or degenerate"));
-        }
-    }
-    if !solution.elbow.is_finite()
-        || !solution.wrist.is_finite()
-        || !solution.solved_reach.is_finite()
-        || !pose.upper_arm_delta.is_normalized()
-        || !pose.lower_arm_delta.is_normalized()
-    {
-        return Err(format!(
-            "{side} arm IK or resolved pose is not finite/normalized"
-        ));
-    }
-
-    println!(
-        "arm pose verified: side={side} upper={:?} lower={:?} hand={:?} bend_sine={bend_sine:.6} optional_shoulder={} optional_fingers={}",
-        chain.upper_arm,
-        chain.lower_arm,
-        chain.hand,
-        chain.capabilities.has_shoulder,
-        chain.capabilities.has_fingers,
-    );
+    println!("arm pose verified: side={side} fixed-length composed FK");
     Ok(())
 }
 
-/// Verifies the zero-amplitude idle policy on a Ready avatar: the typed
-/// profile must be bound and the hips translation must stay exactly at its
-/// animation-authored value across paced frames.
+/// The retired hips-only oscillator remains disabled. ADR-021 loss-idle sway
+/// and standing contact can move the hips; they must remain finite.
 fn verify_idle_contract(app: &mut App, root: Entity) -> Result<(), String> {
     const IDLE_FRAMES: usize = 30;
     const IDLE_FRAME_PACE: Duration = Duration::from_millis(16);
@@ -329,11 +279,6 @@ fn verify_idle_contract(app: &mut App, root: Entity) -> Result<(), String> {
         if !current.is_finite() {
             return Err(format!(
                 "hips entity {hips:?} received a non-finite translation"
-            ));
-        }
-        if current != base {
-            return Err(format!(
-                "hips translation changed without an idle writer: base={base:?} current={current:?}"
             ));
         }
     }
@@ -430,6 +375,28 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
         Ok(samples)
     };
 
+    // Observe the actual asynchronous result of each episode's final input.
+    // Render-frame counts alone can end before the constrained worker returns.
+    let await_sample = |app: &mut App, seq: FrameSeq| -> Result<Duration, String> {
+        let started = Instant::now();
+        while app
+            .world()
+            .get::<DynamicArmTargets>(root)
+            .is_none_or(|targets| targets.source_seq != Some(seq))
+        {
+            if started.elapsed() >= Duration::from_secs(10) {
+                return Err(format!(
+                    "sample {seq:?} was not admitted: {:?}",
+                    app.world().get::<UpperLimbSolveStatus>(root)
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(16));
+            app.update();
+            sample_transforms(app)?;
+        }
+        Ok(started.elapsed())
+    };
+
     let push = |app: &mut App,
                 seq: u64,
                 state: TrackingState,
@@ -463,7 +430,12 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
         result.map_err(|error| format!("control frame injection failed: {error}"))
     };
 
-    let mut last_head_rotation = Option::<bevy::math::Quat>::None;
+    let initial_head = sample_transforms(app)?
+        .first()
+        .ok_or_else(|| "trace sample list was empty".to_owned())?
+        .1
+        .rotation;
+    let mut head_moved = false;
     for seq in 0..MOTION_FRAMES as u64 {
         let phase = seq as f32 / MOTION_FRAMES as f32;
         let pose = HeadPose {
@@ -478,6 +450,7 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
             pose,
             Some([0.04 * (phase * std::f32::consts::TAU).sin(), 0.01, 0.02]),
         )?;
+        std::thread::sleep(Duration::from_millis(16));
         app.update();
         let samples = sample_transforms(app)?;
         let head = samples
@@ -485,15 +458,23 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
             .ok_or_else(|| "trace sample list was empty".to_owned())?
             .1
             .rotation;
-        if let Some(previous) = last_head_rotation
-            && previous.angle_between(head) < 1.0e-9
-            && seq > 2
-        {
-            return Err("tracked head rotation stopped responding to input".to_owned());
-        }
-        last_head_rotation = Some(head);
+        head_moved |= initial_head.angle_between(head) > 1.0e-4;
     }
-    println!("control episode motion verified ({} frames)", MOTION_FRAMES);
+    let motion_wait = await_sample(app, FrameSeq(MOTION_FRAMES as u64))?;
+    let head = sample_transforms(app)?
+        .first()
+        .ok_or_else(|| "trace sample list was empty".to_owned())?
+        .1
+        .rotation;
+    head_moved |= initial_head.angle_between(head) > 1.0e-4;
+    if !head_moved {
+        return Err(
+            "tracked head rotation did not respond during the paced motion episode".to_owned(),
+        );
+    }
+    println!(
+        "control episode motion verified ({MOTION_FRAMES} input frames, {motion_wait:?} awaiting final sample)"
+    );
 
     for seq in 0..LOSS_FRAMES as u64 {
         push(
@@ -503,10 +484,14 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
             HeadPose::default(),
             None,
         )?;
+        std::thread::sleep(Duration::from_millis(16));
         app.update();
         sample_transforms(app)?;
     }
-    println!("control episode loss verified ({} frames)", LOSS_FRAMES);
+    let loss_wait = await_sample(app, FrameSeq((MOTION_FRAMES + LOSS_FRAMES) as u64))?;
+    println!(
+        "control episode loss verified ({LOSS_FRAMES} input frames, {loss_wait:?} awaiting final sample)"
+    );
 
     let before = sample_transforms(app)?;
     for seq in 0..REACQUIRE_FRAMES as u64 {
@@ -522,9 +507,12 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
             },
             Some([-0.03, 0.0, 0.01]),
         )?;
+        std::thread::sleep(Duration::from_millis(16));
         app.update();
         sample_transforms(app)?;
     }
+    let last_seq = FrameSeq((MOTION_FRAMES + LOSS_FRAMES + REACQUIRE_FRAMES) as u64);
+    let reacquire_wait = await_sample(app, last_seq)?;
     let after = sample_transforms(app)?;
     let moved = before
         .iter()
@@ -534,8 +522,8 @@ fn verify_control_episode(app: &mut App, root: Entity) -> Result<(), String> {
         return Err("reacquire did not update the tracked pose".to_owned());
     }
     println!(
-        "control episode reacquire verified ({} frames)",
-        REACQUIRE_FRAMES
+        "control episode reacquire verified ({} input frames, {:?} awaiting final sample)",
+        REACQUIRE_FRAMES, reacquire_wait
     );
     Ok(())
 }

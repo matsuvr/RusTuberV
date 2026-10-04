@@ -44,6 +44,7 @@ pub mod placeholder;
 pub mod pose;
 /// Explicit tracking state machine and transition table.
 pub mod state_machine;
+mod thorax;
 /// Neutral-relative head translation from webcam face geometry (Issue #166).
 pub mod translation;
 /// Scale-aware soft-cap and dt-aware filtering for translation (Issue #164).

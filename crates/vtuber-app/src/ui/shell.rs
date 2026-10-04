@@ -125,6 +125,28 @@ impl Plugin for UiShellPlugin {
             app.is_plugin_added::<EguiPlugin>(),
             "UiShellPlugin requires EguiPlugin to be installed first"
         );
+        // Run this single-avatar scene's short ordered systems inline.
+        // Inference and constrained arm solving keep their own workers.
+        use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
+        for label in [
+            First.intern(),
+            PreUpdate.intern(),
+            Update.intern(),
+            PostUpdate.intern(),
+            Last.intern(),
+            EguiPrimaryContextPass.intern(),
+        ] {
+            app.edit_schedule(label, |schedule| {
+                schedule.set_executor(SingleThreadedExecutor::new());
+            });
+        }
+        // In particular, keep blocking surface/VSync work on the render
+        // thread instead of dispatching it into the shared frame task pool.
+        if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render.edit_schedule(bevy::render::Render, |schedule| {
+                schedule.set_executor(SingleThreadedExecutor::new());
+            });
+        }
         app.add_plugins(super::avatar_preview::AvatarPreviewPlugin);
         // The first camera may be the offscreen output camera. Never attach
         // egui there: UI pixels must stay on the window-targeting camera only.

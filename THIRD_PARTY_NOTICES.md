@@ -114,3 +114,40 @@ revision. It is 53,305,389 bytes with SHA-256
 redistributed under the upstream Apache-2.0 terms with this notice retained.
 The exact source URL, schema path, and redistribution record are maintained in
 `assets/models/manifest.toml`.
+
+## MyoHub MyoArm anatomical parameters
+
+The CMC joint axes, ranges and hand offsets in `vtuber-avatar/src/thumb.rs`,
+elbow/radioulnar axes and offsets in `vtuber-avatar/src/arm_anatomy.rs`,
+and girdle axes and offsets in `vtuber-avatar/src/girdle.rs`
+are adapted from `myo_sim/models/arm/assets/myoarm_r_chain.xml` at
+[MyoHub/myo_sim revision 93b0ca8f4ec90c9899ee7f05fee561e9911da91b](https://github.com/MyoHub/myo_sim/tree/93b0ca8f4ec90c9899ee7f05fee561e9911da91b).
+Copyright 2025 Vikash Kumar, Vittorio Caggiano. Apache License, Version 2.0;
+see [the retained license](docs/licenses/myo-sim-Apache-2.0.txt).
+The adaptation maps source joint axes to the VRM's authored metacarpal/palm
+frame, including left-hand reflection. The forearm adapter retains the radial offset and neutral carrying angle,
+while mapping the resulting direction onto the fixed VRM forearm length. No MuJoCo runtime or meshes are included.
+
+## CMU Graphics Lab shoulder range-of-motion data and Joint Limits
+
+`crates/vtuber-avatar/src/data/cmu_shoulder_rom.{json,rs}` contains a derived
+full-rotation shoulder k-DOP, fitted by
+`tools/research/convert_cmu_shoulder_limits.py` to CMU ROM clips 74/13, 126/14,
+127/02 and 143/21. The JSON records SHA-256 hashes and sample counts. The raw
+ASF/AMC recordings are not included in this repository.
+
+The data used in this project was obtained from mocap.cs.cmu.edu.
+The database was created with funding from NSF EIA-0196217.
+
+CMU permits copying, modification and redistribution without permission, and
+inclusion in commercially sold products. The data itself may not be resold,
+including in converted form. See [CMU](https://mocap.cs.cmu.edu/) and its
+[FAQ](https://mocap.cs.cmu.edu/faqs.php). This derived constraint is incorporated
+into the application; it is not a standalone data product.
+
+The full-rotation k-DOP method and 13 directions follow Daniel Holden's
+[Joint Limits](https://github.com/orangeduck/Joint-Limits/tree/951358f73a90c82ff4fa33c6d11969c1eb0b02e1),
+Copyright (c) 2021 Daniel Holden, MIT. The implementation was adapted to Rust
+and an offline ASF/AMC converter. See `docs/licenses/holden-joint-limits-MIT.txt`.
+Its LAFAN1-derived demonstration database and PosePrior data are not included
+or used to fit these limits.
