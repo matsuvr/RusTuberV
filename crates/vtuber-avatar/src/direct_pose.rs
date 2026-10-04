@@ -426,6 +426,7 @@ pub fn apply_direct_body_tracking(
     arm_selection: Option<Res<crate::arm_pipeline::ArmSourceSelection>>,
     mirror: Option<Res<crate::mirror::AvatarMotionMirror>>,
     bindings: Query<&crate::binding::AvatarBinding>,
+    collision: Query<&crate::collision::AvatarCollision>,
     mut bone_states: Local<HashMap<Entity, DirectBoneState>>,
     mut root_rest_rotations: Local<HashMap<Entity, Quat>>,
 ) {
@@ -448,6 +449,9 @@ pub fn apply_direct_body_tracking(
             .or_insert(root_global.rotation());
         let profile = profile.unwrap_or(&default_profile);
         let pose = sanitize_input(input);
+        let constrained_body = collision
+            .get(root)
+            .is_ok_and(|c| c.0.as_ref().is_ok_and(|g| !g.hulls.is_empty()));
         // A Pose stream owns the torso independently of the face. Missing
         // hips mean no observed torso, never permission to relabel head yaw
         // as measured chest yaw. Its retained loss weight returns to neutral.
@@ -597,26 +601,30 @@ pub fn apply_direct_body_tracking(
                 )
             };
             let state = bone_states.entry(bone.entity).or_default();
-            state.smoothed_angles = Vec3::new(
-                smooth_angle_half_life(
-                    state.smoothed_angles.x,
-                    target_angles.x,
-                    half_lives[bone.index],
-                    dt,
-                ),
-                smooth_angle_half_life(
-                    state.smoothed_angles.y,
-                    target_angles.y,
-                    half_lives[bone.index],
-                    dt,
-                ),
-                smooth_angle_half_life(
-                    state.smoothed_angles.z,
-                    target_angles.z,
-                    half_lives[bone.index],
-                    dt,
-                ),
-            );
+            state.smoothed_angles = if constrained_body {
+                target_angles
+            } else {
+                Vec3::new(
+                    smooth_angle_half_life(
+                        state.smoothed_angles.x,
+                        target_angles.x,
+                        half_lives[bone.index],
+                        dt,
+                    ),
+                    smooth_angle_half_life(
+                        state.smoothed_angles.y,
+                        target_angles.y,
+                        half_lives[bone.index],
+                        dt,
+                    ),
+                    smooth_angle_half_life(
+                        state.smoothed_angles.z,
+                        target_angles.z,
+                        half_lives[bone.index],
+                        dt,
+                    ),
+                )
+            };
             let tracking_target = if let Some(torso) = observed_body {
                 let head_rotation = Quat::from_euler(
                     EulerRot::YXZ,

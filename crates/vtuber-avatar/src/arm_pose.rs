@@ -1,6 +1,6 @@
 //! Runtime composition for the model-adaptive default arm pose.
 //!
-//! Binding resolves a typed, rest-relative pose once. This module applies that
+//! The constrained runtime admits a rest-relative path. This module applies that
 //! pose after animation and direct body tracking without changing immutable
 //! rest components or accumulating the delta from one frame to the next.
 
@@ -8,16 +8,14 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use crate::arm::{
-    ArmChainBinding, ArmIkInput, ArmIkSolution, ArmPoseProfile, ArmPoseProfileOverride,
-    ArmPoseProfileOverrideError, FingerJointRestBinding, FingerJointRestReferences,
-    solve_two_bone_arm,
+    ArmChainBinding, ArmPoseProfile, ArmPoseProfileOverride, ArmPoseProfileOverrideError,
+    FingerJointRestBinding, FingerJointRestReferences,
 };
 use crate::arm_pipeline::DynamicArmProfileOverride;
 use crate::binding::AvatarBinding;
-use crate::lifecycle::{ActiveAvatar, AvatarGeneration};
+use crate::lifecycle::ActiveAvatar;
 use crate::load::AvatarAssetId;
 
-const ROTATION_MATCH_EPSILON: f32 = 1.0e-6;
 /// Normal default-pose transition duration.
 pub const DEFAULT_ARM_TRANSITION_SECONDS: f32 = 0.25;
 /// Slower return-to-default transition duration.
@@ -69,7 +67,7 @@ impl ArmPoseOverrideStore {
         Ok(())
     }
 
-    /// Returns the validated legacy static override for a model identity.
+    /// Returns the validated rest-pose override for a model identity.
     #[must_use]
     pub fn profile_for(&self, model_id: &AvatarAssetId) -> Option<ArmPoseProfile> {
         self.overrides
@@ -90,7 +88,7 @@ impl ArmPoseOverrideStore {
             .and_then(|profile| profile.into_profile().ok())
     }
 
-    /// Removes a model's legacy override so automatic defaults apply.
+    /// Removes a model's rest-pose override so automatic defaults apply.
     pub fn reset(&mut self, model_id: &AvatarAssetId) -> bool {
         self.overrides.remove(&model_id.0).is_some()
     }
@@ -123,19 +121,19 @@ impl ArmPoseOverrideStore {
         accepted
     }
 
-    /// Returns the number of legacy static overrides, excluding dynamic profiles.
+    /// Returns the number of rest-pose overrides, excluding dynamic profiles.
     #[must_use]
     pub fn len(&self) -> usize {
         self.overrides.len()
     }
 
-    /// Returns whether no legacy static overrides are stored, ignoring dynamic profiles.
+    /// Returns whether no rest-pose overrides are stored, ignoring dynamic profiles.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.overrides.is_empty()
     }
 
-    /// Iterates over validated legacy static overrides for settings persistence.
+    /// Iterates over validated rest-pose overrides for settings persistence.
     pub fn entries(&self) -> impl Iterator<Item = (&str, &ArmPoseProfileOverride)> {
         self.overrides
             .iter()
@@ -213,7 +211,7 @@ pub struct ResolvedArmPose {
     /// Only an explicit hand target writes this; the default and virtual poses
     /// leave the hand at its authored rest-relative pose.
     pub hand: Option<ResolvedBoneDelta>,
-    /// Optional weak shoulder-follow correction.
+    /// Optional shoulder-girdle rotation.
     pub shoulder: Option<ResolvedBoneDelta>,
     /// Authored finger curl corrections.
     pub fingers: ResolvedFingerPose,
@@ -254,389 +252,6 @@ pub struct ResolvedFingerJointPose {
     pub intermediate: Option<ResolvedBoneDelta>,
     /// Distal correction.
     pub distal: Option<ResolvedBoneDelta>,
-}
-
-/// The typed default arm pose resolved for one avatar generation.
-///
-/// Each side is independently optional. An incomplete or degenerate arm chain
-/// therefore leaves that side untouched without preventing the avatar from
-/// becoming ready.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct DefaultArmPose {
-    /// Avatar generation this pose belongs to.
-    pub generation: AvatarGeneration,
-    /// Resolved left-arm pose, when the complete chain is usable.
-    pub left: Option<ResolvedArmPose>,
-    /// Resolved right-arm pose, when the complete chain is usable.
-    pub right: Option<ResolvedArmPose>,
-}
-
-impl DefaultArmPose {
-    /// Resolves both default arm poses from immutable binding geometry.
-    #[must_use]
-    pub fn from_chains(
-        generation: AvatarGeneration,
-        left: Option<ArmChainBinding>,
-        right: Option<ArmChainBinding>,
-    ) -> Self {
-        Self::from_chains_with_profile(generation, left, right, ArmPoseProfile::default())
-    }
-
-    /// Resolves both default arm poses using an explicit bounded profile.
-    #[must_use]
-    pub fn from_chains_with_profile(
-        generation: AvatarGeneration,
-        left: Option<ArmChainBinding>,
-        right: Option<ArmChainBinding>,
-        profile: ArmPoseProfile,
-    ) -> Self {
-        Self {
-            generation,
-            left: left.and_then(|chain| resolve_chain(chain, profile)),
-            right: right.and_then(|chain| resolve_chain(chain, profile)),
-        }
-    }
-}
-
-/// Independently blendable left/right arm-pose transition state.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-pub struct ArmPoseBlendState {
-    /// Avatar generation this transition belongs to.
-    pub generation: AvatarGeneration,
-    /// Left-arm source transition.
-    pub left: Option<ArmPoseBlendSide>,
-    /// Right-arm source transition.
-    pub right: Option<ArmPoseBlendSide>,
-}
-
-impl ArmPoseBlendState {
-    /// Creates a normal frame-rate-independent transition from neutral to the
-    /// resolved default pose.
-    #[must_use]
-    pub fn from_default(default_pose: &DefaultArmPose) -> Self {
-        Self {
-            generation: default_pose.generation,
-            left: default_pose.left.map(|target| {
-                ArmPoseBlendSide::new(neutral_pose(target), target, DEFAULT_ARM_TRANSITION_SECONDS)
-            }),
-            right: default_pose.right.map(|target| {
-                ArmPoseBlendSide::new(neutral_pose(target), target, DEFAULT_ARM_TRANSITION_SECONDS)
-            }),
-        }
-    }
-
-    /// Advances both sides by a finite monotonic time delta.
-    pub fn advance(&mut self, delta_seconds: f32) {
-        if !delta_seconds.is_finite() || delta_seconds < 0.0 {
-            return;
-        }
-        if let Some(left) = &mut self.left {
-            left.advance(delta_seconds);
-        }
-        if let Some(right) = &mut self.right {
-            right.advance(delta_seconds);
-        }
-    }
-
-    /// Returns the current left-arm pose.
-    #[must_use]
-    pub fn current_left(&self) -> Option<ResolvedArmPose> {
-        self.left.map(ArmPoseBlendSide::current)
-    }
-
-    /// Returns the current right-arm pose.
-    #[must_use]
-    pub fn current_right(&self) -> Option<ResolvedArmPose> {
-        self.right.map(ArmPoseBlendSide::current)
-    }
-
-    /// Starts an independently blendable left-arm transition.
-    pub fn transition_left(&mut self, target: ResolvedArmPose, duration_seconds: f32) {
-        self.left = Some(ArmPoseBlendSide::new(
-            self.current_left().unwrap_or_else(|| neutral_pose(target)),
-            target,
-            duration_seconds,
-        ));
-    }
-
-    /// Starts an independently blendable right-arm transition.
-    pub fn transition_right(&mut self, target: ResolvedArmPose, duration_seconds: f32) {
-        self.right = Some(ArmPoseBlendSide::new(
-            self.current_right().unwrap_or_else(|| neutral_pose(target)),
-            target,
-            duration_seconds,
-        ));
-    }
-
-    /// Returns the left arm toward its default target using the slower return
-    /// profile.
-    pub fn return_left_to_default(&mut self, target: ResolvedArmPose) {
-        self.transition_left(target, DEFAULT_ARM_RETURN_SECONDS);
-    }
-
-    /// Returns the right arm toward its default target using the slower return
-    /// profile.
-    pub fn return_right_to_default(&mut self, target: ResolvedArmPose) {
-        self.transition_right(target, DEFAULT_ARM_RETURN_SECONDS);
-    }
-
-    /// Replaces the resolved default target while preserving each side's
-    /// current compositor output as the transition source.
-    pub fn transition_to_default(&mut self, default_pose: &DefaultArmPose, duration_seconds: f32) {
-        self.generation = default_pose.generation;
-        self.left = transition_side(self.left, default_pose.left, duration_seconds);
-        self.right = transition_side(self.right, default_pose.right, duration_seconds);
-    }
-}
-
-fn transition_side(
-    current: Option<ArmPoseBlendSide>,
-    target: Option<ResolvedArmPose>,
-    duration_seconds: f32,
-) -> Option<ArmPoseBlendSide> {
-    target.map(|target| {
-        let from = current
-            .map(ArmPoseBlendSide::current)
-            .unwrap_or_else(|| neutral_pose(target));
-        ArmPoseBlendSide::new(from, target, duration_seconds)
-    })
-}
-
-/// One side of an arm-pose source transition.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ArmPoseBlendSide {
-    from: ResolvedArmPose,
-    target: ResolvedArmPose,
-    elapsed_seconds: f32,
-    duration_seconds: f32,
-}
-
-impl ArmPoseBlendSide {
-    /// Creates a side transition from an arbitrary resolved source pose.
-    #[must_use]
-    pub fn new(from: ResolvedArmPose, target: ResolvedArmPose, duration_seconds: f32) -> Self {
-        Self {
-            from,
-            target,
-            elapsed_seconds: 0.0,
-            duration_seconds: if duration_seconds.is_finite() && duration_seconds > f32::EPSILON {
-                duration_seconds
-            } else {
-                0.0
-            },
-        }
-    }
-
-    /// Advances this side by a finite delta.
-    pub fn advance(&mut self, delta_seconds: f32) {
-        if delta_seconds.is_finite() && delta_seconds >= 0.0 {
-            self.elapsed_seconds =
-                (self.elapsed_seconds + delta_seconds).min(self.duration_seconds);
-        }
-    }
-
-    /// Returns the shortest-arc interpolated pose at the current time.
-    #[must_use]
-    pub fn current(self) -> ResolvedArmPose {
-        let amount = vtuber_tracking::filter::time::transition_progress(
-            self.elapsed_seconds,
-            self.duration_seconds,
-        );
-        blend_pose(self.from, self.target, amount)
-    }
-}
-
-fn neutral_pose(pose: ResolvedArmPose) -> ResolvedArmPose {
-    ResolvedArmPose {
-        upper_arm_delta: Quat::IDENTITY,
-        lower_arm_delta: Quat::IDENTITY,
-        hand: neutral_bone(pose.hand),
-        shoulder: pose.shoulder.map(|bone| ResolvedBoneDelta {
-            delta: Quat::IDENTITY,
-            ..bone
-        }),
-        fingers: neutral_fingers(pose.fingers),
-        ..pose
-    }
-}
-
-fn neutral_fingers(fingers: ResolvedFingerPose) -> ResolvedFingerPose {
-    ResolvedFingerPose {
-        thumb: neutral_finger_joints(fingers.thumb),
-        index: neutral_finger_joints(fingers.index),
-        middle: neutral_finger_joints(fingers.middle),
-        ring: neutral_finger_joints(fingers.ring),
-        little: neutral_finger_joints(fingers.little),
-    }
-}
-
-fn neutral_finger_joints(joints: ResolvedFingerJointPose) -> ResolvedFingerJointPose {
-    ResolvedFingerJointPose {
-        metacarpal: neutral_bone(joints.metacarpal),
-        proximal: neutral_bone(joints.proximal),
-        intermediate: neutral_bone(joints.intermediate),
-        distal: neutral_bone(joints.distal),
-    }
-}
-
-fn neutral_bone(bone: Option<ResolvedBoneDelta>) -> Option<ResolvedBoneDelta> {
-    bone.map(|bone| ResolvedBoneDelta {
-        delta: Quat::IDENTITY,
-        ..bone
-    })
-}
-
-fn blend_pose(from: ResolvedArmPose, target: ResolvedArmPose, amount: f32) -> ResolvedArmPose {
-    ResolvedArmPose {
-        upper_arm: target.upper_arm,
-        lower_arm: target.lower_arm,
-        upper_arm_delta: from
-            .upper_arm_delta
-            .slerp(target.upper_arm_delta, amount)
-            .normalize(),
-        lower_arm_delta: from
-            .lower_arm_delta
-            .slerp(target.lower_arm_delta, amount)
-            .normalize(),
-        hand: blend_bone(from.hand, target.hand, amount),
-        shoulder: blend_bone(from.shoulder, target.shoulder, amount),
-        fingers: blend_fingers(from.fingers, target.fingers, amount),
-    }
-}
-
-fn blend_bone(
-    from: Option<ResolvedBoneDelta>,
-    target: Option<ResolvedBoneDelta>,
-    amount: f32,
-) -> Option<ResolvedBoneDelta> {
-    let entity = target.or(from)?.entity;
-    let from_delta = from.map_or(Quat::IDENTITY, |bone| bone.delta);
-    let target_delta = target.map_or(Quat::IDENTITY, |bone| bone.delta);
-    Some(ResolvedBoneDelta {
-        entity,
-        delta: from_delta.slerp(target_delta, amount).normalize(),
-    })
-}
-
-fn blend_fingers(
-    from: ResolvedFingerPose,
-    target: ResolvedFingerPose,
-    amount: f32,
-) -> ResolvedFingerPose {
-    ResolvedFingerPose {
-        thumb: blend_finger_joints(from.thumb, target.thumb, amount),
-        index: blend_finger_joints(from.index, target.index, amount),
-        middle: blend_finger_joints(from.middle, target.middle, amount),
-        ring: blend_finger_joints(from.ring, target.ring, amount),
-        little: blend_finger_joints(from.little, target.little, amount),
-    }
-}
-
-fn blend_finger_joints(
-    from: ResolvedFingerJointPose,
-    target: ResolvedFingerJointPose,
-    amount: f32,
-) -> ResolvedFingerJointPose {
-    ResolvedFingerJointPose {
-        metacarpal: blend_bone(from.metacarpal, target.metacarpal, amount),
-        proximal: blend_bone(from.proximal, target.proximal, amount),
-        intermediate: blend_bone(from.intermediate, target.intermediate, amount),
-        distal: blend_bone(from.distal, target.distal, amount),
-    }
-}
-
-fn resolve_chain(
-    chain: ArmChainBinding,
-    profile: crate::arm::ArmPoseProfile,
-) -> Option<ResolvedArmPose> {
-    // Binding-time resolution goes through the typed pipeline so the legacy
-    // static source stays a single, explicitly demoted stage (Issue #176).
-    let motion = crate::arm_motion_geometry::build_arm_motion_rest_geometry(
-        chain.side,
-        &chain.rest,
-        None,
-        None,
-        None,
-    );
-    let input = crate::arm_pipeline::ArmPipelineInput::binding_time(&chain, &motion, profile);
-    crate::arm_pipeline::resolve_arm_pose(
-        &input,
-        crate::arm_pipeline::ArmPoseSourceKind::LegacyStatic,
-    )
-    .ok()?
-    .map(|(pose, _)| pose)
-}
-
-/// Stage 2..=4 of the arm pipeline: analytic two-bone solve plus the
-/// shoulder-follow and finger stages that produce final rest-relative deltas.
-///
-/// The hand target is produced by an earlier pipeline stage; this function
-/// never generates one itself. `Ok(None)` means the solved pose was degenerate
-/// (non-finite or identity) and the side should stay untouched.
-pub(crate) fn solve_stage(
-    chain: &ArmChainBinding,
-    profile: crate::arm::ArmPoseProfile,
-    target: &crate::arm::ArmIkTarget,
-) -> Result<Option<ResolvedArmPose>, crate::arm_pipeline::ArmPipelineError> {
-    let input = ArmIkInput::from_chain(chain, *target);
-    let mut solution =
-        solve_two_bone_arm(input).map_err(crate::arm_pipeline::ArmPipelineError::Solve)?;
-    // Stage 3b: the coronal descent limit keeps the arm out of the torso
-    // regardless of which source produced the hand target. Raising the arm
-    // and forward/backward swing stay free.
-    crate::arm_pipeline::clamp_upper_arm_swing(
-        &mut solution,
-        &input,
-        crate::arm_pipeline::MAX_ARM_DROP_RADIANS,
-    );
-    let joints =
-        crate::skeleton::joint_coordinates(input.skeleton_rest(), solution.skeleton_pose())
-            .ok_or(crate::arm_pipeline::ArmPipelineError::DegenerateSolvedPose)?;
-    solution =
-        crate::tracked_arm::arm_from_joints(chain, solution.upper_arm_global_rotation, joints.x)
-            .ok_or(crate::arm_pipeline::ArmPipelineError::DegenerateSolvedPose)?;
-    resolved_from_solution(chain, &solution, profile)
-}
-
-/// Stages 2..=4 for a virtual/default arm: turn a solved analytic pose into the
-/// final rest-relative deltas the compositor writes.
-///
-/// The hand target is produced by an earlier stage; this function never
-/// generates one. `Ok(None)` means the solved pose was degenerate (non-finite
-/// or identity) and the side should stay untouched. The observed path uses the
-/// same fixed-axis IK and rest-delta helpers.
-pub(crate) fn resolved_from_solution(
-    chain: &ArmChainBinding,
-    solution: &ArmIkSolution,
-    profile: crate::arm::ArmPoseProfile,
-) -> Result<Option<ResolvedArmPose>, crate::arm_pipeline::ArmPipelineError> {
-    if !solution.upper_arm_delta.is_finite()
-        || !solution.lower_arm_delta.is_finite()
-        || solution.upper_arm_delta.length_squared() <= f32::EPSILON
-        || solution.lower_arm_delta.length_squared() <= f32::EPSILON
-    {
-        return Ok(None);
-    }
-
-    // Joint rotations are already solved relative to the authored hierarchy.
-    // A parent's transform propagates rigidly through FK; adding fractions to
-    // descendant local joints invents extra articulation and changes the IK.
-    let shoulder = chain.shoulder.map(|entity| ResolvedBoneDelta {
-        entity,
-        delta: Quat::IDENTITY,
-    });
-    let upper_arm_delta = solution.upper_arm_delta.normalize();
-    let lower_arm_delta = solution.lower_arm_delta.normalize();
-
-    Ok(Some(ResolvedArmPose {
-        upper_arm: chain.upper_arm,
-        lower_arm: chain.lower_arm,
-        upper_arm_delta,
-        lower_arm_delta,
-        hand: None,
-        shoulder,
-        fingers: resolve_finger_pose(chain, profile.finger_curl_radians),
-    }))
 }
 
 pub(crate) fn resolve_finger_pose(
@@ -716,105 +331,61 @@ pub(crate) fn resolve_finger_joint(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-#[doc(hidden)]
-pub struct DefaultArmPoseBoneState {
-    base: Quat,
-    last_delta: Quat,
-    initialized: bool,
-}
-
-impl Default for DefaultArmPoseBoneState {
-    fn default() -> Self {
-        Self {
-            base: Quat::IDENTITY,
-            last_delta: Quat::IDENTITY,
-            initialized: false,
-        }
-    }
-}
-
-/// Applies the resolved default arm pose after animation and direct tracking.
-///
-/// The state detects an animation change by comparing the current transform to
-/// the previous composed output. This makes the operation stable across
-/// frames while still allowing an animation system to provide a new base pose.
-/// The affected subtree is then propagated through its actual `ChildOf` path,
-/// including intermediate nodes, before VRM gaze and constraints execute.
-#[expect(
-    clippy::type_complexity,
-    reason = "Bevy's `Query` filter tuple for this system's declared components, with no call site to change"
-)]
+/// Writes the admitted joint path relative to immutable authored locals.
+/// Animation cannot add an unchecked arm rotation after the constrained solve.
+/// The actual subtree (including helpers) is propagated exactly once.
 pub fn apply_default_arm_pose(
-    mut roots: Query<
-        (
-            &AvatarBinding,
-            &DefaultArmPose,
-            Option<&mut ArmPoseBlendState>,
-            Option<&crate::arm_pipeline::DynamicArmTargets>,
-        ),
-        With<ActiveAvatar>,
-    >,
+    roots: Query<(&AvatarBinding, &crate::arm_pipeline::DynamicArmTargets), With<ActiveAvatar>>,
     mut transforms: Query<(&mut Transform, &mut GlobalTransform)>,
+    rests: Query<&bevy_vrm1::prelude::RestTransform>,
     child_ofs: Query<&ChildOf>,
     children: Query<&Children>,
-    time: Res<Time>,
-    mut bone_states: Local<HashMap<Entity, DefaultArmPoseBoneState>>,
 ) {
-    bone_states.retain(|entity, _| transforms.contains(*entity));
-
-    for (binding, pose, blend_state, dynamic) in roots.iter_mut() {
-        if pose.generation != binding.generation {
+    for (binding, targets) in &roots {
+        if targets.generation != Some(binding.generation) {
             continue;
         }
-
-        // The Issue #168 virtual-hand source is authoritative per side when
-        // its per-frame resolution exists for this generation; sides without
-        // a dynamic resolution keep the static default pose/blend fallback.
-        let mut resolved_poses: [Option<ResolvedArmPose>; 2] =
-            if let Some(mut blend_state) = blend_state {
-                if blend_state.generation != binding.generation {
-                    continue;
-                }
-                blend_state.advance(time.delta_secs());
-                [blend_state.current_left(), blend_state.current_right()]
-            } else {
-                [pose.left, pose.right]
-            };
-        if let Some(targets) = dynamic.filter(|t| t.generation == Some(binding.generation)) {
-            if targets.left.is_some() {
-                resolved_poses[0] = targets.left;
-            }
-            if targets.right.is_some() {
-                resolved_poses[1] = targets.right;
-            }
-        }
+        let resolved_poses = [targets.left, targets.right];
 
         for resolved in resolved_poses.into_iter().flatten() {
+            let refresh_root = resolved
+                .shoulder
+                .map(|b| b.entity)
+                .unwrap_or(resolved.upper_arm);
+            // The candidate FK uses immutable local offsets, including helper
+            // joints. Animation may not translate/scale those links afterward.
+            let mut stack = vec![refresh_root];
             let mut any_changed = false;
+            while let Some(bone) = stack.pop() {
+                if let (Ok(rest), Ok((mut current, _))) =
+                    (rests.get(bone), transforms.get_mut(bone))
+                    && *current != **rest
+                {
+                    *current = **rest;
+                    any_changed = true;
+                }
+                if let Ok(descendants) = children.get(bone) {
+                    stack.extend(descendants.iter());
+                }
+            }
             if let Some(shoulder) = resolved.shoulder {
-                any_changed |= apply_delta(
-                    shoulder.entity,
-                    shoulder.delta,
-                    &mut transforms,
-                    &mut bone_states,
-                );
+                any_changed |=
+                    apply_delta(shoulder.entity, shoulder.delta, &mut transforms, &rests);
             }
             any_changed |= apply_delta(
                 resolved.upper_arm,
                 resolved.upper_arm_delta,
                 &mut transforms,
-                &mut bone_states,
+                &rests,
             );
             any_changed |= apply_delta(
                 resolved.lower_arm,
                 resolved.lower_arm_delta,
                 &mut transforms,
-                &mut bone_states,
+                &rests,
             );
             if let Some(hand) = resolved.hand {
-                any_changed |=
-                    apply_delta(hand.entity, hand.delta, &mut transforms, &mut bone_states);
+                any_changed |= apply_delta(hand.entity, hand.delta, &mut transforms, &rests);
             }
             for finger in [
                 resolved.fingers.thumb.metacarpal,
@@ -841,12 +412,7 @@ pub fn apply_default_arm_pose(
             .into_iter()
             .flatten()
             {
-                any_changed |= apply_delta(
-                    finger.entity,
-                    finger.delta,
-                    &mut transforms,
-                    &mut bone_states,
-                );
+                any_changed |= apply_delta(finger.entity, finger.delta, &mut transforms, &rests);
             }
             if !any_changed {
                 continue;
@@ -865,89 +431,22 @@ pub fn apply_default_arm_pose(
     }
 }
 
-/// Re-resolves the active model's default pose after a validated settings
-/// update. This system never traverses or reconstructs the arm hierarchy: it
-/// uses the immutable `ArmBinding` geometry cached during binding and hands the
-/// result to the existing generation-scoped compositor state.
-pub fn apply_arm_pose_profile_changes(
-    mut changes: MessageReader<ArmPoseProfileChange>,
-    overrides: Res<ArmPoseOverrideStore>,
-    mut roots: Query<
-        (
-            &AvatarBinding,
-            &AvatarAssetId,
-            &mut DefaultArmPose,
-            &mut ArmPoseBlendState,
-        ),
-        With<ActiveAvatar>,
-    >,
-) {
-    for change in changes.read() {
-        for (binding, model_id, mut pose, mut blend_state) in roots.iter_mut() {
-            if model_id != &change.model_id {
-                continue;
-            }
-
-            let profile = overrides.profile_for(model_id).unwrap_or_default();
-            let resolved = DefaultArmPose::from_chains_with_profile(
-                binding.generation,
-                binding.left_arm,
-                binding.right_arm,
-                profile,
-            );
-            let duration = if change.return_to_default {
-                DEFAULT_ARM_RETURN_SECONDS
-            } else {
-                DEFAULT_ARM_TRANSITION_SECONDS
-            };
-            blend_state.transition_to_default(&resolved, duration);
-            *pose = resolved;
-        }
-    }
-}
-
 fn apply_delta(
     entity: Entity,
     delta: Quat,
     transforms: &mut Query<(&mut Transform, &mut GlobalTransform)>,
-    bone_states: &mut HashMap<Entity, DefaultArmPoseBoneState>,
+    rests: &Query<&bevy_vrm1::prelude::RestTransform>,
 ) -> bool {
-    if !delta.is_finite() || delta.length_squared() <= f32::EPSILON {
-        return false;
-    }
-    let Ok((mut transform, _global)) = transforms.get_mut(entity) else {
+    let Ok(rest) = rests.get(entity) else {
         return false;
     };
-
-    let state = bone_states.entry(entity).or_default();
-    let expected_previous = state.base * state.last_delta;
-    let animation_changed = !state.initialized
-        || !transform.rotation.is_finite()
-        || transform.rotation.dot(expected_previous).abs() < 1.0 - ROTATION_MATCH_EPSILON;
-    let base = if animation_changed {
-        finite_normalized_or(transform.rotation, Quat::IDENTITY)
-    } else {
-        state.base
+    let Ok((mut transform, _)) = transforms.get_mut(entity) else {
+        return false;
     };
-    let delta = delta.normalize();
-    let output = finite_normalized_or(base * delta, base);
-    state.base = base;
-    state.last_delta = delta;
-    state.initialized = true;
+    let output = (rest.rotation * delta).normalize();
     if output == transform.rotation {
-        // The pose is already applied bit-for-bit; reporting no change lets
-        // the caller skip the ancestor/subtree global-transform refresh that
-        // would only rewrite identical values.
         return false;
     }
     transform.rotation = output;
     true
-}
-
-fn finite_normalized_or(value: Quat, fallback: Quat) -> Quat {
-    if value.is_finite() && value.length_squared() > f32::EPSILON {
-        value.normalize()
-    } else {
-        fallback
-    }
 }

@@ -89,6 +89,8 @@ pub struct DiagnosticsSnapshot {
     pub camera_format: Option<String>,
     /// Avatar capability summary.
     pub avatar_capabilities: Option<String>,
+    /// Current bilateral arm solve, including residual and blocked transitions.
+    pub upper_limb: Option<vtuber_avatar::UpperLimbSolveStatus>,
     /// Number of avatar pose frames successfully applied.
     pub avatar_frames_applied: u64,
     /// Number of avatar pose frames skipped because the lifecycle/binding was

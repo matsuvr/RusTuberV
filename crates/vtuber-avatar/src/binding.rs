@@ -19,7 +19,6 @@ use crate::arm::{
     RestSpaceBonePose,
 };
 use crate::arm_motion_geometry::ArmMotionGeometry;
-use crate::arm_pose::{ArmPoseBlendState, ArmPoseOverrideStore, DefaultArmPose};
 use crate::bind::BindTriggered;
 use crate::capabilities::{
     AvatarCapabilities, BonePresence, DeclaredLookAtType, ExpressionCapabilities,
@@ -239,7 +238,6 @@ pub fn bind_humanoid_bones(
     )>,
     spring_roots: Query<Entity, With<SpringRoot>>,
     parents: Query<&ChildOf>,
-    arm_pose_overrides: Option<Res<ArmPoseOverrideStore>>,
     tracking_profile: Res<crate::tracking_profile::GlobalBodyTrackingProfile>,
 ) {
     if lifecycle.state() != AvatarLifecycleState::Binding {
@@ -316,22 +314,6 @@ pub fn bind_humanoid_bones(
     match result {
         Ok(mut binding) => {
             binding.generation = lifecycle.current_generation();
-            let profile = root_ref
-                .get::<AvatarAssetId>()
-                .and_then(|model_id| {
-                    arm_pose_overrides
-                        .as_deref()
-                        .and_then(|overrides| overrides.profile_for(model_id))
-                })
-                .unwrap_or_default();
-            let default_arm_pose = DefaultArmPose::from_chains_with_profile(
-                binding.generation,
-                binding.left_arm,
-                binding.right_arm,
-                profile,
-            );
-            let arm_pose_blend = ArmPoseBlendState::from_default(&default_arm_pose);
-
             // The idle-motion policy is a typed zero-amplitude profile
             // (Issue #180 / ADR-020). There is no procedural idle writer and
             // no breathing geometry to resolve; the authored/animated rest
@@ -486,8 +468,6 @@ pub fn bind_humanoid_bones(
             // require on the root.
             commands.entity(root_entity).insert((
                 binding,
-                default_arm_pose,
-                arm_pose_blend,
                 BodyTracking::default(),
                 BodyTrackingPoseInput::default(),
                 tracking_profile.0,

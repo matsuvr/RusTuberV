@@ -132,7 +132,8 @@ pub struct HandFingerPose {
 pub struct ArmTrackingTarget {
     /// Desired wrist offset from the observed shoulder.
     pub wrist: [f32; 3],
-    /// Observed elbow offset; controls the bend plane, not an exact elbow constraint.
+    /// Observed elbow offset, used as a positional objective with its own
+    /// confidence. Bone geometry and hard constraints can leave a residual.
     pub elbow_pole: [f32; 3],
     /// Unit normal of the observed palm plane in the canonical tracking basis,
     /// when the index/little-finger keypoints defined one.
@@ -164,22 +165,19 @@ pub struct ArmTrackingTargets {
 
 /// How much an observed channel should replace the avatar's virtual arm.
 ///
-/// `wrist` gates the observed shoulder orientation and elbow flexion; the
-/// avatar blends those joint coordinates with its resolved initial skeleton,
-/// keeping bone lengths fixed instead of moving the wrist through Cartesian
-/// space. `pole` gates the observed bend plane within that observed arm;
-/// `palm` gates the observed forearm twist; `fingers` gates the observed finger
-/// articulation. They are separate so losing an elbow keeps the visible hand
-/// following while the avatar supplies a natural pole, and losing a hand
-/// detection keeps the twist and the fingers. All are in `0.0..=1.0`; zero
-/// means "use the virtual arm", not "the observation is at the origin".
+/// `wrist`, `pole` and `palm` weight the observed wrist, elbow and palm
+/// objectives in the same constrained solve. Missing channels return to the
+/// admitted neutral pose; `fingers` blends the selected catalog articulation.
+/// Fixed bone lengths and joint/collision limits take priority over all these
+/// objectives. All weights are in `0.0..=1.0`; zero means no observation for
+/// that channel, never an observation at the origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmBlendWeight {
     /// Observed arm contribution, driven by wrist presence.
     pub wrist: f32,
-    /// Observed elbow-bend-plane contribution.
+    /// Observed elbow-position contribution.
     pub pole: f32,
-    /// Observed palm-plane contribution.
+    /// Observed palm orientation contribution (normal and long axis).
     pub palm: f32,
     /// Observed finger-articulation contribution.
     pub fingers: f32,
@@ -244,8 +242,9 @@ pub struct ArmControlFrame {
 pub struct ThoraxTarget {
     /// Neutral-relative rotation in the canonical tracking basis, quaternion XYZW.
     pub rotation: [f32; 4],
-    /// Left/right shoulder displacement in the calibrated thorax frame,
-    /// divided by the fixed neutral shoulder width.
+    /// Left/right displacement from the neutral shoulder coordinates, in the
+    /// current thorax frame, divided by the fixed neutral shoulder width.
+    /// Rigid torso rotation is excluded and is carried by `rotation` alone.
     pub shoulder_offsets: [[f32; 3]; 2],
     /// Confidence/loss weight; zero means neutral, not a fabricated observation.
     pub weight: f32,

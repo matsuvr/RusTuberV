@@ -1,12 +1,20 @@
 //! MyoArmRight_v0.01 joint geometry (MyoHub 93b0ca8, Apache-2.0).
-//! The VRM ulna centreline has fixed length. Only the representable axial
-//! component of the radius orientation is transferred to that single bone.
+//! Preserve radius orientation and offset-induced wrist direction, projecting
+//! the resulting reach onto the VRM lower arm's fixed length.
 
-use bevy::prelude::{Mat3, Vec3};
+use bevy::prelude::{Mat3, Quat, Vec3};
 
 use crate::arm::ArmSide;
 
 pub(crate) fn elbow_geometry(upper: Vec3, side: ArmSide) -> Option<(Vec3, Vec3)> {
+    let (map, source_h) = source_mapping(upper, side)?;
+    Some((
+        map * source_h,
+        (map * Vec3::new(0.0184, -0.2535, 0.045)).normalize(),
+    ))
+}
+
+fn source_mapping(upper: Vec3, side: ArmSide) -> Option<(Mat3, Vec3)> {
     let u = upper.try_normalize()?;
     let h = u.cross(Vec3::Z).try_normalize()?;
     let destination = Mat3::from_cols(u, h, u.cross(h));
@@ -32,12 +40,57 @@ pub(crate) fn elbow_geometry(upper: Vec3, side: ArmSide) -> Option<(Vec3, Vec3)>
     let perpendicular = (source_h - source_u * source_u.dot(source_h)).normalize();
     let source = Mat3::from_cols(source_u, perpendicular, source_u.cross(perpendicular));
     let map = destination * source.transpose();
-    let radius_origin = Vec3::new(0.0004, -0.0115, 0.02);
-    let wrist_from_radius = Vec3::new(0.018, -0.242, 0.025);
-    Some((
-        map * source_h,
-        (map * polar(radius_origin + wrist_from_radius)).normalize(),
-    ))
+    let polar_map = Mat3::from_cols(polar(Vec3::X), polar(Vec3::Y), polar(Vec3::Z));
+    // Return the map of source polar vectors. The elbow axis has already
+    // received the axial reflection before this inverse polar conversion.
+    Some((map * polar_map, polar_map.transpose() * source_h))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RadiusGeometry {
+    pub origin: Vec3,
+    pub wrist: Vec3,
+    pub axis: Vec3,
+}
+
+impl RadiusGeometry {
+    pub fn from_arm(upper: Vec3, side: ArmSide) -> Option<Self> {
+        let (map, _) = source_mapping(upper, side)?;
+        Some(Self {
+            origin: map * Vec3::new(0.0004, -0.0115, 0.02),
+            wrist: map * Vec3::new(0.018, -0.242, 0.025),
+            // The adapter uses distal-positive roll; reflecting this polar
+            // axis therefore reverses the roll coordinate between sides.
+            axis: (map * -Vec3::new(-0.017161, 0.992666, -0.119668)).normalize(),
+        })
+    }
+
+    /// Bounds for R'(r) and R''(r), with respect to the roll coordinate.
+    /// Both vectors of the corrective shortest arc stay within asin(o/w)
+    /// of the rotated radius, so its quaternion denominator stays positive.
+    pub fn derivative_bounds(self) -> (f32, f32) {
+        let o = self.origin.length();
+        let w = self.wrist.length();
+        let u1 = w / (w - o);
+        let u2 = u1 + 3.0 * u1 * u1;
+        let m = 2.0 * (1.0 - (o / w).powi(2)).sqrt();
+        let q1 = std::f32::consts::SQRT_2 * (1.0 + u1) / m;
+        let q2 = std::f32::consts::SQRT_2 * (1.0 + u2 + 2.0 * u1) / m + 3.0 * q1 * q1;
+        let angular = 2.0 * q1;
+        (
+            angular + 1.0,
+            2.0 * q2 + 2.0 * q1 * q1 + 2.0 * angular + 1.0,
+        )
+    }
+
+    /// Preserve the source radius orientation and wrist direction, projecting
+    /// only its varying distance onto the VRM's immutable lower-arm length.
+    pub fn rotation(self, roll: f32) -> Option<Quat> {
+        let neutral = (self.origin + self.wrist).try_normalize()?;
+        let radius = Quat::from_axis_angle(self.axis, roll);
+        let direction = (self.origin + radius * self.wrist).try_normalize()?;
+        Some((crate::skeleton::minimal_arc(radius * neutral, direction)? * radius).normalize())
+    }
 }
 
 /// Dot product in the source model after reversing its proximal roll axis to

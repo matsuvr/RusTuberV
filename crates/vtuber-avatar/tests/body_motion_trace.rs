@@ -9,33 +9,20 @@
 //! Headless trace validation for the upper-body motion pipeline
 //! (Body Motion 11/11, Issue #173).
 //!
-//! Runs the production system ordering — position bridge -> dynamic arm
-//! targets -> arm compositor writer — against a synthetic rig and evaluates
-//! deterministic traces at 30/60/120 fps equivalents:
-//!
-//! - finite output (no NaN / Inf) for every stage on every frame
-//! - no frame-to-frame accumulation (identical input => identical output)
-//! - root compensation and hips-relative hand anchor behavior
-//! - legacy static source demotion (virtual-hand authority by default)
-//! - tracking loss/reacquire continuity without snaps or stale state
-//! - avatar replacement generation cleanup
+//! Runs the position/body bridge at 30/60/120 fps. Arm integration, mirror,
+//! held observations and loss are exercised with the constrained runtime's
+//! complete fixed-length rig in `upper_limb_runtime::tests`.
 
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_vrm1::prelude::{BodyTracking, RestGlobalTransform, RestTransform};
-use vtuber_avatar::AvatarMotionMirror;
 use vtuber_avatar::{
-    ActiveAvatar, ArmChainBinding, ArmChainCapabilities, ArmMotionGeometry, ArmPoseBlendState,
-    ArmPoseOverrideStore, ArmRestGeometry, ArmSide, ArmSourceSelection, AvatarAssetId,
-    AvatarBinding, AvatarGeneration, AvatarLifecycle, DefaultArmPose, DynamicArmTargets,
-    RestSpaceBonePose, apply_default_arm_pose, update_body_tracking_pose_input,
-    update_body_tracking_position_input, update_dynamic_arm_targets,
-};
-use vtuber_avatar::{
-    BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingProfile,
-    apply_direct_body_tracking,
+    ActiveAvatar, AvatarAssetId, AvatarBinding, AvatarGeneration, AvatarLifecycle,
+    AvatarMotionMirror, BodyTrackingPoseInput, BodyTrackingPositionInput, BodyTrackingProfile,
+    apply_direct_body_tracking, update_body_tracking_pose_input,
+    update_body_tracking_position_input,
 };
 use vtuber_core::types::AvatarControlFrame;
 use vtuber_core::types::{
@@ -49,52 +36,8 @@ const EPSILON: f32 = 1.0e-4;
 struct TraceRig {
     root: Entity,
     head: Entity,
-    left_upper: Entity,
-    left_lower: Entity,
-    right_upper: Entity,
-    right_lower: Entity,
-}
-
-fn rest_bone(position: Vec3) -> RestSpaceBonePose {
-    RestSpaceBonePose {
-        position,
-        global_rotation: Quat::IDENTITY,
-        local_rotation: Quat::IDENTITY,
-    }
-}
-
-fn chain(side: ArmSide, upper: Entity, lower: Entity) -> ArmChainBinding {
-    // Real VRM/glTF basis: the model faces +Z and its left arm is +X.
-    let sign = match side {
-        ArmSide::Left => 1.0_f32,
-        ArmSide::Right => -1.0,
-    };
-    let shoulder_pos = Vec3::new(0.04 * sign, 1.30, 0.0);
-    let upper_origin = Vec3::new(0.16 * sign, 1.32, 0.0);
-    let elbow = upper_origin + Vec3::new(0.24 * sign, -0.04, 0.0);
-    let wrist = elbow + Vec3::new(-0.02 * sign, -0.25, -0.01);
-    ArmChainBinding {
-        side,
-        shoulder: None,
-        upper_arm: upper,
-        lower_arm: lower,
-        hand: lower,
-        fingers: vtuber_avatar::FingerReferences::default(),
-        finger_rest: vtuber_avatar::FingerRestReferences::default(),
-        rest: ArmRestGeometry {
-            shoulder: Some(rest_bone(shoulder_pos)),
-            upper_arm: rest_bone(upper_origin),
-            elbow: rest_bone(elbow),
-            wrist: rest_bone(wrist),
-            upper_arm_length: upper_origin.distance(elbow),
-            forearm_length: elbow.distance(wrist),
-            total_arm_length: upper_origin.distance(wrist),
-        },
-        capabilities: ArmChainCapabilities {
-            has_shoulder: true,
-            has_fingers: false,
-        },
-    }
+    chest: Entity,
+    spine: Entity,
 }
 
 fn instant_at(millis: u64) -> Instant {
@@ -109,8 +52,6 @@ fn build_app() -> (App, TraceRig) {
         .insert_resource(TimeUpdateStrategy::ManualInstant(instant_at(0)))
         .init_resource::<vtuber_avatar::ActiveControlFrame>()
         .init_resource::<AvatarLifecycle>()
-        .init_resource::<ArmSourceSelection>()
-        .init_resource::<ArmPoseOverrideStore>()
         .init_resource::<vtuber_avatar::PositionInputMetrics>()
         .init_resource::<vtuber_avatar::LossIdleState>()
         .init_resource::<vtuber_avatar::BodyFollowFilter>()
@@ -122,8 +63,6 @@ fn build_app() -> (App, TraceRig) {
                 update_body_tracking_position_input,
                 update_body_tracking_pose_input,
                 apply_direct_body_tracking,
-                update_dynamic_arm_targets,
-                apply_default_arm_pose,
             )
                 .chain(),
         );
@@ -146,31 +85,6 @@ fn build_app() -> (App, TraceRig) {
     let spine = spawn_bone(&mut app, root, Vec3::Y * 0.12);
     let chest = spawn_bone(&mut app, spine, Vec3::Y * 0.14);
     let head = spawn_bone(&mut app, chest, Vec3::Y * 0.18);
-    let left_upper = spawn_bone(&mut app, chest, Vec3::new(0.12, 0.10, 0.0));
-    let left_lower = spawn_bone(&mut app, left_upper, Vec3::new(0.24, -0.04, 0.0));
-    let right_upper = spawn_bone(&mut app, chest, Vec3::new(-0.12, 0.10, 0.0));
-    let right_lower = spawn_bone(&mut app, right_upper, Vec3::new(-0.24, -0.04, 0.0));
-
-    let left_arm_binding = chain(ArmSide::Left, left_upper, left_lower);
-    let right_arm_binding = chain(ArmSide::Right, right_upper, right_lower);
-
-    let motion = ArmMotionGeometry {
-        left: Some(vtuber_avatar::build_arm_motion_rest_geometry(
-            ArmSide::Left,
-            &left_arm_binding.rest,
-            Some(Vec3::new(0.0, 0.92, 0.0)),
-            Some(Quat::IDENTITY),
-            Some(Vec3::new(0.0, 1.20, 0.02)),
-        )),
-        right: Some(vtuber_avatar::build_arm_motion_rest_geometry(
-            ArmSide::Right,
-            &right_arm_binding.rest,
-            Some(Vec3::new(0.0, 0.92, 0.0)),
-            Some(Quat::IDENTITY),
-            Some(Vec3::new(0.0, 1.20, 0.02)),
-        )),
-    };
-
     let mut lifecycle = AvatarLifecycle::default();
     lifecycle.request_load(root).expect("load request");
     lifecycle.start_binding(root);
@@ -185,20 +99,15 @@ fn build_app() -> (App, TraceRig) {
         upper_chest: None,
         chest: Some(chest),
         spine: Some(spine),
-        left_upper_arm: Some(left_upper),
-        right_upper_arm: Some(right_upper),
-        left_arm: Some(left_arm_binding),
-        right_arm: Some(right_arm_binding),
+        left_upper_arm: None,
+        right_upper_arm: None,
+        left_arm: None,
+        right_arm: None,
         left_eye: None,
         right_eye: None,
         generation,
     };
 
-    let default_pose = DefaultArmPose {
-        generation,
-        left: None,
-        right: None,
-    };
     let body_scale = vtuber_avatar::body_scale::BodyScaleMeters {
         generation,
         scale_meters: 0.7,
@@ -208,11 +117,7 @@ fn build_app() -> (App, TraceRig) {
         ActiveAvatar,
         binding,
         model_id,
-        default_pose,
-        ArmPoseBlendState::from_default(&default_pose),
-        motion,
         body_scale,
-        DynamicArmTargets::default(),
         BodyTracking::default(),
         BodyTrackingPoseInput::default(),
         BodyTrackingProfile::default(),
@@ -225,10 +130,8 @@ fn build_app() -> (App, TraceRig) {
     let rig = TraceRig {
         root,
         head,
-        left_upper,
-        left_lower,
-        right_upper,
-        right_lower,
+        chest,
+        spine,
     };
     (app, rig)
 }
@@ -297,119 +200,18 @@ fn push_frame_inner(app: &mut App, generation: AvatarGeneration, frame: AvatarCo
     control.frame = Some(frame);
 }
 
-fn rotations(app: &App, rig: &TraceRig) -> [Quat; 4] {
-    [
-        app.world()
-            .get::<Transform>(rig.left_upper)
-            .unwrap()
-            .rotation,
-        app.world()
-            .get::<Transform>(rig.left_lower)
-            .unwrap()
-            .rotation,
-        app.world()
-            .get::<Transform>(rig.right_upper)
-            .unwrap()
-            .rotation,
-        app.world()
-            .get::<Transform>(rig.right_lower)
-            .unwrap()
-            .rotation,
-    ]
+fn rotations(app: &App, rig: &TraceRig) -> [Quat; 3] {
+    [rig.head, rig.chest, rig.spine]
+        .map(|bone| app.world().get::<Transform>(bone).unwrap().rotation)
 }
 
 fn assert_all_finite(app: &App, rig: &TraceRig) {
-    for entity in [
-        rig.left_upper,
-        rig.left_lower,
-        rig.right_upper,
-        rig.right_lower,
-    ] {
+    for entity in [rig.head, rig.chest, rig.spine] {
         let transform = app.world().get::<Transform>(entity).unwrap();
         assert!(transform.rotation.is_finite(), "non-finite rotation");
     }
     let root_transform = app.world().get::<Transform>(rig.root).unwrap();
     assert!(root_transform.translation.is_finite());
-}
-
-#[test]
-fn virtual_hand_compensation_reads_tracked_targets_and_keeps_body_follow_separate() {
-    use bevy::ecs::system::RunSystemOnce;
-    let (mut app, rig) = build_app();
-    let generation = app
-        .world()
-        .resource::<AvatarLifecycle>()
-        .current_generation();
-    push_frame(&mut app, generation, 1, Vec3::ZERO);
-    app.update();
-    push_frame(&mut app, generation, 2, Vec3::new(0.08, 0.0, 0.03));
-    app.insert_resource(TimeUpdateStrategy::ManualInstant(instant_at(16)));
-    app.update();
-    let input = *app
-        .world()
-        .get::<BodyTrackingPositionInput>(rig.root)
-        .unwrap();
-    assert!(
-        input.tracked_head_target.distance(input.head_offset) > 0.01,
-        "tracked target must lead the existing body-follow output"
-    );
-    let before = app
-        .world()
-        .get::<DynamicArmTargets>(rig.root)
-        .unwrap()
-        .left
-        .unwrap();
-    {
-        let mut input = app
-            .world_mut()
-            .get_mut::<BodyTrackingPositionInput>(rig.root)
-            .unwrap();
-        input.head_offset = Vec3::splat(0.2);
-        input.body_offset = Vec3::splat(0.2);
-        input.weight = 0.25;
-    }
-    app.world_mut()
-        .run_system_once(update_dynamic_arm_targets)
-        .unwrap();
-    let after_display = app
-        .world()
-        .get::<DynamicArmTargets>(rig.root)
-        .unwrap()
-        .left
-        .unwrap();
-    assert!(
-        before
-            .upper_arm_delta
-            .angle_between(after_display.upper_arm_delta)
-            < EPSILON
-    );
-    assert!(
-        before
-            .lower_arm_delta
-            .angle_between(after_display.lower_arm_delta)
-            < EPSILON
-    );
-    app.world_mut()
-        .get_mut::<BodyTrackingPositionInput>(rig.root)
-        .unwrap()
-        .tracked_head_target
-        .z += 0.08;
-    app.world_mut()
-        .run_system_once(update_dynamic_arm_targets)
-        .unwrap();
-    let after_target = app
-        .world()
-        .get::<DynamicArmTargets>(rig.root)
-        .unwrap()
-        .left
-        .unwrap();
-    assert!(
-        before
-            .upper_arm_delta
-            .angle_between(after_target.upper_arm_delta)
-            > EPSILON,
-        "virtual arm must consume the published tracked target instead of recomputing the frame"
-    );
 }
 
 #[test]
@@ -421,7 +223,7 @@ fn trace_is_deterministic_across_30_60_and_120_fps_equivalents() {
             .resource::<AvatarLifecycle>()
             .current_generation();
         let mut tick_clock = 0_u64;
-        let mut previous = Option::<[Quat; 4]>::None;
+        let mut previous = Option::<[Quat; 3]>::None;
 
         for _ in 0..5 {
             tick_clock += frame_millis;
@@ -458,96 +260,6 @@ fn trace_is_deterministic_across_30_60_and_120_fps_equivalents() {
             .resource::<vtuber_avatar::PositionInputMetrics>();
         assert!(metrics.frames_published > 0, "position channel published");
     }
-}
-
-#[test]
-fn virtual_hand_authority_drives_the_compositor_not_the_legacy_source() {
-    let (mut app, rig) = build_app();
-    let generation = app
-        .world()
-        .resource::<AvatarLifecycle>()
-        .current_generation();
-    let selection = app.world().resource::<ArmSourceSelection>();
-    assert_eq!(
-        selection.mode,
-        vtuber_avatar::ArmPoseSourceKind::VirtualHandAnchor,
-        "virtual-hand authority is the default"
-    );
-
-    push_frame(&mut app, generation, 1, Vec3::ZERO);
-    app.update();
-
-    let targets = app
-        .world()
-        .get::<DynamicArmTargets>(rig.root)
-        .expect("dynamic targets present");
-    assert_eq!(targets.generation, Some(generation));
-    assert!(targets.left.is_some() && targets.right.is_some());
-
-    for entity in [rig.left_upper, rig.right_upper] {
-        let rotation = app.world().get::<Transform>(entity).unwrap().rotation;
-        assert!(rotation.angle_between(Quat::IDENTITY) > 1e-3);
-    }
-}
-
-#[test]
-fn tracking_loss_reacquire_replaces_state_without_snaps_or_stale_entities() {
-    let (mut app, rig) = build_app();
-    let generation = app
-        .world()
-        .resource::<AvatarLifecycle>()
-        .current_generation();
-
-    push_frame(&mut app, generation, 1, Vec3::new(0.05, 0.0, 0.02));
-    app.update();
-    assert_all_finite(&app, &rig);
-    let tracked_rotations = rotations(&app, &rig);
-
-    let mut control = app
-        .world_mut()
-        .resource_mut::<vtuber_avatar::ActiveControlFrame>();
-    if let Some(frame) = control.frame.as_mut() {
-        frame.state = TrackingState::LostHold;
-        frame.head_translation = HeadTranslationSignal::UNAVAILABLE;
-    }
-    let _ = control;
-    app.update();
-    assert_all_finite(&app, &rig);
-
-    push_frame(&mut app, generation, 2, Vec3::new(-0.04, 0.0, 0.01));
-    app.update();
-    assert_all_finite(&app, &rig);
-    let reacquired = rotations(&app, &rig);
-    assert!(
-        tracked_rotations
-            .iter()
-            .zip(reacquired.iter())
-            .any(|(a, b)| a.angle_between(*b) > 1e-3),
-        "reacquire updates the pose"
-    );
-}
-
-#[test]
-fn avatar_generation_cleanup_rejects_stale_frames_and_targets() {
-    let (mut app, rig) = build_app();
-    let old_generation = app
-        .world()
-        .resource::<AvatarLifecycle>()
-        .current_generation();
-
-    push_frame(&mut app, old_generation, 1, Vec3::new(0.03, 0.0, 0.0));
-    app.update();
-
-    push_frame(
-        &mut app,
-        AvatarGeneration(old_generation.0.wrapping_sub(1)),
-        2,
-        Vec3::new(0.09, 0.0, 0.0),
-    );
-    app.update();
-    let targets = app.world().get::<DynamicArmTargets>(rig.root).unwrap();
-    assert_eq!(targets.generation, None, "stale targets must clear");
-    assert!(targets.left.is_none() && targets.right.is_none());
 }
 
 #[test]

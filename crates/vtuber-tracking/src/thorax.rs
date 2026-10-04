@@ -12,6 +12,7 @@ use vtuber_core::arm_tracking::{PoseArmObservation, PoseWorldLandmark, ThoraxTar
 struct Sample {
     rotation: UnitQuaternion<f32>,
     shoulders: [Vector3<f32>; 2],
+    hips: [Vector3<f32>; 2],
     width: f32,
 }
 
@@ -43,7 +44,32 @@ fn sample(pose: &PoseArmObservation, threshold: f32) -> Option<Sample> {
             rotation.inverse() * (left - origin),
             rotation.inverse() * (right - origin),
         ],
+        hips: [
+            rotation.inverse() * (lh - origin),
+            rotation.inverse() * (rh - origin),
+        ],
     })
+}
+
+// Rigid least-squares registration of the four torso landmarks (Kabsch).
+// Fitting both hips and shoulders retains shoulder residuals; defining the
+// entire thorax from the moving shoulder line would erase those residuals.
+fn fitted_rotation(neutral: Sample, source: Sample) -> Option<UnitQuaternion<f32>> {
+    let mut covariance = Matrix3::zeros();
+    for (a, b) in source
+        .shoulders
+        .into_iter()
+        .chain(source.hips)
+        .zip(neutral.shoulders.into_iter().chain(neutral.hips))
+    {
+        covariance += (source.rotation * a) * (neutral.rotation * b).transpose();
+    }
+    let svd = covariance.svd(true, true);
+    let u = svd.u?;
+    let vt = svd.v_t?;
+    let orientation =
+        Matrix3::from_diagonal(&Vector3::new(1.0, 1.0, (u * vt).determinant().signum()));
+    Some(UnitQuaternion::from_matrix(&(u * orientation * vt)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,7 +123,8 @@ impl ThoraxState {
         let rotation = self
             .rotation
             .get_or_insert_with(|| RotationSpring::new(UnitQuaternion::identity()));
-        rotation.step_world(source.rotation * neutral.rotation.inverse(), dt, 0.15);
+        let fitted = fitted_rotation(neutral, source)?;
+        rotation.step_world(fitted, dt, 0.15);
         let shoulders = self
             .shoulders
             .get_or_insert_with(|| [VectorSpring::new(Vector3::zeros()); 2]);
@@ -106,8 +133,10 @@ impl ThoraxState {
             .zip(source.shoulders)
             .zip(neutral.shoulders)
         {
-            let calibrated = neutral.rotation.inverse() * source.rotation * point;
-            state.step((calibrated - rest) / neutral.width, dt, 0.15);
+            // Both points are expressed in their own thorax frames. A rigid
+            // torso turn must not also appear as a shoulder displacement.
+            let point = neutral.rotation.inverse() * fitted.inverse() * source.rotation * point;
+            state.step((point - rest) / neutral.width, dt, 0.15);
         }
         let q = rotation.value.quaternion();
         Some(ThoraxTarget {
@@ -167,9 +196,23 @@ mod tests {
         let [x, y, z, w] = output.rotation;
         let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(w, x, y, z));
         assert!(q.angle_to(&UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.4)) < 1.0e-5);
-        assert!(output.shoulder_offsets[0][2] < -0.1);
-        assert!(output.shoulder_offsets[1][2] > 0.1);
+        assert!(
+            output
+                .shoulder_offsets
+                .iter()
+                .flatten()
+                .all(|v| v.abs() < 1.0e-6)
+        );
         assert_eq!(output.mirrored().mirrored(), output);
+        let mut protracted = pose(0.0);
+        protracted.left.shoulder.meters[2] = -0.08;
+        let source = sample(&protracted, 0.5).unwrap();
+        let neutral = sample(&pose(0.0), 0.5).unwrap();
+        let fitted = fitted_rotation(neutral, source).unwrap();
+        let residual =
+            neutral.rotation.inverse() * fitted.inverse() * source.rotation * source.shoulders[0]
+                - neutral.shoulders[0];
+        assert!(residual.z > 0.0, "protraction must survive the torso fit");
         let mut missing = pose(0.4);
         missing.hips = None;
         state.consume(Some(&missing), 0.5);

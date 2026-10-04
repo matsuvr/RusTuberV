@@ -371,6 +371,8 @@ pub struct ArmIkTarget {
 /// Inputs for the pure analytic two-bone solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArmIkInput {
+    /// Anatomical side used to reflect the published radioulnar geometry.
+    pub side: ArmSide,
     /// Upper-arm origin in model/rest space.
     pub shoulder: Vec3,
     /// Rest elbow origin in model/rest space.
@@ -410,6 +412,7 @@ impl ArmIkInput {
         let (elbow_axis, neutral_forearm) =
             crate::arm_anatomy::elbow_geometry(upper, side).unwrap_or((Vec3::ZERO, Vec3::ZERO));
         Self {
+            side,
             shoulder: geometry.upper_arm.position,
             rest_elbow: geometry.elbow.position,
             rest_wrist: geometry.wrist.position,
@@ -576,6 +579,10 @@ impl ArmIkInput {
             hinge_axis: self.elbow_axis,
             neutral_lower: self.neutral_forearm,
             axial_projection: crate::arm_anatomy::radius_axial_projection(),
+            radius: crate::arm_anatomy::RadiusGeometry::from_arm(
+                self.rest_elbow - self.shoulder,
+                self.side,
+            ),
             flexion_limit: ELBOW_FLEXION_LIMIT_RAD,
             axial_limit: FOREARM_ROLL_LIMIT_RAD,
         }
@@ -656,13 +663,6 @@ fn validate_input(input: ArmIkInput) -> Result<(), ArmIkError> {
 
 pub(crate) use crate::skeleton::{finite_normalized, stable_perpendicular};
 
-fn normalized_or_identity(value: Quat) -> Result<Quat, ArmIkError> {
-    if !value.is_finite() || value.length_squared() <= ARM_IK_EPSILON {
-        return Err(ArmIkError::DegenerateGeometry);
-    }
-    Ok(value.normalize())
-}
-
 pub(crate) fn rotation_arc(from: Vec3, to: Vec3) -> Quat {
     let dot = from.dot(to).clamp(-1.0, 1.0);
     if dot > 1.0 - ARM_IK_EPSILON {
@@ -684,11 +684,4 @@ pub(crate) fn rotation_arc(from: Vec3, to: Vec3) -> Quat {
         scale * 0.5,
     )
     .normalize()
-}
-
-pub(crate) fn conjugated_rest_delta(
-    model_delta: Quat,
-    rest_global: Quat,
-) -> Result<Quat, ArmIkError> {
-    normalized_or_identity(crate::skeleton::rest_delta(model_delta, rest_global))
 }

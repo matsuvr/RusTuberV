@@ -203,7 +203,15 @@ fn observed_chest_and_head_keep_independent_world_rotations() {
     use vtuber_avatar::{AvatarBinding, AvatarGeneration, AvatarMotionMirror, TrackedArmControl};
     use vtuber_core::arm_tracking::{ArmControlFrame, ThoraxTarget};
     for (head_yaw, chest_yaw) in [(0.25, 0.0), (0.0, 0.25), (0.25, -0.2)] {
-        let mut app = build_rig(true, true, BodyTrackingPositionInput::default());
+        let mut app = build_rig(
+            true,
+            true,
+            live_input(Vec3::new(0.06, 0.02, -0.04), Vec3::ZERO),
+        );
+        app.insert_resource(vtuber_avatar::ArmSourceSelection {
+            mode: vtuber_avatar::ArmPoseSourceKind::TrackedPose,
+            ..Default::default()
+        });
         let rig = rig_of(&app);
         let generation = AvatarGeneration(1);
         app.world_mut()

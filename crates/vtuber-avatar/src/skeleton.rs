@@ -20,6 +20,7 @@ pub(crate) struct TwoBoneRest {
     pub hinge_axis: Vec3,
     pub neutral_lower: Vec3,
     pub axial_projection: f32,
+    pub radius: Option<crate::arm_anatomy::RadiusGeometry>,
     pub flexion_limit: f32,
     pub axial_limit: f32,
 }
@@ -46,6 +47,18 @@ pub(crate) fn rest_delta(delta: Quat, rest_rotation: Quat) -> Quat {
 
 pub(crate) fn world_delta_to_local(delta: Quat, parent_rotation: Quat) -> Quat {
     rest_delta(delta, parent_rotation)
+}
+
+/// Shortest arc without an identity deadband near parallel vectors. The
+/// general glam helper intentionally rounds angles below about 0.001 rad to
+/// identity; that discontinuity is unsuitable inside the certified joint FK.
+/// The antipodal case has no unique minimal axis and remains explicit absence.
+pub(crate) fn minimal_arc(from: Vec3, to: Vec3) -> Option<Quat> {
+    let from = from.as_dvec3().try_normalize()?;
+    let to = to.as_dvec3().try_normalize()?;
+    let cross = from.cross(to);
+    let q = bevy::math::DQuat::from_xyzw(cross.x, cross.y, cross.z, 1.0 + from.dot(to));
+    (q.length_squared() > 0.0).then(|| q.normalize().as_quat())
 }
 
 /// Bent rest segments define the hinge; a straight chain uses its authored
@@ -81,22 +94,28 @@ pub(crate) fn from_joints(
     // Authored segment offsets need not lie in the anatomical flexion plane.
     // Remove that rest bend before applying the fixed hinge, rather than
     // allowing a small off-plane offset to redefine the joint's axis.
-    let rest_to_neutral = Quat::from_rotation_arc(lower_dir, rest.neutral_lower.try_normalize()?);
+    let rest_to_neutral = minimal_arc(lower_dir, rest.neutral_lower.try_normalize()?)?;
     let hinge =
         Quat::from_axis_angle(axis, flexion.clamp(0.0, rest.flexion_limit)) * rest_to_neutral;
     // The final FK reconstruction owns the limits, including calls made by
     // damping, loss blending and forearm alignment after the analytic solve.
-    let relative = hinge
-        * Quat::from_axis_angle(
-            lower_dir,
-            projected_roll(
-                axial_roll.clamp(-rest.axial_limit, rest.axial_limit),
-                rest.axial_projection,
-            ),
-        );
+    let relative = if let Some(radius) = rest.radius {
+        Quat::from_axis_angle(axis, flexion.clamp(0.0, rest.flexion_limit))
+            * radius.rotation(axial_roll.clamp(-rest.axial_limit, rest.axial_limit))?
+            * rest_to_neutral
+    } else {
+        hinge
+            * Quat::from_axis_angle(
+                lower_dir,
+                projected_roll(
+                    axial_roll.clamp(-rest.axial_limit, rest.axial_limit),
+                    rest.axial_projection,
+                ),
+            )
+    };
     let start_model = start_rotation * rest.start_rotation.inverse();
     let middle = rest.start + start_model * upper;
-    let end = middle + start_model * hinge * lower;
+    let end = middle + start_model * relative * lower;
     Some(TwoBonePose {
         middle,
         end,
@@ -118,10 +137,51 @@ pub(crate) fn joint_coordinates(rest: TwoBoneRest, pose: TwoBonePose) -> Option<
     let roll = if roll.w < 0.0 { -roll } else { roll };
     let axis = rest.middle_rotation.inverse() * (rest.end - rest.middle).try_normalize()?;
     let projected = 2.0 * roll.xyz().dot(axis).atan2(roll.w);
-    Some(Vec2::new(
-        flexion,
-        unprojected_roll(projected, rest.axial_projection),
-    ))
+    let mut joints = Vec2::new(flexion, unprojected_roll(projected, rest.axial_projection));
+    if rest.radius.is_some() {
+        joints = joints.clamp(
+            Vec2::new(0.0, -rest.axial_limit),
+            Vec2::new(rest.flexion_limit, rest.axial_limit),
+        );
+        // Invert the same two-coordinate FK, including the radius offset.
+        // A small Gauss-Newton solve removes the coupling that the old axial
+        // projection incorrectly assigned to elbow flexion.
+        let h = f32::EPSILON.cbrt();
+        let residual = |q: Vec2| -> Option<Vec3> {
+            let r = from_joints(rest, pose.start_rotation, q.x, q.y)?.middle_rotation;
+            let mut delta = r.inverse() * pose.middle_rotation;
+            if delta.w < 0.0 {
+                delta = -delta;
+            }
+            Some(delta.to_scaled_axis())
+        };
+        for _ in 0..12 {
+            let r = residual(joints)?;
+            if r.length() < 32.0 * f32::EPSILON {
+                return Some(joints);
+            }
+            let x = (residual(joints + Vec2::X * h)? - residual(joints - Vec2::X * h)?) / (2.0 * h);
+            let y = (residual(joints + Vec2::Y * h)? - residual(joints - Vec2::Y * h)?) / (2.0 * h);
+            let a = x.dot(x);
+            let b = x.dot(y);
+            let c = y.dot(y);
+            let determinant = a * c - b * b;
+            if determinant.abs() <= f32::EPSILON {
+                return None;
+            }
+            let xr = x.dot(r);
+            let yr = y.dot(r);
+            joints -= Vec2::new(c * xr - b * yr, a * yr - b * xr) / determinant;
+            joints = joints.clamp(
+                Vec2::new(0.0, -rest.axial_limit),
+                Vec2::new(rest.flexion_limit, rest.axial_limit),
+            );
+        }
+        if residual(joints)?.length() > 64.0 * f32::EPSILON {
+            return None;
+        }
+    }
+    Some(joints)
 }
 
 pub(crate) fn projected_roll(angle: f32, projection: f32) -> f32 {

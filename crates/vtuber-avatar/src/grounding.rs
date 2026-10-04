@@ -60,6 +60,7 @@ impl GroundedFeet {
                     ),
                     neutral_lower: upper_direction,
                     axial_projection: 1.0,
+                    radius: None,
                     start_rotation: start.rotation(),
                     middle_rotation: middle.rotation(),
                     hinge_axis: skeleton::rest_hinge_axis(
@@ -94,19 +95,23 @@ impl GroundedFeet {
 }
 
 pub(crate) fn register_grounding(app: &mut App) {
-    app.add_systems(PostUpdate, restore_ungrounded_pose.before(AnimationSystems))
-        .add_systems(
-            PostUpdate,
-            plant_feet
-                .after(crate::direct_position::apply_direct_body_position)
-                .before(crate::arm_pipeline::update_dynamic_arm_targets)
-                .before(crate::arm_pipeline::update_tracked_arm_targets)
-                .before(crate::arm_pose::apply_default_arm_pose)
-                .before(crate::gaze::update_direct_look_at_input)
-                .before(VrmSystemSets::GazeControl)
-                .before(VrmSystemSets::Constraints)
-                .before(TransformSystems::Propagate),
-        );
+    app.add_systems(
+        PostUpdate,
+        restore_ungrounded_pose
+            .after(crate::upper_limb_runtime::restore_body_inputs)
+            .before(AnimationSystems),
+    )
+    .add_systems(
+        PostUpdate,
+        plant_feet
+            .after(crate::direct_position::apply_direct_body_position)
+            .before(crate::upper_limb_runtime::update_upper_limb_targets)
+            .before(crate::arm_pose::apply_default_arm_pose)
+            .before(crate::gaze::update_direct_look_at_input)
+            .before(VrmSystemSets::GazeControl)
+            .before(VrmSystemSets::Constraints)
+            .before(TransformSystems::Propagate),
+    );
 }
 
 fn restore_ungrounded_pose(

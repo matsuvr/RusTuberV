@@ -79,41 +79,20 @@ pub(crate) fn from_coordinates(
     chain: &ArmChainBinding,
     angles: ShoulderCoordinates,
 ) -> Option<Quat> {
-    let direction = if let Some(plane) = angles.plane {
-        let (s, c) = plane.sin_cos();
-        let (e, down) = angles.elevation.sin_cos();
-        Vec3::new(sign(chain) * e * c, -down, e * s)
+    let swing = if let Some(plane) = angles.plane {
+        let side = sign(chain);
+        // A retained plane defines the frame even at the upper pole. Its
+        // instantaneous recovery from a direction alone remains undefined.
+        Quat::from_rotation_y(-side * plane)
+            * Quat::from_rotation_z(side * angles.elevation)
+            * Quat::from_rotation_y(side * plane)
     } else if angles.elevation <= 8.0 * f32::EPSILON {
-        Vec3::NEG_Y
+        Quat::IDENTITY
     } else {
         return None;
     };
     Some(
-        (swing(direction)?
-            * Quat::from_axis_angle(-sign(chain) * Vec3::Y, angles.axial)
-            * neutral(chain)?)
-        .normalize(),
-    )
-}
-
-/// Holzbaur/Xu thoracohumeral ranges, never bone-local Euler limits.
-pub(crate) fn constrain(chain: &ArmChainBinding, rotation: Quat) -> Option<Quat> {
-    let angles = coordinates(chain, rotation)?;
-    let plane = angles
-        .plane
-        .map(|p| p.clamp(-90.0_f32.to_radians(), 130.0_f32.to_radians()));
-    let axial = angles
-        .axial
-        .clamp(-90.0_f32.to_radians(), 20.0_f32.to_radians());
-    if plane == angles.plane && axial == angles.axial {
-        return Some(rotation);
-    }
-    from_coordinates(
-        chain,
-        ShoulderCoordinates {
-            plane,
-            axial,
-            ..angles
-        },
+        (swing * Quat::from_axis_angle(-sign(chain) * Vec3::Y, angles.axial) * neutral(chain)?)
+            .normalize(),
     )
 }

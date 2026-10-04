@@ -21,6 +21,7 @@ pub mod binding;
 pub mod body_motion;
 pub mod body_scale;
 pub mod capabilities;
+mod collision;
 pub mod compatibility;
 pub mod direct_look;
 pub mod direct_pose;
@@ -29,9 +30,11 @@ pub mod expression;
 pub mod expression_catalog;
 mod framing;
 pub mod gaze;
+mod girdle;
 pub mod glb;
 mod grounding;
 pub mod idle;
+mod joint_limits;
 pub mod lifecycle;
 pub mod load;
 pub mod look;
@@ -45,6 +48,15 @@ mod skeleton;
 mod thumb;
 pub mod tracking_profile;
 pub mod unload;
+mod upper_limb;
+mod upper_limb_body;
+mod upper_limb_path;
+mod upper_limb_planner;
+mod upper_limb_runtime;
+pub use upper_limb_runtime::update_upper_limb_targets;
+mod upper_limb_solver;
+pub use collision::CollisionError as UpperLimbCollisionError;
+pub use upper_limb_solver::SolveStatus as UpperLimbSolveStatus;
 pub mod vrm;
 mod vrm0;
 pub mod vrm1;
@@ -60,17 +72,14 @@ pub use arm_motion_geometry::{
     ArmMotionGeometry, ArmMotionRestGeometry, HipsAnchorFrame, build_arm_motion_rest_geometry,
 };
 pub use arm_pipeline::{
-    ArmPipelineError, ArmPipelineInput, ArmPipelineOutcome, ArmPoseSourceKind, ArmPoseSourceUsed,
-    ArmSourceSelection, DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION, DynamicArmProfile,
+    ArmPoseSourceKind, ArmSourceSelection, DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION, DynamicArmProfile,
     DynamicArmProfileOverride, DynamicArmProfileOverrideError, DynamicArmTargets,
-    MAX_ARM_DROP_RADIANS, TrackedArmControl, chain_side_label, clamp_upper_arm_swing,
-    resolve_arm_pose, resolve_side, update_dynamic_arm_targets, update_tracked_arm_targets,
+    TrackedArmControl,
 };
 pub use arm_pose::{
-    ArmPoseBlendSide, ArmPoseBlendState, ArmPoseOverrideStore, ArmPoseOverrideStoreError,
-    ArmPoseProfileChange, DEFAULT_ARM_RETURN_SECONDS, DEFAULT_ARM_TRANSITION_SECONDS,
-    DefaultArmPose, ResolvedArmPose, ResolvedBoneDelta, ResolvedFingerJointPose,
-    ResolvedFingerPose, apply_arm_pose_profile_changes, apply_default_arm_pose,
+    ArmPoseOverrideStore, ArmPoseOverrideStoreError, ArmPoseProfileChange,
+    DEFAULT_ARM_RETURN_SECONDS, DEFAULT_ARM_TRANSITION_SECONDS, ResolvedArmPose, ResolvedBoneDelta,
+    ResolvedFingerJointPose, ResolvedFingerPose, apply_default_arm_pose,
 };
 pub use bind::BindTriggered;
 pub use binding::{AvatarBindError, AvatarBinding, bind_humanoid_bones};
@@ -138,9 +147,7 @@ pub use render_output::{
     AvatarOutputTarget, AvatarViewportSnapshot, VIEWPORT_ONLY_RENDER_LAYER,
     register_output_systems,
 };
-pub use tracked_arm::{
-    resolved_tracked_arm_pose, solve_tracked_arm, tracked_arm_ik_target, tracking_to_rest_rotation,
-};
+pub use tracked_arm::{tracked_arm_ik_target, tracking_to_rest_rotation};
 pub use tracking_profile::{
     GlobalBodyTrackingProfile, TRACKING_PROFILE_SCHEMA_VERSION, TrackingProfileDocument,
 };
