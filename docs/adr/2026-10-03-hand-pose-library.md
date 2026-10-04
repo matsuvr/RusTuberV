@@ -144,12 +144,21 @@ OK、指クロス、Vulcan、両手ハートの片側、親指を含む三本指
 abduction [-0.5,0.78] rad。出典は[公開XML](https://github.com/MyoHub/myo_sim/blob/93b0ca8f4ec90c9899ee7f05fee561e9911da91b/myo_sim/models/arm/assets/myoarm_r_chain.xml)。
 Apache-2.0表記・著作権表示・ライセンスはTHIRD_PARTY_NOTICESとdocs/licensesに保持する。
 
+角度の符号もsource FKで照合する。右手のCMC→MCPベクトル
+`(0.0165,-0.0292,-0.0127)` は、負のcmc_flexionで尺側へ、正の
+cmc_abductionで掌側へ動く。元クリップのthumbs-upはDefoより
+`Thumb.1 Stretched`が増え、指の方向へ親指を立てるので負のflexionへ写す。
+`Thumb.Spread`が減る対立方向は正のabductionへ写す。
+追加のOK・つまみは負のflexion・正のabductionを使う。
+
 sourceのCMC→MCP軸と掌法線の基底から、各VRMの同じrest基底へ軸を写す。
 左手では極性の骨方向と軸性の回転軸を区別して反射する。metacarpalにだけ
 2軸回転を適用し、MCP/IPは従来のrest相対屈曲を維持する。これによりsourceの
 thumb restをモデルへ押し付けず、各モデルのrest仰角・開きを保つ。
 
-数値確認: source2軸の単独/複合、範囲外入力の制限、非identity rest、左右反射、
-weight 0の復帰を確認する。握り/親指立て/OK/つまみの実VRM目視、および
-指先接触を保証する#257への接続は未実施。元ポーズを移植するだけでは
-モデルごとに異なる指長での接触は保証できず、#255全体の完了とはしない。
+数値確認ではsource2軸の単独/複合、範囲外入力の制限、非identity rest、左右反射、
+weight 0の復帰を確認した。手指の実際のFK形状を#256/#257の衝突候補へ渡し、
+胸・反対の腕/手との制約と時間更新へ接続した。
+固定ポーズはモデルごとの指長を変えず、OK/つまみの指先一致を解くIKではない。
+#257も同じ手の指先接触の保証を追加するIssueではない。
+握り/親指立て/OK/つまみの描画確認は[上肢の統合記録](2026-10-03-upper-limb-anatomy.md#統合版の確認記録2026-10-04進行中)へまとめる。

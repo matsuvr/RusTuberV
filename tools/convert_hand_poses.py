@@ -92,8 +92,12 @@ def convert(clip, reference):
     # Retarget normalized muscle differences from the relaxed clip to the
     # public CMC ranges. Preserve the avatar's own resting base orientation;
     # do not interpret Unity muscle values as measured anatomical angles.
+    # In MyoArm's right-hand axes, negative cmc_flexion moves the shaft
+    # toward the palm's ulnar side; positive cmc_abduction lifts it volarly.
+    # In these clips increasing Thumb.1 Stretched brings the thumb toward
+    # the finger direction (e.g. thumbs-up); decreasing Spread opposes it.
     flex = (reference["LeftHand.Thumb.1 Stretched"] - muscle("Thumb", "1 Stretched")) * (0.7 + 0.78) / 2
-    abduct = (muscle("Thumb", "Spread") - reference["LeftHand.Thumb.Spread"]) * (0.78 + 0.5) / 2
+    abduct = (reference["LeftHand.Thumb.Spread"] - muscle("Thumb", "Spread")) * (0.78 + 0.5) / 2
     cmc = [math.degrees(max(-0.78, min(0.7, flex))), math.degrees(max(-0.5, min(0.78, abduct)))]
     return curls, spreads, thumb, thumb_spread, cmc
 
@@ -129,11 +133,11 @@ def main():
     # Additional artist-authored CMC poses (degrees), not anatomical coupling
     # coefficients. The hand model constrains their two oblique hinges.
     cmc_extra = {
-        "ring_only": [20, -20], "little_only": [20, -20], "ok": [25, -20],
-        "crossed_fingers": [20, -20], "vulcan": [-10, 10], "half_heart": [10, 10],
-        "three_thumb_index_middle": [-15, 5], "i_love_you": [-15, 10],
-        "four_with_thumb": [-15, 5], "open_together": [0, -10],
-        "two_together": [20, -20], "pinch": [20, -15],
+        "ring_only": [-20, 20], "little_only": [-20, 20], "ok": [-25, 20],
+        "crossed_fingers": [-20, 20], "vulcan": [10, -10], "half_heart": [-10, -10],
+        "three_thumb_index_middle": [15, -5], "i_love_you": [15, -10],
+        "four_with_thumb": [15, -5], "open_together": [0, 10],
+        "two_together": [-20, 20], "pinch": [-20, 15],
     }
     poses = [(name, *convert(clips[clip], clips["Defo"])) for clip, name in CLIPS]
     poses += [(*pose, cmc_extra[pose[0]]) for pose in ADDITIONAL]
