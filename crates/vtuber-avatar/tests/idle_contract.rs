@@ -20,8 +20,8 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use vtuber_avatar::{
     ActiveAvatar, AvatarAssetId, AvatarBinding, AvatarGeneration, AvatarLifecycle,
-    BodyTrackingPositionInput, DefaultArmPose, IDLE_PROCEDURAL_AMPLITUDE_METERS, IdleMotionProfile,
-    LossIdleState, PositionInputMetrics, update_body_tracking_position_input,
+    BodyTrackingPositionInput, IDLE_PROCEDURAL_AMPLITUDE_METERS, IdleMotionProfile, LossIdleState,
+    PositionInputMetrics, update_body_tracking_position_input,
 };
 use vtuber_core::types::AvatarControlFrame;
 use vtuber_core::types::{
@@ -112,11 +112,6 @@ fn build_app() -> (App, IdleRig, AvatarGeneration) {
         right_eye: None,
         generation,
     };
-    let default_pose = DefaultArmPose {
-        generation,
-        left: None,
-        right: None,
-    };
     let body_scale = vtuber_avatar::body_scale::BodyScaleMeters {
         generation,
         scale_meters: 0.7,
@@ -126,7 +121,6 @@ fn build_app() -> (App, IdleRig, AvatarGeneration) {
         ActiveAvatar,
         binding,
         model_id,
-        default_pose,
         IdleMotionProfile::default(),
         body_scale,
         BodyTrackingPositionInput::default(),

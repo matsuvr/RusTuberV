@@ -18,6 +18,9 @@ pub(crate) struct TwoBoneRest {
     pub start_rotation: Quat,
     pub middle_rotation: Quat,
     pub hinge_axis: Vec3,
+    pub neutral_lower: Vec3,
+    pub axial_projection: f32,
+    pub radius: Option<crate::arm_anatomy::RadiusGeometry>,
     pub flexion_limit: f32,
     pub axial_limit: f32,
 }
@@ -44,6 +47,18 @@ pub(crate) fn rest_delta(delta: Quat, rest_rotation: Quat) -> Quat {
 
 pub(crate) fn world_delta_to_local(delta: Quat, parent_rotation: Quat) -> Quat {
     rest_delta(delta, parent_rotation)
+}
+
+/// Shortest arc without an identity deadband near parallel vectors. The
+/// general glam helper intentionally rounds angles below about 0.001 rad to
+/// identity; that discontinuity is unsuitable inside the certified joint FK.
+/// The antipodal case has no unique minimal axis and remains explicit absence.
+pub(crate) fn minimal_arc(from: Vec3, to: Vec3) -> Option<Quat> {
+    let from = from.as_dvec3().try_normalize()?;
+    let to = to.as_dvec3().try_normalize()?;
+    let cross = from.cross(to);
+    let q = bevy::math::DQuat::from_xyzw(cross.x, cross.y, cross.z, 1.0 + from.dot(to));
+    (q.length_squared() > 0.0).then(|| q.normalize().as_quat())
 }
 
 /// Bent rest segments define the hinge; a straight chain uses its authored
@@ -74,25 +89,33 @@ pub(crate) fn from_joints(
 ) -> Option<TwoBonePose> {
     let upper = rest.middle - rest.start;
     let lower = rest.end - rest.middle;
-    let upper_dir = upper.try_normalize()?;
     let lower_dir = lower.try_normalize()?;
     let axis = rest.hinge_axis.try_normalize()?;
     // Authored segment offsets need not lie in the anatomical flexion plane.
     // Remove that rest bend before applying the fixed hinge, rather than
     // allowing a small off-plane offset to redefine the joint's axis.
-    let rest_to_straight = Quat::from_rotation_arc(lower_dir, upper_dir);
+    let rest_to_neutral = minimal_arc(lower_dir, rest.neutral_lower.try_normalize()?)?;
     let hinge =
-        Quat::from_axis_angle(axis, flexion.clamp(0.0, rest.flexion_limit)) * rest_to_straight;
+        Quat::from_axis_angle(axis, flexion.clamp(0.0, rest.flexion_limit)) * rest_to_neutral;
     // The final FK reconstruction owns the limits, including calls made by
     // damping, loss blending and forearm alignment after the analytic solve.
-    let relative = hinge
-        * Quat::from_axis_angle(
-            lower_dir,
-            axial_roll.clamp(-rest.axial_limit, rest.axial_limit),
-        );
+    let relative = if let Some(radius) = rest.radius {
+        Quat::from_axis_angle(axis, flexion.clamp(0.0, rest.flexion_limit))
+            * radius.rotation(axial_roll.clamp(-rest.axial_limit, rest.axial_limit))?
+            * rest_to_neutral
+    } else {
+        hinge
+            * Quat::from_axis_angle(
+                lower_dir,
+                projected_roll(
+                    axial_roll.clamp(-rest.axial_limit, rest.axial_limit),
+                    rest.axial_projection,
+                ),
+            )
+    };
     let start_model = start_rotation * rest.start_rotation.inverse();
     let middle = rest.start + start_model * upper;
-    let end = middle + start_model * hinge * lower;
+    let end = middle + start_model * relative * lower;
     Some(TwoBonePose {
         middle,
         end,
@@ -105,14 +128,77 @@ pub(crate) fn from_joints(
 
 /// Recover the flexion and axial coordinates in the immutable rest frame.
 pub(crate) fn joint_coordinates(rest: TwoBoneRest, pose: TwoBonePose) -> Option<Vec2> {
-    let upper = (pose.middle - rest.start).try_normalize()?;
     let lower = (pose.end - pose.middle).try_normalize()?;
-    let flexion = upper.cross(lower).length().atan2(upper.dot(lower));
+    let start_model = pose.start_rotation * rest.start_rotation.inverse();
+    let lower = start_model.inverse() * lower;
+    let flexion = hinge_coordinate(rest, lower)?;
     let unrolled = from_joints(rest, pose.start_rotation, flexion, 0.0)?;
     let roll = unrolled.middle_rotation.inverse() * pose.middle_rotation;
     let roll = if roll.w < 0.0 { -roll } else { roll };
     let axis = rest.middle_rotation.inverse() * (rest.end - rest.middle).try_normalize()?;
-    Some(Vec2::new(flexion, 2.0 * roll.xyz().dot(axis).atan2(roll.w)))
+    let projected = 2.0 * roll.xyz().dot(axis).atan2(roll.w);
+    let mut joints = Vec2::new(flexion, unprojected_roll(projected, rest.axial_projection));
+    if rest.radius.is_some() {
+        joints = joints.clamp(
+            Vec2::new(0.0, -rest.axial_limit),
+            Vec2::new(rest.flexion_limit, rest.axial_limit),
+        );
+        // Invert the same two-coordinate FK, including the radius offset.
+        // A small Gauss-Newton solve removes the coupling that the old axial
+        // projection incorrectly assigned to elbow flexion.
+        let h = f32::EPSILON.cbrt();
+        let residual = |q: Vec2| -> Option<Vec3> {
+            let r = from_joints(rest, pose.start_rotation, q.x, q.y)?.middle_rotation;
+            let mut delta = r.inverse() * pose.middle_rotation;
+            if delta.w < 0.0 {
+                delta = -delta;
+            }
+            Some(delta.to_scaled_axis())
+        };
+        for _ in 0..12 {
+            let r = residual(joints)?;
+            if r.length() < 32.0 * f32::EPSILON {
+                return Some(joints);
+            }
+            let x = (residual(joints + Vec2::X * h)? - residual(joints - Vec2::X * h)?) / (2.0 * h);
+            let y = (residual(joints + Vec2::Y * h)? - residual(joints - Vec2::Y * h)?) / (2.0 * h);
+            let a = x.dot(x);
+            let b = x.dot(y);
+            let c = y.dot(y);
+            let determinant = a * c - b * b;
+            if determinant.abs() <= f32::EPSILON {
+                return None;
+            }
+            let xr = x.dot(r);
+            let yr = y.dot(r);
+            joints -= Vec2::new(c * xr - b * yr, a * yr - b * xr) / determinant;
+            joints = joints.clamp(
+                Vec2::new(0.0, -rest.axial_limit),
+                Vec2::new(rest.flexion_limit, rest.axial_limit),
+            );
+        }
+        if residual(joints)?.length() > 64.0 * f32::EPSILON {
+            return None;
+        }
+    }
+    Some(joints)
+}
+
+pub(crate) fn projected_roll(angle: f32, projection: f32) -> f32 {
+    let (s, c) = (0.5 * angle).sin_cos();
+    2.0 * (projection * s).atan2(c)
+}
+
+pub(crate) fn unprojected_roll(angle: f32, projection: f32) -> f32 {
+    let (s, c) = (0.5 * angle).sin_cos();
+    2.0 * s.atan2(projection * c)
+}
+
+pub(crate) fn hinge_coordinate(rest: TwoBoneRest, lower: Vec3) -> Option<f32> {
+    let axis = rest.hinge_axis.try_normalize()?;
+    let source = (rest.neutral_lower - axis * rest.neutral_lower.dot(axis)).try_normalize()?;
+    let target = (lower - axis * lower.dot(axis)).try_normalize()?;
+    Some(axis.dot(source.cross(target)).atan2(source.dot(target)))
 }
 
 pub(crate) fn solve_two_bone(
@@ -126,6 +212,7 @@ pub(crate) fn solve_two_bone(
         rest.middle,
         rest.end,
         rest.hinge_axis,
+        rest.neutral_lower,
         target,
         pole,
     ]
@@ -137,62 +224,94 @@ pub(crate) fn solve_two_bone(
     {
         return Err(SolveError::NonFinite);
     }
-    let lengths = rest.lengths;
-    if lengths.min_element() <= 1.0e-4 {
-        return Err(SolveError::Degenerate);
-    }
-    let rest_direction = finite_normalized(rest.end - rest.start).ok_or(SolveError::Degenerate)?;
-    let offset = target - rest.start;
-    let distance = offset.length();
-    if !distance.is_finite() {
-        return Err(SolveError::NonFinite);
-    }
-    let direction = finite_normalized(offset).unwrap_or(rest_direction);
-    let min_reach =
-        (lengths.length_squared() + 2.0 * lengths.x * lengths.y * rest.flexion_limit.cos()).sqrt();
-    let max_reach = lengths.element_sum() - extension_margin;
-    if min_reach >= max_reach {
-        return Err(SolveError::Degenerate);
-    }
-    let reach = distance.clamp(min_reach, max_reach);
+    let direction = (target - rest.start)
+        .try_normalize()
+        .or_else(|| (rest.end - rest.start).try_normalize())
+        .ok_or(SolveError::Degenerate)?;
+    let flexion = flexion_for_reach(rest, target.distance(rest.start), extension_margin)?;
     let project = |v: Vec3| v - direction * v.dot(direction);
     let bend = finite_normalized(project(pole - rest.start))
         .or_else(|| finite_normalized(project(rest.middle - rest.start)))
         .or_else(|| stable_perpendicular(direction, Vec3::Y))
         .ok_or(SolveError::Degenerate)?;
-    let cosine = ((lengths.x * lengths.x + reach * reach - lengths.y * lengths.y)
-        / (2.0 * lengths.x * reach))
-        .clamp(-1.0, 1.0);
-    let middle = rest.start
-        + direction * (cosine * lengths.x)
-        + bend * ((1.0 - cosine * cosine).max(0.0).sqrt() * lengths.x);
-    let end = rest.start + direction * reach;
-    let upper = finite_normalized(middle - rest.start).ok_or(SolveError::Degenerate)?;
-    let lower = finite_normalized(end - middle).ok_or(SolveError::Degenerate)?;
-    let rest_upper = finite_normalized(rest.middle - rest.start).ok_or(SolveError::Degenerate)?;
-    let rest_axis = finite_normalized(rest.hinge_axis).ok_or(SolveError::Degenerate)?;
-    // At full extension the pole still defines the hinge plane. Deriving it
-    // from two collinear segments would lose the knee axis.
-    let plane = bend
-        .cross(direction)
+    // Construct the anatomical triangle in double precision, then orient it as
+    // a rigid whole. FK remains the only producer of elbow/wrist positions;
+    // rounding a nearly straight triangle must not change its hinge angle.
+    let upper = (rest.middle - rest.start).as_dvec3().normalize();
+    let axis = rest.hinge_axis.as_dvec3().normalize();
+    let lower = bevy::math::DQuat::from_axis_angle(axis, flexion)
+        * rest.neutral_lower.as_dvec3().normalize();
+    let reach = (upper * f64::from(rest.lengths.x) + lower * f64::from(rest.lengths.y)).normalize();
+    let source_plane = upper
+        .cross(lower)
         .try_normalize()
+        .or_else(|| (axis - upper * upper.dot(axis)).try_normalize())
         .ok_or(SolveError::Degenerate)?;
-    let rest_basis = Mat3::from_cols(rest_upper, rest_axis, rest_upper.cross(rest_axis));
-    let basis = Mat3::from_cols(upper, plane, upper.cross(plane));
-    let start_model = Quat::from_mat3(&(basis * rest_basis.transpose()));
-    let flexion = upper.cross(lower).length().atan2(upper.dot(lower));
-    let mut pose = from_joints(
+    let source_bend = reach.cross(source_plane).normalize();
+    let source = bevy::math::DMat3::from_cols(reach, source_bend, source_plane);
+    let direction = direction.as_dvec3().normalize();
+    let bend = (bend.as_dvec3() - direction * bend.as_dvec3().dot(direction)).normalize();
+    let target = bevy::math::DMat3::from_cols(direction, bend, bend.cross(direction));
+    let start_model = bevy::math::DQuat::from_mat3(&(target * source.transpose())).as_quat();
+    from_joints(
         rest,
         (start_model * rest.start_rotation).normalize(),
-        flexion,
+        flexion as f32,
         0.0,
     )
-    .ok_or(SolveError::Degenerate)?;
-    // The analytic positions depend on geometry alone, including when the
-    // authored joint frames differ. FK reproduces them up to rounding.
-    pose.middle = middle;
-    pose.end = end;
-    Ok(pose)
+    .ok_or(SolveError::Degenerate)
+}
+
+/// Inverse of the same oblique hinge used by FK. The extension-side maximum
+/// follows from the source geometry, rather than assuming collinear bones.
+pub(crate) fn flexion_for_reach(
+    rest: TwoBoneRest,
+    distance: f32,
+    extension_margin: f32,
+) -> Result<f64, SolveError> {
+    if !distance.is_finite() || !rest.lengths.is_finite() {
+        return Err(SolveError::NonFinite);
+    }
+    if rest.lengths.min_element() <= 1.0e-4 {
+        return Err(SolveError::Degenerate);
+    }
+    let upper = (rest.middle - rest.start)
+        .as_dvec3()
+        .try_normalize()
+        .ok_or(SolveError::Degenerate)?;
+    let axis = rest
+        .hinge_axis
+        .as_dvec3()
+        .try_normalize()
+        .ok_or(SolveError::Degenerate)?;
+    let neutral = rest
+        .neutral_lower
+        .as_dvec3()
+        .try_normalize()
+        .ok_or(SolveError::Degenerate)?;
+    let c = upper.dot(axis) * neutral.dot(axis);
+    let a = upper.dot(neutral) - c;
+    let b = upper.dot(axis.cross(neutral));
+    let radius = a.hypot(b);
+    if radius <= f64::EPSILON {
+        return Err(SolveError::Degenerate);
+    }
+    let limit = f64::from(rest.flexion_limit);
+    let peak = b.atan2(a).clamp(0.0, limit);
+    let lengths = rest.lengths.as_dvec2();
+    let chord = |f: f64| {
+        (lengths.length_squared() + 2.0 * lengths.x * lengths.y * (a * f.cos() + b * f.sin() + c))
+            .max(0.0)
+            .sqrt()
+    };
+    let min = chord(limit).min(chord(0.0));
+    let max = chord(peak) - f64::from(extension_margin);
+    if min >= max {
+        return Err(SolveError::Degenerate);
+    }
+    let reach = f64::from(distance).clamp(min, max);
+    let cosine = (reach * reach - lengths.length_squared()) / (2.0 * lengths.x * lengths.y);
+    Ok((b.atan2(a) + ((cosine - c) / radius).clamp(-1.0, 1.0).acos()).clamp(0.0, limit))
 }
 
 pub(crate) fn finite_normalized(value: Vec3) -> Option<Vec3> {

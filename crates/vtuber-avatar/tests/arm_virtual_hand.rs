@@ -16,8 +16,8 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 use vtuber_avatar::{
-    ActiveAvatar, AvatarBinding, AvatarGeneration, DefaultArmPose, DynamicArmTargets,
-    ResolvedArmPose, apply_default_arm_pose,
+    ActiveAvatar, AvatarBinding, AvatarGeneration, DynamicArmTargets, ResolvedArmPose,
+    apply_default_arm_pose,
 };
 
 #[derive(Clone, Copy)]
@@ -28,7 +28,12 @@ struct Chain {
 
 fn spawn_child(app: &mut App, parent: Entity, transform: Transform) -> Entity {
     app.world_mut()
-        .spawn((transform, GlobalTransform::IDENTITY, ChildOf(parent)))
+        .spawn((
+            transform,
+            bevy_vrm1::prelude::RestTransform(transform),
+            GlobalTransform::IDENTITY,
+            ChildOf(parent),
+        ))
         .id()
 }
 
@@ -44,7 +49,7 @@ fn pose_for(chain: &Chain, delta: Quat) -> ResolvedArmPose {
     }
 }
 
-/// Spawns a minimal avatar with a static default pose and an (empty) dynamic
+/// Spawns a minimal avatar with a authored pose and an (empty) dynamic
 /// target component, mirroring what avatar binding inserts.
 fn spawn_avatar(app: &mut App, generation: AvatarGeneration) -> Chain {
     let root = app
@@ -62,14 +67,8 @@ fn spawn_avatar(app: &mut App, generation: AvatarGeneration) -> Chain {
         Transform::from_translation(Vec3::new(0.7, 0.0, 0.0)),
     );
     let chain = Chain { upper, lower };
-    let static_pose = pose_for(&chain, Quat::from_rotation_z(0.1));
     app.world_mut().entity_mut(root).insert((
         AvatarBinding::head_only(root, root, generation),
-        DefaultArmPose {
-            generation,
-            left: Some(static_pose),
-            right: None,
-        },
         DynamicArmTargets {
             generation: Some(generation),
             source_seq: None,
@@ -92,17 +91,17 @@ fn upper_rotation(app: &App, chain: &Chain) -> Quat {
 }
 
 #[test]
-fn fresh_dynamic_targets_override_the_static_default_pose() {
+fn only_admitted_targets_are_applied() {
     let mut app = build_app();
     let generation = AvatarGeneration(3);
     let chain = spawn_avatar(&mut app, generation);
 
-    // No dynamic resolution yet: static default pose applies.
+    // No dynamic resolution yet: authored pose applies.
     app.update();
     let static_rotation = upper_rotation(&app, &chain);
     assert!(
-        static_rotation.angle_between(Quat::IDENTITY * Quat::from_rotation_z(0.1)) < 1e-5,
-        "fallback path must keep applying the static pose"
+        static_rotation.angle_between(Quat::IDENTITY) < 1e-5,
+        "unresolved targets must leave the authored pose"
     );
 
     // A dynamic resolution for this generation becomes authoritative.
@@ -159,7 +158,7 @@ fn repeated_updates_with_identical_targets_do_not_accumulate() {
 }
 
 #[test]
-fn stale_generation_targets_are_ignored_in_favor_of_the_static_pose() {
+fn stale_generation_targets_leave_the_authored_pose() {
     let mut app = build_app();
     let generation = AvatarGeneration(9);
     let chain = spawn_avatar(&mut app, generation);
@@ -183,8 +182,8 @@ fn stale_generation_targets_are_ignored_in_favor_of_the_static_pose() {
     app.update();
     let applied = upper_rotation(&app, &chain);
     assert!(
-        applied.angle_between(Quat::IDENTITY * Quat::from_rotation_z(0.1)) < 1e-5,
-        "generation-isolated compositor must fall back to the static pose"
+        applied.angle_between(Quat::IDENTITY) < 1e-5,
+        "stale targets must not write the skeleton"
     );
 }
 

@@ -51,7 +51,7 @@ fn chain(side: ArmSide, upper_length: f32, forearm_length: f32) -> ArmChainBindi
 }
 
 fn input_for(chain: &ArmChainBinding, target: ArmIkTarget) -> ArmIkInput {
-    ArmIkInput::from_geometry(chain.rest, target)
+    ArmIkInput::from_geometry(chain.rest, target, chain.side)
 }
 
 fn assert_finite_solution(solution: &vtuber_avatar::ArmIkSolution) {
@@ -69,7 +69,7 @@ fn assert_finite_solution(solution: &vtuber_avatar::ArmIkSolution) {
 }
 
 #[test]
-fn default_profile_opens_the_whole_arm_into_an_a_pose() {
+fn default_profile_lowers_the_arm_with_lateral_hand_clearance() {
     let chain = chain(ArmSide::Left, 0.7, 0.55);
     let target = default_arm_target(&chain, ArmPoseProfile::default()).unwrap();
     assert_eq!(target.wrist.z, chain.rest.upper_arm.position.z);
@@ -78,14 +78,25 @@ fn default_profile_opens_the_whole_arm_into_an_a_pose() {
     assert_finite_solution(&solution);
     assert!(solution.solved_reach < chain.rest.total_arm_length);
     assert!(solution.elbow.y < chain.rest.upper_arm.position.y);
-    let direction = Vec3::new(1.0, -1.0, 0.0).normalize();
+    let direction = Vec3::new(
+        10.0_f32.to_radians().sin(),
+        -10.0_f32.to_radians().cos(),
+        0.0,
+    );
     assert!(
-        (solution.elbow - chain.rest.upper_arm.position)
+        (solution.wrist - chain.rest.upper_arm.position)
             .normalize()
             .dot(direction)
-            > 0.999
+            > 0.99999
     );
-    assert!((solution.wrist - solution.elbow).normalize().dot(direction) > 0.999);
+    assert!((solution.elbow.distance(chain.rest.upper_arm.position) - 0.7).abs() < 1.0e-5);
+    assert!((solution.wrist.distance(solution.elbow) - 0.55).abs() < 1.0e-5);
+    // The source carrying angle remains present even near full extension.
+    assert!(
+        (solution.elbow - chain.rest.upper_arm.position)
+            .angle_between(solution.wrist - solution.elbow)
+            > 5.0_f32.to_radians()
+    );
     assert!(solution.upper_arm_delta.dot(Quat::IDENTITY).abs() < 0.999_99);
     assert!(solution.lower_arm_delta.dot(Quat::IDENTITY).abs() < 0.999_99);
 }
@@ -148,10 +159,20 @@ fn unreachable_targets_are_clamped_to_extension_and_flexion_limits() {
     .unwrap();
     assert_finite_solution(&far);
     assert_finite_solution(&folded);
-    assert!((far.solved_reach - (1.3 - 1.0e-4)).abs() < 1.0e-5);
-    let upper = (folded.elbow - chain.rest.upper_arm.position).normalize();
-    let lower = (folded.wrist - folded.elbow).normalize();
-    assert!((upper.dot(lower).clamp(-1.0, 1.0).acos() - 130.0_f32.to_radians()).abs() < 1.0e-5);
+    assert!(far.solved_reach < 1.3 - 1.0e-4);
+    let input = input_for(
+        &chain,
+        ArmIkTarget {
+            wrist: chain.rest.wrist.position,
+            elbow_pole: chain.rest.elbow.position,
+        },
+    );
+    let upper_model =
+        folded.upper_arm_global_rotation * chain.rest.upper_arm.global_rotation.inverse();
+    let lower = upper_model.inverse() * (folded.wrist - folded.elbow).normalize();
+    let expected =
+        Quat::from_axis_angle(input.elbow_axis, 130.0_f32.to_radians()) * input.neutral_forearm;
+    assert!(lower.distance(expected) < 1.0e-5);
 }
 
 #[test]
@@ -172,8 +193,13 @@ fn elbow_flexion_uses_one_rest_axis_across_poles_and_non_identity_bone_axes() {
             let hinge = chain.rest.elbow.global_rotation
                 * solution.lower_arm_delta
                 * chain.rest.elbow.global_rotation.inverse();
+            let rest_to_neutral = Quat::from_rotation_arc(
+                (chain.rest.wrist.position - chain.rest.elbow.position).normalize(),
+                input.neutral_forearm,
+            );
+            let flexion = hinge * rest_to_neutral.inverse();
             assert!(
-                (hinge * input.elbow_axis).distance(input.elbow_axis) < 1.0e-5,
+                (flexion * input.elbow_axis).distance(input.elbow_axis) < 1.0e-5,
                 "flexion must not introduce extra elbow axes"
             );
             let upper_model =
@@ -185,74 +211,6 @@ fn elbow_flexion_uses_one_rest_axis_across_poles_and_non_identity_bone_axes() {
             assert!(elbow.distance(solution.elbow) < 1.0e-5);
             assert!(wrist.distance(solution.wrist) < 1.0e-5);
         }
-    }
-}
-
-#[test]
-fn anterior_elbow_flexion_preserves_both_palm_surfaces_without_a_humeral_half_turn() {
-    use vtuber_avatar::FingerJointRestBinding;
-    use vtuber_avatar::tracked_arm::{PalmRollFilter, align_palm_twist};
-
-    for side in [ArmSide::Left, ArmSide::Right] {
-        let sign = if side == ArmSide::Left { 1.0 } else { -1.0 };
-        let mut chain = chain(side, 0.7, 0.55);
-        chain.rest.upper_arm.global_rotation = Quat::from_rotation_y(0.6);
-        chain.rest.elbow.global_rotation = Quat::from_rotation_x(0.4) * Quat::from_rotation_z(-0.5);
-        chain.rest.wrist.global_rotation = Quat::from_rotation_z(0.3);
-        let finger = |offset| FingerJointRestBinding {
-            entity: chain.hand,
-            rest: RestSpaceBonePose {
-                position: chain.rest.wrist.position + offset,
-                global_rotation: Quat::IDENTITY,
-                local_rotation: Quat::IDENTITY,
-            },
-        };
-        // VRM T-pose: fingers point outward, index lies anterior to little.
-        chain.finger_rest.index.proximal = Some(finger(Vec3::new(sign * 0.08, 0.0, 0.02)));
-        chain.finger_rest.little.proximal = Some(finger(Vec3::new(sign * 0.08, 0.0, -0.02)));
-        let rest_normal = Vec3::Y * sign;
-        let forearm = chain.rest.wrist.position - chain.rest.elbow.position;
-        let flexion = Quat::from_rotation_y(-sign * 60.0_f32.to_radians());
-        let target = ArmIkTarget {
-            wrist: chain.rest.elbow.position + flexion * forearm,
-            elbow_pole: chain.rest.elbow.position,
-        };
-        let input = ArmIkInput::from_chain(&chain, target);
-        let base = solve_two_bone_arm(input).unwrap();
-        assert!(base.upper_arm_delta.angle_between(Quat::IDENTITY) < 1.0e-3);
-        let axis = (base.wrist - base.elbow).normalize();
-        let physical_palm = -Vec3::Y;
-        let mut shown_palms = Vec::new();
-        for roll in [-90.0_f32, 90.0] {
-            let pronation = Quat::from_axis_angle(axis, roll.to_radians());
-            let observed = pronation * flexion * rest_normal;
-            let expected_palm = pronation * flexion * physical_palm;
-            let mut filter = PalmRollFilter::default();
-            let mut solution = base;
-            for _ in 0..120 {
-                solution = base;
-                let twist = align_palm_twist(
-                    &chain,
-                    &mut solution,
-                    observed.to_array(),
-                    Quat::IDENTITY,
-                    1.0,
-                    &mut filter,
-                    1.0 / 60.0,
-                )
-                .unwrap();
-                assert_eq!(twist.hand, Some(Quat::IDENTITY));
-            }
-            let lower_model =
-                solution.lower_arm_global_rotation * chain.rest.elbow.global_rotation.inverse();
-            let shown_palm = lower_model * physical_palm;
-            assert!(shown_palm.dot(expected_palm) > 0.999);
-            assert!(solution.upper_arm_delta.angle_between(Quat::IDENTITY) < 1.0e-3);
-            assert!(solution.elbow.distance(base.elbow) < 1.0e-5);
-            assert!(solution.wrist.distance(base.wrist) < 1.0e-5);
-            shown_palms.push(shown_palm);
-        }
-        assert!(shown_palms[0].dot(shown_palms[1]) < -0.999);
     }
 }
 
@@ -312,8 +270,8 @@ fn non_identity_rest_orientations_preserve_model_solution_and_conjugate_deltas()
     let identity = solve_two_bone_arm(input_for(&identity_chain, target)).unwrap();
     let rotated = solve_two_bone_arm(input_for(&rotated_chain, target)).unwrap();
     assert_finite_solution(&rotated);
-    assert_eq!(identity.elbow, rotated.elbow);
-    assert_eq!(identity.wrist, rotated.wrist);
+    assert!(identity.elbow.distance(rotated.elbow) < 1.0e-6);
+    assert!(identity.wrist.distance(rotated.wrist) < 1.0e-6);
     assert!(
         rotated
             .upper_arm_global_rotation

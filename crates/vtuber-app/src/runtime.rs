@@ -4,7 +4,7 @@
 //! workers share the capture source; shutdown stops consumers before capture.
 
 use bevy::prelude::*;
-use vtuber_avatar::{AvatarOutputState, apply_arm_pose_profile_changes};
+use vtuber_avatar::AvatarOutputState;
 
 use crate::capture_runtime::{
     CaptureRuntime, LatestVideoFrame, capture_bridge_system, default_camera_backend,
@@ -56,7 +56,6 @@ pub(crate) fn configure_pipeline(app: &mut App) {
             // Look-change messages written by the action processing must
             // reach the avatar side in the same frame.
             process_ui_actions_system.before(vtuber_avatar::look::apply_look_settings_changes),
-            apply_arm_pose_profile_changes,
             sync_avatar_lifecycle_system
                 .after(vtuber_avatar::unload::despawn_unloading_avatar)
                 .before(vtuber_avatar::look::apply_look_settings_changes),

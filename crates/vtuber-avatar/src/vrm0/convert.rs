@@ -510,6 +510,34 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn legacy_collider_handedness_and_scene_facing_are_distinct_transforms() {
+        use bevy::prelude::{Quat, Vec3};
+        let node_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let source = json!({
+            "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
+            "nodes": [{"children": [1]}, {"rotation": node_rotation.to_array()}],
+            "extensions": {"VRM": {
+                "humanoid": {"humanBones": [{"bone": "hips", "node": 0}, {"bone": "head", "node": 1}]},
+                "secondaryAnimation": {"boneGroups": [], "colliderGroups": [{"node": 1,
+                    "colliders": [{"offset": {"x": 1.0, "y": 2.0, "z": 3.0}, "radius": 0.2}]}]}
+            }}
+        });
+        let bytes = Glb::new(source, None).to_vec().unwrap();
+        let converted = prepare_managed_vrm_bytes(&bytes).unwrap().unwrap();
+        let document = Glb::parse(&converted).unwrap().document;
+        let offset: [f32; 3] = serde_json::from_value(
+            document["extensions"]["VRMC_springBone"]["colliders"][0]["shape"]["sphere"]["offset"]
+                .clone(),
+        )
+        .unwrap();
+        let root: [f32; 4] =
+            serde_json::from_value(document["nodes"][0]["rotation"].clone()).unwrap();
+        let world = Quat::from_array(root) * node_rotation * Vec3::from_array(offset);
+        assert!(world.distance(Vec3::new(-1.0, 3.0, -2.0)) < 1.0e-6);
+        assert!(prepare_managed_vrm_bytes(&converted).unwrap().is_none());
+    }
+
+    #[test]
     fn vrm0_thumb_nodes_bind_to_the_same_anatomical_joints_in_vrm1() {
         let source = json!({
             "asset": {"version": "2.0"},

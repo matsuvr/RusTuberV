@@ -222,7 +222,7 @@ pub struct ArmChainBinding {
     pub capabilities: ArmChainCapabilities,
 }
 
-/// Initial geometry-derived parameters for the default A-pose.
+/// Initial geometry-derived parameters for the relaxed attention pose.
 ///
 /// The values are intentionally kept in one typed profile so later per-model
 /// tuning can validate and replace them without scattering pose constants
@@ -245,7 +245,9 @@ pub struct ArmPoseProfile {
 impl Default for ArmPoseProfile {
     fn default() -> Self {
         Self {
-            arm_drop_radians: 45.0_f32.to_radians(),
+            // Leave ten degrees of lateral clearance instead of pressing the
+            // hands against the thighs in a fully vertical attention pose.
+            arm_drop_radians: 80.0_f32.to_radians(),
             reach_ratio: 1.0,
             forward_hand_offset_ratio: 0.0,
             elbow_pole_offset_ratio: 0.0,
@@ -369,6 +371,8 @@ pub struct ArmIkTarget {
 /// Inputs for the pure analytic two-bone solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArmIkInput {
+    /// Anatomical side used to reflect the published radioulnar geometry.
+    pub side: ArmSide,
     /// Upper-arm origin in model/rest space.
     pub shoulder: Vec3,
     /// Rest elbow origin in model/rest space.
@@ -392,6 +396,8 @@ pub struct ArmIkInput {
     /// Fixed elbow flexion axis in model/rest space. It is transformed by the
     /// upper-arm rotation, never inferred again from a solved forearm twist.
     pub elbow_axis: Vec3,
+    /// Source-model neutral ulna direction in immutable rest space.
+    pub neutral_forearm: Vec3,
 }
 
 impl ArmIkInput {
@@ -401,10 +407,12 @@ impl ArmIkInput {
     /// Slightly bent authored T-poses do not redefine the anatomical hinge;
     /// shared FK removes the rest bend before applying flexion about this axis.
     #[must_use]
-    pub fn from_geometry(geometry: ArmRestGeometry, target: ArmIkTarget) -> Self {
+    pub fn from_geometry(geometry: ArmRestGeometry, target: ArmIkTarget, side: ArmSide) -> Self {
         let upper = geometry.elbow.position - geometry.upper_arm.position;
-        let elbow_axis = finite_normalized(upper.cross(Vec3::Z)).unwrap_or(Vec3::ZERO);
+        let (elbow_axis, neutral_forearm) =
+            crate::arm_anatomy::elbow_geometry(upper, side).unwrap_or((Vec3::ZERO, Vec3::ZERO));
         Self {
+            side,
             shoulder: geometry.upper_arm.position,
             rest_elbow: geometry.elbow.position,
             rest_wrist: geometry.wrist.position,
@@ -416,13 +424,14 @@ impl ArmIkInput {
             upper_arm_rest_global_rotation: geometry.upper_arm.global_rotation,
             lower_arm_rest_global_rotation: geometry.elbow.global_rotation,
             elbow_axis,
+            neutral_forearm,
         }
     }
 
     /// Creates solver input using the bound rig's fixed anatomical bend frame.
     #[must_use]
     pub fn from_chain(chain: &ArmChainBinding, target: ArmIkTarget) -> Self {
-        Self::from_geometry(chain.rest, target)
+        Self::from_geometry(chain.rest, target, chain.side)
     }
 }
 
@@ -472,7 +481,7 @@ impl std::fmt::Display for ArmIkError {
 
 impl std::error::Error for ArmIkError {}
 
-/// Builds the default A-pose target from the shoulder and that arm's bone lengths.
+/// Builds the relaxed attention target from the shoulder and that arm's bone lengths.
 pub fn default_arm_target(
     chain: &ArmChainBinding,
     profile: ArmPoseProfile,
@@ -520,11 +529,18 @@ pub(crate) fn neutral_elbow_pole(chain: &ArmChainBinding, wrist: Vec3) -> Option
             elbow_pole: rest.elbow.position,
         },
     );
-    let lowered = rotation_arc(upper, Vec3::NEG_Y);
-    let aimed = rotation_arc(Vec3::NEG_Y, direction);
-    let hinge = aimed * lowered * input.elbow_axis;
-    let bend = finite_normalized(direction.cross(hinge))?;
-    Some(rest.upper_arm.position + bend * rest.upper_arm_length)
+    let lowered = crate::shoulder::neutral(chain)? * rest.upper_arm.global_rotation.inverse();
+    let flexion = crate::skeleton::flexion_for_reach(
+        input.skeleton_rest(),
+        wrist.distance(rest.upper_arm.position),
+        ARM_IK_EPSILON,
+    )
+    .ok()? as f32;
+    let lower = Quat::from_axis_angle(input.elbow_axis, flexion) * input.neutral_forearm;
+    let neutral_wrist = lowered * (upper * rest.upper_arm_length + lower * rest.forearm_length);
+    let aimed = rotation_arc(neutral_wrist.normalize(), direction);
+    let elbow = aimed * lowered * upper * rest.upper_arm_length;
+    Some(rest.upper_arm.position + elbow)
 }
 
 /// Solves a deterministic constant-time analytic two-bone arm IK problem.
@@ -561,6 +577,12 @@ impl ArmIkInput {
             start_rotation: self.upper_arm_rest_global_rotation,
             middle_rotation: self.lower_arm_rest_global_rotation,
             hinge_axis: self.elbow_axis,
+            neutral_lower: self.neutral_forearm,
+            axial_projection: crate::arm_anatomy::radius_axial_projection(),
+            radius: crate::arm_anatomy::RadiusGeometry::from_arm(
+                self.rest_elbow - self.shoulder,
+                self.side,
+            ),
             flexion_limit: ELBOW_FLEXION_LIMIT_RAD,
             axial_limit: FOREARM_ROLL_LIMIT_RAD,
         }
@@ -641,13 +663,6 @@ fn validate_input(input: ArmIkInput) -> Result<(), ArmIkError> {
 
 pub(crate) use crate::skeleton::{finite_normalized, stable_perpendicular};
 
-fn normalized_or_identity(value: Quat) -> Result<Quat, ArmIkError> {
-    if !value.is_finite() || value.length_squared() <= ARM_IK_EPSILON {
-        return Err(ArmIkError::DegenerateGeometry);
-    }
-    Ok(value.normalize())
-}
-
 pub(crate) fn rotation_arc(from: Vec3, to: Vec3) -> Quat {
     let dot = from.dot(to).clamp(-1.0, 1.0);
     if dot > 1.0 - ARM_IK_EPSILON {
@@ -669,11 +684,4 @@ pub(crate) fn rotation_arc(from: Vec3, to: Vec3) -> Quat {
         scale * 0.5,
     )
     .normalize()
-}
-
-pub(crate) fn conjugated_rest_delta(
-    model_delta: Quat,
-    rest_global: Quat,
-) -> Result<Quat, ArmIkError> {
-    normalized_or_identity(crate::skeleton::rest_delta(model_delta, rest_global))
 }

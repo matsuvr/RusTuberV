@@ -20,7 +20,7 @@ use bevy::time::TimeUpdateStrategy;
 use bevy::window::ExitCondition;
 use vtuber_avatar::{
     AvatarLifecycle, AvatarOutputFrameSlot, AvatarOutputState, AvatarViewportCamera,
-    ImportedAvatar, LoadImportedAvatarRequest, UserAssetPath, VtuberAvatarPlugin,
+    VtuberAvatarPlugin,
 };
 use vtuber_core::{VideoOutputFrame, VideoOutputProfile};
 
@@ -110,11 +110,6 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     let imported =
         vtuber_app::import::import_vrm(path, &managed_root, vtuber_app::import::DEFAULT_SIZE_LIMIT)
             .map_err(|error| RenderError::Failed(format!("import failed: {error}")))?;
-    let asset_id = vtuber_avatar::AvatarAssetId::new(&imported.id);
-    let asset_path = UserAssetPath::avatar_model_path(&asset_id)
-        .map_err(|error| RenderError::Failed(format!("asset path failed: {error}")))?;
-    let imported_avatar = ImportedAvatar::new(asset_id, asset_path, imported.name.clone());
-
     let managed_root_string = managed_root
         .to_str()
         .ok_or_else(|| RenderError::Failed("managed root is not valid UTF-8".to_owned()))?;
@@ -124,9 +119,11 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
         AssetSourceBuilder::platform_default(managed_root_string, None),
     );
 
+    let mut orchestrator = vtuber_app::orchestrator::Orchestrator::new(managed_root.clone());
+    orchestrator.queue_imported_model(imported);
     let mut app = App::new();
     app.insert_resource(sources)
-        .insert_resource(ManagedAvatar(imported_avatar))
+        .insert_resource(orchestrator)
         .insert_resource(AvatarOutputState::with_profile(VideoOutputProfile {
             width: WIDTH,
             height: HEIGHT,
@@ -148,14 +145,14 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
                 .disable::<bevy::winit::WinitPlugin>(),
         )
         .add_plugins(VtuberAvatarPlugin)
-        .init_resource::<vtuber_app::orchestrator::Orchestrator>()
         .init_resource::<vtuber_app::ui::UiState>()
         .init_resource::<vtuber_app::ui_model::UiViewModel>()
         .init_resource::<vtuber_app::preview::PreviewState>()
         .init_resource::<vtuber_app::ndi_output::NdiOutputIntent>()
         .add_systems(Update, vtuber_app::orchestrator::process_ui_actions_system
             .before(vtuber_avatar::look::apply_look_settings_changes))
-        .add_systems(Startup, emit_load)
+        .add_systems(Update, vtuber_app::orchestrator::sync_avatar_lifecycle_system
+            .after(vtuber_app::orchestrator::process_ui_actions_system))
         .add_systems(Update, (place_camera, activate_output));
     app.finish();
     app.cleanup();
@@ -184,11 +181,45 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
         ));
     }
 
+    let arm_deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        app.update();
+        let mut query = app
+            .world_mut()
+            .query::<&vtuber_avatar::UpperLimbSolveStatus>();
+        if query
+            .iter(app.world())
+            .any(|s| !matches!(s, vtuber_avatar::UpperLimbSolveStatus::Solving))
+        {
+            break;
+        }
+        if Instant::now() >= arm_deadline {
+            return Err(RenderError::Failed(
+                "upper limb initialization timed out".to_owned(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut arm_status = app
+        .world_mut()
+        .query::<&vtuber_avatar::UpperLimbSolveStatus>();
+    println!(
+        "Upper limbs: {:?}",
+        arm_status.iter(app.world()).collect::<Vec<_>>()
+    );
+    let arm_failure = arm_status
+        .iter(app.world())
+        .find(|s| !matches!(s, vtuber_avatar::UpperLimbSolveStatus::Feasible { .. }))
+        .map(|s| format!("upper limb initialization: {s:?}"));
     for _ in 0..WARMUP_FRAMES {
         app.update();
     }
     let off = take_frame(&mut app, deadline)?;
+    write_png(&out_dir.join(format!("{name}.off.png")), &off)?;
+    if let Some(error) = arm_failure {
+        return Err(RenderError::Failed(error));
+    }
 
     set_look(&mut app, true, 1.0)?;
     for _ in 0..SETTLE_FRAMES {
@@ -302,21 +333,6 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     Ok(summary)
 }
 
-#[derive(Resource)]
-struct ManagedAvatar(ImportedAvatar);
-
-fn emit_load(mut requests: MessageWriter<LoadImportedAvatarRequest>, avatar: Res<ManagedAvatar>) {
-    requests.write(LoadImportedAvatarRequest {
-        request_id: 1,
-        imported: avatar.0.clone(),
-    });
-}
-
-/// A fixed upper-body camera so every model is framed the same deterministic
-/// way; the framing solve would otherwise depend on a window viewport.
-///
-/// The camera the plugin spawns is reused instead of adding a second one: the
-/// output camera mirrors the single viewport camera, and two would break it.
 fn place_camera(mut cameras: Query<(&mut Transform, &mut Projection), With<AvatarViewportCamera>>) {
     let transform = Transform::from_translation(Vec3::new(0.0, 1.35, 1.45))
         .looking_at(Vec3::new(0.0, 1.25, 0.0), Vec3::Y);

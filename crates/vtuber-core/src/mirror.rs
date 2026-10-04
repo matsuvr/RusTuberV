@@ -80,6 +80,7 @@ impl ArmTrackingTarget {
             wrist: mirror.polar(self.wrist),
             elbow_pole: mirror.polar(self.elbow_pole),
             palm_normal: self.palm_normal.map(|normal| mirror.axial(normal)),
+            palm_forward: self.palm_forward.map(|forward| mirror.polar(forward)),
             fingers: self.fingers.map(|fingers| HandFingerPose {
                 fingers: fingers
                     .fingers
@@ -87,6 +88,7 @@ impl ArmTrackingTarget {
                 spread: fingers.spread,
                 thumb: fingers.thumb.map(|angle| mirror.horizontal(angle)),
                 thumb_spread: fingers.thumb_spread,
+                thumb_cmc: fingers.thumb_cmc,
             }),
         }
     }

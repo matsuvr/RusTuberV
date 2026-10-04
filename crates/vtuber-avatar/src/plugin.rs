@@ -80,6 +80,7 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<ArmPoseOverrideStore>()
             .init_resource::<crate::arm_pipeline::ArmSourceSelection>()
             .init_resource::<crate::arm_pipeline::TrackedArmControl>()
+            .init_resource::<crate::upper_limb_runtime::UpperLimbState>()
             .add_message::<crate::arm_pose::ArmPoseProfileChange>()
             .init_resource::<ActiveControlFrame>()
             .init_resource::<ManualExpressionSelection>()
@@ -161,41 +162,40 @@ impl Plugin for VtuberAvatarPlugin {
                     .before(apply_direct_body_tracking)
                     .before(VrmSystemSets::Constraints),
             )
-            // Both arm target stages sample the torso bone the arms hang from,
-            // so they run after every writer of that bone's global rotation:
-            // the direct body-tracking writer and the position (lean) writer.
-            // Running before them would read the pose the previous frame left
-            // behind.
+            // Read the final torso/head transforms and rendered morph weights.
+            // The arm compositor follows node constraints so no later node
+            // constraint can overwrite an admitted anatomical arm pose.
             .add_systems(
                 PostUpdate,
-                crate::arm_pipeline::update_dynamic_arm_targets
-                    .after(update_body_tracking_position_input)
-                    .after(apply_direct_body_tracking)
-                    .after(apply_direct_body_position)
-                    .before(apply_default_arm_pose),
+                crate::upper_limb_runtime::restore_body_inputs
+                    .before(AnimationSystems)
+                    .before(crate::direct_position::restore_torso_lean),
             )
             .add_systems(
                 PostUpdate,
-                crate::arm_pipeline::update_tracked_arm_targets
+                crate::collision::bind_collision_geometry
+                    .after(VrmSystemSets::SpringBone)
+                    .before(crate::upper_limb_runtime::update_upper_limb_targets),
+            )
+            .add_systems(
+                PostUpdate,
+                crate::upper_limb_runtime::update_upper_limb_targets
+                    .after(update_body_tracking_position_input)
                     .after(apply_direct_body_tracking)
                     .after(apply_direct_body_position)
-                    .after(crate::arm_pipeline::update_dynamic_arm_targets)
+                    .after(VrmSystemSets::SpringBone)
                     .before(apply_default_arm_pose),
             )
             .add_systems(
                 PostUpdate,
                 apply_default_arm_pose
                     .after(apply_direct_body_tracking)
-                    .after(apply_direct_body_position)
-                    .before(update_direct_look_at_input)
-                    .before(VrmSystemSets::GazeControl)
-                    .before(VrmSystemSets::Constraints),
+                    .after(apply_direct_body_position),
             )
             .add_systems(
                 PostUpdate,
                 update_direct_look_at_input
                     .after(apply_direct_body_tracking)
-                    .after(apply_default_arm_pose)
                     .before(VrmSystemSets::GazeControl),
             )
             .add_systems(

@@ -67,6 +67,9 @@ pub struct ArmLandmarks {
 /// Both anatomical arms from one pose. Left/right are not preview-mirror labels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PoseArmObservation {
+    /// Anatomical left/right hips from the same Pose result. Missing hips
+    /// make thorax orientation unavailable, without invalidating the arms.
+    pub hips: Option<[PoseWorldLandmark; 2]>,
     /// Subject's left arm.
     pub left: ArmLandmarks,
     /// Subject's right arm.
@@ -112,9 +115,11 @@ pub struct HandFingerPose {
     /// the palm plane. The Hand Landmarker CMC is not used.
     pub thumb: [f32; 2],
     /// The thumb's in-plane opening, from forward toward across. Used for pose
-    /// recognition only; the avatar keeps CMC at rest and does not transfer
-    /// its opening to the MCP joint.
+    /// recognition only; CMC uses the selected catalog coordinates separately.
     pub thumb_spread: f32,
+    /// Authored CMC [flexion, abduction] in the right-hand model coordinates.
+    /// Independent of raw landmark features; reflected by the avatar axes.
+    pub thumb_cmc: [f32; 2],
 }
 
 /// Shoulder-relative target in units of the subject's calibrated total arm length.
@@ -127,7 +132,8 @@ pub struct HandFingerPose {
 pub struct ArmTrackingTarget {
     /// Desired wrist offset from the observed shoulder.
     pub wrist: [f32; 3],
-    /// Observed elbow offset; controls the bend plane, not an exact elbow constraint.
+    /// Observed elbow offset, used as a positional objective with its own
+    /// confidence. Bone geometry and hard constraints can leave a residual.
     pub elbow_pole: [f32; 3],
     /// Unit normal of the observed palm plane in the canonical tracking basis,
     /// when the index/little-finger keypoints defined one.
@@ -136,6 +142,9 @@ pub struct ArmTrackingTarget {
     /// geometry's index/pinky cross product, so no per-side sign is applied.
     /// `None` means "no palm observation", never a fabricated neutral twist.
     pub palm_normal: Option<[f32; 3]>,
+    /// Palm long axis from wrist toward the index/little MCP bisector.
+    /// A polar vector, unlike the axial palm normal.
+    pub palm_forward: Option<[f32; 3]>,
     /// Observed finger articulation, when the hand's landmarks defined it.
     ///
     /// `None` means "no finger observation", never a fabricated rest pose; the
@@ -156,22 +165,19 @@ pub struct ArmTrackingTargets {
 
 /// How much an observed channel should replace the avatar's virtual arm.
 ///
-/// `wrist` gates the observed shoulder orientation and elbow flexion; the
-/// avatar blends those joint coordinates with its resolved initial skeleton,
-/// keeping bone lengths fixed instead of moving the wrist through Cartesian
-/// space. `pole` gates the observed bend plane within that observed arm;
-/// `palm` gates the observed forearm twist; `fingers` gates the observed finger
-/// articulation. They are separate so losing an elbow keeps the visible hand
-/// following while the avatar supplies a natural pole, and losing a hand
-/// detection keeps the twist and the fingers. All are in `0.0..=1.0`; zero
-/// means "use the virtual arm", not "the observation is at the origin".
+/// `wrist`, `pole` and `palm` weight the observed wrist, elbow and palm
+/// objectives in the same constrained solve. Missing channels return to the
+/// admitted neutral pose; `fingers` blends the selected catalog articulation.
+/// Fixed bone lengths and joint/collision limits take priority over all these
+/// objectives. All weights are in `0.0..=1.0`; zero means no observation for
+/// that channel, never an observation at the origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmBlendWeight {
     /// Observed arm contribution, driven by wrist presence.
     pub wrist: f32,
-    /// Observed elbow-bend-plane contribution.
+    /// Observed elbow-position contribution.
     pub pole: f32,
-    /// Observed palm-plane contribution.
+    /// Observed palm orientation contribution (normal and long axis).
     pub palm: f32,
     /// Observed finger-articulation contribution.
     pub fingers: f32,
@@ -217,6 +223,8 @@ pub struct ArmBlendWeights {
 /// virtual arm instead", never a hand at the origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmControlFrame {
+    /// Independently observed thorax and shoulder centres, with its own loss weight.
+    pub thorax: Option<ThoraxTarget>,
     /// Sequence of the camera image the observation came from.
     pub source_seq: FrameSeq,
     /// Capture time of the camera image the observation came from.
@@ -227,6 +235,34 @@ pub struct ArmControlFrame {
     pub targets: ArmTrackingTargets,
     /// Per-side per-channel confidence in the targets.
     pub weights: ArmBlendWeights,
+}
+
+/// Calibrated torso proxy from Pose hips and shoulders, not ISB bone markers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThoraxTarget {
+    /// Neutral-relative rotation in the canonical tracking basis, quaternion XYZW.
+    pub rotation: [f32; 4],
+    /// Left/right displacement from the neutral shoulder coordinates, in the
+    /// current thorax frame, divided by the fixed neutral shoulder width.
+    /// Rigid torso rotation is excluded and is carried by `rotation` alone.
+    pub shoulder_offsets: [[f32; 3]; 2],
+    /// Confidence/loss weight; zero means neutral, not a fabricated observation.
+    pub weight: f32,
+}
+
+impl ThoraxTarget {
+    /// Reflects the rotation and exchanges the two anatomical shoulder centres.
+    #[must_use]
+    pub fn mirrored(self) -> Self {
+        let [x, y, z, w] = self.rotation;
+        let [left, right] = self.shoulder_offsets;
+        let reflect = |[x, y, z]: [f32; 3]| [-x, y, z];
+        Self {
+            rotation: [x, -y, -z, w],
+            shoulder_offsets: [reflect(right), reflect(left)],
+            ..self
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,11 +281,13 @@ mod tests {
             wrist: [0.3, 0.2, 0.4],
             elbow_pole: [0.5, -0.1, 0.2],
             palm_normal: Some([0.1, 0.2, -0.9]),
+            palm_forward: Some([0.2, 0.9, 0.1]),
             fingers: Some(HandFingerPose {
                 fingers: [[0.1, 0.2, 0.3]; 4],
                 spread: [0.2, 0.0, -0.1, -0.3],
                 thumb: [0.4, 0.5],
                 thumb_spread: 0.25,
+                thumb_cmc: [0.0; 2],
             }),
         };
         let targets = ArmTrackingTargets {
@@ -260,6 +298,7 @@ mod tests {
         assert_eq!(mirrored.left, None);
         assert_eq!(mirrored.right.unwrap().wrist, [-0.3, 0.2, 0.4]);
         assert_eq!(mirrored.right.unwrap().elbow_pole, [-0.5, -0.1, 0.2]);
+        assert_eq!(mirrored.right.unwrap().palm_forward, Some([-0.2, 0.9, 0.1]));
         assert_eq!(mirrored.right.unwrap().palm_normal, Some([0.1, -0.2, 0.9]));
         // Local normal components and signed bends reverse on reflection.
         let fingers = mirrored.right.unwrap().fingers.unwrap();
@@ -296,9 +335,11 @@ mod tests {
             wrist: [0.0; 3],
             elbow_pole: [0.0; 3],
             palm_normal: None,
+            palm_forward: None,
             fingers: None,
         };
         let frame = ArmControlFrame {
+            thorax: None,
             source_seq: FrameSeq(1),
             captured_at: MonoTimeNs(2),
             produced_at: MonoTimeNs(3),
@@ -331,6 +372,7 @@ mod tests {
             captured_at: MonoTimeNs(10),
             inference_finished_at: MonoTimeNs(20),
             observation: Some(PoseArmObservation {
+                hips: None,
                 left: arm,
                 right: arm,
             }),

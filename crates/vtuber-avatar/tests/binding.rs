@@ -11,7 +11,6 @@
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
-use vtuber_avatar::DefaultArmPose;
 use vtuber_avatar::arm::ArmSide;
 use vtuber_avatar::bind::BindTriggered;
 use vtuber_avatar::binding::{AvatarBinding, bind_humanoid_bones};
@@ -370,12 +369,12 @@ fn humanoid_binding_caches_normal_symmetric_arm_chains() {
     let right = binding
         .right_arm
         .expect("right symmetric chain should bind");
-    let default_pose = app
-        .world()
-        .get::<DefaultArmPose>(root)
-        .expect("complete chains should resolve a typed default pose");
-    assert!(default_pose.left.is_some());
-    assert!(default_pose.right.is_some());
+    // Binding publishes geometry; the constrained runtime admits the pose.
+    assert!(
+        app.world()
+            .get::<vtuber_avatar::DynamicArmTargets>(root)
+            .is_some()
+    );
     assert!((left.rest.upper_arm_length - right.rest.upper_arm_length).abs() < 1.0e-6);
     assert!((left.rest.forearm_length - right.rest.forearm_length).abs() < 1.0e-6);
     assert!((left.rest.total_arm_length - right.rest.total_arm_length).abs() < 1.0e-6);

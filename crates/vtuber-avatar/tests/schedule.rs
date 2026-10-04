@@ -22,7 +22,7 @@ fn avatar_plugin_is_publicly_constructible() {
 /// Checks the listed ordering edges in the real avatar/VRM PostUpdate schedule.
 ///
 /// The checks cover animation before body inputs, body writers before arm
-/// target generation and composition, arm composition before direct gaze, and
+/// target generation and composition, rendered morphs before collision binding, and
 /// tracked expressions between gaze control and the upstream expression set.
 /// Schedule initialization also detects cycles in this PostUpdate schedule.
 /// Update-stage lifecycle ordering is not inspected by this test.
@@ -104,7 +104,8 @@ fn avatar_post_update_schedule_orders_body_arms_gaze_and_expressions() {
                 // below we reject any PostUpdate system name containing
                 // "breathing". This does not rule out other hips writers.
                 ("apply_direct_body_tracking", "apply_default_arm_pose"),
-                ("apply_default_arm_pose", "update_direct_look_at_input"),
+                ("trace_expressions", "bind_collision_geometry"),
+                ("bind_collision_geometry", "update_upper_limb_targets"),
                 ("apply_direct_body_tracking", "update_direct_look_at_input"),
                 ("update_direct_look_at_input", "trace_gaze"),
                 ("trace_gaze", "apply_tracked_expressions"),
@@ -113,18 +114,14 @@ fn avatar_post_update_schedule_orders_body_arms_gaze_and_expressions() {
                 // from, so they must run after every writer of that bone's
                 // global rotation. Reading it before either writer would use
                 // the pose the previous frame left behind.
-                ("apply_direct_body_tracking", "update_dynamic_arm_targets"),
-                ("apply_direct_body_position", "update_dynamic_arm_targets"),
-                ("apply_direct_body_tracking", "update_tracked_arm_targets"),
-                ("apply_direct_body_position", "update_tracked_arm_targets"),
+                ("apply_direct_body_tracking", "update_upper_limb_targets"),
+                ("apply_direct_body_position", "update_upper_limb_targets"),
                 ("apply_direct_body_position", "apply_default_arm_pose"),
                 ("restore_torso_lean", "trace_animation"),
                 ("apply_direct_body_position", "plant_feet"),
-                ("plant_feet", "update_dynamic_arm_targets"),
-                ("plant_feet", "update_tracked_arm_targets"),
+                ("plant_feet", "update_upper_limb_targets"),
                 ("plant_feet", "apply_default_arm_pose"),
-                ("update_dynamic_arm_targets", "update_tracked_arm_targets"),
-                ("update_tracked_arm_targets", "apply_default_arm_pose"),
+                ("update_upper_limb_targets", "apply_default_arm_pose"),
             ] {
                 assert_before(schedule, before, after);
             }

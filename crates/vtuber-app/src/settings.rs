@@ -1258,22 +1258,4 @@ mod dynamic_profile_tests {
                 .is_none()
         );
     }
-
-    #[test]
-    fn migration_from_legacy_v1_resets_to_automatic_defaults() {
-        let legacy = ArmPoseProfileOverride::from_profile(ArmPoseProfile {
-            arm_drop_radians: 0.4,
-            reach_ratio: 0.8,
-            ..ArmPoseProfile::default()
-        });
-        let migrated = DynamicArmProfileOverride::from_legacy_override(&legacy);
-        assert_eq!(
-            migrated.schema_version,
-            DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION
-        );
-        assert_eq!(
-            migrated.into_profile().unwrap(),
-            DynamicArmProfile::default()
-        );
-    }
 }
