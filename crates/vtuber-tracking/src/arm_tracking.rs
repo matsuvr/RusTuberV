@@ -598,9 +598,9 @@ pub struct ArmTrackingProfile {
     /// Largest accepted wrist displacement between two observations, in units
     /// of the calibrated arm length.
     ///
-    /// A larger single-observation displacement is a detection teleport, not
-    /// hand motion, so it is quarantined and the arm returns to the virtual
-    /// arm instead of following it.
+    /// A larger single-observation displacement is quarantined. Consistent
+    /// subsequent observations resume the existing smoothing; continued
+    /// discontinuities return the arm to its virtual pose.
     pub max_wrist_step: f32,
 }
 
@@ -769,9 +769,9 @@ fn extension_falloff(extension: f32) -> f32 {
     }
 }
 
-/// Keeps the elbow pole continuous and in the plane perpendicular to the arm.
+/// Stabilizes the elbow's bend plane while preserving its axial position.
 ///
-/// The observed elbow is projected onto the shoulder-to-wrist axis and the
+/// The observed elbow is split along/across the shoulder-to-wrist axis and the
 /// previous plane is rotated toward it around that axis with an extension
 /// falloff: as the arm approaches full extension the bend side is
 /// ill-conditioned, so the plane holds its last well-conditioned direction and
@@ -782,7 +782,8 @@ fn extension_falloff(extension: f32) -> f32 {
 /// an opposed observation cross to the observation's side instead of being
 /// pinned on the wrong side or interpolated through zero; the render clock's
 /// plane rate limit keeps that crossing smooth. An undefined plane returns
-/// `None` instead of a fabricated world axis.
+/// `None` instead of a fabricated world axis. The axial component is retained:
+/// the constrained solver consumes an elbow position, not just an IK pole.
 #[must_use]
 pub fn stabilize_elbow_pole(
     previous: Option<[f32; 3]>,
@@ -795,6 +796,7 @@ pub fn stabilize_elbow_pole(
     }
     let axis = wrist / axial;
     let weight = extension_falloff(axial);
+    let along = axis * vector(target.elbow_pole).dot(&axis);
 
     let observed_perpendicular = perpendicular(vector(target.elbow_pole), axis);
     let observed_length = observed_perpendicular.norm();
@@ -813,10 +815,10 @@ pub fn stabilize_elbow_pole(
             } else {
                 previous_length.max(f32::EPSILON)
             };
-            Some(array(direction * length))
+            Some(array(direction * length + along))
         }
-        (Some(observed), None) => Some(array(observed * observed_length.max(f32::EPSILON))),
-        (None, Some(prior)) => Some(array(prior * previous_length.max(f32::EPSILON))),
+        (Some(observed), None) => Some(array(observed * observed_length.max(f32::EPSILON) + along)),
+        (None, Some(prior)) => Some(array(prior * previous_length.max(f32::EPSILON) + along)),
         (None, None) => None,
     }
 }
@@ -867,6 +869,9 @@ impl ChannelPresence {
 struct ArmSideState {
     calibration: ArmCalibrationState,
     source: Option<ArmTrackingTarget>,
+    /// Previous usable observation, including a quarantined one. The jump
+    /// limit is between observations, not against a permanently stale target.
+    previous_wrist: Option<[f32; 3]>,
     smoother: Option<ArmSmootherState>,
     output: Option<ArmTrackingTarget>,
     last_pole: Option<[f32; 3]>,
@@ -890,6 +895,7 @@ impl ArmSideState {
         Self {
             calibration: ArmCalibrationState::new(),
             source: None,
+            previous_wrist: None,
             smoother: None,
             output: None,
             last_pole: None,
@@ -967,9 +973,10 @@ impl ArmSideState {
         };
 
         let target = retarget_arm_landmarks(*arm, reference);
+        let previous_wrist = self.previous_wrist.replace(target.wrist);
         let teleported = !self.wrist_lost
-            && self.source.is_some_and(|previous| {
-                (vector(target.wrist) - vector(previous.wrist)).norm() > profile.max_wrist_step
+            && previous_wrist.is_some_and(|previous| {
+                (vector(target.wrist) - vector(previous)).norm() > profile.max_wrist_step
             });
         if teleported {
             self.presence = ChannelPresence::NONE;
@@ -2711,7 +2718,30 @@ mod tests {
     }
 
     #[test]
-    fn a_wrist_teleport_is_quarantined_and_returns_to_virtual() {
+    fn a_stable_new_wrist_position_is_reconsidered_after_quarantine() {
+        let profile = ArmTrackingProfile::default();
+        let base = arm();
+        let mut state = tracked_state(base, &profile);
+        let accepted = state.left.source.unwrap();
+        let moved = arm_at([0.3, 0.2, 0.0], [-0.5, -0.4, 0.0]);
+        let _ = feed(&mut state, moved, 100, SETTLED_NS, &profile);
+        assert_eq!(state.left.source, Some(accepted));
+        let _ = feed(
+            &mut state,
+            moved,
+            101,
+            SETTLED_NS + OBSERVATION_STEP_NS,
+            &profile,
+        );
+        assert_ne!(state.left.source, Some(accepted));
+        assert_ne!(
+            state.left.output.unwrap().wrist,
+            state.left.source.unwrap().wrist
+        );
+    }
+
+    #[test]
+    fn inconsistent_wrist_teleports_are_quarantined_and_return_to_virtual() {
         let profile = ArmTrackingProfile::default();
         let base = arm();
         let mut state = tracked_state(base, &profile);
@@ -2719,20 +2749,23 @@ mod tests {
 
         // More than one calibrated arm length away in a single observation.
         let teleport = arm_at([0.3, 0.2, 0.0], [-0.5, -0.4, 0.0]);
+        let other = arm_at([0.3, 0.2, 0.0], [1.0, 0.6, 0.0]);
         for seq in 0..FULL_RETURN_FRAMES {
             let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
-            let _ = feed(&mut state, teleport, 100 + seq, now, &profile);
+            let input = if seq % 2 == 0 { teleport } else { other };
+            let _ = feed(&mut state, input, 100 + seq, now, &profile);
         }
 
-        // The teleport never becomes a target, and because the wrist was
-        // never really lost it never becomes a reacquisition either.
+        // Consecutive observations remain inconsistent, so neither becomes
+        // a target merely because its visibility/hand presence stays high.
         assert_eq!(state.left.source, Some(tracked_source));
         assert_eq!(state.left.weights().wrist, 0.0);
 
-        // The real hand reappears near the last accepted target and reconnects
-        // from zero without a jump.
+        // The real hand reappears and its next consistent observation
+        // reconnects from zero without a jump.
         let now = SETTLED_NS + FULL_RETURN_FRAMES * OBSERVATION_STEP_NS;
-        let control = feed(&mut state, base, 300, now, &profile).unwrap();
+        let _ = feed(&mut state, base, 300, now, &profile);
+        let control = feed(&mut state, base, 301, now + OBSERVATION_STEP_NS, &profile).unwrap();
         let weight = control.weights.left.wrist;
         assert!((0.0..0.5).contains(&weight), "got {weight}");
         assert_eq!(state.left.source, Some(tracked_source));
@@ -2921,6 +2954,18 @@ mod tests {
         let before = finite_normalized(vector(previous)).unwrap();
         let after = finite_normalized(vector(next.left.last_pole.unwrap())).unwrap();
         assert!(before.dot(&after) > 0.0);
+    }
+
+    #[test]
+    fn tracked_elbow_preserves_its_observed_position_not_only_the_bend_plane() {
+        let profile = ArmTrackingProfile::default();
+        let observed = arm();
+        let state = tracked_state(observed, &profile);
+        let reference = measure_arm_reference(observed).unwrap();
+        let wanted = retarget_arm_landmarks(observed, reference);
+        let output = state.left.output.unwrap();
+        near(output.wrist, wanted.wrist);
+        near(output.elbow_pole, wanted.elbow_pole);
     }
 
     #[test]

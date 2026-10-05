@@ -31,9 +31,18 @@ pub(crate) struct CapsuleCollider {
     pub radius: f32,
 }
 
+#[derive(Clone, Debug)]
+struct ShoulderSocket {
+    bone: Entity,
+    pivot: Vec3,
+    /// Bind vertices influenced by both the thorax and this upper arm.
+    radius: f32,
+}
+
 #[derive(Component, Clone, Debug, Default)]
 pub(crate) struct CollisionGeometry {
     pub capsules: Vec<CapsuleCollider>,
+    shoulders: Vec<ShoulderSocket>,
     pairs: Vec<[usize; 2]>,
     bones: Vec<Entity>,
 }
@@ -194,6 +203,15 @@ pub(crate) fn bind_collision_geometry(
         let build = || -> Result<(CollisionGeometry, CollisionMorphs), CollisionError> {
             let mut morph_inputs = CollisionMorphs::default();
             let mut points = HashMap::<(Entity, Entity), Vec<Vec3>>::new();
+            let mut sockets: Vec<_> = [binding.left_arm, binding.right_arm]
+                .into_iter()
+                .flatten()
+                .map(|c| ShoulderSocket {
+                    bone: c.upper_arm,
+                    pivot: c.rest.upper_arm.position,
+                    radius: 0.0,
+                })
+                .collect();
 
             let mut stack = vec![root.id()];
             while let Some(entity) = stack.pop() {
@@ -278,6 +296,7 @@ pub(crate) fn bind_collision_geometry(
                             let vertex = position(vertex_index)?;
                             let mut point = Vec3::ZERO;
                             let mut strongest = (0.0, None);
+                            let mut owners = Vec::new();
 
                             for (&index, &weight) in indices.iter().zip(weights) {
                                 if weight <= 0.0 {
@@ -294,6 +313,9 @@ pub(crate) fn bind_collision_geometry(
                                     rest(bone)?.transform_point(inverse.transform_point3(vertex));
                                 point += rest_point * weight;
                                 let owner = classify(bone);
+                                if let Some(owner) = owner {
+                                    owners.push(owner);
+                                }
                                 if weight > strongest.0 {
                                     strongest = (weight, owner);
                                 }
@@ -301,7 +323,24 @@ pub(crate) fn bind_collision_geometry(
                             if !point.is_finite() {
                                 return Err(CollisionError::InvalidMesh);
                             }
-                            if let Some((bone, _)) = strongest.1 {
+                            for socket in &mut sockets {
+                                if owners.iter().any(|(b, _)| *b == socket.bone)
+                                    && owners.iter().any(|(_, r)| *r == Region::Torso)
+                                {
+                                    include_morphs(vertex_index);
+                                    socket.radius = socket.radius.max(point.distance(socket.pivot));
+                                }
+                            }
+                            if let Some((bone, region)) = strongest.1 {
+                                // Shared shoulder skin deforms across the joint;
+                                // the socket above owns this region. Fitting it
+                                // again as rigid upper-arm skin overstates its
+                                // occupied volume when the arm crosses the chest.
+                                if matches!(region, Region::Upper(_))
+                                    && owners.iter().any(|(_, r)| *r == Region::Torso)
+                                {
+                                    continue;
+                                }
                                 include_morphs(vertex_index);
                                 points.entry((bone, entity)).or_default().push(point);
                             }
@@ -364,7 +403,9 @@ pub(crate) fn bind_collision_geometry(
                     }
                 }
             }
-            Ok((CollisionGeometry::new(capsules, &connections), morph_inputs))
+            let mut geometry = CollisionGeometry::new(capsules, &connections);
+            geometry.shoulders = sockets;
+            Ok((geometry, morph_inputs))
         };
 
         match build() {
@@ -468,6 +509,64 @@ fn fit_capsules(
 }
 
 impl CollisionGeometry {
+    /// Move an observed forearm in depth to the camera-facing torso surface.
+    /// Both landmarks receive the same translation, preserving their view-plane
+    /// positions and relative geometry. The constrained FK still decides the
+    /// actual joints and separation from the other arm.
+    pub fn visible_forearm_target(
+        &self,
+        points: [Vec3; 2],
+        toward_camera: Vec3,
+        side: crate::arm::ArmSide,
+        body: &HashMap<Entity, BoneMotion>,
+    ) -> [Vec3; 2] {
+        use parry3d::{
+            query::{ShapeCastOptions, details::cast_shapes_support_map_support_map},
+            shape::Capsule,
+        };
+        let radius = self
+            .capsules
+            .iter()
+            .filter(|c| c.region == Region::Forearm(side))
+            .map(|c| c.radius)
+            .fold(0.0_f32, f32::max);
+        let [a, b] = points.map(|p| Vector::from_array(p.to_array().map(f64::from)));
+        let axis = Vector::from_array(toward_camera.to_array().map(f64::from));
+        // The body pose excludes independently solved shoulder/arm bones.
+        let capsules = self
+            .capsules
+            .iter()
+            .filter(|c| c.region == Region::Torso)
+            .filter_map(|c| {
+                body.get(&c.bone).map(|m| {
+                    let [a, b] = c
+                        .endpoints
+                        .map(|p| Vector::from_array(m.point(p).to_array().map(f64::from)));
+                    Capsule::new(a, b, f64::from(c.radius))
+                })
+            });
+        let rear = a.dot(axis).min(b.dot(axis)) - f64::from(radius);
+        let front = capsules
+            .clone()
+            .map(|c| c.segment.a.dot(axis).max(c.segment.b.dot(axis)) + c.radius)
+            .fold(rear, f64::max);
+        let distance = front - rear;
+        let forearm = Capsule::new(a + axis * distance, b + axis * distance, f64::from(radius));
+        let hit = capsules
+            .filter_map(|c| {
+                cast_shapes_support_map_support_map(
+                    &Pose::IDENTITY,
+                    -axis,
+                    &c,
+                    &forearm,
+                    ShapeCastOptions::with_max_time_of_impact(distance),
+                )
+                .map(|hit| hit.time_of_impact)
+            })
+            .fold(distance, f64::min);
+        points.map(|p| p + toward_camera * (distance - hit) as f32)
+    }
+
     pub fn new(capsules: Vec<CapsuleCollider>, connected: &[[Entity; 2]]) -> Self {
         let mut bones: Vec<_> = capsules.iter().map(|c| c.bone).collect();
         bones.sort_unstable();
@@ -499,6 +598,7 @@ impl CollisionGeometry {
         }
         Self {
             capsules,
+            shoulders: Vec::new(),
             pairs,
             bones,
         }
@@ -552,6 +652,17 @@ impl CollisionGeometry {
             .ok_or(CollisionError::InvalidMesh)
     }
 
+    fn shoulder_socket(&self, a: &CapsuleCollider, b: &CapsuleCollider) -> Option<&ShoulderSocket> {
+        let upper = match (a.region, b.region) {
+            (Region::Upper(_), Region::Torso) => a.bone,
+            (Region::Torso, Region::Upper(_)) => b.bone,
+            _ => return None,
+        };
+        self.shoulders
+            .iter()
+            .find(|s| s.bone == upper && s.radius > 0.0)
+    }
+
     /// Signed capsule separation. The frozen mask only skips inactive finite
     /// difference rows; every new nonlinear candidate checks all pairs.
     pub fn solver_margins(
@@ -574,7 +685,22 @@ impl CollisionGeometry {
                 .get(a)
                 .zip(segments.get(b))
                 .ok_or(CollisionError::InvalidMesh)?;
-            let distance = segment_distance(sa, sb) as f32 - ca.radius - cb.radius;
+            let mut distance = segment_distance(sa, sb) as f32 - ca.radius - cb.radius;
+            if let Some(socket) = self.shoulder_socket(ca, cb) {
+                let pivot = motion(socket.bone)
+                    .ok_or(CollisionError::MissingBone)?
+                    .point(socket.pivot);
+                let pivot = Vector::from_array(pivot.to_array().map(f64::from));
+                distance = distance.max(
+                    socket.radius
+                        - intersection_radius(
+                            &[sa.a - pivot, sa.b - pivot],
+                            ca.radius,
+                            &[sb.a - pivot, sb.b - pivot],
+                            cb.radius,
+                        ),
+                );
+            }
             margins.push(distance);
             active.push(frozen.is_some() || distance <= margin);
         }
@@ -603,6 +729,11 @@ impl CollisionGeometry {
         let to = self.posed(endpoint)?;
         for &[a, b] in &self.pairs {
             let (ca, cb) = self.pair([a, b])?;
+            let upper_index = if matches!(ca.region, Region::Upper(_)) {
+                a
+            } else {
+                b
+            };
             let swept = |i: usize, radius: f32| -> Result<SweptCapsule, CollisionError> {
                 let (from, to) = from
                     .get(i)
@@ -616,11 +747,61 @@ impl CollisionGeometry {
             let a = swept(a, ca.radius)?;
             let b = swept(b, cb.radius)?;
             if !a.separated(&b) {
-                return Ok(false);
+                let Some(socket) = self.shoulder_socket(ca, cb) else {
+                    return Ok(false);
+                };
+                let pivot = |motion: &dyn Fn(Entity) -> Option<BoneMotion>| {
+                    motion(socket.bone)
+                        .map(|m| {
+                            Vector::from_array(m.point(socket.pivot).to_array().map(f64::from))
+                        })
+                        .ok_or(CollisionError::MissingBone)
+                };
+                let start = pivot(motion)?;
+                let end = pivot(endpoint)?;
+                // The upper capsule's acceleration bound includes the socket's
+                // translation. Add it after subtracting the pivot chord.
+                let joint_padding = padding(upper_index);
+                let relative = |s: &SweptCapsule| {
+                    let [a, b, c, d] = s.points;
+                    [a - start, b - start, c - end, d - end]
+                };
+                if intersection_radius(
+                    &relative(&a),
+                    a.radius as f32 + joint_padding,
+                    &relative(&b),
+                    b.radius as f32 + joint_padding,
+                ) > socket.radius
+                {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
     }
+}
+
+/// The intersection of two shapes lies inside the intersection of their
+/// bounding boxes. Its farthest corner bounds every overlapping point,
+/// including contacts other than the deepest capsule contact.
+fn intersection_radius(a: &[Vector], ra: f32, b: &[Vector], rb: f32) -> f32 {
+    let bounds = |points: &[Vector], radius: f32| {
+        let lo = points
+            .iter()
+            .copied()
+            .fold(Vector::splat(f64::INFINITY), |v, p| v.min(p));
+        let hi = points
+            .iter()
+            .copied()
+            .fold(Vector::splat(f64::NEG_INFINITY), |v, p| v.max(p));
+        (
+            lo - Vector::splat(f64::from(radius)),
+            hi + Vector::splat(f64::from(radius)),
+        )
+    };
+    let (al, ah) = bounds(a, ra);
+    let (bl, bh) = bounds(b, rb);
+    al.max(bl).abs().max(ah.min(bh).abs()).length() as f32
 }
 
 fn segment_distance(a: &Segment, b: &Segment) -> f64 {
@@ -720,6 +901,52 @@ mod tests {
         assert!(!g.pose_is_clear(&identity, 0.0).unwrap());
         assert!((g.solver_margins(identity, 0.0, None).unwrap().0[0] + 0.05).abs() < 1e-6);
     }
+
+    #[test]
+    fn visible_landmark_moves_only_in_depth_and_preserves_clear_targets() {
+        let g = CollisionGeometry::new(
+            vec![
+                capsule(1, Region::Torso, 0.0),
+                CapsuleCollider {
+                    radius: 0.05,
+                    ..capsule(2, Region::Forearm(ArmSide::Left), 0.4)
+                },
+            ],
+            &[],
+        );
+        let body = HashMap::from([(entity(1), identity(entity(1)).unwrap())]);
+        let input = Vec3::new(0.0, 0.0, -0.05);
+        let visible = g.visible_forearm_target([input; 2], Vec3::Z, ArmSide::Left, &body)[0];
+        assert!(visible.distance(Vec3::new(0.0, 0.0, 0.15)) < 1.0e-6);
+        for point in [Vec3::new(0.0, 0.0, 0.25), Vec3::new(0.3, 0.0, -0.2)] {
+            assert_eq!(
+                g.visible_forearm_target([point; 2], Vec3::Z, ArmSide::Left, &body),
+                [point; 2]
+            );
+        }
+        // Both endpoints are outside the silhouette, but their connecting
+        // forearm passes through the torso. Point raycasts would miss it.
+        let across = [Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0)];
+        let visible = g.visible_forearm_target(across, Vec3::Z, ArmSide::Left, &body);
+        for (input, output) in across.into_iter().zip(visible) {
+            assert!(output.distance(input + Vec3::Z * 0.15) < 1.0e-6);
+        }
+        let rotation = Quat::from_euler(EulerRot::XYZ, 0.2, 0.6, -0.3);
+        let body = HashMap::from([(
+            entity(1),
+            BoneMotion {
+                rotation,
+                translation: Vec3::ZERO,
+            },
+        )]);
+        let rotated = g.visible_forearm_target(
+            [rotation * input; 2],
+            rotation * Vec3::Z,
+            ArmSide::Left,
+            &body,
+        )[0];
+        assert!(rotated.distance(rotation * Vec3::new(0.0, 0.0, 0.15)) < 1.0e-6);
+    }
     #[test]
     fn adjacent_links_do_not_exclude_the_torso_or_opposite_arm() {
         let g = CollisionGeometry::new(
@@ -734,6 +961,74 @@ mod tests {
         assert!(!g.pairs.contains(&[1, 2]));
         assert!(g.pairs.contains(&[0, 1]));
         assert!(g.pairs.contains(&[1, 3]));
+    }
+    #[test]
+    fn shoulder_overlap_is_local_and_does_not_exempt_other_links() {
+        let mut g = CollisionGeometry::new(
+            vec![
+                capsule(1, Region::Torso, 0.0),
+                CapsuleCollider {
+                    bone: entity(2),
+                    region: Region::Upper(ArmSide::Left),
+                    endpoints: [Vec3::new(0.1, 0.2, 0.0), Vec3::new(0.1, 0.5, 0.0)],
+                    radius: 0.04,
+                },
+            ],
+            &[],
+        );
+        assert!(!g.pose_is_clear(&identity, 0.0).unwrap());
+        g.shoulders.push(ShoulderSocket {
+            bone: entity(2),
+            pivot: Vec3::new(0.1, 0.2, 0.0),
+            radius: 0.12,
+        });
+        assert!(g.pose_is_clear(&identity, 0.0).unwrap());
+        assert!(g.sweep_is_clear(&identity, &identity, |_| 0.0).unwrap());
+        // Move the arm/socket below the chest: the distal part now intersects
+        // the torso outside the socket, despite involving the same two bones.
+        let moved = |bone| {
+            Some(BoneMotion {
+                rotation: Quat::IDENTITY,
+                translation: if bone == entity(2) {
+                    Vec3::NEG_Y * 0.5
+                } else {
+                    Vec3::ZERO
+                },
+            })
+        };
+        assert!(!g.pose_is_clear(&moved, 0.0).unwrap());
+        assert!(!g.sweep_is_clear(&identity, &moved, |_| 0.0).unwrap());
+        g.capsules[1].region = Region::Forearm(ArmSide::Left);
+        assert!(!g.pose_is_clear(&identity, 0.0).unwrap());
+    }
+
+    #[test]
+    fn a_socket_does_not_admit_a_sweep_through_the_chest() {
+        let mut g = CollisionGeometry::new(
+            vec![
+                capsule(1, Region::Torso, 0.0),
+                capsule(2, Region::Upper(ArmSide::Left), -0.5),
+            ],
+            &[],
+        );
+        g.shoulders.push(ShoulderSocket {
+            bone: entity(2),
+            pivot: Vec3::new(-0.5, 0.2, 0.0),
+            radius: 0.12,
+        });
+        let end = |bone| {
+            Some(BoneMotion {
+                rotation: Quat::IDENTITY,
+                translation: if bone == entity(2) {
+                    Vec3::X
+                } else {
+                    Vec3::ZERO
+                },
+            })
+        };
+        assert!(g.pose_is_clear(&identity, 0.0).unwrap());
+        assert!(g.pose_is_clear(&end, 0.0).unwrap());
+        assert!(!g.sweep_is_clear(&identity, &end, |_| 0.0).unwrap());
     }
     #[test]
     fn swept_capsules_reject_crossing_with_clear_endpoints() {

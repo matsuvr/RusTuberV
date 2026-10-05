@@ -410,6 +410,24 @@ pub fn update_upper_limb_targets(
         .flatten()
         .map(|c| c.rest.total_arm_length)
         .fold(0.0_f32, f32::max);
+    if selection.mode == ArmPoseSourceKind::TrackedPose {
+        for (goal, chain) in goals.iter_mut().zip(chains) {
+            if let Some((goal, chain)) = goal.as_mut().zip(chain)
+                && goal.weight.wrist > 0.0
+                && goal.weight.pole > 0.0
+                && let Some(elbow) = goal.elbow
+            {
+                let [elbow, wrist] = geometry.visible_forearm_target(
+                    [elbow, goal.wrist],
+                    tracking_to_rest * Vec3::Z,
+                    chain.side,
+                    &body,
+                );
+                goal.elbow = Some(elbow);
+                goal.wrist = wrist;
+            }
+        }
+    }
     let problem = Problem {
         chains,
         goals,
@@ -629,10 +647,10 @@ pub fn update_upper_limb_targets(
                 let progressing = next != seed && matches!(status, SolveStatus::Feasible { .. });
                 let mut refine = unfinished(seed, next, status) || progressing;
                 let mut secondary_next = secondary;
-                // Continue a feasible local movement before trying a different
-                // IK branch. A lower endpoint error alone does not make that
-                // other branch reachable from the currently displayed pose.
-                if !initial && !progressing {
+                // Contact-limited local progress does not imply that its IK
+                // branch is the best one. Compare the reachable local prefix
+                // of the second seed, retaining its distant solution to refine.
+                if !initial {
                     let mut destination_seed = secondary.map_or_else(|| goals.map(|g| g.map(|g| g.neutral)), |s| s.pose);
                     for (seed, goal) in destination_seed.iter_mut().zip(goals) {
                         if let Some((seed, goal)) = seed.as_mut().zip(goal) {
@@ -645,14 +663,22 @@ pub fn update_upper_limb_targets(
                         (destination_seed, previous.status)
                     } else { problem.solve(destination_seed, rounds) };
                     let alternate_refine = unfinished(destination_seed, alternative, alternative_status);
+                    secondary_next = Some(SecondarySolution { pose: alternative, refine: alternate_refine, status: alternative_status });
                     if let SolveStatus::Feasible { residual: other, .. } = alternative_status
                         && !matches!(status, SolveStatus::Feasible { residual, .. } if residual <= other + 64.0*f32::EPSILON)
                     {
-                        secondary_next = Some(SecondarySolution { pose: next, refine, status });
-                        next = alternative;
-                        status = alternative_status;
-                    } else {
-                        secondary_next = Some(SecondarySolution { pose: alternative, refine: alternate_refine, status: alternative_status });
+                        let candidate = if progressing {
+                            local_branch_step(&problem, anchor, alternative)
+                        } else { Some((alternative, alternative_status)) };
+                        if let Some((candidate, candidate_status @ SolveStatus::Feasible { residual: candidate_error, .. })) = candidate
+                            && !matches!(status, SolveStatus::Feasible { residual, .. } if residual <= candidate_error + 64.0*f32::EPSILON)
+                        {
+                            if candidate == alternative {
+                                secondary_next = Some(SecondarySolution { pose: next, refine, status });
+                            }
+                            next = candidate;
+                            status = candidate_status;
+                        }
                     }
                     refine |= alternate_refine;
                 }
@@ -768,6 +794,42 @@ pub fn update_upper_limb_targets(
     report(&mut commands, root, &mut state, status);
 }
 
+/// Compare reachable progress toward another IK branch, not its distant endpoint.
+/// The existing SQP step size and path backtracking keep a streamed observation
+/// to one local step; the next observation can redirect it without a long queue.
+fn local_branch_step(
+    problem: &Problem<'_>,
+    from: [Option<ArmJoints>; 2],
+    target: [Option<ArmJoints>; 2],
+) -> Option<([Option<ArmJoints>; 2], SolveStatus)> {
+    let distance = from
+        .into_iter()
+        .zip(target)
+        .filter_map(|(a, b)| a.zip(b))
+        .flat_map(|(a, b)| a.angles.into_iter().zip(b.angles))
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    let step = crate::upper_limb_solver::MAX_STEP_RADIANS;
+    let mut amount = step / distance.max(step);
+    for _ in 0..=8 {
+        let candidate = crate::upper_limb_path::interpolate(from, target, amount);
+        let evaluation = problem.evaluate(candidate).ok()?;
+        if problem.feasible(&evaluation)
+            && crate::upper_limb_path::check_transition(problem, from, candidate)
+        {
+            return Some((
+                candidate,
+                SolveStatus::Feasible {
+                    residual: evaluation.error.sqrt() as f32,
+                    converged: false,
+                },
+            ));
+        }
+        amount *= 0.5;
+    }
+    None
+}
+
 fn report(commands: &mut Commands, root: Entity, state: &mut UpperLimbState, status: SolveStatus) {
     if state
         .status
@@ -812,6 +874,60 @@ mod tests {
     use vtuber_core::arm_tracking::{
         ArmBlendWeight, ArmBlendWeights, ArmControlFrame, ArmTrackingTarget, ArmTrackingTargets,
     };
+
+    #[test]
+    fn another_branch_can_supply_a_local_step_without_crossing_its_blocked_route() {
+        use crate::collision::{CapsuleCollider, CollisionGeometry, Region};
+        use crate::upper_limb::tests::{chain, state};
+        let chain = chain(ArmSide::Left);
+        let from = [Some(state(0.7, 0.8, -0.2, 1.2)), None];
+        let target = [Some(state(1.5, 0.8, -0.2, 1.2)), None];
+        let middle = crate::upper_limb_path::interpolate(from, target, 0.5);
+        let obstacle = middle[0].unwrap().forward(&chain).unwrap().wrist;
+        let torso = Entity::from_raw_u32(100).unwrap();
+        let body = std::collections::HashMap::from([(
+            torso,
+            crate::collision::BoneMotion {
+                rotation: Quat::IDENTITY,
+                translation: Vec3::ZERO,
+            },
+        )]);
+        let geometry = CollisionGeometry::new(
+            vec![
+                CapsuleCollider {
+                    bone: torso,
+                    region: Region::Torso,
+                    endpoints: [obstacle; 2],
+                    radius: 0.005,
+                },
+                CapsuleCollider {
+                    bone: chain.hand,
+                    region: Region::Hand(ArmSide::Left),
+                    endpoints: [chain.rest.wrist.position; 2],
+                    radius: 0.005,
+                },
+            ],
+            &[],
+        );
+        let problem = Problem {
+            chains: [Some(&chain), None],
+            goals: [None, None],
+            body: &body,
+            body_curve: None,
+            geometry: &geometry,
+            tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+        };
+        assert!(problem.feasible(&problem.evaluate(target).unwrap()));
+        assert!(!crate::upper_limb_path::check_transition(&problem, from, target));
+        let (step, status) = local_branch_step(&problem, from, target).unwrap();
+        assert_ne!(step, from);
+        assert_ne!(step, target);
+        assert!(matches!(status, SolveStatus::Feasible { .. }));
+        assert!(crate::upper_limb_path::check_transition(&problem, from, step));
+        for (a, b) in from[0].unwrap().angles.into_iter().zip(step[0].unwrap().angles) {
+            assert!((a - b).abs() <= crate::upper_limb_solver::MAX_STEP_RADIANS + f32::EPSILON);
+        }
+    }
 
     fn update_after_worker(app: &mut App) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

@@ -272,6 +272,22 @@ pub(crate) fn rest_palm_forward(chain: &ArmChainBinding) -> Option<Vec3> {
     (index + little).try_normalize()
 }
 
+/// Wrist-relative MCP markers carried by a measured palm frame. Keeping their
+/// authored lengths makes orientation error a distance, like the elbow/wrist
+/// tasks, instead of treating each unit palm vector as an entire arm length.
+pub(crate) fn palm_markers(
+    chain: &ArmChainBinding,
+    (normal, forward): (Vec3, Vec3),
+) -> Option<[Vec3; 2]> {
+    let rest = palm_frame(rest_palm_normal(chain)?, rest_palm_forward(chain)?)?;
+    let rotation = palm_frame(normal, forward)? * rest.inverse();
+    let wrist = chain.rest.wrist.position;
+    Some([
+        rotation * (chain.finger_rest.index.proximal?.rest.position - wrist),
+        rotation * (chain.finger_rest.little.proximal?.rest.position - wrist),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

@@ -140,6 +140,91 @@ mod tests {
         let (_, status) = problem.solve(solved, 16);
         assert!(matches!(status,SolveStatus::Feasible{residual,..} if residual>1.0));
     }
+
+    #[test]
+    fn unreachable_palm_rotation_does_not_pull_the_arm_away_from_its_positions() {
+        let chain = chain(ArmSide::Left);
+        let pose = state(1.3, 1.1, -0.3, 1.5);
+        let original = pose.forward(&chain).unwrap();
+        let mut target = goal(pose, &chain);
+        let (normal, forward) = target.palm.unwrap();
+        let turn = Quat::from_axis_angle(forward, 2.5);
+        target.palm = Some((turn * normal, forward));
+        let body = HashMap::new();
+        let geometry = CollisionGeometry::default();
+        let problem = Problem {
+            chains: [Some(&chain), None],
+            goals: [Some(target), None],
+            body: &body,
+            body_curve: None,
+            geometry: &geometry,
+            tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+        };
+        let start = [Some(pose), None];
+        let (solved, _) = problem.solve(start, 96);
+        let result = problem.evaluate(solved).unwrap();
+        let arm = result.arms[0].as_ref().unwrap();
+        assert!(problem.feasible(&result));
+        assert!(arm.wrist.distance(original.wrist) < chain.rest.total_arm_length * 0.05);
+        assert!(arm.elbow.distance(original.elbow) < chain.rest.total_arm_length * 0.05);
+        assert!(result.error < problem.evaluate(start).unwrap().error);
+    }
+
+    #[test]
+    fn restoring_one_arm_contact_does_not_starve_the_other_arms_target() {
+        use crate::collision::{CapsuleCollider, Region};
+        let left = chain(ArmSide::Left);
+        let right = chain(ArmSide::Right);
+        let start = state(0.9, 1.0, -0.3, 1.2);
+        let right_pose = start.forward(&right).unwrap();
+        let torso = Entity::from_raw_u32(100).unwrap();
+        let body = HashMap::from([(
+            torso,
+            BoneMotion {
+                rotation: Quat::IDENTITY,
+                translation: Vec3::ZERO,
+            },
+        )]);
+        let geometry = CollisionGeometry::new(
+            vec![
+                CapsuleCollider {
+                    bone: torso,
+                    region: Region::Torso,
+                    endpoints: [right_pose.wrist + Vec3::Z * 0.139; 2],
+                    radius: 0.1,
+                },
+                CapsuleCollider {
+                    bone: right.hand,
+                    region: Region::Hand(ArmSide::Right),
+                    endpoints: [right.rest.wrist.position; 2],
+                    radius: 0.04,
+                },
+            ],
+            &[],
+        );
+        let problem = Problem {
+            chains: [Some(&left), Some(&right)],
+            goals: [
+                Some(goal(state(1.4, 1.2, -0.3, 1.2), &left)),
+                Some(goal(start, &right)),
+            ],
+            geometry: &geometry,
+            body: &body,
+            body_curve: None,
+            tolerance: 64.0 * f32::EPSILON * left.rest.total_arm_length,
+        };
+        let before = problem.evaluate([Some(start); 2]).unwrap();
+        assert!(!problem.feasible(&before));
+        let (solved, status) = problem.solve([Some(start); 2], 1);
+        let after = problem.evaluate(solved).unwrap();
+        assert!(matches!(status, SolveStatus::Feasible { .. }));
+        assert!(problem.feasible(&after));
+        let target = problem.goals[0].unwrap().wrist;
+        assert!(
+            after.arms[0].as_ref().unwrap().wrist.distance(target)
+                < before.arms[0].as_ref().unwrap().wrist.distance(target) - 0.01
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -207,11 +292,13 @@ impl Problem<'_> {
                 if let Some(elbow) = goal.elbow {
                     distance(pose.elbow / scale, elbow / scale, goal.weight.pole);
                 }
-                if let Some(((normal, forward), (wanted_normal, wanted_forward))) =
-                    pose.palm.zip(goal.palm)
-                {
-                    distance(normal, wanted_normal, goal.weight.palm);
-                    distance(forward, wanted_forward, goal.weight.palm);
+                if let Some((current, wanted)) = pose.palm.zip(goal.palm).and_then(|(a, b)| {
+                    crate::tracked_arm::palm_markers(chain, a)
+                        .zip(crate::tracked_arm::palm_markers(chain, b))
+                }) {
+                    for (current, wanted) in current.into_iter().zip(wanted) {
+                        distance(current / scale, wanted / scale, goal.weight.palm);
+                    }
                 }
                 if let Some(shoulder) = goal.shoulder {
                     distance(
@@ -677,14 +764,19 @@ impl Problem<'_> {
         let mut trust = MAX_STEP_RADIANS;
         let mut converged = false;
         let mut accepted_steps = 0;
+        let mut restoration_steps = 0;
         let mut linearization = None;
         // Tracking stops at about 0.057 degrees; the cached neutral pose
         // retains its original 0.006-degree solve so its IK branch does not
         // change. Feasibility/ROM and the derivative stencil stay unchanged.
         // Failed proposals contract trust until its numerical stopping
-        // threshold. Do not restart that contraction at each work batch:
-        // only accepted improvements spend the continuation budget.
-        while accepted_steps < rounds {
+        // threshold. Only accepted improvements spend the work budget.
+        // Moving skin/body inputs can put the previous pose just outside the
+        // numerical interior. Finish that restoration before spending the
+        // observation-step budget; otherwise one arm's contact correction can
+        // starve both arms' tracking on every live update. Restoration has the
+        // same 96-iteration work limit as the existing neutral solve.
+        while accepted_steps < rounds && restoration_steps < 96 {
             let within_numeric_margin = evaluation.constraints.iter().all(|c| *c >= 0.0);
             if within_numeric_margin && evaluation.error <= f64::from(f32::EPSILON).powi(2) {
                 converged = true;
@@ -763,18 +855,15 @@ impl Problem<'_> {
                 scale *= 0.5;
             }
             if accepted {
-                accepted_steps += 1;
+                if within_numeric_margin {
+                    accepted_steps += 1;
+                } else {
+                    restoration_steps += 1;
+                }
                 linearization = None;
             }
-            if accepted && evaluation.constraints.iter().all(|c| *c >= 0.0) {
-                // Backtracking may make the admitted step much smaller than
-                // the QP proposal. Stop at display resolution instead of
-                // queuing invisible improvements on every render tick.
-                converged = magnitude * scale <= angle_resolution;
-                if converged {
-                    break;
-                }
-            }
+            // A shortened line-search step is not convergence: the full QP
+            // proposal above determines that, before backtracking for contact.
             if !accepted {
                 trust *= 0.5;
             }
