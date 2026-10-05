@@ -36,6 +36,10 @@ pub(crate) struct BodyCurve {
 }
 
 impl BodyRig {
+    pub fn contains(&self, bone: Entity) -> bool {
+        self.indices.contains_key(&bone)
+    }
+
     pub fn bind(
         root: Entity,
         chest: Entity,

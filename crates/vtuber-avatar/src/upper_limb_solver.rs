@@ -3,10 +3,12 @@
 
 use crate::{
     arm::ArmChainBinding,
-    collision::{BoneMotion, CollisionError, CollisionGeometry, DifferentialCache},
+    collision::{BoneMotion, CollisionError, CollisionGeometry},
     upper_limb::{ArmCandidate, ArmJoints},
 };
 use bevy::prelude::*;
+
+pub(crate) const MAX_STEP_RADIANS: f32 = 0.25;
 use std::collections::HashMap;
 
 struct Linearization {
@@ -299,11 +301,7 @@ impl Problem<'_> {
     fn evaluate_geometry(
         &self,
         mut evaluation: Evaluation,
-        differential: Option<(
-            &[bool],
-            &DifferentialCache,
-            &std::collections::HashSet<Entity>,
-        )>,
+        differential: Option<&[bool]>,
     ) -> Result<Evaluation, CollisionError> {
         let length = self
             .chains
@@ -323,9 +321,8 @@ impl Problem<'_> {
             // Include near contacts before the finite-difference stencil
             // reaches them. This selects work, not an anatomical clearance;
             // every nonlinear candidate still checks all pairs.
-            length * f32::EPSILON.cbrt(),
-            differential.map(|(pairs, _, _)| pairs),
-            differential.map(|(_, cache, moved)| (cache, moved)),
+            self.contact_offset() + length * f32::EPSILON.cbrt(),
+            differential,
         )?;
         evaluation.clearance = margins.iter().copied().fold(f32::INFINITY, f32::min);
         evaluation
@@ -334,7 +331,7 @@ impl Problem<'_> {
             // by path admission. Spending that allowance as penetration here
             // leaves no representable interval for the next contact motion.
             .extend(margins.into_iter().zip(&active).map(|(m, active)| {
-                if *active { f64::from((m - 4.0 * self.tolerance) / length) } else { 1.0 }
+                if *active { f64::from((m - self.contact_offset() - 4.0 * self.tolerance) / length) } else { 1.0 }
             }));
         evaluation.contact_pairs = active;
         evaluation.constraints.extend(
@@ -359,8 +356,6 @@ impl Problem<'_> {
         let h = f32::EPSILON.cbrt();
         let mut task_columns = Vec::new();
         let mut constraint_columns = Vec::new();
-        let cache = self.geometry.differential_cache();
-        let cache = &cache;
         // These jobs belong to the asynchronous pose solve. Sharing the ECS
         // frame pool lets a render-critical task pick up a long collision job.
         let mut columns = bevy::tasks::AsyncComputeTaskPool::get_or_init(
@@ -408,12 +403,8 @@ impl Problem<'_> {
                         let pairs = self
                             .geometry
                             .differential_pairs(&evaluation.contact_pairs, &moved);
-                        let a = self
-                            .evaluate_geometry(a, Some((&pairs, cache, &moved)))
-                            .ok()?;
-                        let b = self
-                            .evaluate_geometry(b, Some((&pairs, cache, &moved)))
-                            .ok()?;
+                        let a = self.evaluate_geometry(a, Some(&pairs)).ok()?;
+                        let b = self.evaluate_geometry(b, Some(&pairs)).ok()?;
                         task_column.extend(
                             a.residuals
                                 .iter()
@@ -683,7 +674,7 @@ impl Problem<'_> {
             Ok(v) => v,
             Err(e) => return (current, SolveStatus::InvalidGeometry(e)),
         };
-        let mut trust = 0.25_f32;
+        let mut trust = MAX_STEP_RADIANS;
         let mut converged = false;
         let mut accepted_steps = 0;
         let mut linearization = None;
@@ -809,7 +800,20 @@ impl Problem<'_> {
         (current, status)
     }
 
+    /// Keep an endpoint gap equal to both capsules' existing chord resolution.
+    /// Near-zero contact leaves no room for the curved link motion between
+    /// observations. This is a geometric contact offset, not a joint limit.
+    pub fn contact_offset(&self) -> f32 {
+        self.chains
+            .into_iter()
+            .flatten()
+            .map(|c| c.rest.total_arm_length)
+            .fold(0.0_f32, f32::max)
+            * 0.002
+    }
+
     pub fn feasible(&self, evaluation: &Evaluation) -> bool {
-        evaluation.clearance >= -self.tolerance && evaluation.joint_margin >= -64.0 * f32::EPSILON
+        evaluation.clearance >= self.contact_offset() - self.tolerance
+            && evaluation.joint_margin >= -64.0 * f32::EPSILON
     }
 }

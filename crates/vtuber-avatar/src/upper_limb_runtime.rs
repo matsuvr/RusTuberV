@@ -33,6 +33,12 @@ pub struct UpperLimbState {
     producer_body: Option<BodyPose>,
 }
 
+impl UpperLimbState {
+    pub(crate) fn owns_bone(&self, bone: Entity) -> bool {
+        self.body_rig.as_ref().is_some_and(|rig| rig.contains(bone))
+    }
+}
+
 #[derive(Clone, Copy)]
 struct NeutralSolution {
     goals: [Option<ArmGoal>; 2],
@@ -48,6 +54,7 @@ struct SecondarySolution {
 }
 
 struct PreparedStep {
+    computation_seconds: f32,
     anchor: [Option<ArmJoints>; 2],
     anchor_body: Option<BodyPose>,
     path: JointPath,
@@ -137,11 +144,11 @@ pub fn update_upper_limb_targets(
     }
     for change in profile_changes.read().filter(|c| &c.model_id == model_id) {
         state.solved_goals = None;
-        state.path.response_seconds = if change.return_to_default {
+        state.path.transition_seconds = Some(if change.return_to_default {
             crate::arm_pose::DEFAULT_ARM_RETURN_SECONDS
         } else {
             crate::arm_pose::DEFAULT_ARM_TRANSITION_SECONDS
-        };
+        });
     }
     let transforms = transform_queries.p0();
     let frame = tracked
@@ -344,7 +351,7 @@ pub fn update_upper_limb_targets(
         .flat_map(|a| a.motion.into_keys())
         .collect();
     let body_pose = (|| -> Result<Option<BodyPose>, crate::collision::CollisionError> {
-        if geometry.hulls.is_empty() {
+        if geometry.capsules.is_empty() {
             return Ok(None);
         }
         if state.body_rig.is_none() {
@@ -356,13 +363,7 @@ pub fn update_upper_limb_targets(
             state.body_rig = Some(BodyRig::bind(
                 root,
                 chest,
-                geometry
-                    .bones()
-                    .filter(|b| !controlled.contains(b))
-                    // Head/neck already compensate the proposed chest. Carry
-                    // those local rotations on the same body curve so an
-                    // admitted chest delay cannot expose the future residual.
-                    .chain([Some(binding.head), binding.neck].into_iter().flatten()),
+                geometry.bones().filter(|b| !controlled.contains(b)),
                 |bone| {
                     let (local, global, rest) = transforms.get(bone).ok()?;
                     Some((
@@ -438,13 +439,27 @@ pub fn update_upper_limb_targets(
             .obsolete
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let mut completed_status = None;
     if let Some(pending) = state.pending.as_mut()
         && let Some(prepared) = future::block_on(future::poll_once(&mut pending.task))
     {
         state.queued = Some(prepared);
         state.pending = None;
     }
+    let mut status = state.status.unwrap_or(SolveStatus::Solving);
+    let mut frame_seconds = time.delta_secs();
+    if matches!(status, SolveStatus::Feasible { .. }) && state.path.busy() {
+        let current = state.path.current;
+        match state.path.advance(&problem, current, frame_seconds) {
+            Ok(remaining) => frame_seconds = remaining,
+            Err(error) => {
+                status = error;
+                state.refine = false;
+                frame_seconds = 0.0;
+            }
+        }
+    }
+    // A frame may cross the endpoint. Carry its remaining time into the
+    // prefetched path instead of rounding every camera interval up to a tick.
     if !state.path.busy()
         && let Some(mut prepared) = state.queued.take()
     {
@@ -456,10 +471,11 @@ pub fn update_upper_limb_targets(
             }
         {
             if state.solved_goals.is_none() {
-                prepared.path.response_seconds = state.path.response_seconds;
+                prepared.path.transition_seconds = state.path.transition_seconds;
             }
+            prepared.path.retime(prepared.computation_seconds);
             state.path = prepared.path;
-            completed_status = Some(prepared.status);
+            status = prepared.status;
             state.refine = prepared.refine;
             state.source_seq = prepared.source_seq;
             state.neutral = prepared.neutral;
@@ -471,9 +487,6 @@ pub fn update_upper_limb_targets(
             state.solved_goals = None;
         }
     }
-    let mut status = completed_status
-        .or(state.status)
-        .unwrap_or(SolveStatus::Solving);
     if state.pending.is_none()
         && state.queued.is_none()
         && state.solved_goals == Some(goals)
@@ -513,9 +526,13 @@ pub fn update_upper_limb_targets(
         let geometry = std::sync::Arc::clone(geometry);
         let snapshot = body.clone();
         let chains = [binding.left_arm, binding.right_arm];
-        // Fresh input gets a short first response. Once that sample has been
-        // admitted, batch refinement to avoid a path/worker handoff per step.
-        let rounds = if source_seq == state.source_seq { 4 } else { 1 };
+        // Publish a feasible local step promptly. Extra capacity completes
+        // contact restoration when that first iteration cannot yet be shown.
+        let pool = AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        // A 30 Hz camera naturally repeats a sample on alternating render
+        // ticks. That is not a stopped target: batching four task steps there
+        // creates a large jump in the next two-frame display interval.
+        let rounds = 1;
         let unchanged = state.solved_goals == Some(goals) && !body_changed;
         let cached_status = unchanged.then_some(status).filter(|s| {
             matches!(
@@ -532,10 +549,11 @@ pub fn update_upper_limb_targets(
             .filter(|s| s.refine || state.solved_goals == Some(goals));
         let obsolete = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let search_obsolete = std::sync::Arc::clone(&obsolete);
+        let started = std::time::Instant::now();
         state.pending = Some(PendingSolve {
             obsolete,
             source_seq,
-            task: AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default).spawn(async move {
+            task: pool.spawn(async move {
                 let neutral_problem = Problem {
                     chains: [chains[0].as_ref(), chains[1].as_ref()],
                     goals: neutral_goals,
@@ -554,6 +572,7 @@ pub fn update_upper_limb_targets(
                     let (pose, status) = neutral_problem.solve_neutral(seed);
                     if !matches!(status, SolveStatus::Feasible { .. }) {
                         return PreparedStep {
+                            computation_seconds: started.elapsed().as_secs_f32(),
                             anchor,
                             anchor_body,
                             path,
@@ -600,11 +619,20 @@ pub fn update_upper_limb_targets(
                 };
                 let (mut next, mut status) = if let Some(status) = cached_status { (seed, status) }
                     else { problem.solve(seed, rounds) };
+                // Keep the continuation step independent of worker count.
+                // Extra workers finish the same contact restoration sooner.
+                if matches!(status, SolveStatus::NoFeasibleSolution) && next != seed {
+                    (next, status) = problem.solve(next, 1);
+                }
                 let unfinished = |from, to, status| from != to && matches!(status,
                     SolveStatus::Feasible { converged: false, .. } | SolveStatus::NoFeasibleSolution);
-                let mut refine = unfinished(seed, next, status);
+                let progressing = next != seed && matches!(status, SolveStatus::Feasible { .. });
+                let mut refine = unfinished(seed, next, status) || progressing;
                 let mut secondary_next = secondary;
-                if !initial && (rounds > 1 || matches!(status, SolveStatus::NoFeasibleSolution) || !refine) {
+                // Continue a feasible local movement before trying a different
+                // IK branch. A lower endpoint error alone does not make that
+                // other branch reachable from the currently displayed pose.
+                if !initial && !progressing {
                     let mut destination_seed = secondary.map_or_else(|| goals.map(|g| g.map(|g| g.neutral)), |s| s.pose);
                     for (seed, goal) in destination_seed.iter_mut().zip(goals) {
                         if let Some((seed, goal)) = seed.as_mut().zip(goal) {
@@ -634,7 +662,7 @@ pub fn update_upper_limb_targets(
                 if matches!(status, SolveStatus::Feasible { .. })
                     && (next != path.current || body_curve.as_ref().is_some_and(|c| !c.from.same(&c.to)))
                 {
-                    let admitted = if initial { path.advance(&problem, next, 0.0).map(|()| true) } else { path.plan(&problem, next, &search_obsolete) };
+                    let admitted = if initial { path.advance(&problem, next, 0.0).map(|_| true) } else { path.plan(&problem, next, &search_obsolete) };
                     match admitted {
                         Err(error) => { status = error; refine = matches!(error, SolveStatus::Solving); }
                         Ok(false) => {
@@ -669,6 +697,7 @@ pub fn update_upper_limb_targets(
                 }
                 refine &= matches!(status, SolveStatus::Feasible { .. } | SolveStatus::Solving);
                 PreparedStep {
+                    computation_seconds: started.elapsed().as_secs_f32(),
                     anchor,
                     anchor_body,
                     path,
@@ -687,7 +716,8 @@ pub fn update_upper_limb_targets(
     if matches!(status, SolveStatus::Feasible { .. }) {
         let current = state.path.current;
         if state.path.busy()
-            && let Err(error) = state.path.advance(&problem, current, time.delta_secs())
+            && frame_seconds > 0.0
+            && let Err(error) = state.path.advance(&problem, current, frame_seconds)
         {
             status = error;
             state.refine = false;
@@ -1074,8 +1104,10 @@ mod tests {
                         .zip(b.angles)
                         .zip(crate::upper_limb::BOUNDS)
                     {
-                        // max quintic progress rate = 1.875/duration.
-                        let bound = (hi - lo) * 1.875 / (120.0 * 0.15) + 64.0 * f32::EPSILON;
+                        // A live segment traverses its checked range linearly
+                        // over one camera interval, without the old rest envelope.
+                        let duration = 1.0 / 30.0;
+                        let bound = (hi - lo) / (120.0 * duration) + 64.0 * f32::EPSILON;
                         assert!((b - a).abs() <= bound);
                     }
                 }

@@ -100,10 +100,10 @@ fn run() -> Result<(), StartupError> {
         AssetSourceBuilder::platform_default(asset_source_root(&managed_root)?, None),
     );
 
-    // Budget this single-avatar app for three CPUs, including on larger hosts.
-    // The IO/frame minima remain; this is a worker budget, not OS affinity.
+    // Keep short frame schedules on their caller, but let the asynchronous
+    // anatomy solve use more of a larger host. Small hosts still size down.
     let mut pools = bevy::app::TaskPoolOptions {
-        max_total_threads: 3,
+        max_total_threads: 12,
         ..default()
     };
     pools.async_compute.percent = 0.5;

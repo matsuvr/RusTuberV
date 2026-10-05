@@ -411,25 +411,54 @@ type BodyTrackingPoseRoot<'a> = (
 /// [`crate::VtuberAvatarPlugin`] registers this system after Bevy animation
 /// and before VRM gaze control and constraints. The function
 /// is public so integration tests and custom schedules can verify that path.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Bevy injects five independent root/bone/hierarchy/rest queries, frame time, and separate bone and root-rotation histories into this system"
-)]
-pub fn apply_direct_body_tracking(
-    vrms: Query<BodyTrackingPoseRoot<'_>, With<BodyTracking>>,
-    root_globals: Query<&GlobalTransform, With<Vrm>>,
-    mut transforms: Query<(&mut Transform, &mut GlobalTransform), Without<Vrm>>,
-    child_ofs: Query<&ChildOf>,
-    rests: Query<(&RestTransform, &RestGlobalTransform)>,
-    time: Res<Time>,
-    arm_control: Option<Res<crate::arm_pipeline::TrackedArmControl>>,
-    arm_selection: Option<Res<crate::arm_pipeline::ArmSourceSelection>>,
-    mirror: Option<Res<crate::mirror::AvatarMotionMirror>>,
-    bindings: Query<&crate::binding::AvatarBinding>,
-    collision: Query<&crate::collision::AvatarCollision>,
-    mut bone_states: Local<HashMap<Entity, DirectBoneState>>,
-    mut root_rest_rotations: Local<HashMap<Entity, Quat>>,
-) {
+pub fn apply_direct_body_tracking(params: DirectPoseParams<'_, '_>) {
+    apply_direct_tracking(params, false);
+}
+
+/// Finish face tracking against the admitted chest on every render tick.
+/// Bones that actually deform collision geometry stay on the checked path.
+pub(crate) fn apply_direct_head_tracking(params: DirectPoseParams<'_, '_>) {
+    apply_direct_tracking(params, true);
+}
+
+/// Queries and per-bone state for direct body/head tracking.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct DirectPoseParams<'w, 's> {
+    vrms: Query<'w, 's, BodyTrackingPoseRoot<'static>, With<BodyTracking>>,
+    root_globals: Query<'w, 's, &'static GlobalTransform, With<Vrm>>,
+    transforms: Query<'w, 's, (&'static mut Transform, &'static mut GlobalTransform), Without<Vrm>>,
+    child_ofs: Query<'w, 's, &'static ChildOf>,
+    children: Query<'w, 's, &'static Children>,
+    rests: Query<'w, 's, (&'static RestTransform, &'static RestGlobalTransform)>,
+    time: Res<'w, Time>,
+    arm_control: Option<Res<'w, crate::arm_pipeline::TrackedArmControl>>,
+    arm_selection: Option<Res<'w, crate::arm_pipeline::ArmSourceSelection>>,
+    mirror: Option<Res<'w, crate::mirror::AvatarMotionMirror>>,
+    bindings: Query<'w, 's, &'static crate::binding::AvatarBinding>,
+    collision: Query<'w, 's, &'static crate::collision::AvatarCollision>,
+    bone_states: Local<'s, HashMap<Entity, DirectBoneState>>,
+    root_rest_rotations: Local<'s, HashMap<Entity, Quat>>,
+    admission: Option<Res<'w, crate::upper_limb_runtime::UpperLimbState>>,
+}
+
+fn apply_direct_tracking(params: DirectPoseParams<'_, '_>, head_only: bool) {
+    let DirectPoseParams {
+        vrms,
+        root_globals,
+        mut transforms,
+        child_ofs,
+        children,
+        rests,
+        time,
+        arm_control,
+        arm_selection,
+        mirror,
+        bindings,
+        collision,
+        mut bone_states,
+        mut root_rest_rotations,
+        admission,
+    } = params;
     let dt = time.delta_secs();
     let default_profile = BodyTrackingProfile::default();
 
@@ -451,7 +480,7 @@ pub fn apply_direct_body_tracking(
         let pose = sanitize_input(input);
         let constrained_body = collision
             .get(root)
-            .is_ok_and(|c| c.0.as_ref().is_ok_and(|g| !g.hulls.is_empty()));
+            .is_ok_and(|c| c.0.as_ref().is_ok_and(|g| !g.capsules.is_empty()));
         // A Pose stream owns the torso independently of the face. Missing
         // hips mean no observed torso, never permission to relabel head yaw
         // as measured chest yaw. Its retained loss weight returns to neutral.
@@ -563,6 +592,13 @@ pub fn apply_direct_body_tracking(
             reason = "every `DirectBoneEntry` index is one of the `HEAD..=HIPS` constants below `BONE_COUNT`, and every weight, limit and half-life array holds exactly `BONE_COUNT` entries"
         )]
         for bone in chain {
+            let live_head = bone.index <= NECK
+                && admission
+                    .as_ref()
+                    .is_some_and(|path| !path.owns_bone(bone.entity));
+            if head_only != live_head {
+                continue;
+            }
             let Ok((rest_tf, rest_gtf)) = rests.get(bone.entity) else {
                 continue;
             };
@@ -601,7 +637,7 @@ pub fn apply_direct_body_tracking(
                 )
             };
             let state = bone_states.entry(bone.entity).or_default();
-            state.smoothed_angles = if constrained_body {
+            state.smoothed_angles = if constrained_body && !live_head {
                 target_angles
             } else {
                 Vec3::new(
@@ -632,6 +668,10 @@ pub fn apply_direct_body_tracking(
                     -state.smoothed_angles.y,
                     -state.smoothed_angles.z,
                 );
+                let rest_model = root_rest_rotation.inverse() * rest_gtf.rotation();
+                let rest_parent = rest_model * rest_tf.rotation.inverse();
+                let parent_model = root_global.rotation().inverse() * parent_global.rotation();
+                let parent_delta = parent_model * rest_parent.inverse();
                 let wanted = match bone.index {
                     HEAD => head_rotation,
                     NECK => {
@@ -642,15 +682,11 @@ pub fn apply_direct_body_tracking(
                         } else {
                             0.0
                         };
-                        torso.slerp(head_rotation, share)
+                        parent_delta.slerp(head_rotation, share)
                     }
                     index if index == torso_index => torso,
                     _ => Quat::IDENTITY,
                 };
-                let rest_model = root_rest_rotation.inverse() * rest_gtf.rotation();
-                let rest_parent = rest_model * rest_tf.rotation.inverse();
-                let parent_model = root_global.rotation().inverse() * parent_global.rotation();
-                let parent_delta = parent_model * rest_parent.inverse();
                 // The next joint receives only the residual; the hierarchy
                 // carries chest rotation into head/neck exactly once.
                 let mut residual = parent_delta.inverse() * wanted;
@@ -693,6 +729,132 @@ pub fn apply_direct_body_tracking(
             state.last_delta = delta;
             state.initialized = true;
             computed_globals.insert(bone.entity, *global);
+        }
+        if head_only {
+            // This pass follows the engine's transform propagation and the
+            // admitted body. Carry the new head/neck pose into eyes and hair
+            // before extraction, instead of leaving their globals one tick old.
+            let first = neck.map_or(head.0, |neck| neck.0);
+            if let Ok((_, global)) = transforms.get(first) {
+                let global = *global;
+                crate::skeleton::refresh_subtree(first, global, &mut transforms, &children);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    use super::*;
+
+    #[test]
+    fn head_keeps_following_when_the_admitted_chest_is_held() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<crate::upper_limb_runtime::UpperLimbState>()
+            .insert_resource(crate::arm_pipeline::ArmSourceSelection {
+                mode: crate::arm_pipeline::ArmPoseSourceKind::TrackedPose,
+                ..Default::default()
+            })
+            .add_systems(
+                Update,
+                (
+                    apply_direct_body_tracking,
+                    |roots: Query<&ChestBoneEntity>, mut bones: Query<&mut Transform>| {
+                        // An outstanding collision solve keeps this previously
+                        // admitted chest; the proposed torso is still identity.
+                        for chest in &roots {
+                            bones.get_mut(chest.0).unwrap().rotation = Quat::from_rotation_y(0.2);
+                        }
+                    },
+                    apply_direct_head_tracking,
+                )
+                    .chain(),
+            );
+        let profile = BodyTrackingProfile {
+            bone_half_lives: BodyBoneHalfLives {
+                head_seconds: 0.0,
+                neck_seconds: 0.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let root = app
+            .world_mut()
+            .spawn((
+                Vrm,
+                BodyTracking::default(),
+                BodyTrackingPoseInput::default(),
+                profile,
+                Transform::IDENTITY,
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+        let mut parent = root;
+        let mut bones = Vec::new();
+        for _ in 0..4 {
+            let bone = app
+                .world_mut()
+                .spawn((
+                    Transform::IDENTITY,
+                    GlobalTransform::IDENTITY,
+                    RestTransform(Transform::IDENTITY),
+                    RestGlobalTransform(GlobalTransform::IDENTITY),
+                    ChildOf(parent),
+                ))
+                .id();
+            bones.push(bone);
+            parent = bone;
+        }
+        let [chest, neck, head] = [bones[0], bones[1], bones[2]];
+        app.world_mut().entity_mut(root).insert((
+            ChestBoneEntity(chest),
+            NeckBoneEntity(neck),
+            HeadBoneEntity(head),
+        ));
+        app.update(); // Initialize Bevy's frame clock before advancing filters.
+        for yaw in [-0.2, 0.35, -0.1, 0.4] {
+            *app.world_mut()
+                .get_mut::<BodyTrackingPoseInput>(root)
+                .unwrap() = BodyTrackingPoseInput {
+                yaw_radians: yaw,
+                weight: 1.0,
+                active: true,
+                ..Default::default()
+            };
+            app.update();
+            let world = app.world();
+            let head_world = world.get::<GlobalTransform>(head).unwrap().rotation();
+            let eye_world = world.get::<GlobalTransform>(bones[3]).unwrap().rotation();
+            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                assert!((eye_world * axis).distance(head_world * axis) < 1.0e-5);
+            }
+            assert!(
+                (head_world * Vec3::Z).distance(Quat::from_rotation_y(yaw) * Vec3::Z) < 1.0e-4,
+                "head={head_world:?}, wanted yaw={yaw}"
+            );
+            assert!(
+                world
+                    .get::<Transform>(chest)
+                    .unwrap()
+                    .rotation
+                    .angle_between(Quat::from_rotation_y(0.2))
+                    < 1.0e-4
+            );
+            for (bone, limit) in [
+                (neck, profile.bone_rotation_limits.neck),
+                (head, profile.bone_rotation_limits.head),
+            ] {
+                let (yaw, pitch, roll) = world
+                    .get::<Transform>(bone)
+                    .unwrap()
+                    .rotation
+                    .to_euler(EulerRot::YXZ);
+                assert!(yaw.abs() <= limit.yaw_radians + 1.0e-4);
+                assert!(pitch.abs() <= limit.pitch_radians + 1.0e-4);
+                assert!(roll.abs() <= limit.roll_radians + 1.0e-4);
+            }
         }
     }
 }
