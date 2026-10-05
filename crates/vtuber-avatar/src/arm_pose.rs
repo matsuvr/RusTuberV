@@ -262,12 +262,22 @@ pub(crate) fn resolve_finger_pose(
         return ResolvedFingerPose::default();
     };
     let fingers = chain.finger_rest;
+    let curl_radians = signed_finger_curl(chain.side, curl_radians);
     ResolvedFingerPose {
         thumb: resolve_finger_joints(fingers.thumb, curl_radians, normal),
         index: resolve_finger_joints(fingers.index, curl_radians, normal),
         middle: resolve_finger_joints(fingers.middle, curl_radians, normal),
         ring: resolve_finger_joints(fingers.ring, curl_radians, normal),
         little: resolve_finger_joints(fingers.little, curl_radians, normal),
+    }
+}
+
+/// The palm-frame normal reverses across the anatomical sides. Positive
+/// profile curl therefore needs the same handed sign as observed finger flexion.
+pub(crate) fn signed_finger_curl(side: crate::arm::ArmSide, curl: f32) -> f32 {
+    match side {
+        crate::arm::ArmSide::Left => -curl,
+        crate::arm::ArmSide::Right => curl,
     }
 }
 

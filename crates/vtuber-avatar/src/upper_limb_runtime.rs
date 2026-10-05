@@ -30,6 +30,7 @@ pub struct UpperLimbState {
     secondary: Option<SecondarySolution>,
     recovery_seed: Option<[Option<ArmJoints>; 2]>,
     body_rig: Option<std::sync::Arc<BodyRig>>,
+    neutral_body: Option<BodyPose>,
     producer_body: Option<BodyPose>,
 }
 
@@ -39,8 +40,9 @@ impl UpperLimbState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct NeutralSolution {
+    geometry: std::sync::Arc<crate::collision::CollisionGeometry>,
     goals: [Option<ArmGoal>; 2],
     pose: [Option<ArmJoints>; 2],
     status: SolveStatus,
@@ -124,6 +126,7 @@ pub fn update_upper_limb_targets(
         Query<(&Transform, &GlobalTransform, Option<&RestGlobalTransform>)>,
         Query<(&mut Transform, &mut GlobalTransform)>,
     )>,
+    rests: Query<&bevy_vrm1::prelude::RestTransform>,
     parents: Query<&ChildOf>,
     children: Query<&Children>,
     mut state: ResMut<UpperLimbState>,
@@ -246,6 +249,8 @@ pub fn update_upper_limb_targets(
             // The profile specifies the wrist location. The bounded analytic
             // seed is only a starting point and may no longer reach it.
             profile_goal.weight.wrist = 1.0;
+            profile_goal.palm = initial.forward(chain).and_then(|p| p.palm);
+            profile_goal.weight.palm = 1.0;
             *slot = Some(profile_goal);
         }
         match selection.mode {
@@ -360,7 +365,7 @@ pub fn update_upper_limb_targets(
                 .or(binding.chest)
                 .or(binding.spine)
                 .ok_or(crate::collision::CollisionError::MissingBone)?;
-            state.body_rig = Some(BodyRig::bind(
+            let rig = BodyRig::bind(
                 root,
                 chest,
                 geometry.bones().filter(|b| !controlled.contains(b)),
@@ -372,7 +377,11 @@ pub fn update_upper_limb_targets(
                         parents.get(bone).ok().map(ChildOf::parent),
                     ))
                 },
-            )?);
+            )?;
+            // The default is admitted against the imported rest body before
+            // any live torso pose can influence its contact solution.
+            state.neutral_body = Some(rig.capture(|b| rests.get(b).ok().map(|r| **r))?);
+            state.body_rig = Some(rig);
         }
         state
             .body_rig
@@ -405,33 +414,36 @@ pub fn update_upper_limb_targets(
             return;
         }
     };
+    let neutral_body = match state
+        .neutral_body
+        .as_ref()
+        .map(BodyPose::motions)
+        .transpose()
+    {
+        Ok(body) => body.unwrap_or_default(),
+        Err(e) => {
+            report(
+                &mut commands,
+                root,
+                &mut state,
+                SolveStatus::InvalidGeometry(e),
+            );
+            return;
+        }
+    };
     let extent = chains
         .into_iter()
         .flatten()
         .map(|c| c.rest.total_arm_length)
         .fold(0.0_f32, f32::max);
-    if selection.mode == ArmPoseSourceKind::TrackedPose {
-        for (goal, chain) in goals.iter_mut().zip(chains) {
-            if let Some((goal, chain)) = goal.as_mut().zip(chain)
-                && goal.weight.wrist > 0.0
-                && goal.weight.pole > 0.0
-                && let Some(elbow) = goal.elbow
-            {
-                let [elbow, wrist] = geometry.visible_forearm_target(
-                    [elbow, goal.wrist],
-                    tracking_to_rest * Vec3::Z,
-                    chain.side,
-                    &body,
-                );
-                goal.elbow = Some(elbow);
-                goal.wrist = wrist;
-            }
-        }
-    }
+    let fitted_geometry = state
+        .neutral
+        .as_ref()
+        .map(|n| std::sync::Arc::clone(&n.geometry));
     let problem = Problem {
         chains,
         goals,
-        geometry,
+        geometry: fitted_geometry.as_deref().unwrap_or(geometry),
         body: &body,
         body_curve: None,
         tolerance: 64.0 * f32::EPSILON * extent,
@@ -505,6 +517,14 @@ pub fn update_upper_limb_targets(
             state.solved_goals = None;
         }
     }
+    let admitted_geometry = state
+        .neutral
+        .as_ref()
+        .map(|n| std::sync::Arc::clone(&n.geometry));
+    let problem = Problem {
+        geometry: admitted_geometry.as_deref().unwrap_or(problem.geometry),
+        ..problem
+    };
     if state.pending.is_none()
         && state.queued.is_none()
         && state.solved_goals == Some(goals)
@@ -543,6 +563,8 @@ pub fn update_upper_limb_targets(
         let initial = path.current.iter().all(Option::is_none);
         let geometry = std::sync::Arc::clone(geometry);
         let snapshot = body.clone();
+        let tracked_pose = selection.mode == ArmPoseSourceKind::TrackedPose;
+        let neutral_snapshot = neutral_body;
         let chains = [binding.left_arm, binding.right_arm];
         // Publish a feasible local step promptly. Extra capacity completes
         // contact restoration when that first iteration cannot yet be shown.
@@ -561,7 +583,7 @@ pub fn update_upper_limb_targets(
                 }
             )
         });
-        let cached_neutral = state.neutral.filter(|n| n.goals == neutral_goals);
+        let cached_neutral = state.neutral.clone().filter(|n| n.goals == neutral_goals);
         let secondary = state
             .secondary
             .filter(|s| s.refine || state.solved_goals == Some(goals));
@@ -572,17 +594,17 @@ pub fn update_upper_limb_targets(
             obsolete,
             source_seq,
             task: pool.spawn(async move {
+                let empty_geometry = crate::collision::CollisionGeometry::default();
                 let neutral_problem = Problem {
                     chains: [chains[0].as_ref(), chains[1].as_ref()],
                     goals: neutral_goals,
-                    geometry: &geometry,
-                    body: &snapshot,
+                    geometry: &empty_geometry,
+                    body: &neutral_snapshot,
                     body_curve: None,
                     tolerance: 64.0 * f32::EPSILON * extent,
                 };
-                // The return target is the same constrained pose admitted at
-                // startup, not the infeasible analytic request that preceded
-                // it. Recompute it only when its profile or shape changes.
+                // Establish the skeletal default before fitting contact proxies.
+                // Clothing bounds must not choose the recovery posture.
                 let neutral_solution = if let Some(cached) = cached_neutral {
                     cached
                 } else {
@@ -602,7 +624,21 @@ pub fn update_upper_limb_targets(
                             recovery_seed: None,
                         };
                     }
+                    let mut fitted = (*geometry).clone();
+                    let motions: std::collections::HashMap<_, _> = chains.iter().zip(pose)
+                        .filter_map(|(chain, pose)| chain.as_ref().zip(pose))
+                        .filter_map(|(chain, pose)| pose.forward(chain))
+                        .flat_map(|arm| arm.motion).collect();
+                    if let Err(error) = fitted.fit_neutral(
+                        |bone| motions.get(&bone).or_else(|| neutral_snapshot.get(&bone)).copied(),
+                        neutral_problem.contact_offset() + 8.0 * neutral_problem.tolerance,
+                    ) {
+                        return PreparedStep { computation_seconds: started.elapsed().as_secs_f32(),
+                            anchor, anchor_body, path, status: SolveStatus::InvalidGeometry(error),
+                            refine: false, source_seq, neutral: None, secondary: None, recovery_seed: None };
+                    }
                     NeutralSolution {
+                        geometry: std::sync::Arc::new(fitted),
                         goals: neutral_goals,
                         pose,
                         status,
@@ -618,6 +654,21 @@ pub fn update_upper_limb_targets(
                         goal.neutral_girdle = Some(Vec2::new(protract, elevate));
                     }
                 }
+                if tracked_pose {
+                    for (goal, chain) in goals.iter_mut().zip(&chains) {
+                        if let Some((goal, chain)) = goal.as_mut().zip(chain.as_ref())
+                            && goal.weight.wrist > 0.0 && goal.weight.pole > 0.0
+                            && let Some(elbow) = goal.elbow
+                        {
+                            let [elbow, wrist] = neutral_solution.geometry.visible_forearm_target(
+                                [elbow, goal.wrist], tracking_to_rest * Vec3::Z,
+                                chain.side, &snapshot,
+                            );
+                            goal.elbow = Some(elbow);
+                            goal.wrist = wrist;
+                        }
+                    }
+                }
                 if initial {
                     seed = neutral_solution.pose;
                     for (seed, goal) in seed.iter_mut().zip(goals) {
@@ -630,7 +681,7 @@ pub fn update_upper_limb_targets(
                 let problem = Problem {
                     chains: [chains[0].as_ref(), chains[1].as_ref()],
                     goals,
-                    geometry: &geometry,
+                    geometry: &neutral_solution.geometry,
                     body: &snapshot,
                     body_curve: body_curve.as_ref(),
                     tolerance: 64.0 * f32::EPSILON * extent,
@@ -918,13 +969,22 @@ mod tests {
             tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
         };
         assert!(problem.feasible(&problem.evaluate(target).unwrap()));
-        assert!(!crate::upper_limb_path::check_transition(&problem, from, target));
+        assert!(!crate::upper_limb_path::check_transition(
+            &problem, from, target
+        ));
         let (step, status) = local_branch_step(&problem, from, target).unwrap();
         assert_ne!(step, from);
         assert_ne!(step, target);
         assert!(matches!(status, SolveStatus::Feasible { .. }));
-        assert!(crate::upper_limb_path::check_transition(&problem, from, step));
-        for (a, b) in from[0].unwrap().angles.into_iter().zip(step[0].unwrap().angles) {
+        assert!(crate::upper_limb_path::check_transition(
+            &problem, from, step
+        ));
+        for (a, b) in from[0]
+            .unwrap()
+            .angles
+            .into_iter()
+            .zip(step[0].unwrap().angles)
+        {
             assert!((a - b).abs() <= crate::upper_limb_solver::MAX_STEP_RADIANS + f32::EPSILON);
         }
     }

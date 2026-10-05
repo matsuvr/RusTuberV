@@ -42,7 +42,7 @@ pub fn observed_finger_deltas(
         return None;
     }
     let weight = weight.clamp(0.0, 1.0);
-    let baseline = rest_curl * (1.0 - weight);
+    let baseline = crate::arm_pose::signed_finger_curl(chain.side, rest_curl) * (1.0 - weight);
     let normal = rest_palm_normal(chain)?;
     let wrist = chain.rest.wrist.position;
     let index =
@@ -1284,6 +1284,63 @@ mod tests {
             observed_finger_deltas(&chain, observed, 1.0, 0.0),
             observed_finger_deltas(&chain, observed, 1.0, 0.3)
         );
+    }
+
+    #[test]
+    fn default_and_lost_fingers_curl_palmward_on_both_sides() {
+        for reflected in [false, true] {
+            let mut chain = articulated_chain();
+            if reflected {
+                chain.side = crate::arm::ArmSide::Right;
+                for bone in [
+                    &mut chain.rest.upper_arm,
+                    &mut chain.rest.elbow,
+                    &mut chain.rest.wrist,
+                ] {
+                    bone.position.x = -bone.position.x;
+                }
+                for row in [
+                    &mut chain.finger_rest.thumb,
+                    &mut chain.finger_rest.index,
+                    &mut chain.finger_rest.middle,
+                    &mut chain.finger_rest.ring,
+                    &mut chain.finger_rest.little,
+                ] {
+                    for joint in [
+                        &mut row.metacarpal,
+                        &mut row.proximal,
+                        &mut row.intermediate,
+                        &mut row.distal,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        joint.rest.position.x = -joint.rest.position.x;
+                    }
+                }
+            }
+            let joint = chain.finger_rest.index.proximal.unwrap();
+            let ray = (chain.finger_rest.index.intermediate.unwrap().rest.position
+                - joint.rest.position)
+                .normalize();
+            for delta in [
+                crate::arm_pose::resolve_finger_pose(&chain, 0.3)
+                    .index
+                    .proximal
+                    .unwrap()
+                    .delta,
+                observed_finger_deltas(&chain, straight_fingers(), 1.0e-5, 0.3)
+                    .unwrap()
+                    .index
+                    .proximal
+                    .unwrap()
+                    .delta,
+            ] {
+                let bent =
+                    joint.rest.global_rotation * delta * joint.rest.global_rotation.inverse() * ray;
+                assert!(bent.y < -0.01, "default finger bent backward: {bent:?}");
+            }
+        }
     }
 
     #[test]

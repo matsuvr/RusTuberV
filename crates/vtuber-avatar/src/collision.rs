@@ -389,6 +389,18 @@ pub(crate) fn bind_collision_geometry(
                 };
                 capsules.extend(fit_capsules(bone, region, &points, orientation)?);
             }
+            for chain in [binding.left_arm, binding.right_arm].into_iter().flatten() {
+                for capsule in capsules
+                    .iter_mut()
+                    .filter(|c| c.region == Region::Upper(chain.side))
+                {
+                    trim_upper_capsule(
+                        capsule,
+                        chain.rest.upper_arm.position,
+                        chain.rest.elbow.position,
+                    )?;
+                }
+            }
             if !capsules.iter().any(|h| h.region == Region::Torso) {
                 return Err(CollisionError::InvalidMesh);
             }
@@ -424,6 +436,27 @@ pub(crate) fn bind_collision_geometry(
             commands.entity(root.id()).insert(Visibility::Hidden);
         }
     }
+}
+
+/// Keep the upper-arm contact proxy near the elbow. The shoulder skin and
+/// torso already occupy the axilla; extending this rigid proxy into it makes
+/// an arm lift start inside a contact that the skeleton cannot resolve.
+fn trim_upper_capsule(
+    capsule: &mut CapsuleCollider,
+    shoulder: Vec3,
+    elbow: Vec3,
+) -> Result<(), CollisionError> {
+    let upper = elbow - shoulder;
+    let length = upper.length();
+    let axis = upper.try_normalize().ok_or(CollisionError::InvalidMesh)?;
+    let proximal_reach = length * 0.25;
+    capsule.radius = capsule.radius.min(proximal_reach);
+    let minimum_centre = capsule.radius - proximal_reach;
+    for endpoint in &mut capsule.endpoints {
+        let along = (*endpoint - elbow).dot(axis);
+        *endpoint += axis * (minimum_centre - along).max(0.0);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -602,6 +635,39 @@ impl CollisionGeometry {
             pairs,
             bones,
         }
+    }
+
+    /// Fit mesh-derived capsule radii in the canonical skeletal default.
+    /// Rounded clothing bounds contain empty space; their initial overlap
+    /// must not push the skeleton out of its specified recovery pose.
+    /// These same radii are used for endpoints and swept path admission.
+    pub fn fit_neutral(
+        &mut self,
+        motion: impl Fn(Entity) -> Option<BoneMotion>,
+        clearance: f32,
+    ) -> Result<(), CollisionError> {
+        let segments = self.posed(&motion)?;
+        let mut radii: Vec<_> = self.capsules.iter().map(|c| c.radius).collect();
+        for &[a, b] in &self.pairs {
+            let (ca, cb) = self.pair([a, b])?;
+            let (sa, sb) = segments
+                .get(a)
+                .zip(segments.get(b))
+                .ok_or(CollisionError::InvalidMesh)?;
+            let available = (segment_distance(sa, sb) as f32 - clearance).max(0.0);
+            let sum = ca.radius + cb.radius;
+            if available < sum {
+                let scale = available / sum;
+                for (index, radius) in [(a, ca.radius), (b, cb.radius)] {
+                    let fitted = radii.get_mut(index).ok_or(CollisionError::InvalidMesh)?;
+                    *fitted = fitted.min(radius * scale);
+                }
+            }
+        }
+        for (capsule, radius) in self.capsules.iter_mut().zip(radii) {
+            capsule.radius = radius;
+        }
+        Ok(())
     }
 
     pub fn bones(&self) -> impl Iterator<Item = Entity> + '_ {
@@ -886,6 +952,68 @@ mod tests {
             translation: Vec3::ZERO,
         })
     }
+    #[test]
+    fn neutral_fit_is_shared_by_pose_and_sweep_contacts() {
+        let mut geometry = CollisionGeometry::new(
+            vec![
+                capsule(1, Region::Torso, 0.0),
+                capsule(2, Region::Forearm(ArmSide::Left), 0.15),
+            ],
+            &[],
+        );
+        assert!(!geometry.pose_is_clear(&identity, 0.0).unwrap());
+        geometry.fit_neutral(identity, 0.002).unwrap();
+        assert!(geometry.pose_is_clear(&identity, 0.0019).unwrap());
+        assert!(
+            geometry
+                .sweep_is_clear(&identity, &identity, |_| 0.0)
+                .unwrap()
+        );
+        let inward = |bone| {
+            identity(bone).map(|mut m| {
+                if bone == entity(2) {
+                    m.translation.x = -0.01;
+                }
+                m
+            })
+        };
+        assert!(!geometry.pose_is_clear(&inward, 0.0).unwrap());
+        assert!(
+            !geometry
+                .sweep_is_clear(&identity, &inward, |_| 0.0)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn upper_capsule_stops_short_of_the_axilla() {
+        let mut upper = CapsuleCollider {
+            bone: entity(2),
+            region: Region::Upper(ArmSide::Left),
+            endpoints: [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, -0.3, 0.0)],
+            radius: 0.06,
+        };
+        let shoulder = Vec3::ZERO;
+        let elbow = Vec3::new(0.0, -0.3, 0.0);
+        trim_upper_capsule(&mut upper, shoulder, elbow).unwrap();
+        let uppermost = upper
+            .endpoints
+            .iter()
+            .map(|p| p.y + upper.radius)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((uppermost - (-0.3 + 0.3 * 0.25)).abs() < 1.0e-6);
+        assert_eq!(upper.endpoints[1], elbow);
+
+        let mut broad_sleeve = CapsuleCollider {
+            endpoints: [shoulder, elbow],
+            radius: 0.2,
+            ..upper
+        };
+        trim_upper_capsule(&mut broad_sleeve, shoulder, elbow).unwrap();
+        assert!((broad_sleeve.radius - 0.075).abs() < 1.0e-6);
+        assert!(broad_sleeve.endpoints[0].y + broad_sleeve.radius <= -0.225 + 1.0e-6);
+    }
+
     #[test]
     fn capsule_distance_and_spherical_degeneracy() {
         let a = Segment::new(Vector::ZERO, Vector::X);

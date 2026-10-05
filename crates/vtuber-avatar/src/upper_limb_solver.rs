@@ -142,6 +142,39 @@ mod tests {
     }
 
     #[test]
+    fn lost_arm_recovers_neutral_palm_and_joint_pose() {
+        let chain = chain(ArmSide::Left);
+        let neutral = state(0.1, 0.3, -0.4, 0.2);
+        let mut target = goal(neutral, &chain);
+        target.weight = Default::default();
+        target.shoulder_weight = 0.0;
+        target.neutral_girdle = Some(Vec2::new(neutral.angles[7], neutral.angles[8]));
+        let geometry = CollisionGeometry::default();
+        let body = HashMap::new();
+        let problem = Problem {
+            chains: [Some(&chain), None],
+            goals: [Some(target), None],
+            geometry: &geometry,
+            body: &body,
+            body_curve: None,
+            tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+        };
+        let mut tracked = neutral;
+        tracked.angles[2] += 0.5;
+        tracked.angles[4] -= 0.3;
+        let (recovered, status) = problem.solve([Some(tracked), None], 96);
+        assert!(matches!(status, SolveStatus::Feasible { .. }));
+        let expected = neutral.forward(&chain).unwrap();
+        let recovered = recovered[0].unwrap().forward(&chain).unwrap();
+        assert!(recovered.wrist.distance(expected.wrist) < 0.002);
+        assert!(recovered.elbow.distance(expected.elbow) < 0.002);
+        let (normal, forward) = recovered.palm.unwrap();
+        let (wanted_normal, wanted_forward) = expected.palm.unwrap();
+        assert!(normal.dot(wanted_normal) > 0.999);
+        assert!(forward.dot(wanted_forward) > 0.999);
+    }
+
+    #[test]
     fn unreachable_palm_rotation_does_not_pull_the_arm_away_from_its_positions() {
         let chain = chain(ArmSide::Left);
         let pose = state(1.3, 1.1, -0.3, 1.5);
@@ -320,7 +353,7 @@ impl Problem<'_> {
                     1.0 - goal.weight.wrist,
                 );
                 // At startup the profile requests a wrist position, not a
-                // measured elbow. Let collision/ROM find the elbow instead
+                // measured elbow. Let the skeletal solve find the elbow instead
                 // of forcing the straight analytic seed as a second goal.
                 // After admission, loss returns to that actual neutral FK.
                 if goal.neutral_girdle.is_some() {
@@ -329,6 +362,23 @@ impl Problem<'_> {
                         neutral.elbow / scale,
                         1.0 - goal.weight.pole,
                     );
+                }
+                // Once the entire arm is unobserved, recover its neutral palm
+                // as well as elbow/wrist positions. Position-only recovery
+                // leaves humeral axial rotation undetermined on a straight arm.
+                let unobserved = 1.0
+                    - goal
+                        .weight
+                        .wrist
+                        .max(goal.weight.pole)
+                        .max(goal.weight.palm);
+                if let Some((current, wanted)) = pose.palm.zip(neutral.palm).and_then(|(a, b)| {
+                    crate::tracked_arm::palm_markers(chain, a)
+                        .zip(crate::tracked_arm::palm_markers(chain, b))
+                }) {
+                    for (current, wanted) in current.into_iter().zip(wanted) {
+                        distance(current / scale, wanted / scale, unobserved);
+                    }
                 }
                 // Missing palm orientation returns only radioulnar/wrist
                 // articulation to rest. A neutral world-space palm would
@@ -679,67 +729,13 @@ impl Problem<'_> {
         )
     }
 
-    /// Initialize a profile from both its analytic seed and the best feasible
-    /// point on a coarse, symmetric grid of the published shoulder/elbow
-    /// domain. A straight-arm seed can be trapped on the outside of a sleeve;
-    /// the grid lets local SQP reach the bent-elbow attention pose. These are
-    /// search nodes, not additional joint limits or anatomical coefficients.
+    /// Resolve the skeletal default without allowing clothing contacts to
+    /// select another shoulder/elbow branch.
     pub fn solve_neutral(
         &self,
         seed: [Option<ArmJoints>; 2],
     ) -> ([Option<ArmJoints>; 2], SolveStatus) {
-        let (mut pose, mut status) = self.solve_at_resolution(seed, 96, 1.0e-4);
-        let samples = |index| {
-            crate::upper_limb::BOUNDS.get(index).map(|&(lo, hi)| {
-                std::array::from_fn::<_, 5, _>(|i| lo + (hi - lo) * i as f32 / 4.0)
-            })
-        };
-        let [Some(plane), Some(elevation), Some(axial), Some(elbow)] = std::array::from_fn(samples)
-        else {
-            return (pose, status);
-        };
-        let mut candidates = Vec::new();
-        for p in plane {
-            for e in elevation {
-                for a in axial {
-                    for f in elbow {
-                        let sc = crate::girdle::rhythm(p, e);
-                        let candidate = seed.map(|s| {
-                            s.map(|s| ArmJoints {
-                                angles: [p, e, a, f, 0.0, 0.0, 0.0, sc[0], sc[1]],
-                                ..s
-                            })
-                        });
-                        let Ok(kinematics) = self.kinematics(candidate) else {
-                            continue;
-                        };
-                        if kinematics.joint_margin >= 0.0 {
-                            candidates.push((candidate, kinematics.error));
-                        }
-                    }
-                }
-            }
-        }
-        // The grid's best feasible seed is independent of visit order.
-        // Check increasing FK task error and stop at the first feasible
-        // point, avoiding skin clipping for worse candidates.
-        candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let best = candidates
-            .into_iter()
-            .find(|(candidate, _)| self.evaluate(*candidate).is_ok_and(|v| self.feasible(&v)));
-        if let Some((candidate, _)) = best {
-            let (other, other_status) = self.solve_at_resolution(candidate, 96, 1.0e-4);
-            if let SolveStatus::Feasible {
-                residual: alternative,
-                ..
-            } = other_status
-                && !matches!(status,SolveStatus::Feasible {residual,..} if residual<=alternative)
-            {
-                pose = other;
-                status = other_status;
-            }
-        }
-        (pose, status)
+        self.solve_at_resolution(seed, 96, 1.0e-4)
     }
 
     pub fn solve(
