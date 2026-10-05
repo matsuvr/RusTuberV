@@ -47,6 +47,20 @@ bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "be60f99d35c4d
 [profile.dev]
 debug = "line-tables-only"
 
+# Keep the real-time anatomy solver usable in the debug application too.
+# Preserve debug assertions and line tables; only optimize its hot crates.
+[profile.dev.package.vtuber-avatar]
+opt-level = 3
+
+[profile.dev.package.vtuber-tracking]
+opt-level = 3
+
+[profile.dev.package.parry3d-f64]
+opt-level = 3
+
+[profile.dev.package.nalgebra]
+opt-level = 3
+
 # Runtime performance profile: whole-crate cross-language-unit optimization.
 # The pipeline is allocation- and inlining-sensitive (per-frame image loops),
 # so thin LTO + single codegen unit measurably improves the hot path.

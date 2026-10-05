@@ -194,6 +194,12 @@ impl Plugin for VtuberAvatarPlugin {
             )
             .add_systems(
                 PostUpdate,
+                crate::direct_pose::apply_direct_head_tracking
+                    .after(crate::upper_limb_runtime::update_upper_limb_targets)
+                    .before(apply_default_arm_pose),
+            )
+            .add_systems(
+                PostUpdate,
                 update_direct_look_at_input
                     .after(apply_direct_body_tracking)
                     .before(VrmSystemSets::GazeControl),

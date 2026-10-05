@@ -1,5 +1,5 @@
 //! RRT-Connect (Kuffner & LaValle, ICRA 2000) for contact-trapped IK branches.
-//! Tree edges use the continuous ROM/skin checks, never just point samples.
+//! Tree edges use the continuous ROM/capsule checks, never just point samples.
 
 use crate::{
     upper_limb::{ArmJoints, BOUNDS},
@@ -79,7 +79,7 @@ impl Space<'_, '_> {
             ..*self.problem
         };
         // Most sampled configurations fail a joint bound; reject them before
-        // posing skin. Then stop at the first collision instead of computing
+        // posing capsules. Then stop at the first collision instead of computing
         // the full distance/Jacobian input that only the SQP needs.
         let Ok(evaluation) = problem.kinematics(to) else {
             return false;
@@ -87,14 +87,17 @@ impl Space<'_, '_> {
         if !problem.feasible(&evaluation) {
             return false;
         }
-        problem.geometry.pose_is_clear(&|bone| {
-            evaluation
-                .arms
-                .iter()
-                .flatten()
-                .find_map(|a| a.motion.get(&bone).copied())
-                .or_else(|| problem.body.get(&bone).copied())
-        }) == Ok(true)
+        problem.geometry.pose_is_clear(
+            &|bone| {
+                evaluation
+                    .arms
+                    .iter()
+                    .flatten()
+                    .find_map(|a| a.motion.get(&bone).copied())
+                    .or_else(|| problem.body.get(&bone).copied())
+            },
+            problem.contact_offset() - problem.tolerance,
+        ) == Ok(true)
             && check_transition(&problem, from, to)
     }
 
@@ -160,24 +163,24 @@ pub(crate) fn connect(
     if space.clear(start, goal) {
         return Ok(vec![space.pose(goal)]);
     }
-    // A streamed observation need not wait for a complete route. Backtrack
-    // the proposed displacement and admit only the part whose full segment
-    // satisfies the same joint and skin checks. A held target can still use
-    // the global planner to escape a contact-trapped branch.
-    if obsolete.load(std::sync::atomic::Ordering::Relaxed) {
-        let mut amount = 0.5;
-        for _ in 0..8 {
-            let point = std::array::from_fn(|i| {
-                start
-                    .get(i)
-                    .zip(goal.get(i))
-                    .map_or(0.0, |(a, b)| a + (b - a) * amount)
-            });
-            if space.clear(start, point) {
-                return Ok(vec![space.pose(point)]);
-            }
-            amount *= 0.5;
+    // A streamed observation need not wait for a complete route. First admit
+    // a feasible prefix using ordinary backtracking, even when the cheap local
+    // solve finished before the next observation arrived. Starting global RRT
+    // first would spend the whole camera interval and then discard its work.
+    let mut amount = 0.5;
+    for _ in 0..8 {
+        let point = std::array::from_fn(|i| {
+            start
+                .get(i)
+                .zip(goal.get(i))
+                .map_or(0.0, |(a, b)| a + (b - a) * amount)
+        });
+        if space.clear(start, point) {
+            return Ok(vec![space.pose(point)]);
         }
+        amount *= 0.5;
+    }
+    if obsolete.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(SolveStatus::Solving);
     }
     let mut a = vec![Node {
