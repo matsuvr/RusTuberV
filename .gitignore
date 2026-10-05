@@ -56,6 +56,8 @@ desktop.ini
 # runtime debug traces it references, so nothing under it is committed.
 /data/
 *.teachercapture/
+/docs/
+
 # Stray capture artifacts that must never be committed even if they appear
 # outside data/raw/ (raw face video can reveal the capture location).
 /tmp_arkit_take/
