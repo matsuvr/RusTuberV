@@ -122,6 +122,10 @@ fn avatar_post_update_schedule_orders_body_arms_gaze_and_expressions() {
                 ("plant_feet", "update_upper_limb_targets"),
                 ("plant_feet", "apply_default_arm_pose"),
                 ("update_upper_limb_targets", "apply_default_arm_pose"),
+                // Springs must sample the displayed body and arm pose, not
+                // the producer body and previous frame's arm colliders.
+                ("apply_direct_head_tracking", "update_spring_bones"),
+                ("apply_default_arm_pose", "update_spring_bones"),
             ] {
                 assert_before(schedule, before, after);
             }

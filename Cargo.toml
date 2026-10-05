@@ -40,15 +40,15 @@ mediapipe = { path = "vendor/mediapipe-rs" }
 [patch."https://github.com/not-elm/bevy_vrm1"]
 bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "be60f99d35c4d786b0d17c93aef07e60aa31f34d" }
 
-# Build artifact disk policy (AGENTS.md): full debug info in dev builds is
-# the single largest contributor to target/ size (tens of GiB). Line tables
-# keep panic backtraces readable with file/line numbers; do not restore
-# "debug = true" / 2.
+# Keep dev and test artifacts small. The test profile inherits dev settings.
+# This removes debugger symbols and incremental build caches;
+# re-enable them only when explicitly needed for a debugging session.
 [profile.dev]
-debug = "line-tables-only"
+debug = 0
+incremental = false
 
 # Keep the real-time anatomy solver usable in the debug application too.
-# Preserve debug assertions and line tables; only optimize its hot crates.
+# Preserve debug assertions; only optimize its hot crates.
 [profile.dev.package.vtuber-avatar]
 opt-level = 3
 

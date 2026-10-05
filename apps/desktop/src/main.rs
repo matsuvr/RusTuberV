@@ -100,13 +100,12 @@ fn run() -> Result<(), StartupError> {
         AssetSourceBuilder::platform_default(asset_source_root(&managed_root)?, None),
     );
 
-    // Keep short frame schedules on their caller, but let the asynchronous
-    // anatomy solve use more of a larger host. Small hosts still size down.
-    let mut pools = bevy::app::TaskPoolOptions {
+    // Keep Bevy's default pool proportions: a three-CPU host needs one
+    // background worker so pose solving leaves room for inference and rendering.
+    let pools = bevy::app::TaskPoolOptions {
         max_total_threads: 12,
         ..default()
     };
-    pools.async_compute.percent = 0.5;
     let mut app = App::new();
     app.insert_resource(sources)
         // Avatar output must keep its cadence while OBS or another app has focus.

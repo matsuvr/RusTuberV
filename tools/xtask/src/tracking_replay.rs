@@ -80,8 +80,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     orchestrator.set_camera_list(source.enumerate().map_err(|e| e.to_string())?);
     // Windows can report all host CPUs even with a restricted process affinity.
     // Match the pool budget to the independently enforced process CPU budget.
-    let mut pools = bevy::app::TaskPoolOptions::with_num_threads(threads);
-    pools.async_compute.percent = 0.5;
+    let pools = bevy::app::TaskPoolOptions::with_num_threads(threads);
     let mut app = App::new();
     app.insert_resource(sources)
         .insert_resource(bevy::winit::WinitSettings::continuous())
@@ -183,6 +182,7 @@ struct Row {
     face_inference_ms: Option<f64>,
     pose_hand_inference_ms: Option<f64>,
     face_frames: u64,
+    face_no_face_frames: u64,
     pose_hand_frames: u64,
     arm_source_seq: Option<u64>,
     arm_first_apply_ms: Option<f64>,
@@ -276,7 +276,9 @@ fn sample(world: &mut World, m: &mut Measurement) -> Result<bool, String> {
         .map(|t| now.0.saturating_sub(t.0) as f64 / 1e6);
     let new_arm = arm_seq != m.previous_arm;
     m.previous_arm = arm_seq;
-    let face_ms = (face.frames_processed != m.previous_face)
+    // A completed no-face result is still an inference, not a skipped image.
+    let face_completed = face.frames_processed + face.no_face_frames;
+    let face_ms = (face_completed != m.previous_face)
         .then_some(face.last_inference_duration)
         .flatten()
         .map(|d| d.as_secs_f64() * 1000.0);
@@ -284,7 +286,7 @@ fn sample(world: &mut World, m: &mut Measurement) -> Result<bool, String> {
         .then_some(pose.last_inference_duration)
         .flatten()
         .map(|d| d.as_secs_f64() * 1000.0);
-    m.previous_face = face.frames_processed;
+    m.previous_face = face_completed;
     m.previous_pose = pose.frames_processed;
     let mut joints = Vec::new();
     if let Some((binding, _, _)) = current {
@@ -326,6 +328,7 @@ fn sample(world: &mut World, m: &mut Measurement) -> Result<bool, String> {
         face_inference_ms: face_ms,
         pose_hand_inference_ms: pose_ms,
         face_frames: face.frames_processed,
+        face_no_face_frames: face.no_face_frames,
         pose_hand_frames: pose.frames_processed,
         arm_source_seq: arm_seq,
         arm_first_apply_ms: new_arm.then_some(age).flatten(),
@@ -387,6 +390,8 @@ fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
         return Err("incomplete pipeline: face, Pose/Hand and admitted tracked arms are required; partial trace retained".into());
     }
     let duration = last.video_seconds - first.video_seconds;
+    let face_detected = last.face_frames - first.face_frames;
+    let face_no_face = last.face_no_face_frames - first.face_no_face_frames;
     let adapter = world
         .get_resource::<bevy::render::renderer::RenderAdapterInfo>()
         .map(|info| {
@@ -426,7 +431,9 @@ fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
         "main_interval_ms": distribution(rows.iter().map(|r| r.main_interval_ms)),
         "wall_fps": rows.len() as f64 * 1000.0 / rows.iter().map(|r| r.main_interval_ms).sum::<f64>(),
         "main_world_ms": distribution(rows.iter().map(|r| r.main_world_ms)),
-        "face_hz": (last.face_frames - first.face_frames) as f64 / duration,
+        "face_hz": (face_detected + face_no_face) as f64 / duration,
+        "face_detected_hz": face_detected as f64 / duration,
+        "face_no_face_frames": face_no_face,
         "pose_hand_hz": (last.pose_hand_frames - first.pose_hand_frames) as f64 / duration,
         "face_inference_ms": distribution(rows.iter().filter_map(|r| r.face_inference_ms)),
         "pose_hand_inference_ms": distribution(rows.iter().filter_map(|r| r.pose_hand_inference_ms)),

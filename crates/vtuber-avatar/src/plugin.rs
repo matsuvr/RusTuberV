@@ -165,6 +165,8 @@ impl Plugin for VtuberAvatarPlugin {
             // Read the final torso/head transforms and rendered morph weights.
             // The arm compositor follows node constraints so no later node
             // constraint can overwrite an admitted anatomical arm pose.
+            // Finish body/head/arms before the pre-spring propagation: springs
+            // must use the displayed pose and its current collider positions.
             .add_systems(
                 PostUpdate,
                 crate::upper_limb_runtime::restore_body_inputs
@@ -174,7 +176,7 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(
                 PostUpdate,
                 crate::collision::bind_collision_geometry
-                    .after(VrmSystemSets::SpringBone)
+                    .after(VrmSystemSets::Expressions)
                     .before(crate::upper_limb_runtime::update_upper_limb_targets),
             )
             .add_systems(
@@ -183,14 +185,15 @@ impl Plugin for VtuberAvatarPlugin {
                     .after(update_body_tracking_position_input)
                     .after(apply_direct_body_tracking)
                     .after(apply_direct_body_position)
-                    .after(VrmSystemSets::SpringBone)
+                    .after(VrmSystemSets::Expressions)
                     .before(apply_default_arm_pose),
             )
             .add_systems(
                 PostUpdate,
                 apply_default_arm_pose
                     .after(apply_direct_body_tracking)
-                    .after(apply_direct_body_position),
+                    .after(apply_direct_body_position)
+                    .before(VrmSystemSets::PropagateAfterExpressions),
             )
             .add_systems(
                 PostUpdate,
