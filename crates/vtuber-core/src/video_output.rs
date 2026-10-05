@@ -66,8 +66,8 @@ pub struct VideoOutputFrame {
     frame_seq: FrameSeq,
     /// Completion timestamp from the process-local monotonic clock.
     captured_at: MonoTimeNs,
-    /// Packed, owned frame bytes.
-    data: Arc<[u8]>,
+    /// Shared packed bytes, retaining the owned Vec's allocation.
+    data: Arc<Vec<u8>>,
 }
 
 impl VideoOutputFrame {
@@ -140,15 +140,15 @@ impl VideoOutputFrame {
             pixel_format: VideoOutputPixelFormat::Bgra8StraightAlpha,
             frame_seq,
             captured_at,
-            data: data.into(),
+            data: Arc::new(data),
         })
     }
 
     /// Converts a GPU texture readback with aligned rows into one packed frame.
     ///
-    /// The readback buffer is copied row-by-row because wgpu requires the
-    /// source stride to be aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`. The
-    /// resulting frame has no padding and is normalized to straight alpha.
+    /// Takes ownership of the readback allocation and normalizes it to straight
+    /// alpha in place. Padded rows are compacted within the same allocation;
+    /// already-packed rows (including the default 1920-pixel width) need no copy.
     ///
     /// # Errors
     /// Rejects zero dimensions, arithmetic overflow, a source stride smaller
@@ -160,7 +160,7 @@ impl VideoOutputFrame {
         source_stride_bytes: usize,
         frame_seq: FrameSeq,
         captured_at: MonoTimeNs,
-        readback: &[u8],
+        mut readback: Vec<u8>,
     ) -> Result<Self, VideoOutputFrameError> {
         let packed_stride = packed_stride(width)?;
         if source_stride_bytes < packed_stride {
@@ -178,19 +178,22 @@ impl VideoOutputFrame {
         }
 
         let packed_len = checked_len(packed_stride, height)?;
-        let mut data = vec![0; packed_len];
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "the row windows are validated above: `source_stride_bytes >= packed_stride`, `readback.len() == expected_readback_len` and `data.len() == packed_len`"
-        )]
-        for row in 0..height as usize {
-            let source_start = row * source_stride_bytes;
-            let destination_start = row * packed_stride;
-            data[destination_start..destination_start + packed_stride]
-                .copy_from_slice(&readback[source_start..source_start + packed_stride]);
+        if source_stride_bytes != packed_stride {
+            // The validated strides and length keep both windows in bounds.
+            // Moving toward the front preserves all rows not yet visited;
+            // copy_within also handles overlap within a row.
+            for row in 1..height as usize {
+                let source_start = row * source_stride_bytes;
+                let destination_start = row * packed_stride;
+                readback.copy_within(
+                    source_start..source_start + packed_stride,
+                    destination_start,
+                );
+            }
+            readback.truncate(packed_len);
         }
-        unpremultiply_bgra8_in_place(&mut data)?;
-        Self::new_bgra8(width, height, frame_seq, captured_at, data)
+        unpremultiply_bgra8_in_place(&mut readback)?;
+        Self::new_bgra8(width, height, frame_seq, captured_at, readback)
     }
 }
 
@@ -304,14 +307,9 @@ mod tests {
 
     #[test]
     fn accessors_expose_the_validated_frame_without_changing_its_layout() {
-        let frame = VideoOutputFrame::new_bgra8(
-            2,
-            1,
-            FrameSeq(3),
-            MonoTimeNs(4),
-            vec![1, 2, 3, 4, 5, 6, 7, 8],
-        )
-        .unwrap();
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let allocation = data.as_ptr();
+        let frame = VideoOutputFrame::new_bgra8(2, 1, FrameSeq(3), MonoTimeNs(4), data).unwrap();
         assert_eq!(
             (frame.width(), frame.height(), frame.stride_bytes()),
             (2, 1, 8)
@@ -323,6 +321,7 @@ mod tests {
         assert_eq!(frame.frame_seq(), FrameSeq(3));
         assert_eq!(frame.captured_at(), MonoTimeNs(4));
         assert_eq!(frame.data(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(frame.data().as_ptr(), allocation);
         assert_eq!(frame.data().as_ptr(), frame.clone().data().as_ptr());
     }
 
@@ -439,7 +438,7 @@ mod tests {
         readback[..4].copy_from_slice(&[25, 50, 75, 128]);
         readback[4..].copy_from_slice(&[99, 98, 97, 96]);
         let frame =
-            VideoOutputFrame::from_padded_bgra8(1, 1, 8, FrameSeq(3), timestamp(), &readback)
+            VideoOutputFrame::from_padded_bgra8(1, 1, 8, FrameSeq(3), timestamp(), readback)
                 .expect("padded one-pixel readback is valid");
         assert_eq!(&*frame.data, &[50, 100, 149, 128]);
         let mut again = frame.data.to_vec();
@@ -457,7 +456,7 @@ mod tests {
         readback[..4].copy_from_slice(&[25, 50, 75, 128]);
         readback[4..].copy_from_slice(&[99, 98, 97, 96]);
         let frame =
-            VideoOutputFrame::from_padded_bgra8(1, 1, 8, FrameSeq(3), timestamp(), &readback)
+            VideoOutputFrame::from_padded_bgra8(1, 1, 8, FrameSeq(3), timestamp(), readback)
                 .expect("padded one-pixel readback is valid");
         assert_eq!(frame.stride_bytes, 4);
         assert_eq!(&*frame.data, &[50, 100, 149, 128]);
@@ -469,16 +468,25 @@ mod tests {
 
     #[test]
     fn row_padding_is_discarded_for_every_row() {
-        let mut readback = vec![0_u8; 16];
-        readback[..4].copy_from_slice(&[10, 20, 30, 255]);
-        readback[4..8].copy_from_slice(&[1, 2, 3, 4]);
-        readback[8..12].copy_from_slice(&[40, 50, 60, 0]);
-        readback[12..16].copy_from_slice(&[5, 6, 7, 8]);
+        // The second and third rows overlap their destinations during compaction.
+        let readback = vec![
+            10, 20, 30, 255, 11, 21, 31, 255, 12, 22, 32, 255, 99, 98, 97, 96, 25, 50, 75, 128, 40,
+            50, 60, 0, 13, 23, 33, 255, 95, 94, 93, 92, 14, 24, 34, 255, 15, 25, 35, 255, 16, 26,
+            36, 255, 91, 90, 89, 88,
+        ];
+        let allocation = readback.as_ptr();
         let frame =
-            VideoOutputFrame::from_padded_bgra8(1, 2, 8, FrameSeq(4), timestamp(), &readback)
-                .expect("two padded rows are valid");
-        assert_eq!(frame.stride_bytes, 4);
-        assert_eq!(&*frame.data, &[10, 20, 30, 255, 0, 0, 0, 0]);
+            VideoOutputFrame::from_padded_bgra8(3, 3, 16, FrameSeq(4), timestamp(), readback)
+                .expect("three padded rows are valid");
+        assert_eq!(frame.stride_bytes(), 12);
+        assert_eq!(frame.data().as_ptr(), allocation);
+        assert_eq!(
+            frame.data(),
+            &[
+                10, 20, 30, 255, 11, 21, 31, 255, 12, 22, 32, 255, 50, 100, 149, 128, 0, 0, 0, 0,
+                13, 23, 33, 255, 14, 24, 34, 255, 15, 25, 35, 255, 16, 26, 36, 255,
+            ]
+        );
         assert_eq!(frame.frame_seq, FrameSeq(4));
     }
 
@@ -513,14 +521,14 @@ mod tests {
             })
         );
         assert_eq!(
-            VideoOutputFrame::from_padded_bgra8(2, 1, 4, FrameSeq(0), timestamp(), &[0; 4]),
+            VideoOutputFrame::from_padded_bgra8(2, 1, 4, FrameSeq(0), timestamp(), vec![0; 4]),
             Err(VideoOutputFrameError::InvalidStride {
                 minimum: 8,
                 actual: 4
             })
         );
         assert_eq!(
-            VideoOutputFrame::from_padded_bgra8(1, 1, 8, FrameSeq(0), timestamp(), &[0; 4]),
+            VideoOutputFrame::from_padded_bgra8(1, 1, 8, FrameSeq(0), timestamp(), vec![0; 4]),
             Err(VideoOutputFrameError::DataLength {
                 expected: 8,
                 actual: 4

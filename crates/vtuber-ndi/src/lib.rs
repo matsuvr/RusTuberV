@@ -1372,7 +1372,7 @@ mod tests {
             Err(vtuber_core::VideoOutputFrameError::DataLength { .. })
         ));
         assert!(matches!(
-            VideoOutputFrame::from_padded_bgra8(2, 1, 4, FrameSeq(1), MonoTimeNs(1), &[0; 4]),
+            VideoOutputFrame::from_padded_bgra8(2, 1, 4, FrameSeq(1), MonoTimeNs(1), vec![0; 4]),
             Err(vtuber_core::VideoOutputFrameError::InvalidStride { .. })
         ));
     }

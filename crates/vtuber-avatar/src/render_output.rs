@@ -308,7 +308,7 @@ fn sync_output_camera(
 }
 
 fn handle_output_readback(
-    event: On<ReadbackComplete>,
+    mut event: On<ReadbackComplete>,
     mut commands: Commands,
     state: Res<AvatarOutputState>,
     target: Res<AvatarOutputTarget>,
@@ -324,13 +324,15 @@ fn handle_output_readback(
     let profile = target.profile();
     let packed_stride = profile.packed_stride_bytes();
     let source_stride = RenderDevice::align_copy_bytes_per_row(packed_stride);
+    // This is the sole consumer of this camera's ReadbackComplete bytes.
+    let readback = std::mem::take(&mut event.data);
     match VideoOutputFrame::from_padded_bgra8(
         profile.width,
         profile.height,
         source_stride,
         slot.next_frame_seq(),
         monotonic_now(),
-        &event.data,
+        readback,
     ) {
         Ok(frame) => slot.publish(frame),
         Err(error) => {
@@ -407,6 +409,43 @@ mod tests {
                 depth_or_array_layers: 1,
             }
         );
+    }
+
+    #[test]
+    fn full_hd_readback_reuses_the_event_allocation_and_converts_alpha() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<AvatarOutputState>()
+            .init_resource::<AvatarOutputFrameSlot>()
+            .add_systems(Startup, setup_output_camera);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .activate();
+        let output = camera_entity(&mut app, false);
+        let profile = app.world().resource::<AvatarOutputTarget>().profile();
+        let stride = profile.packed_stride_bytes();
+        assert_eq!(RenderDevice::align_copy_bytes_per_row(stride), stride);
+        let data = [25, 50, 75, 128, 40, 50, 60, 255, 9, 10, 11, 0]
+            .repeat(stride * profile.height as usize / 12);
+        let allocation = data.as_ptr();
+        app.world_mut().trigger(ReadbackComplete {
+            entity: output,
+            data,
+        });
+
+        let slot = app.world().resource::<AvatarOutputFrameSlot>();
+        let frame = slot.latest().expect("converted readback");
+        assert_eq!(frame.data().as_ptr(), allocation);
+        assert_eq!(frame.data().len(), stride * profile.height as usize);
+        assert!(
+            frame
+                .data()
+                .chunks_exact(12)
+                .all(|pixels| { pixels == [50, 100, 149, 128, 40, 50, 60, 255, 0, 0, 0, 0] })
+        );
+        assert_eq!(slot.received_frames(), 1);
+        assert_eq!(slot.rejected_frames(), 0);
     }
 
     #[test]
