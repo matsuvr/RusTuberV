@@ -432,10 +432,8 @@ pub struct DirectPoseParams<'w, 's> {
     rests: Query<'w, 's, (&'static RestTransform, &'static RestGlobalTransform)>,
     time: Res<'w, Time>,
     arm_control: Option<Res<'w, crate::arm_pipeline::TrackedArmControl>>,
-    arm_selection: Option<Res<'w, crate::arm_pipeline::ArmSourceSelection>>,
     mirror: Option<Res<'w, crate::mirror::AvatarMotionMirror>>,
     bindings: Query<'w, 's, &'static crate::binding::AvatarBinding>,
-    collision: Query<'w, 's, &'static crate::collision::AvatarCollision>,
     bone_states: Local<'s, HashMap<Entity, DirectBoneState>>,
     root_rest_rotations: Local<'s, HashMap<Entity, Quat>>,
     admission: Option<Res<'w, crate::upper_limb_runtime::UpperLimbState>>,
@@ -451,10 +449,8 @@ fn apply_direct_tracking(params: DirectPoseParams<'_, '_>, head_only: bool) {
         rests,
         time,
         arm_control,
-        arm_selection,
         mirror,
         bindings,
-        collision,
         mut bone_states,
         mut root_rest_rotations,
         admission,
@@ -478,42 +474,25 @@ fn apply_direct_tracking(params: DirectPoseParams<'_, '_>, head_only: bool) {
             .or_insert(root_global.rotation());
         let profile = profile.unwrap_or(&default_profile);
         let pose = sanitize_input(input);
-        let constrained_body = collision
-            .get(root)
-            .is_ok_and(|c| c.0.as_ref().is_ok_and(|g| !g.capsules.is_empty()));
-        // A Pose stream owns the torso independently of the face. Missing
-        // hips mean no observed torso, never permission to relabel head yaw
-        // as measured chest yaw. Its retained loss weight returns to neutral.
-        let observed_body = arm_control
-            .as_ref()
-            .and_then(|control| {
-                let binding = bindings.get(root).ok()?;
-                (control.generation == Some(binding.generation))
-                    .then_some(control.frame)
-                    .flatten()
-                    .map(|frame| {
-                        let target = frame.thorax.map(|target| {
-                            if mirror.as_ref().is_none_or(|m| m.is_enabled()) {
-                                target.mirrored()
-                            } else {
-                                target
-                            }
-                        });
-                        target.map_or(Quat::IDENTITY, |target| {
-                            let q = Quat::from_array(target.rotation);
-                            let q = control.view_to_model * q * control.view_to_model.inverse();
-                            Quat::IDENTITY.slerp(q, target.weight)
-                        })
-                    })
-            })
-            .or_else(|| {
-                arm_selection
-                    .as_ref()
-                    .filter(|selection| {
-                        selection.mode == crate::arm_pipeline::ArmPoseSourceKind::TrackedPose
-                    })
-                    .map(|_| Quat::IDENTITY)
-            });
+        // Observed thorax motion is added to the existing artistic head follow.
+        // Missing hips leave that follow intact; they provide no torso rotation.
+        let observed_body = arm_control.as_ref().and_then(|control| {
+            let binding = bindings.get(root).ok()?;
+            (control.generation == Some(binding.generation))
+                .then_some(control.frame)
+                .flatten()
+                .and_then(|frame| frame.thorax)
+                .map(|target| {
+                    let target = if mirror.as_ref().is_none_or(|m| m.is_enabled()) {
+                        target.mirrored()
+                    } else {
+                        target
+                    };
+                    let q = Quat::from_array(target.rotation);
+                    let q = control.view_to_model * q * control.view_to_model.inverse();
+                    Quat::IDENTITY.slerp(q, target.weight)
+                })
+        });
         let available = [
             true,
             neck.is_some(),
@@ -616,10 +595,11 @@ fn apply_direct_tracking(params: DirectPoseParams<'_, '_>, head_only: bool) {
                 continue;
             };
 
-            let target_angles = if observed_body.is_some() {
+            let absolute_head = bone.index <= NECK && (live_head || observed_body.is_some());
+            let target_angles = if absolute_head {
                 // Smooth the absolute head intent, before parent compensation.
                 // A chest turn must not be delayed a second time in the neck.
-                if bone.index <= NECK { pose } else { Vec3::ZERO }
+                pose
             } else {
                 Vec3::new(
                     clamp_angle(
@@ -637,31 +617,27 @@ fn apply_direct_tracking(params: DirectPoseParams<'_, '_>, head_only: bool) {
                 )
             };
             let state = bone_states.entry(bone.entity).or_default();
-            state.smoothed_angles = if constrained_body && !live_head {
-                target_angles
-            } else {
-                Vec3::new(
-                    smooth_angle_half_life(
-                        state.smoothed_angles.x,
-                        target_angles.x,
-                        half_lives[bone.index],
-                        dt,
-                    ),
-                    smooth_angle_half_life(
-                        state.smoothed_angles.y,
-                        target_angles.y,
-                        half_lives[bone.index],
-                        dt,
-                    ),
-                    smooth_angle_half_life(
-                        state.smoothed_angles.z,
-                        target_angles.z,
-                        half_lives[bone.index],
-                        dt,
-                    ),
-                )
-            };
-            let tracking_target = if let Some(torso) = observed_body {
+            state.smoothed_angles = Vec3::new(
+                smooth_angle_half_life(
+                    state.smoothed_angles.x,
+                    target_angles.x,
+                    half_lives[bone.index],
+                    dt,
+                ),
+                smooth_angle_half_life(
+                    state.smoothed_angles.y,
+                    target_angles.y,
+                    half_lives[bone.index],
+                    dt,
+                ),
+                smooth_angle_half_life(
+                    state.smoothed_angles.z,
+                    target_angles.z,
+                    half_lives[bone.index],
+                    dt,
+                ),
+            );
+            let tracking_target = if absolute_head {
                 let head_rotation = Quat::from_euler(
                     EulerRot::YXZ,
                     state.smoothed_angles.x,
@@ -684,22 +660,41 @@ fn apply_direct_tracking(params: DirectPoseParams<'_, '_>, head_only: bool) {
                         };
                         parent_delta.slerp(head_rotation, share)
                     }
-                    index if index == torso_index => torso,
-                    _ => Quat::IDENTITY,
+                    _ => head_rotation,
                 };
                 // The next joint receives only the residual; the hierarchy
                 // carries chest rotation into head/neck exactly once.
                 let mut residual = parent_delta.inverse() * wanted;
-                if bone.index <= NECK {
-                    let (yaw, pitch, roll) = residual.to_euler(EulerRot::YXZ);
-                    residual = Quat::from_euler(
-                        EulerRot::YXZ,
-                        clamp_angle(yaw, limits[bone.index].yaw_radians),
-                        clamp_angle(pitch, limits[bone.index].pitch_radians),
-                        clamp_angle(roll, limits[bone.index].roll_radians),
-                    );
-                }
+                let (yaw, pitch, roll) = residual.to_euler(EulerRot::YXZ);
+                residual = Quat::from_euler(
+                    EulerRot::YXZ,
+                    clamp_angle(yaw, limits[bone.index].yaw_radians),
+                    clamp_angle(pitch, limits[bone.index].pitch_radians),
+                    clamp_angle(roll, limits[bone.index].roll_radians),
+                );
                 rest_tf.rotation * crate::skeleton::rest_delta(residual, rest_model)
+            } else if bone.index == torso_index
+                && let Some(torso) = observed_body
+            {
+                let rest_model = root_rest_rotation.inverse() * rest_gtf.rotation();
+                let rest_parent = rest_model * rest_tf.rotation.inverse();
+                let parent_model = root_global.rotation().inverse() * parent_global.rotation();
+                let parent_delta = parent_model * rest_parent.inverse();
+                let follow = Quat::from_euler(
+                    EulerRot::YXZ,
+                    state.smoothed_angles.x,
+                    -state.smoothed_angles.y,
+                    -state.smoothed_angles.z,
+                );
+                let combined = parent_delta.inverse() * torso * parent_delta * follow;
+                let (yaw, pitch, roll) = combined.to_euler(EulerRot::YXZ);
+                let combined = Quat::from_euler(
+                    EulerRot::YXZ,
+                    clamp_angle(yaw, limits[bone.index].yaw_radians),
+                    clamp_angle(pitch, limits[bone.index].pitch_radians),
+                    clamp_angle(roll, limits[bone.index].roll_radians),
+                );
+                rest_tf.rotation * crate::skeleton::rest_delta(combined, rest_model)
             } else {
                 direct_tracking_target(state.smoothed_angles, root_rest_rotation, rest_tf, rest_gtf)
             };

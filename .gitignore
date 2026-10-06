@@ -51,12 +51,9 @@ desktop.ini
 
 # Development-only capture datasets and raw device frames stay outside the
 # repository (privacy boundary). Only derived numeric fixtures may be
-# committed. The whole data/ tree is local-only output of the docs' data-prep
-# commands (docs/eye-closure-run-v2-20260913.md: "not committed") and the
-# runtime debug traces it references, so nothing under it is committed.
+# committed. The whole data/ tree is local-only output.
 /data/
 *.teachercapture/
-/docs/
 
 # Stray capture artifacts that must never be committed even if they appear
 # outside data/raw/ (raw face video can reveal the capture location).

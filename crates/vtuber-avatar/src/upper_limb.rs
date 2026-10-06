@@ -57,19 +57,6 @@ pub(crate) struct ArmCandidate {
 }
 
 impl ArmJoints {
-    /// Interpret the shared resting profile in the imported model's space.
-    pub fn resting(
-        chain: &ArmChainBinding,
-        profile: crate::arm::ArmPoseProfile,
-    ) -> Option<(Self, ArmIkTarget)> {
-        let target = crate::arm::default_arm_target(chain, profile).ok()?;
-        let solution =
-            crate::arm::solve_two_bone_arm(ArmIkInput::from_chain(chain, target)).ok()?;
-        let mut joints = Self::from_solution(chain, solution)?;
-        joints.rest_curl = profile.finger_curl_radians;
-        Some((joints, target))
-    }
-
     pub fn valid(&self) -> bool {
         self.angles
             .iter()

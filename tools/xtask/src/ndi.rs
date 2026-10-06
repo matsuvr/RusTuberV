@@ -14,7 +14,6 @@ use vtuber_inference::MediaPipeTask;
 use vtuber_ndi::runtime_identity::{RUNTIME_FILE_NAMES, runtime_file_in, runtime_name_in_binary};
 const LICENSE_FILE: &str = "NDI_SDK_LICENSE_AGREEMENT.pdf";
 const RUNTIME_LICENSES_FILE: &str = "Processing.NDI.Lib.Licenses.txt";
-const USAGE_FILE: &str = "README_NDI.md";
 const NOTICES_FILE: &str = "THIRD_PARTY_NOTICES.md";
 const MANIFEST_FILE: &str = "NDI_RUNTIME_MANIFEST.txt";
 const EXECUTABLE_FILE: &str = "RusTuberV.exe";
@@ -75,7 +74,6 @@ fn stage_package(options: PackageOptions) -> Result<(), String> {
     require_file(&options.runtime_dll, "NDI runtime DLL")?;
     require_file(&options.sdk_license, "exact NDI SDK license agreement")?;
     require_file(&options.runtime_licenses, "NDI runtime 3rd-party licenses")?;
-    require_file(&options.usage, "NDI user usage notes")?;
     require_file(&options.model_manifest, "face model manifest")?;
     require_file(&options.model_task, "MediaPipe face task bundle")?;
     require_file(&options.model_license, "MediaPipe model license")?;
@@ -118,7 +116,6 @@ fn stage_package(options: PackageOptions) -> Result<(), String> {
         options.output.join(&model_task_file),
         options.output.join(MODEL_LICENSE_FILE),
         options.output.join(RUNTIME_LICENSES_FILE),
-        options.output.join(USAGE_FILE),
     ];
     if !options.force && destinations.iter().any(|destination| destination.exists()) {
         return Err(
@@ -135,7 +132,6 @@ fn stage_package(options: PackageOptions) -> Result<(), String> {
     copy_file_if_unchanged(&options.model_task, &destinations[6])?;
     copy_file_if_unchanged(&options.model_license, &destinations[7])?;
     copy_file_if_unchanged(&options.runtime_licenses, &destinations[8])?;
-    copy_file_if_unchanged(&options.usage, &destinations[9])?;
 
     let package_sha = if options.package_archive_available {
         options.sdk_package_sha256.clone()
@@ -155,7 +151,6 @@ fn stage_package(options: PackageOptions) -> Result<(), String> {
          license_sha256={}\n\
          runtime_licenses_file={RUNTIME_LICENSES_FILE}\n\
          runtime_licenses_sha256={}\n\
-         usage_file={USAGE_FILE}\n\
          face_task_file={model_task_file}\n\
          face_task_sha256={}\n\
          face_model_license_file={MODEL_LICENSE_FILE}\n\
@@ -205,7 +200,6 @@ fn verify_package(package_dir: &Path) -> Result<(), String> {
         NOTICES_FILE,
         MANIFEST_FILE,
         RUNTIME_LICENSES_FILE,
-        USAGE_FILE,
     ];
     for file in expected {
         require_file(&package_dir.join(file), file)?;
@@ -253,7 +247,6 @@ fn verify_package(package_dir: &Path) -> Result<(), String> {
     require_manifest(&manifest, "runtime_file", runtime_name)?;
     require_manifest(&manifest, "license_file", LICENSE_FILE)?;
     require_manifest(&manifest, "runtime_licenses_file", RUNTIME_LICENSES_FILE)?;
-    require_manifest(&manifest, "usage_file", USAGE_FILE)?;
     require_manifest(&manifest, "application_local", "true")?;
     require_manifest(&manifest, "system_path_install", "false")?;
     require_manifest(&manifest, "ndi_tools_included", "false")?;
@@ -527,7 +520,6 @@ struct PackageOptions {
     sdk_package_sha256: String,
     package_archive_available: bool,
     runtime_licenses: PathBuf,
-    usage: PathBuf,
     zip: Option<PathBuf>,
     model_manifest: PathBuf,
     model_task: PathBuf,
@@ -546,7 +538,6 @@ impl PackageOptions {
         let mut sdk_package_sha256 = None;
         let mut package_archive_available = true;
         let mut runtime_licenses = None;
-        let mut usage = workspace_root.join("docs/NDI_USER.md");
         let mut zip = None;
         let mut force = false;
         let mut index = 0;
@@ -566,7 +557,6 @@ impl PackageOptions {
                 "--runtime-licenses" => {
                     runtime_licenses = Some(next_path(args, &mut index, argument)?);
                 }
-                "--usage" => usage = next_path(args, &mut index, argument)?,
                 "--zip" => zip = Some(next_path(args, &mut index, argument)?),
                 "--force" => force = true,
                 "--help" | "-h" => {
@@ -614,7 +604,6 @@ impl PackageOptions {
             sdk_package_sha256,
             package_archive_available,
             runtime_licenses,
-            usage,
             zip,
             model_manifest: workspace_root.join(MODEL_MANIFEST_FILE),
             model_task: workspace_root.join(model_task_file()),
@@ -752,7 +741,7 @@ fn print_package_help() {
     println!("    --sdk-version <version> \\");
     println!("    [--sdk-package-sha256 <sha256> | --sdk-package-unavailable] \\");
     println!("    [--executable <RusTuberV.exe>] [--runtime-licenses <txt>] \\");
-    println!("    [--usage <README_NDI.md>] [--zip <output.zip>] [--force]");
+    println!("    [--zip <output.zip>] [--force]");
 }
 
 #[cfg(test)]
@@ -837,7 +826,6 @@ mod tests {
         fs::write(directory.join(RUNTIME_FILE_NAMES[0]), b"runtime").expect("runtime");
         fs::write(directory.join(LICENSE_FILE), b"license").expect("license");
         fs::write(directory.join(RUNTIME_LICENSES_FILE), b"runtime licenses").expect("licenses");
-        fs::write(directory.join(USAGE_FILE), b"usage").expect("usage");
         fs::write(
             directory.join(NOTICES_FILE),
             "NDI® is a registered trademark of Vizrt NDI AB\nhttps://ndi.video\n",
@@ -858,7 +846,6 @@ mod tests {
              license_sha256={}\n\
              runtime_licenses_file={}\n\
              runtime_licenses_sha256={}\n\
-             usage_file={}\n\
              face_task_file={}\n\
              face_task_sha256={}\n\
              face_model_license_file={}\n\
@@ -876,7 +863,6 @@ mod tests {
             sha256_file(&directory.join(LICENSE_FILE)).expect("license hash"),
             RUNTIME_LICENSES_FILE,
             sha256_file(&directory.join(RUNTIME_LICENSES_FILE)).expect("runtime licenses hash"),
-            USAGE_FILE,
             model_task_file(),
             sha256_file(&model_dir.join(MediaPipeTask::Face.file())).expect("task hash"),
             MODEL_LICENSE_FILE,

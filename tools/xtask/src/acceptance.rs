@@ -131,7 +131,7 @@ pub fn print_help() {
     println!();
     println!("COMMANDS:");
     println!("  env              Print test environment info");
-    println!("  new [base-dir]   Create a new acceptance run directory");
+    println!("  new <base-dir>   Create a new acceptance run directory");
     println!("  verify <manifest> Verify both pipeline artifacts against manifest");
     println!("  help             Show this help");
     println!();

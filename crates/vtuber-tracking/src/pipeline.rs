@@ -467,8 +467,8 @@ impl MediapipeSampleCache {
 /// Per-eye default blink-close thresholds in openness units (`1 - raw blink`).
 ///
 /// This is the rule used when no verified eye-closure profile is installed. The
-/// values are the raw-blink (R) frontier measured on the local labelled takes
-/// (`docs/eye-closure-run-v2-20260913.md`): a raw MediaPipe blink of 0.65
+/// values are the raw-blink (R) frontier measured on the local labelled takes:
+/// a raw MediaPipe blink of 0.65
 /// (left) or 0.60 (right) closes, and the hysteresis release is 0.10 raw
 /// blink wide. They only turn an already near-closed eye into an exact `1.0`
 /// morph weight; MediaPipe never reaches the endpoint by itself.

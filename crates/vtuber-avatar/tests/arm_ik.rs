@@ -83,6 +83,11 @@ fn default_profile_lowers_the_arm_with_lateral_hand_clearance() {
         -10.0_f32.to_radians().cos(),
         0.0,
     );
+    let bend = |point: Vec3| {
+        let offset = point - chain.rest.upper_arm.position;
+        (offset - direction * offset.dot(direction)).normalize()
+    };
+    assert!(bend(solution.elbow).dot(bend(target.elbow_pole)) > 0.99999);
     assert!(
         (solution.wrist - chain.rest.upper_arm.position)
             .normalize()

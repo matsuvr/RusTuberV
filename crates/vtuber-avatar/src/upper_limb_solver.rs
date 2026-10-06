@@ -58,6 +58,41 @@ pub(crate) struct ArmGoal {
     pub neutral_girdle: Option<Vec2>,
 }
 
+impl ArmGoal {
+    /// Resting targets share the moving shoulder origin. A wrist target alone
+    /// lets the optimizer trade elbow flexion and wrist bend against reach.
+    pub fn resting(chain: &ArmChainBinding, profile: crate::arm::ArmPoseProfile) -> Option<Self> {
+        let target = crate::arm::default_arm_target(chain, profile).ok()?;
+        let analytic =
+            crate::arm::solve_two_bone_arm(crate::arm::ArmIkInput::from_chain(chain, target))
+                .ok()?;
+        let mut neutral = ArmJoints::from_solution(chain, analytic)?;
+        neutral.rest_curl = profile.finger_curl_radians;
+        let pose = neutral.forward(chain)?;
+        let offset = pose.shoulder - chain.rest.upper_arm.position;
+        let direction = (target.wrist - chain.rest.upper_arm.position).try_normalize()?;
+        // The palm frame uses the index/little cross product (opposite normal
+        // signs on the two sides). Its across axis points toward the thumb.
+        let palm = crate::arm::rest_palm_normal(chain)
+            .map(|_| (Vec3::Z.cross(direction).normalize(), direction));
+        Some(Self {
+            wrist: target.wrist + offset,
+            elbow: Some(analytic.elbow + offset),
+            palm,
+            shoulder: None,
+            weight: vtuber_core::arm_tracking::ArmBlendWeight {
+                wrist: 1.0,
+                pole: 1.0,
+                palm: 1.0,
+                fingers: 0.0,
+            },
+            shoulder_weight: 0.0,
+            neutral,
+            neutral_girdle: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -83,6 +118,32 @@ mod tests {
         assert!(1.0 - x * x - step * step > 0.0);
         assert!(correction[0].abs() < step as f32 * step as f32);
         assert!(correction.iter().skip(1).all(|c| *c == 0.0));
+    }
+
+    #[test]
+    fn resting_profile_keeps_elbow_extended_and_thumb_forward() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let chain = chain(side);
+            let target = ArmGoal::resting(&chain, Default::default()).unwrap();
+            let geometry = CollisionGeometry::default();
+            let body = HashMap::new();
+            let problem = Problem {
+                chains: [Some(&chain), None],
+                goals: [Some(target), None],
+                geometry: &geometry,
+                body: &body,
+                body_curve: None,
+                tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+            };
+            let (solved, status) = problem.solve_neutral([Some(target.neutral), None]);
+            let joints = solved[0].unwrap();
+            let pose = joints.forward(&chain).unwrap();
+            let (normal, forward) = pose.palm.unwrap();
+            assert!(matches!(status, SolveStatus::Feasible { .. }));
+            assert!(joints.angles[3] < 5.0_f32.to_radians());
+            assert!(forward.cross(normal).dot(Vec3::Z) > 0.99);
+            assert!(forward.dot((pose.wrist - pose.elbow).normalize()) > 0.99);
+        }
     }
 
     fn goal(joints: ArmJoints, chain: &ArmChainBinding) -> ArmGoal {
@@ -352,10 +413,9 @@ impl Problem<'_> {
                     neutral.wrist / scale,
                     1.0 - goal.weight.wrist,
                 );
-                // At startup the profile requests a wrist position, not a
-                // measured elbow. Let the skeletal solve find the elbow instead
-                // of forcing the straight analytic seed as a second goal.
-                // After admission, loss returns to that actual neutral FK.
+                // Startup uses the explicit profile goals above. Only after
+                // admission do missing channels return to the solved neutral
+                // FK, rather than the bounded analytic starting point.
                 if goal.neutral_girdle.is_some() {
                     distance(
                         pose.elbow / scale,

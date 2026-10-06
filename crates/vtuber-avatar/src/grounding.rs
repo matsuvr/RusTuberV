@@ -98,18 +98,17 @@ pub(crate) fn register_grounding(app: &mut App) {
     app.add_systems(
         PostUpdate,
         restore_ungrounded_pose
-            .after(crate::upper_limb_runtime::restore_body_inputs)
+            .before(crate::upper_limb_runtime::restore_body_inputs)
             .before(AnimationSystems),
     )
     .add_systems(
         PostUpdate,
         plant_feet
             .after(crate::direct_position::apply_direct_body_position)
-            .before(crate::upper_limb_runtime::update_upper_limb_targets)
+            .after(crate::upper_limb_runtime::update_upper_limb_targets)
+            .before(crate::direct_pose::apply_direct_head_tracking)
             .before(crate::arm_pose::apply_default_arm_pose)
-            .before(crate::gaze::update_direct_look_at_input)
-            .before(VrmSystemSets::GazeControl)
-            .before(VrmSystemSets::Constraints)
+            .before(VrmSystemSets::PropagateAfterExpressions)
             .before(TransformSystems::Propagate),
     );
 }

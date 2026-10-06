@@ -3,7 +3,6 @@
 Usage: python tools/convert_hand_poses.py path/to/UmebocDC_Hand.211010.zip
 Only the converted angle table is saved; no Unity assets are extracted.
 These are adapted poses, not a reproduction of Unity's avatar muscle solver.
-See docs/adr/2026-10-03-hand-pose-library.md for the coordinate contract.
 """
 
 import argparse

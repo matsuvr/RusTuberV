@@ -24,9 +24,7 @@ archive's `Memo.txt` identifies the distribution, including its animation clips,
 as CC0. See [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
 
 Only converted hand-local joint angles are included. The original Unity package,
-animation clips, models, and textures are not redistributed. The conversion and
-12 additional app-authored poses are described in
-[the hand-pose ADR](docs/adr/2026-10-03-hand-pose-library.md).
+animation clips, models, and textures are not redistributed.
 
 ## bevy_vrm1 (temporary transparency patch)
 
@@ -98,7 +96,7 @@ SDK runtime remains a separately governed distribution component.
 `527037fa0fe1339750140283930bbb9560460e9e`, licensed under Apache-2.0. Its
 `LICENSE` and `NOTICE` files are retained in the vendored directory. The copy
 adds the MediaPipe Pose Landmarker bindings alongside the existing face tasks;
-the upstream face API and loader are unchanged. See ADR-009. The native
+the upstream face API and loader are unchanged. The native
 `libmediapipe` library that binds to is the official MediaPipe Tasks 0.10.35
 build and is fetched, not redistributed, by this repository.
 
@@ -123,7 +121,7 @@ and girdle axes and offsets in `vtuber-avatar/src/girdle.rs`
 are adapted from `myo_sim/models/arm/assets/myoarm_r_chain.xml` at
 [MyoHub/myo_sim revision 93b0ca8f4ec90c9899ee7f05fee561e9911da91b](https://github.com/MyoHub/myo_sim/tree/93b0ca8f4ec90c9899ee7f05fee561e9911da91b).
 Copyright 2025 Vikash Kumar, Vittorio Caggiano. Apache License, Version 2.0;
-see [the retained license](docs/licenses/myo-sim-Apache-2.0.txt).
+see [the retained license](vendor/mediapipe-rs/LICENSE).
 The adaptation maps source joint axes to the VRM's authored metacarpal/palm
 frame, including left-hand reflection. The forearm adapter retains the radial offset and neutral carrying angle,
 while mapping the resulting direction onto the fixed VRM forearm length. No MuJoCo runtime or meshes are included.
@@ -148,6 +146,6 @@ into the application; it is not a standalone data product.
 The full-rotation k-DOP method and 13 directions follow Daniel Holden's
 [Joint Limits](https://github.com/orangeduck/Joint-Limits/tree/951358f73a90c82ff4fa33c6d11969c1eb0b02e1),
 Copyright (c) 2021 Daniel Holden, MIT. The implementation was adapted to Rust
-and an offline ASF/AMC converter. See `docs/licenses/holden-joint-limits-MIT.txt`.
+and an offline ASF/AMC converter. See [the MIT terms](LICENSE).
 Its LAFAN1-derived demonstration database and PosePrior data are not included
 or used to fit these limits.

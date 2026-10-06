@@ -25,8 +25,8 @@ static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
         }],
         texts: &[
             LicenseText {
-                file_name: "myo-sim-Apache-2.0.txt",
-                body: include_str!("../../../docs/licenses/myo-sim-Apache-2.0.txt"),
+                file_name: "vendor/mediapipe-rs/LICENSE",
+                body: include_str!("../../../vendor/mediapipe-rs/LICENSE"),
             },
             LicenseText {
                 file_name: "THIRD_PARTY_NOTICES.md",
@@ -40,10 +40,16 @@ static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
             name: "Daniel Holden Joint Limits method (adapted)",
             version: "",
         }],
-        texts: &[LicenseText {
-            file_name: "holden-joint-limits-MIT.txt",
-            body: include_str!("../../../docs/licenses/holden-joint-limits-MIT.txt"),
-        }],
+        texts: &[
+            LicenseText {
+                file_name: "LICENSE",
+                body: include_str!("../../../LICENSE"),
+            },
+            LicenseText {
+                file_name: "THIRD_PARTY_NOTICES.md",
+                body: include_str!("../../../THIRD_PARTY_NOTICES.md"),
+            },
+        ],
     },
     LicenseGroup {
         expression: "MIT",

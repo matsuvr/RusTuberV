@@ -199,15 +199,77 @@ fn assert_relative_quat(actual: Quat, expected: Quat) {
 }
 
 #[test]
-fn observed_chest_and_head_keep_independent_world_rotations() {
-    use vtuber_avatar::{AvatarBinding, AvatarGeneration, AvatarMotionMirror, TrackedArmControl};
+fn tracked_arms_preserve_head_follow_through_the_torso() {
+    use vtuber_avatar::{AvatarBinding, AvatarGeneration, TrackedArmControl};
     use vtuber_core::arm_tracking::{ArmControlFrame, ThoraxTarget};
-    for (head_yaw, chest_yaw) in [(0.25, 0.0), (0.0, 0.25), (0.25, -0.2)] {
+
+    for thorax in [
+        None,
+        Some(ThoraxTarget {
+            rotation: Quat::IDENTITY.to_array(),
+            shoulder_offsets: [[0.0; 3]; 2],
+            weight: 1.0,
+        }),
+    ] {
         let mut app = build_rig(
             true,
             true,
-            live_input(Vec3::new(0.06, 0.02, -0.04), Vec3::ZERO),
+            live_input(Vec3::new(0.06, 0.0, 0.0), Vec3::ZERO),
         );
+        let rig = rig_of(&app);
+        let generation = AvatarGeneration(1);
+        app.world_mut().entity_mut(rig.root).insert((
+            AvatarBinding::head_only(rig.root, rig.head, generation),
+            vtuber_avatar::pose::natural_body_tracking_profile(),
+            BodyTrackingPoseInput {
+                yaw_radians: 0.5,
+                pitch_radians: 0.25,
+                roll_radians: 0.25,
+                weight: 1.0,
+                active: true,
+            },
+        ));
+        app.insert_resource(vtuber_avatar::ArmSourceSelection {
+            mode: vtuber_avatar::ArmPoseSourceKind::TrackedPose,
+            ..Default::default()
+        });
+        app.insert_resource(TrackedArmControl {
+            generation: Some(generation),
+            frame: Some(ArmControlFrame {
+                thorax,
+                source_seq: vtuber_core::FrameSeq(1),
+                captured_at: vtuber_core::MonoTimeNs(0),
+                produced_at: vtuber_core::MonoTimeNs(0),
+                targets: Default::default(),
+                weights: Default::default(),
+            }),
+            ..Default::default()
+        });
+        for frame in 0..180 {
+            tick(&mut app, frame * FRAME_MILLIS);
+        }
+        for bone in [rig.spine, rig.chest, rig.upper_chest.unwrap()] {
+            assert!(
+                bone_rotation(&app, bone).angle_between(Quat::IDENTITY) > 0.01,
+                "head follow stopped at {bone:?}, thorax={thorax:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn observed_chest_composes_with_head_follow_without_turning_head_twice() {
+    use vtuber_avatar::{AvatarBinding, AvatarGeneration, AvatarMotionMirror, TrackedArmControl};
+    use vtuber_core::arm_tracking::{ArmControlFrame, ThoraxTarget};
+    for (head_yaw, chest_yaw) in [(0.25, 0.0), (0.0, 0.25), (0.25, -0.2)] {
+        let mut app = build_rig(true, true, live_input(Vec3::ZERO, Vec3::ZERO));
+        let mut face_only = build_rig(true, true, live_input(Vec3::ZERO, Vec3::ZERO));
+        let face_rig = rig_of(&face_only);
+        face_only
+            .world_mut()
+            .get_mut::<BodyTrackingPoseInput>(face_rig.root)
+            .unwrap()
+            .yaw_radians = head_yaw;
         app.insert_resource(vtuber_avatar::ArmSourceSelection {
             mode: vtuber_avatar::ArmPoseSourceKind::TrackedPose,
             ..Default::default()
@@ -242,6 +304,7 @@ fn observed_chest_and_head_keep_independent_world_rotations() {
         });
         for frame in 0..180 {
             tick(&mut app, frame * FRAME_MILLIS);
+            tick(&mut face_only, frame * FRAME_MILLIS);
         }
         let chest = app
             .world()
@@ -253,7 +316,12 @@ fn observed_chest_and_head_keep_independent_world_rotations() {
             .get::<GlobalTransform>(rig.head)
             .unwrap()
             .rotation();
-        assert!(chest.dot(Quat::from_rotation_y(chest_yaw)).abs() > 1.0 - 1.0e-6);
+        let follow = face_only
+            .world()
+            .get::<GlobalTransform>(face_rig.upper_chest.unwrap())
+            .unwrap()
+            .rotation();
+        assert!(chest.dot(Quat::from_rotation_y(chest_yaw) * follow).abs() > 1.0 - 1.0e-6);
         assert!(head.dot(Quat::from_rotation_y(head_yaw)).abs() > 1.0 - 1.0e-6);
     }
 }

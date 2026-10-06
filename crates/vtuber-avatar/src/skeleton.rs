@@ -242,11 +242,18 @@ pub(crate) fn solve_two_bone(
     let lower = bevy::math::DQuat::from_axis_angle(axis, flexion)
         * rest.neutral_lower.as_dvec3().normalize();
     let reach = (upper * f64::from(rest.lengths.x) + lower * f64::from(rest.lengths.y)).normalize();
-    let source_plane = upper
-        .cross(lower)
-        .try_normalize()
-        .or_else(|| (axis - upper * upper.dot(axis)).try_normalize())
-        .ok_or(SolveError::Degenerate)?;
+    // A planar hinge keeps its authored plane at full extension, where a
+    // segment cross product would amplify roundoff (notably in straight legs).
+    // The anatomical arm has an oblique hinge and a carrying angle: its actual
+    // triangle plane differs from the hinge even at zero flexion. Map that
+    // triangle to the elbow pole without inventing humeral axial rotation.
+    let source_plane = if rest.radius.is_some() {
+        upper.cross(lower)
+    } else {
+        axis - reach * reach.dot(axis)
+    }
+    .try_normalize()
+    .ok_or(SolveError::Degenerate)?;
     let source_bend = reach.cross(source_plane).normalize();
     let source = bevy::math::DMat3::from_cols(reach, source_bend, source_plane);
     let direction = direction.as_dvec3().normalize();
@@ -436,4 +443,42 @@ pub(crate) fn refresh_parent_global<F: QueryFilter>(
     let global = refresh_global(parent, transforms, child_ofs, Some((root, root_global)))?;
     computed.insert(parent, global);
     Some(global)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn extended_hinge_keeps_its_plane_despite_roundoff_in_segment_directions() {
+        for noise in [-f32::EPSILON, 0.0, f32::EPSILON] {
+            let rest = TwoBoneRest {
+                start: Vec3::ZERO,
+                middle: Vec3::NEG_Y * 0.4,
+                end: Vec3::NEG_Y * 0.8,
+                lengths: Vec2::splat(0.4),
+                start_rotation: Quat::IDENTITY,
+                middle_rotation: Quat::IDENTITY,
+                hinge_axis: Vec3::X,
+                // Transforming/restoring a straight leg in f32 produces
+                // slightly different upper and neutral directions.
+                neutral_lower: Vec3::new(noise, -1.0, 0.0).normalize(),
+                axial_projection: 1.0,
+                radius: None,
+                flexion_limit: 120.0_f32.to_radians(),
+                axial_limit: 0.0,
+            };
+            for distance in [0.8, 0.7999999] {
+                let pose = solve_two_bone(rest, Vec3::NEG_Y * distance, Vec3::Z, 0.0).unwrap();
+                assert!(
+                    pose.start_rotation.angle_between(Quat::IDENTITY) < 0.002,
+                    "extension invented a thigh twist: noise={noise}, rotation={:?}",
+                    pose.start_rotation
+                );
+                assert!(pose.end.distance(Vec3::NEG_Y * distance) < 1.0e-6);
+            }
+        }
+    }
 }

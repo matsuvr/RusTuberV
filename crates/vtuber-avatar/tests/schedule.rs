@@ -119,13 +119,16 @@ fn avatar_post_update_schedule_orders_body_arms_gaze_and_expressions() {
                 ("apply_direct_body_position", "apply_default_arm_pose"),
                 ("restore_torso_lean", "trace_animation"),
                 ("apply_direct_body_position", "plant_feet"),
-                ("plant_feet", "update_upper_limb_targets"),
+                ("restore_ungrounded_pose", "restore_body_inputs"),
+                ("update_upper_limb_targets", "plant_feet"),
+                ("plant_feet", "apply_direct_head_tracking"),
                 ("plant_feet", "apply_default_arm_pose"),
                 ("update_upper_limb_targets", "apply_default_arm_pose"),
                 // Springs must sample the displayed body and arm pose, not
                 // the producer body and previous frame's arm colliders.
                 ("apply_direct_head_tracking", "update_spring_bones"),
                 ("apply_default_arm_pose", "update_spring_bones"),
+                ("plant_feet", "update_spring_bones"),
             ] {
                 assert_before(schedule, before, after);
             }

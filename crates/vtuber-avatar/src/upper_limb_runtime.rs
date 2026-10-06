@@ -216,12 +216,13 @@ pub fn update_upper_limb_targets(
         .enumerate()
     {
         let Some(chain) = chain else { continue };
-        let Some((initial, target)) = ArmJoints::resting(chain, pose_profile) else {
+        let Some(mut profile_goal) = ArmGoal::resting(chain, pose_profile) else {
             continue;
         };
+        let initial = profile_goal.neutral;
         *slot = Some(initial);
         let mut wanted = ArmGoal {
-            wrist: target.wrist,
+            wrist: profile_goal.wrist,
             elbow: None,
             palm: None,
             shoulder: None,
@@ -245,12 +246,8 @@ pub fn update_upper_limb_targets(
             }
         }
         if let Some(slot) = neutral_goals.get_mut(side) {
-            let mut profile_goal = wanted;
-            // The profile specifies the wrist location. The bounded analytic
-            // seed is only a starting point and may no longer reach it.
-            profile_goal.weight.wrist = 1.0;
-            profile_goal.palm = initial.forward(chain).and_then(|p| p.palm);
-            profile_goal.weight.palm = 1.0;
+            profile_goal.shoulder = wanted.shoulder;
+            profile_goal.shoulder_weight = wanted.shoulder_weight;
             *slot = Some(profile_goal);
         }
         match selection.mode {
@@ -280,7 +277,10 @@ pub fn update_upper_limb_targets(
                         let centre = wanted.shoulder.unwrap_or(neutral_centre)
                             + Vec3::from_array(*offset) * width;
                         wanted.shoulder = Some(centre);
-                        wanted.shoulder_weight = thorax.weight;
+                        // A visible thorax must not hold an unobserved arm's
+                        // shoulder away from its cached resting posture.
+                        wanted.shoulder_weight =
+                            thorax.weight * weight.wrist.max(weight.pole).max(weight.palm);
                         wanted.wrist += centre - chain.rest.upper_arm.position;
                         wanted.elbow = wanted
                             .elbow
@@ -304,15 +304,18 @@ pub fn update_upper_limb_targets(
                         torso_delta: current_rotation * rest_rotation.inverse(),
                         body_scale_meters: scale.scale_meters,
                     };
-                    if let Some(target) = crate::arm_pipeline::virtual_hand_target(&input) {
-                        wanted.wrist = target.wrist;
+                    if let Some(target) = crate::arm_pipeline::virtual_hand_target(&input)
+                        && let Some(shoulder) = initial_shoulder
+                    {
+                        let offset = shoulder - chain.rest.upper_arm.position;
+                        wanted.wrist = target.wrist + offset;
                         wanted.weight.wrist = 1.0;
                         // The pole specifies a bend plane, not a measured elbow.
                         // Convert that virtual intent through fixed-length FK.
                         if let Ok(seed) =
                             crate::arm::solve_two_bone_arm(ArmIkInput::from_chain(chain, target))
                         {
-                            wanted.elbow = Some(seed.elbow);
+                            wanted.elbow = Some(seed.elbow + offset);
                             wanted.weight.pole = 1.0;
                         }
                     }
@@ -460,11 +463,17 @@ pub fn update_upper_limb_targets(
     if let Some(pending) = &state.pending
         && pending.source_seq != source_seq
         && (state.solved_goals != Some(goals) || body_changed)
+        && goals
+            .iter()
+            .flatten()
+            .any(|g| g.weight != Default::default())
     {
         // Local steps can finish and be displayed, but an expensive global
         // route for an observation that has already changed is wasted work.
-        // Damping/idle still evolves after a sample is held. Let that sample's
-        // route finish; cancelling on every such tick would starve the search.
+        // Damping/idle still evolves after a sample is held or the arms are
+        // lost. Let the return route finish even when the camera keeps sending
+        // empty arm frames with a moving face/torso. It uses its admitted body
+        // snapshot; new body input follows through the next checked segment.
         pending
             .obsolete
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1098,6 +1107,56 @@ mod tests {
     }
 
     #[test]
+    fn empty_camera_frames_do_not_cancel_recovery_but_reacquisition_does() {
+        let (mut app, root, _, _) = rig();
+        update_after_worker(&mut app);
+        update_after_worker(&mut app);
+        let generation = app.world().get::<AvatarBinding>(root).unwrap().generation;
+        let obsolete = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task =
+            bevy::tasks::AsyncComputeTaskPool::get().spawn(std::future::pending::<PreparedStep>());
+        app.world_mut().resource_mut::<UpperLimbState>().pending = Some(PendingSolve {
+            task,
+            source_seq: Some(vtuber_core::FrameSeq(1)),
+            obsolete: std::sync::Arc::clone(&obsolete),
+        });
+        app.world_mut().resource_mut::<ArmSourceSelection>().mode = ArmPoseSourceKind::TrackedPose;
+        *app.world_mut().resource_mut::<TrackedArmControl>() = TrackedArmControl {
+            generation: Some(generation),
+            view_to_model: Quat::IDENTITY,
+            frame: Some(ArmControlFrame {
+                thorax: None,
+                source_seq: vtuber_core::FrameSeq(2),
+                captured_at: vtuber_core::MonoTimeNs(2),
+                produced_at: vtuber_core::MonoTimeNs(2),
+                targets: ArmTrackingTargets {
+                    left: Some(ArmTrackingTarget {
+                        wrist: [0.3, -0.4, 0.5],
+                        elbow_pole: [0.2, -0.3, 0.2],
+                        palm_normal: None,
+                        palm_forward: None,
+                        fingers: None,
+                    }),
+                    right: None,
+                },
+                weights: Default::default(),
+            }),
+        };
+        app.update();
+        assert!(!obsolete.load(std::sync::atomic::Ordering::Relaxed));
+        app.world_mut()
+            .resource_mut::<TrackedArmControl>()
+            .frame
+            .as_mut()
+            .unwrap()
+            .weights
+            .left
+            .wrist = 1.0;
+        app.update();
+        assert!(obsolete.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
     fn admitted_path_is_the_only_compositor_pose_across_held_frames_and_loss() {
         let (mut app, root, left, right) = rig();
         let generation = app.world().get::<AvatarBinding>(root).unwrap().generation;
@@ -1126,7 +1185,11 @@ mod tests {
             generation: Some(generation),
             view_to_model: Quat::IDENTITY,
             frame: Some(ArmControlFrame {
-                thorax: None,
+                thorax: Some(vtuber_core::arm_tracking::ThoraxTarget {
+                    rotation: Quat::IDENTITY.to_array(),
+                    shoulder_offsets: [[0.03, 0.04, 0.08], [-0.03, 0.04, 0.08]],
+                    weight: 1.0,
+                }),
                 source_seq: vtuber_core::FrameSeq(1),
                 captured_at: vtuber_core::MonoTimeNs(1),
                 produced_at: vtuber_core::MonoTimeNs(1),

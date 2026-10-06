@@ -131,7 +131,7 @@ fn handle_acceptance(args: &[String]) -> TaskResult {
             let base_dir = args
                 .first()
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("docs/acceptance/runs"));
+                .ok_or_else(|| TaskError::new("usage: cargo xtask acceptance new <base-dir>", 1))?;
             let run_dir = acceptance::new_run(&base_dir)?;
             println!("Created acceptance run: {}", run_dir.display());
             Ok(TaskOutcome::Completed)
