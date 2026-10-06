@@ -71,8 +71,6 @@ impl ArmGoal {
         let pose = neutral.forward(chain)?;
         let offset = pose.shoulder - chain.rest.upper_arm.position;
         let direction = (target.wrist - chain.rest.upper_arm.position).try_normalize()?;
-        // The palm frame uses the index/little cross product (opposite normal
-        // signs on the two sides). Its across axis points toward the thumb.
         let palm = crate::arm::rest_palm_normal(chain)
             .map(|_| (Vec3::Z.cross(direction).normalize(), direction));
         Some(Self {

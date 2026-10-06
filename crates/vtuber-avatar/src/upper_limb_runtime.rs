@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn admitted_path_is_the_only_compositor_pose_across_held_frames_and_loss() {
+    fn held_arm_frames_preserve_bone_lengths_and_loss_returns_to_initial_positions() {
         let (mut app, root, left, right) = rig();
         let generation = app.world().get::<AvatarBinding>(root).unwrap().generation;
         update_after_worker(&mut app);

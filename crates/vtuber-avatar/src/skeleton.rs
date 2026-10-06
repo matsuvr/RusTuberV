@@ -452,7 +452,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extended_hinge_keeps_its_plane_despite_roundoff_in_segment_directions() {
+    fn planar_extension_with_direction_noise_keeps_start_rotation_near_identity() {
         for noise in [-f32::EPSILON, 0.0, f32::EPSILON] {
             let rest = TwoBoneRest {
                 start: Vec3::ZERO,
