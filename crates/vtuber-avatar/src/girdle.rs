@@ -125,9 +125,11 @@ pub(crate) fn forward(
         };
         Vec3::new(x, v.y, v.x)
     };
-    // VRM T-pose definition 1.5 already places the shoulders at their relaxed,
-    // lowest position, despite raised arms. Bind that link to the source's
-    // arm-down zero; subtracting the raised-arm rhythm lowers it a second time.
+    // Use the source's zero-angle SC/AC direction as the alignment reference.
+    // VRM T-pose definition 1.5 requires lowered shoulders despite raised arms:
+    // https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_vrm-1.0/tpose.md
+    // At zero source joint angles, alignment to the authored link below keeps
+    // its rest position. A raised-arm reference would lower the link again.
     let rest = polar(source_centre([0.0; 5])).try_normalize()?;
     let mut joints = rhythm(plane, elevation);
     if let Some(sc) = observed_sc {

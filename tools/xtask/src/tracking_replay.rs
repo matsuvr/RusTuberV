@@ -401,7 +401,7 @@ fn measure(world: &mut World) {
         if m.finished {
             return;
         }
-        match sample(world, &mut m) {
+        match advance_replay_measurement(world, &mut m) {
             Ok(false) => {}
             Ok(true) => {
                 if let Some(model) = m.second_model.take() {
@@ -456,7 +456,10 @@ fn measure(world: &mut World) {
     });
 }
 
-fn sample(world: &mut World, m: &mut Measurement) -> Result<bool, String> {
+/// Advance startup/capture selection, then collect timing, pose and image samples.
+/// Return true once playback completes or reaches the recording duration;
+/// return false while startup or measurement is still in progress.
+fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<bool, String> {
     if m.launched.elapsed().as_secs_f64() > m.source.duration().as_secs_f64() + 120.0 {
         return Err("avatar/capture startup timed out".into());
     }

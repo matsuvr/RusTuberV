@@ -163,16 +163,16 @@ mod tests {
         let mut world = World::new();
         let elbow = world.spawn_empty().id();
         let sleeve = world.spawn_empty().id();
-        let tops = world.spawn_empty().id();
+        let unnamed_destination = world.spawn_empty().id();
         let bound = source.bind(&HashMap::from([
             ("Elbow".into(), elbow),
             ("Sleeve".into(), sleeve),
-            ("GltfNode2".into(), tops),
+            ("GltfNode2".into(), unnamed_destination),
         ]));
         assert_eq!(bound.0[&elbow].len(), 2);
         assert_eq!(bound.0[&elbow][0].destination, sleeve);
         assert_eq!(bound.0[&elbow][0].weight, 1.0);
-        assert_eq!(bound.0[&elbow][1].destination, tops);
+        assert_eq!(bound.0[&elbow][1].destination, unnamed_destination);
         assert_eq!(
             bound.0[&elbow][1].kind,
             NodeConstraintKind::Aim(Vec3::NEG_X)

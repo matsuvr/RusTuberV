@@ -207,7 +207,9 @@ fn palm_capsules(chain: crate::arm::ArmChainBinding) -> Vec<CapsuleCollider> {
         .collect()
 }
 
-/// A skeleton link's proxy spans its two joint centres, independent of clothing.
+/// Inset the capsule centre line by its radius at each joint. If the link is
+/// shorter than a diameter, use a sphere at its midpoint; that sphere extends
+/// beyond the joints. Dimensions do not depend on clothing.
 fn link_capsule(
     bone: Entity,
     region: Region,
@@ -655,7 +657,7 @@ mod tests {
             assert!(g.pose_is_clear(&identity, 0.0).unwrap());
             assert!(g.sweep_is_clear(&identity, &identity, |_| 0.0).unwrap());
             for moving in [entity(3), entity(4)] {
-                let contact = |bone| {
+                let motion_for_bone = |bone| {
                     Some(BoneMotion {
                         translation: if bone == moving {
                             Vec3::NEG_X * 0.65
@@ -665,8 +667,11 @@ mod tests {
                         ..identity(bone).unwrap()
                     })
                 };
-                assert!(!g.pose_is_clear(&contact, 0.0).unwrap());
-                assert!(!g.sweep_is_clear(&identity, &contact, |_| 0.0).unwrap());
+                assert!(!g.pose_is_clear(&motion_for_bone, 0.0).unwrap());
+                assert!(
+                    !g.sweep_is_clear(&identity, &motion_for_bone, |_| 0.0)
+                        .unwrap()
+                );
             }
         }
     }
@@ -751,7 +756,7 @@ mod tests {
     #[test]
     fn binding_needs_no_mesh_and_is_invariant_to_bone_axes_and_object_scale() {
         use crate::{binding::AvatarBinding, lifecycle::AvatarGeneration};
-        let bind = |scale: f32, rotation: Quat| {
+        let bind_test_geometry = |scale: f32, rotation: Quat| {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
                 .add_systems(Update, bind_collision_geometry);
@@ -811,7 +816,7 @@ mod tests {
             ));
             geometry
         };
-        let a = bind(1.0, Quat::IDENTITY);
+        let a = bind_test_geometry(1.0, Quat::IDENTITY);
         assert_eq!(a.capsules.len(), 4);
         assert!(
             a.capsules
@@ -819,7 +824,7 @@ mod tests {
                 .filter(|c| c.region == Region::Torso)
                 .all(|c| (c.radius - 0.1).abs() < 1e-6)
         );
-        let b = bind(3.0, Quat::from_euler(EulerRot::XYZ, 0.4, -0.3, 0.7));
+        let b = bind_test_geometry(3.0, Quat::from_euler(EulerRot::XYZ, 0.4, -0.3, 0.7));
         for (a, b) in a.capsules.iter().zip(&b.capsules) {
             assert_eq!(a.region, b.region);
             assert!((3.0 * a.radius - b.radius).abs() < 1e-6);

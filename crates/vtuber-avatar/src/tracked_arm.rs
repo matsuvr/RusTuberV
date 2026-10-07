@@ -280,12 +280,12 @@ pub(crate) fn retarget_palm_frame(
     normal: Vec3,
     forward: Vec3,
 ) -> Option<(Vec3, Vec3)> {
-    let side = if chain.side == crate::arm::ArmSide::Left {
+    let side_sign = if chain.side == crate::arm::ArmSide::Left {
         1.0
     } else {
         -1.0
     };
-    let canonical = palm_frame(Vec3::Y * side, Vec3::X * side)?;
+    let canonical = palm_frame(Vec3::Y * side_sign, Vec3::X * side_sign)?;
     let delta = palm_frame(normal, forward)? * canonical.inverse();
     Some((
         delta * rest_palm_normal(chain)?,
@@ -305,22 +305,23 @@ pub(crate) fn palm_orientation_error(
     Some(palm_rotation_error(current, wanted)? * palm_length(chain)?)
 }
 
-/// Differentiate one continuous logarithm branch around the current pose.
-/// At a half-turn the shortest logarithm flips sign; central differences
-/// across that cut produce a spurious derivative of approximately PI / h.
-pub(crate) fn palm_orientation_derivative_error(
+/// Return palm-length-scaled rotation error on the logarithm branch nearest
+/// the reference palm's error. This supplies continuous residuals for finite
+/// differences; it does not compute a derivative. The shortest logarithm alone
+/// flips sign at a half-turn, producing a spurious derivative near PI / h.
+pub(crate) fn palm_orientation_error_near_reference(
     chain: &ArmChainBinding,
     current: (Vec3, Vec3),
     wanted: (Vec3, Vec3),
-    reference: (Vec3, Vec3),
+    reference_palm: (Vec3, Vec3),
 ) -> Option<Vec3> {
     let error = palm_rotation_error(current, wanted)?;
-    let reference = palm_rotation_error(reference, wanted)?;
+    let reference_error = palm_rotation_error(reference_palm, wanted)?;
     let error = error
         .try_normalize()
         .map(|axis| error - std::f32::consts::TAU * axis)
         .filter(|alternate| {
-            alternate.distance_squared(reference) < error.distance_squared(reference)
+            alternate.distance_squared(reference_error) < error.distance_squared(reference_error)
         })
         .unwrap_or(error);
     Some(error * palm_length(chain)?)
@@ -397,7 +398,7 @@ mod tests {
             let h = f32::EPSILON.cbrt();
             let sample = |angle| {
                 let turn = Quat::from_axis_angle(forward, angle);
-                palm_orientation_derivative_error(
+                palm_orientation_error_near_reference(
                     &chain,
                     (turn * normal, forward),
                     wanted,
@@ -415,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_palm_motion_preserves_authored_t_pose_tilt_on_both_sides() {
+    fn palm_retargeting_rotates_rest_frame_on_both_sides() {
         for side in [crate::arm::ArmSide::Left, crate::arm::ArmSide::Right] {
             let sign = if side == crate::arm::ArmSide::Left {
                 1.0

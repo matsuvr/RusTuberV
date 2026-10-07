@@ -268,20 +268,20 @@ mod tests {
     #[test]
     fn resting_pose_is_independent_of_vrm1_authored_rest_rotations() {
         for side in [ArmSide::Left, ArmSide::Right] {
-            let mut normalized = chain(side);
-            let mut authored = normalized;
+            let mut chain_with_identity_arm_rotations = chain(side);
+            let mut chain_with_authored_arm_rotations = chain_with_identity_arm_rotations;
             for rest in [
-                &mut normalized.rest.upper_arm,
-                &mut normalized.rest.elbow,
-                &mut normalized.rest.wrist,
+                &mut chain_with_identity_arm_rotations.rest.upper_arm,
+                &mut chain_with_identity_arm_rotations.rest.elbow,
+                &mut chain_with_identity_arm_rotations.rest.wrist,
             ] {
                 rest.global_rotation = Quat::IDENTITY;
                 rest.local_rotation = Quat::IDENTITY;
             }
             for (i, rest) in [
-                &mut authored.rest.upper_arm,
-                &mut authored.rest.elbow,
-                &mut authored.rest.wrist,
+                &mut chain_with_authored_arm_rotations.rest.upper_arm,
+                &mut chain_with_authored_arm_rotations.rest.elbow,
+                &mut chain_with_authored_arm_rotations.rest.wrist,
             ]
             .into_iter()
             .enumerate()
@@ -305,8 +305,8 @@ mod tests {
                 assert!(matches!(status, SolveStatus::Feasible { .. }));
                 solved[0].unwrap().forward(chain).unwrap()
             };
-            let a = solve(&normalized);
-            let b = solve(&authored);
+            let a = solve(&chain_with_identity_arm_rotations);
+            let b = solve(&chain_with_authored_arm_rotations);
             for (a, b) in [
                 (a.shoulder, b.shoulder),
                 (a.elbow, b.elbow),
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_position_yields_to_contacts_without_shrinking_the_body() {
+    fn neutral_solve_clears_hand_torso_contact_and_preserves_arm_lengths() {
         use crate::collision::{CapsuleCollider, Region};
         for side in [ArmSide::Left, ArmSide::Right] {
             let chain = chain(side);
@@ -777,10 +777,10 @@ impl Problem<'_> {
                 .and_then(|r| r.arms.get(side))
                 .and_then(Option::as_ref)
                 .and_then(|arm| arm.palm);
-            let orientation_error = |wanted| {
+            let palm_error_for_target = |wanted| {
                 let current = pose.palm?;
                 match reference_palm {
-                    Some(reference) => crate::tracked_arm::palm_orientation_derivative_error(
+                    Some(reference) => crate::tracked_arm::palm_orientation_error_near_reference(
                         chain, current, wanted, reference,
                     ),
                     None => crate::tracked_arm::palm_orientation_error(chain, current, wanted),
@@ -795,7 +795,7 @@ impl Problem<'_> {
                 if let Some(elbow) = goal.elbow {
                     distance(pose.elbow / scale, elbow / scale, goal.weight.pole);
                 }
-                if let Some(error) = goal.palm.and_then(orientation_error) {
+                if let Some(error) = goal.palm.and_then(palm_error_for_target) {
                     distance(error / scale, Vec3::ZERO, goal.weight.palm);
                 }
                 if let Some(shoulder) = goal.shoulder {
@@ -836,7 +836,7 @@ impl Problem<'_> {
                         .wrist
                         .max(goal.weight.pole)
                         .max(goal.weight.palm);
-                if let Some(error) = neutral.palm.and_then(orientation_error) {
+                if let Some(error) = neutral.palm.and_then(palm_error_for_target) {
                     distance(error / scale, Vec3::ZERO, unobserved);
                 }
                 // A resting profile must move the arm to clear the body, not
@@ -974,7 +974,7 @@ impl Problem<'_> {
         let mut constraint_columns = Vec::new();
         // These jobs belong to the asynchronous pose solve. Sharing the ECS
         // frame pool lets a render-critical task pick up a long collision job.
-        let mut columns = bevy::tasks::AsyncComputeTaskPool::get_or_init(
+        let mut indexed_jacobian_columns = bevy::tasks::AsyncComputeTaskPool::get_or_init(
             bevy::tasks::TaskPool::default,
         )
         .scope(|scope| {
@@ -1042,8 +1042,8 @@ impl Problem<'_> {
                 });
             }
         });
-        columns.sort_by_key(|column| column.as_ref().map(|c| c.0));
-        for column in columns {
+        indexed_jacobian_columns.sort_by_key(|column| column.as_ref().map(|c| c.0));
+        for column in indexed_jacobian_columns {
             let (_, tasks, constraints) = column?;
             task_columns.extend(tasks);
             constraint_columns.extend(constraints);
