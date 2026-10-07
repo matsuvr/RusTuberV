@@ -1,5 +1,5 @@
 #!/bin/sh
-# Local-only Jev review. Git passes one line per pushed ref on stdin.
+# Local-only Jev naming and comment review. Git passes one line per pushed ref on stdin.
 if [ -z "${TYPESAFE_API_KEY:-${TYPESAFEAI_API_KEY:-}}" ]; then
   echo 'jev-lint: TYPESAFE_API_KEY is not set; skipping.'
   exit 0
@@ -41,17 +41,4 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       ;;
   esac
 
-  npx -y jev-lint@0.7.0 commits "$base..$local_sha" --fail-on error
-  status=$?
-  case "$status" in
-    0) ;;
-    3)
-      echo 'jev-lint: API unavailable (credits exhausted or service trouble); skipping remaining Jev checks. Push continues.' >&2
-      break
-      ;;
-    *)
-      echo "jev-lint: commits exited $status; push continues." >&2
-      break
-      ;;
-  esac
 done

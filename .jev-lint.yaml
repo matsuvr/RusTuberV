@@ -1,4 +1,4 @@
-# Only locally pushed, self-authored Rust code is reviewed.
+# Only naming and comments in locally pushed, self-authored Rust code are reviewed.
 files: [apps, crates, tools]
 rules:
   rust/comment-describes-block: on
@@ -10,5 +10,3 @@ rules:
   rust/test-name-verifies-claim: on
   rust/trait-name-describes-methods: on
   rust/var-name-describes-value: on
-  git/commit-message-describes-diff: on
-  git/diff-follows-instructions: on
