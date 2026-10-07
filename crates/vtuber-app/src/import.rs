@@ -26,7 +26,8 @@ pub use inspection::inspect_vrm;
 use morph::normalize_vrm_morph_targets;
 use morph::over_limit_morph_target_count;
 pub use runtime::{
-    ensure_managed_model_ready, read_runtime_expression_facts, runtime_ready_source_bytes,
+    ensure_managed_model_ready, read_runtime_expression_facts, read_runtime_source_facts,
+    runtime_ready_source_bytes,
 };
 
 /// Default maximum import size (256 MiB).

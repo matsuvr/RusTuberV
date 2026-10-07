@@ -16,6 +16,102 @@ struct Linearization {
     constraints: nalgebra::DMatrix<f64>,
 }
 
+/// Solve the strictly convex SQP subproblem to its active-set optimum.
+/// Fixed dual sweeps can leave opposed, nearly parallel contacts violated;
+/// nonlinear backtracking then mistakes the failed tangent for convergence.
+fn quadratic_step(
+    hessian: nalgebra::DMatrix<f64>,
+    linear: nalgebra::DVector<f64>,
+    rows: &[[f64; 18]],
+    margins: &[f64],
+) -> Option<[f32; 18]> {
+    use nalgebra::{DMatrix, DVector};
+    // The task QP has a feasible zero step. During contact restoration only
+    // the joint/trust bounds enter this QP; restoration is its objective.
+    if margins.iter().any(|m| *m < 0.0) {
+        return None;
+    }
+    let factor = hessian.cholesky()?;
+    let free = factor.solve(&(-linear));
+    let directions: Vec<_> = rows
+        .iter()
+        .map(|r| factor.solve(&DVector::from_column_slice(r)))
+        .collect();
+    let mut step = DVector::zeros(18);
+    let mut active = Vec::<usize>::new();
+    let resolution = 64.0 * f64::EPSILON.sqrt();
+    for _ in 0..256 {
+        let a = DMatrix::from_fn(active.len(), 18, |i, j| {
+            active
+                .get(i)
+                .and_then(|i| rows.get(*i))
+                .and_then(|r| r.get(j))
+                .copied()
+                .unwrap_or(0.0)
+        });
+        let inverse_normals = DMatrix::from_fn(18, active.len(), |i, j| {
+            active
+                .get(j)
+                .and_then(|j| directions.get(*j))
+                .and_then(|d| d.get(i))
+                .copied()
+                .unwrap_or(0.0)
+        });
+        let free_direction = &free - &step;
+        let multipliers = if active.is_empty() {
+            DVector::zeros(0)
+        } else {
+            (&a * &inverse_normals)
+                .svd(true, true)
+                .solve(&(-&a * &free_direction), f64::EPSILON.sqrt())
+                .ok()?
+        };
+        let direction = free_direction + &inverse_normals * &multipliers;
+        if direction.amax() < resolution {
+            let remove = multipliers
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| **m < -resolution)
+                .min_by(|(_, a), (_, b)| a.total_cmp(b))
+                .map(|(i, _)| i);
+            if let Some(remove) = remove {
+                active.remove(remove);
+                continue;
+            }
+            return Some(std::array::from_fn(|i| {
+                step.get(i).copied().unwrap_or(0.0) as f32
+            }));
+        }
+        let mut amount = 1.0_f64;
+        let mut blocker = None;
+        for (i, (row, margin)) in rows.iter().zip(margins).enumerate() {
+            if active.contains(&i) {
+                continue;
+            }
+            let slope = row.iter().zip(&direction).map(|(a, b)| a * b).sum::<f64>();
+            let normal = row.iter().map(|v| v * v).sum::<f64>().sqrt();
+            // An equality direction has zero slope; do not add a redundant
+            // contact because its roundoff is a tiny negative number.
+            if slope >= -f64::EPSILON.sqrt() * normal * direction.norm() {
+                continue;
+            }
+            let slack = row.iter().zip(&step).map(|(a, b)| a * b).sum::<f64>() + margin;
+            let candidate = slack.max(0.0) / -slope;
+            if candidate < amount {
+                amount = candidate;
+                blocker = Some(i);
+            }
+        }
+        step.axpy(amount, &direction, 1.0);
+        if let Some(blocker) = blocker {
+            active.push(blocker);
+        }
+    }
+    // A work-limit exit is not an optimum. The caller retains its admitted
+    // pose rather than treating an unfinished, violating QP as convergence.
+    None
+}
+
 /// Least-norm normal correction to the violated nonlinear boundaries.
 /// The numerical interior target is in the same dimensionless coordinates
 /// as the existing constraint rounding margin, not an anatomical allowance.
@@ -104,6 +200,57 @@ mod tests {
     use crate::upper_limb::tests::{chain, state};
 
     #[test]
+    fn near_opposed_contacts_keep_the_feasible_tangent_independent_of_row_order() {
+        let mut a = [0.0; 18];
+        a[0] = 1.0;
+        a[1] = 0.001;
+        let mut b = a;
+        b[0] = -1.0;
+        for rows in [[a, b], [b, a]] {
+            let linear = nalgebra::DVector::from_fn(18, |i, _| match i {
+                0 | 2 => -f64::from(MAX_STEP_RADIANS),
+                1 => f64::from(MAX_STEP_RADIANS),
+                _ => 0.0,
+            });
+            let step = quadratic_step(
+                nalgebra::DMatrix::identity(18, 18),
+                linear,
+                &rows,
+                &[0.0; 2],
+            )
+            .unwrap();
+            assert!(step[0].abs() < 1.0e-5 && step[1].abs() < 1.0e-5);
+            assert!((step[2] - MAX_STEP_RADIANS).abs() < 1.0e-6);
+            for row in rows {
+                assert!(
+                    row.iter()
+                        .zip(step)
+                        .map(|(a, b)| a * f64::from(b))
+                        .sum::<f64>()
+                        >= -1.0e-7
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contradictory_linear_contacts_report_absence_of_a_step() {
+        let mut a = [0.0; 18];
+        a[0] = 1.0;
+        let mut b = a;
+        b[0] = -1.0;
+        assert!(
+            quadratic_step(
+                nalgebra::DMatrix::identity(18, 18),
+                nalgebra::DVector::zeros(18),
+                &[a, b],
+                &[-1.0, 0.0]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn normal_correction_allows_a_tangent_step_at_a_curved_boundary() {
         // Unit disk at (1, 0): its tangent step violates the true boundary
         // although the linear constraint admits it. A short SOC moves back
@@ -116,6 +263,63 @@ mod tests {
         assert!(1.0 - x * x - step * step > 0.0);
         assert!(correction[0].abs() < step as f32 * step as f32);
         assert!(correction.iter().skip(1).all(|c| *c == 0.0));
+    }
+
+    #[test]
+    fn resting_pose_is_independent_of_vrm1_authored_rest_rotations() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let mut normalized = chain(side);
+            let mut authored = normalized;
+            for rest in [
+                &mut normalized.rest.upper_arm,
+                &mut normalized.rest.elbow,
+                &mut normalized.rest.wrist,
+            ] {
+                rest.global_rotation = Quat::IDENTITY;
+                rest.local_rotation = Quat::IDENTITY;
+            }
+            for (i, rest) in [
+                &mut authored.rest.upper_arm,
+                &mut authored.rest.elbow,
+                &mut authored.rest.wrist,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                rest.global_rotation = Quat::from_euler(EulerRot::XYZ, 0.34 + i as f32, -0.5, 0.7);
+                rest.local_rotation = Quat::from_rotation_y(0.6 - i as f32);
+            }
+            let geometry = CollisionGeometry::default();
+            let body = HashMap::new();
+            let solve = |chain: &ArmChainBinding| {
+                let target = ArmGoal::resting(chain, Default::default()).unwrap();
+                let problem = Problem {
+                    chains: [Some(chain), None],
+                    goals: [Some(target), None],
+                    geometry: &geometry,
+                    body: &body,
+                    body_curve: None,
+                    tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+                };
+                let (solved, status) = problem.solve_neutral([Some(target.neutral), None]);
+                assert!(matches!(status, SolveStatus::Feasible { .. }));
+                solved[0].unwrap().forward(chain).unwrap()
+            };
+            let a = solve(&normalized);
+            let b = solve(&authored);
+            for (a, b) in [
+                (a.shoulder, b.shoulder),
+                (a.elbow, b.elbow),
+                (a.wrist, b.wrist),
+            ] {
+                assert!(a.distance(b) < 2.0e-5);
+            }
+            let (an, af) = a.palm.unwrap();
+            let (bn, bf) = b.palm.unwrap();
+            assert!(an.distance(bn) < 2.0e-5);
+            assert!(af.distance(bf) < 2.0e-5);
+            assert!(bf.cross(bn).dot(Vec3::Z) > 0.99);
+        }
     }
 
     #[test]
@@ -141,6 +345,64 @@ mod tests {
             assert!(joints.angles[3] < 5.0_f32.to_radians());
             assert!(forward.cross(normal).dot(Vec3::Z) > 0.99);
             assert!(forward.dot((pose.wrist - pose.elbow).normalize()) > 0.99);
+        }
+    }
+
+    #[test]
+    fn initial_position_yields_to_contacts_without_shrinking_the_body() {
+        use crate::collision::{CapsuleCollider, Region};
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let chain = chain(side);
+            let target = ArmGoal::resting(&chain, Default::default()).unwrap();
+            let initial = target.neutral.forward(&chain).unwrap();
+            let torso = Entity::from_raw_u32(100).unwrap();
+            let geometry = CollisionGeometry::new(
+                vec![
+                    CapsuleCollider {
+                        bone: torso,
+                        region: Region::Torso,
+                        endpoints: [initial.wrist + Vec3::Z * 0.05; 2],
+                        radius: 0.08,
+                    },
+                    CapsuleCollider {
+                        bone: chain.hand,
+                        region: Region::Hand(side),
+                        endpoints: [chain.rest.wrist.position; 2],
+                        radius: 0.03,
+                    },
+                ],
+                &[],
+            );
+            let body = HashMap::from([(
+                torso,
+                BoneMotion {
+                    rotation: Quat::IDENTITY,
+                    translation: Vec3::ZERO,
+                },
+            )]);
+            let problem = Problem {
+                chains: [Some(&chain), None],
+                goals: [Some(target), None],
+                geometry: &geometry,
+                body: &body,
+                body_curve: None,
+                tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+            };
+            let seed = [Some(target.neutral), None];
+            assert!(!problem.feasible(&problem.evaluate(seed).unwrap()));
+            let (solved, status) = problem.solve_neutral(seed);
+            let evaluated = problem.evaluate(solved).unwrap();
+            assert!(
+                matches!(status, SolveStatus::Feasible { residual, .. } if residual > 0.0),
+                "{status:?}"
+            );
+            assert!(problem.feasible(&evaluated));
+            let arm = evaluated.arms[0].as_ref().unwrap();
+            assert!(arm.wrist.distance(initial.wrist + Vec3::Z * 0.05) >= 0.11);
+            assert!((arm.elbow.distance(arm.wrist) - chain.rest.forearm_length).abs() < 2.0e-6);
+            assert!(
+                (arm.shoulder.distance(arm.elbow) - chain.rest.upper_arm_length).abs() < 2.0e-6
+            );
         }
     }
 
@@ -263,6 +525,58 @@ mod tests {
     }
 
     #[test]
+    fn narrow_palm_recovers_a_large_forearm_rotation_without_moving_the_elbow() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let mut chain = chain(side);
+            let wrist = chain.rest.wrist.position;
+            let sign = if side == ArmSide::Left { 1.0 } else { -1.0 };
+            chain
+                .finger_rest
+                .index
+                .proximal
+                .as_mut()
+                .unwrap()
+                .rest
+                .position = wrist + Vec3::new(sign * 0.06, 0.0, 0.002);
+            chain
+                .finger_rest
+                .little
+                .proximal
+                .as_mut()
+                .unwrap()
+                .rest
+                .position = wrist + Vec3::new(sign * 0.06, 0.0, -0.002);
+            let mut wanted = state(1.0, 1.2, -0.4, 1.0);
+            wanted.angles[4] = -1.3;
+            let mut initial = wanted;
+            initial.angles[4] = 1.3;
+            let expected = wanted.forward(&chain).unwrap();
+            let first = initial.forward(&chain).unwrap();
+            assert!(first.palm.unwrap().0.dot(expected.palm.unwrap().0) < -0.5);
+            let mut target = goal(wanted, &chain);
+            target.neutral = initial;
+            target.neutral_girdle = Some(Vec2::new(initial.angles[7], initial.angles[8]));
+            let geometry = CollisionGeometry::default();
+            let body = HashMap::new();
+            let problem = Problem {
+                chains: [Some(&chain), None],
+                goals: [Some(target), None],
+                geometry: &geometry,
+                body: &body,
+                body_curve: None,
+                tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+            };
+            let (solved, status) = problem.solve([Some(initial), None], 96);
+            assert!(matches!(status, SolveStatus::Feasible { .. }));
+            let result = solved[0].unwrap().forward(&chain).unwrap();
+            assert!(result.palm.unwrap().0.dot(expected.palm.unwrap().0) > 0.999);
+            assert!(result.palm.unwrap().1.dot(expected.palm.unwrap().1) > 0.999);
+            assert!(result.elbow.distance(expected.elbow) < 0.002);
+            assert!(result.wrist.distance(expected.wrist) < 0.002);
+        }
+    }
+
+    #[test]
     fn restoring_one_arm_contact_does_not_starve_the_other_arms_target() {
         use crate::collision::{CapsuleCollider, Region};
         let left = chain(ArmSide::Left);
@@ -366,15 +680,40 @@ impl Problem<'_> {
         &self,
         state: [Option<ArmJoints>; 2],
     ) -> Result<Evaluation, CollisionError> {
+        self.kinematics_near(state, None)
+    }
+
+    fn kinematics_near(
+        &self,
+        state: [Option<ArmJoints>; 2],
+        reference: Option<&Evaluation>,
+    ) -> Result<Evaluation, CollisionError> {
         let mut arms = [None, None];
         let mut residuals = Vec::new();
-        for (((slot, chain), state), goal) in
-            arms.iter_mut().zip(self.chains).zip(state).zip(self.goals)
+        for (side, (((slot, chain), state), goal)) in arms
+            .iter_mut()
+            .zip(self.chains)
+            .zip(state)
+            .zip(self.goals)
+            .enumerate()
         {
             let Some((chain, state)) = chain.zip(state) else {
                 continue;
             };
             let pose = state.forward(chain).ok_or(CollisionError::InvalidMesh)?;
+            let reference_palm = reference
+                .and_then(|r| r.arms.get(side))
+                .and_then(Option::as_ref)
+                .and_then(|arm| arm.palm);
+            let orientation_error = |wanted| {
+                let current = pose.palm?;
+                match reference_palm {
+                    Some(reference) => crate::tracked_arm::palm_orientation_derivative_error(
+                        chain, current, wanted, reference,
+                    ),
+                    None => crate::tracked_arm::palm_orientation_error(chain, current, wanted),
+                }
+            };
             if let Some(goal) = goal {
                 let scale = chain.rest.total_arm_length;
                 let mut distance = |a: Vec3, b: Vec3, weight: f32| {
@@ -384,13 +723,8 @@ impl Problem<'_> {
                 if let Some(elbow) = goal.elbow {
                     distance(pose.elbow / scale, elbow / scale, goal.weight.pole);
                 }
-                if let Some((current, wanted)) = pose.palm.zip(goal.palm).and_then(|(a, b)| {
-                    crate::tracked_arm::palm_markers(chain, a)
-                        .zip(crate::tracked_arm::palm_markers(chain, b))
-                }) {
-                    for (current, wanted) in current.into_iter().zip(wanted) {
-                        distance(current / scale, wanted / scale, goal.weight.palm);
-                    }
+                if let Some(error) = goal.palm.and_then(orientation_error) {
+                    distance(error / scale, Vec3::ZERO, goal.weight.palm);
                 }
                 if let Some(shoulder) = goal.shoulder {
                     distance(
@@ -430,13 +764,23 @@ impl Problem<'_> {
                         .wrist
                         .max(goal.weight.pole)
                         .max(goal.weight.palm);
-                if let Some((current, wanted)) = pose.palm.zip(neutral.palm).and_then(|(a, b)| {
-                    crate::tracked_arm::palm_markers(chain, a)
-                        .zip(crate::tracked_arm::palm_markers(chain, b))
-                }) {
-                    for (current, wanted) in current.into_iter().zip(wanted) {
-                        distance(current / scale, wanted / scale, unobserved);
-                    }
+                if let Some(error) = neutral.palm.and_then(orientation_error) {
+                    distance(error / scale, Vec3::ZERO, unobserved);
+                }
+                // A resting profile must move the arm to clear the body, not
+                // bend the wrist or twist the humerus to keep pursuing its
+                // unreachable Cartesian wrist. Preserve the neutral joint
+                // articulation while resolving startup contacts.
+                if goal.neutral_girdle.is_none() {
+                    residuals.extend(
+                        state
+                            .angles
+                            .iter()
+                            .zip(goal.neutral.angles)
+                            .skip(2)
+                            .take(2)
+                            .map(|(q, neutral)| f64::from(q - neutral)),
+                    );
                 }
                 // Missing palm orientation returns only radioulnar/wrist
                 // articulation to rest. A neutral world-space palm would
@@ -449,7 +793,12 @@ impl Problem<'_> {
                         .skip(4)
                         .take(3)
                         .map(|(q, neutral)| {
-                            f64::from((q - neutral) * (1.0 - goal.weight.palm).sqrt())
+                            let weight = if goal.neutral_girdle.is_none() {
+                                1.0
+                            } else {
+                                1.0 - goal.weight.palm
+                            };
+                            f64::from((q - neutral) * weight.sqrt())
                         }),
                 );
                 // Unobserved SC motion is estimated from the published
@@ -578,8 +927,8 @@ impl Problem<'_> {
                         .zip(change(&mut minus, -h))
                         .map(|(a, b)| a - b);
                     if let Some(span) = span.filter(|v| *v > 0.0) {
-                        let a = self.kinematics(minus).ok()?;
-                        let b = self.kinematics(plus).ok()?;
+                        let a = self.kinematics_near(minus, Some(evaluation)).ok()?;
+                        let b = self.kinematics_near(plus, Some(evaluation)).ok()?;
                         let moved = [&a, &b]
                             .into_iter()
                             .flat_map(|sample| {
@@ -679,8 +1028,7 @@ impl Problem<'_> {
         };
         let jt = j.transpose();
         let hessian = &jt * &j + DMatrix::identity(18, 18) * 1.0e-4;
-        let factor = hessian.cholesky()?;
-        let free = factor.solve(&(-jt * r));
+        let linear = jt * r;
         let mut rows = Vec::<[f64; 18]>::new();
         let mut margins = Vec::new();
         if !restoring {
@@ -725,55 +1073,7 @@ impl Problem<'_> {
             rows.push(row);
             margins.push(f64::from(hi));
         }
-        // Nonnegative dual coordinate minimization of the convex QP.
-        // H is positive definite by numerical LM regularization; it does not
-        // soften any human limit. The nonlinear line search checks the result.
-        let directions: Vec<_> = rows
-            .iter()
-            .map(|row| {
-                let direction = factor.solve(&DVector::from_column_slice(row));
-                let diagonal = row
-                    .iter()
-                    .zip(direction.iter())
-                    .map(|(a, b)| a * b)
-                    .sum::<f64>();
-                let norm = direction.norm();
-                (direction, diagonal, norm)
-            })
-            .collect();
-        let mut delta = free;
-        let mut lambda = vec![0.0_f64; rows.len()];
-        for _ in 0..256 {
-            let mut largest = 0.0_f64;
-            for (((row, margin), (direction, diagonal, norm)), lambda) in
-                rows.iter().zip(&margins).zip(&directions).zip(&mut lambda)
-            {
-                if *diagonal <= f64::EPSILON {
-                    continue;
-                }
-                let slack = row
-                    .iter()
-                    .zip(delta.iter())
-                    .map(|(a, b)| a * b)
-                    .sum::<f64>()
-                    + margin;
-                let next = (*lambda - slack / diagonal).max(0.0);
-                let change = next - *lambda;
-                // The direction is constant for all dual sweeps. Update in
-                // place instead of allocating an 18-element vector each time.
-                if change != 0.0 {
-                    delta.axpy(change, direction, 1.0);
-                }
-                *lambda = next;
-                largest = largest.max(change.abs() * norm);
-            }
-            if largest < 64.0 * f64::EPSILON.sqrt() {
-                break;
-            }
-        }
-        Some(std::array::from_fn(|i| {
-            delta.get(i).copied().unwrap_or(0.0) as f32
-        }))
+        quadratic_step(hessian, linear, &rows, &margins)
     }
 
     fn score(&self, evaluation: &Evaluation) -> (f64, f64) {
@@ -787,8 +1087,8 @@ impl Problem<'_> {
         )
     }
 
-    /// Resolve the skeletal default without allowing clothing contacts to
-    /// select another shoulder/elbow branch.
+    /// Resolve the configured initial posture within the same anatomical and
+    /// contact domain as tracking. An unreachable profile retains a residual.
     pub fn solve_neutral(
         &self,
         seed: [Option<ArmJoints>; 2],

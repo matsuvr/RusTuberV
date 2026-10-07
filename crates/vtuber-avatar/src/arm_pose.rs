@@ -343,21 +343,31 @@ pub(crate) fn resolve_finger_joint(
 
 /// Writes the admitted joint path relative to immutable authored locals.
 /// Animation cannot add an unchecked arm rotation after the constrained solve.
-/// The actual subtree (including helpers) is propagated exactly once.
+/// The admitted subtree is propagated before its dependent helpers are evaluated.
 pub fn apply_default_arm_pose(
-    roots: Query<(&AvatarBinding, &crate::arm_pipeline::DynamicArmTargets), With<ActiveAvatar>>,
+    roots: Query<
+        (
+            &AvatarBinding,
+            &crate::arm_pipeline::DynamicArmTargets,
+            Option<&crate::node_constraints::NodeConstraintBindings>,
+        ),
+        With<ActiveAvatar>,
+    >,
     mut transforms: Query<(&mut Transform, &mut GlobalTransform)>,
     rests: Query<&bevy_vrm1::prelude::RestTransform>,
     child_ofs: Query<&ChildOf>,
     children: Query<&Children>,
 ) {
-    for (binding, targets) in &roots {
+    use crate::node_constraints::NodeConstraintKind;
+    for (binding, targets, constraints) in &roots {
         if targets.generation != Some(binding.generation) {
             continue;
         }
         let resolved_poses = [targets.left, targets.right];
+        let mut controlled = Vec::new();
 
         for resolved in resolved_poses.into_iter().flatten() {
+            controlled.extend([resolved.upper_arm, resolved.lower_arm]);
             let refresh_root = resolved
                 .shoulder
                 .map(|b| b.entity)
@@ -379,6 +389,7 @@ pub fn apply_default_arm_pose(
                 }
             }
             if let Some(shoulder) = resolved.shoulder {
+                controlled.push(shoulder.entity);
                 any_changed |=
                     apply_delta(shoulder.entity, shoulder.delta, &mut transforms, &rests);
             }
@@ -395,6 +406,7 @@ pub fn apply_default_arm_pose(
                 &rests,
             );
             if let Some(hand) = resolved.hand {
+                controlled.push(hand.entity);
                 any_changed |= apply_delta(hand.entity, hand.delta, &mut transforms, &rests);
             }
             for finger in [
@@ -422,6 +434,7 @@ pub fn apply_default_arm_pose(
             .into_iter()
             .flatten()
             {
+                controlled.push(finger.entity);
                 any_changed |= apply_delta(finger.entity, finger.delta, &mut transforms, &rests);
             }
             if !any_changed {
@@ -436,6 +449,82 @@ pub fn apply_default_arm_pose(
                 crate::skeleton::refresh_global(refresh_root, &mut transforms, &child_ofs, None)
             {
                 crate::skeleton::refresh_subtree(refresh_root, global, &mut transforms, &children);
+            }
+        }
+        // Upstream constraints ran before the admitted arm pose. Evaluate its
+        // dependent helper branches again from this frame's final sources;
+        // otherwise reset sleeves/twist bones remain in T-pose. A constraint
+        // may never change an ancestor of an admitted anatomical joint.
+        for &source in &controlled {
+            let Some(destinations) = constraints.and_then(|c| c.0.get(&source)) else {
+                continue;
+            };
+            let (Ok(rest), Ok((local, global))) = (rests.get(source), transforms.get(source))
+            else {
+                continue;
+            };
+            let source_rest = rest.rotation;
+            let source_rotation = local.rotation;
+            let source_position = global.translation();
+            let delta = source_rest.inverse() * source_rotation;
+            for constraint in destinations {
+                let dest = constraint.destination;
+                if controlled.iter().any(|&bone| {
+                    let mut ancestor = bone;
+                    loop {
+                        if ancestor == dest {
+                            return true;
+                        }
+                        let Ok(parent) = child_ofs.get(ancestor) else {
+                            return false;
+                        };
+                        ancestor = parent.parent();
+                    }
+                }) {
+                    continue;
+                }
+                let Ok(rest) = rests.get(dest) else {
+                    continue;
+                };
+                let target = if let NodeConstraintKind::Roll(axis) = constraint.kind {
+                    // VRMC_node_constraint: source local -> parent -> helper
+                    // local, then remove swing and retain only axial twist.
+                    let in_parent = source_rest * delta * source_rest.inverse();
+                    let in_dest = rest.rotation.inverse() * in_parent * rest.rotation;
+                    rest.rotation
+                        * Quat::from_rotation_arc(axis, in_dest * axis).inverse()
+                        * in_dest
+                } else if let NodeConstraintKind::Aim(axis) = constraint.kind {
+                    let Ok(parent) = child_ofs.get(dest) else {
+                        continue;
+                    };
+                    let (Ok((_, parent_global)), Ok((_, global))) =
+                        (transforms.get(parent.parent()), transforms.get(dest))
+                    else {
+                        continue;
+                    };
+                    let Some(direction) = (source_position - global.translation()).try_normalize()
+                    else {
+                        continue;
+                    };
+                    let parent_rotation = parent_global.rotation();
+                    let from = parent_rotation * rest.rotation * axis;
+                    parent_rotation.inverse()
+                        * Quat::from_rotation_arc(from, direction)
+                        * parent_rotation
+                        * rest.rotation
+                } else {
+                    rest.rotation * delta
+                };
+                let Ok((mut local, _)) = transforms.get_mut(dest) else {
+                    continue;
+                };
+                local.rotation = rest.rotation.slerp(target, constraint.weight).normalize();
+                if let Some(global) =
+                    crate::skeleton::refresh_global(dest, &mut transforms, &child_ofs, None)
+                {
+                    crate::skeleton::refresh_subtree(dest, global, &mut transforms, &children);
+                }
             }
         }
     }

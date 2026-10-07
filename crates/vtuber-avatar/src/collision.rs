@@ -1,4 +1,6 @@
-//! Skeleton-bound capsule compounds fitted once from the visible bind mesh.
+//! Skeleton-bound capsule compounds for anatomical body contacts.
+//! Torso breadth and available palm breadth keep dresses and sleeves out of
+//! body dimensions; remaining link shapes are fitted from the bind mesh.
 //! Runtime contact is segment distance; no mesh skinning or convex-hull rebuilds.
 
 use bevy::mesh::{
@@ -201,6 +203,56 @@ pub(crate) fn bind_collision_geometry(
             Ok(rest.map_or(*global, |r| r.0))
         };
         let build = || -> Result<(CollisionGeometry, CollisionMorphs), CollisionError> {
+            let forearms: Vec<_> = [binding.left_arm, binding.right_arm]
+                .into_iter()
+                .flatten()
+                .filter_map(forearm_capsule)
+                .collect();
+            let palms: Vec<_> = [binding.left_arm, binding.right_arm]
+                .into_iter()
+                .flatten()
+                .flat_map(palm_capsules)
+                .collect();
+            // The torso follows its skeleton links. Rendered skirts, capes and
+            // shoulder decorations are not measurements of the human trunk.
+            let mut torso = Vec::new();
+            if let Some((left, right)) = binding.left_arm.zip(binding.right_arm) {
+                let mut breadth = left
+                    .rest
+                    .upper_arm
+                    .position
+                    .distance(right.rest.upper_arm.position);
+                if let Some((left, right)) = root
+                    .get::<LeftUpperLegBoneEntity>()
+                    .zip(root.get::<RightUpperLegBoneEntity>())
+                {
+                    breadth = breadth.max(
+                        rest(left.0)?
+                            .translation()
+                            .distance(rest(right.0)?.translation()),
+                    );
+                }
+                let radius = breadth * 0.5;
+                let links: Vec<_> = [
+                    root.get::<HipsBoneEntity>().map(|b| b.0),
+                    binding.spine,
+                    binding.chest,
+                    binding.upper_chest,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                let top = (left.rest.upper_arm.position + right.rest.upper_arm.position) * 0.5;
+                for (i, bone) in links.iter().enumerate() {
+                    let start = rest(*bone)?.translation();
+                    let end = links
+                        .get(i + 1)
+                        .map(|next| rest(*next).map(|t| t.translation()))
+                        .transpose()?
+                        .unwrap_or(top);
+                    torso.push(link_capsule(*bone, Region::Torso, start, end, radius));
+                }
+            }
             let mut morph_inputs = CollisionMorphs::default();
             let mut points = HashMap::<(Entity, Entity), Vec<Vec3>>::new();
             let mut sockets: Vec<_> = [binding.left_arm, binding.right_arm]
@@ -332,6 +384,12 @@ pub(crate) fn bind_collision_geometry(
                                 }
                             }
                             if let Some((bone, region)) = strongest.1 {
+                                if forearms.iter().any(|capsule| capsule.bone == bone)
+                                    || palms.iter().any(|capsule| capsule.bone == bone)
+                                    || (!torso.is_empty() && region == Region::Torso)
+                                {
+                                    continue;
+                                }
                                 // Shared shoulder skin deforms across the joint;
                                 // the socket above owns this region. Fitting it
                                 // again as rigid upper-arm skin overstates its
@@ -345,7 +403,11 @@ pub(crate) fn bind_collision_geometry(
                                 points.entry((bone, entity)).or_default().push(point);
                             }
                         }
-                    } else if let Some((bone, _)) = classify(entity) {
+                    } else if let Some((bone, region)) = classify(entity)
+                        && !forearms.iter().any(|capsule| capsule.bone == bone)
+                        && !palms.iter().any(|capsule| capsule.bone == bone)
+                        && (torso.is_empty() || region != Region::Torso)
+                    {
                         let transform = rest(entity)?;
                         let used: Vec<_> = mesh
                             .indices()
@@ -373,33 +435,25 @@ pub(crate) fn bind_collision_geometry(
                     stack.extend(descendants.iter());
                 }
             }
-            let mut capsules = Vec::new();
+            let mut capsules = forearms;
+            capsules.extend(palms);
+            capsules.extend(torso);
             // Keep separate primitives separate: a wing and a sleeve must
             // not become a single collider across their empty space.
             let mut parts: Vec<_> = points.into_iter().collect();
             parts.sort_by_key(|(key, _)| *key);
             for ((bone, _), points) in parts {
                 let (_, region) = classify(bone).ok_or(CollisionError::MissingBone)?;
-                let rest_rotation = rest(bone)?.rotation();
+                // VRM1 may rotate a bone's authored axes without changing its
+                // T-pose mesh. Fit in the shared model-space T-pose basis;
+                // inverse bind poses already account for the authored axes.
                 let orientation = if let Some(axis) = axes.get(&bone) {
                     let axis = axis.try_normalize().ok_or(CollisionError::InvalidMesh)?;
-                    Quat::from_rotation_arc(rest_rotation * Vec3::Y, axis) * rest_rotation
+                    Quat::from_rotation_arc(Vec3::Y, axis)
                 } else {
-                    rest_rotation
+                    Quat::IDENTITY
                 };
                 capsules.extend(fit_capsules(bone, region, &points, orientation)?);
-            }
-            for chain in [binding.left_arm, binding.right_arm].into_iter().flatten() {
-                for capsule in capsules
-                    .iter_mut()
-                    .filter(|c| c.region == Region::Upper(chain.side))
-                {
-                    trim_upper_capsule(
-                        capsule,
-                        chain.rest.upper_arm.position,
-                        chain.rest.elbow.position,
-                    )?;
-                }
             }
             if !capsules.iter().any(|h| h.region == Region::Torso) {
                 return Err(CollisionError::InvalidMesh);
@@ -438,27 +492,6 @@ pub(crate) fn bind_collision_geometry(
     }
 }
 
-/// Keep the upper-arm contact proxy near the elbow. The shoulder skin and
-/// torso already occupy the axilla; extending this rigid proxy into it makes
-/// an arm lift start inside a contact that the skeleton cannot resolve.
-fn trim_upper_capsule(
-    capsule: &mut CapsuleCollider,
-    shoulder: Vec3,
-    elbow: Vec3,
-) -> Result<(), CollisionError> {
-    let upper = elbow - shoulder;
-    let length = upper.length();
-    let axis = upper.try_normalize().ok_or(CollisionError::InvalidMesh)?;
-    let proximal_reach = length * 0.25;
-    capsule.radius = capsule.radius.min(proximal_reach);
-    let minimum_centre = capsule.radius - proximal_reach;
-    for endpoint in &mut capsule.endpoints {
-        let along = (*endpoint - elbow).dot(axis);
-        *endpoint += axis * (minimum_centre - along).max(0.0);
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BoneMotion {
     /// Rigid map of a point from model/rest space to the candidate pose.
@@ -479,6 +512,107 @@ pub enum CollisionError {
     InvalidMesh,
     /// A render skin references an unavailable bone.
     MissingBone,
+}
+
+/// Measure transverse palm breadth at the thumb CMC and four finger MCPs.
+/// The thumb MCP belongs to the articulated thumb, outside the rigid palm;
+/// its T-pose spread must not inflate the forearm. Neither does a sleeve.
+/// Finger bones are optional in VRM; without a measurable breadth the existing
+/// mesh-based binding remains responsible for that link.
+fn forearm_capsule(chain: crate::arm::ArmChainBinding) -> Option<CapsuleCollider> {
+    let start = chain.rest.elbow.position;
+    let end = chain.rest.wrist.position;
+    let direction = (end - start).try_normalize()?;
+    let knuckles: Vec<_> = [
+        chain.finger_rest.thumb.metacarpal,
+        chain.finger_rest.index.proximal,
+        chain.finger_rest.middle.proximal,
+        chain.finger_rest.ring.proximal,
+        chain.finger_rest.little.proximal,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|joint| joint.rest.position)
+    .collect();
+    let mut breadth = 0.0_f32;
+    for (i, a) in knuckles.iter().enumerate() {
+        for b in knuckles.iter().skip(i + 1) {
+            let across = *b - *a;
+            breadth = breadth.max((across - direction * across.dot(direction)).length());
+        }
+    }
+    if !breadth.is_finite() || breadth <= 0.0 {
+        return None;
+    }
+    let radius = breadth * 0.5;
+    Some(link_capsule(
+        chain.lower_arm,
+        Region::Forearm(chain.side),
+        start,
+        end,
+        radius,
+    ))
+}
+
+/// The rigid palm spans the wrist and four MCP centres. Their measured spacing
+/// supplies its thickness, so a cuff or ornament bound to the hand bone cannot
+/// block an otherwise clear arm path. Finger shapes retain their own bindings.
+fn palm_capsules(chain: crate::arm::ArmChainBinding) -> Vec<CapsuleCollider> {
+    let knuckles: Option<Vec<_>> = [
+        chain.finger_rest.index.proximal,
+        chain.finger_rest.middle.proximal,
+        chain.finger_rest.ring.proximal,
+        chain.finger_rest.little.proximal,
+    ]
+    .into_iter()
+    .map(|joint| joint.map(|joint| joint.rest.position))
+    .collect();
+    let Some(knuckles) = knuckles else {
+        return Vec::new();
+    };
+    let radius = knuckles
+        .windows(2)
+        .filter_map(|pair| {
+            pair.first()
+                .zip(pair.last())
+                .map(|(a, b)| a.distance(*b) * 0.5)
+        })
+        .fold(0.0_f32, f32::max);
+    knuckles
+        .into_iter()
+        .map(|end| {
+            link_capsule(
+                chain.hand,
+                Region::Hand(chain.side),
+                chain.rest.wrist.position,
+                end,
+                radius,
+            )
+        })
+        .collect()
+}
+
+/// A skeleton link's proxy spans its two joint centres, independent of clothing.
+fn link_capsule(
+    bone: Entity,
+    region: Region,
+    start: Vec3,
+    end: Vec3,
+    radius: f32,
+) -> CapsuleCollider {
+    let half_link = (end - start) * 0.5;
+    let half_length = half_link.length();
+    let inset = if half_length > radius {
+        half_link * (radius / half_length)
+    } else {
+        half_link
+    };
+    CapsuleCollider {
+        bone,
+        region,
+        endpoints: [start + inset, end - inset],
+        radius,
+    }
 }
 
 /// Fit a rounded box using up to three parallel capsules. Its long direction
@@ -637,39 +771,6 @@ impl CollisionGeometry {
         }
     }
 
-    /// Fit mesh-derived capsule radii in the canonical skeletal default.
-    /// Rounded clothing bounds contain empty space; their initial overlap
-    /// must not push the skeleton out of its specified recovery pose.
-    /// These same radii are used for endpoints and swept path admission.
-    pub fn fit_neutral(
-        &mut self,
-        motion: impl Fn(Entity) -> Option<BoneMotion>,
-        clearance: f32,
-    ) -> Result<(), CollisionError> {
-        let segments = self.posed(&motion)?;
-        let mut radii: Vec<_> = self.capsules.iter().map(|c| c.radius).collect();
-        for &[a, b] in &self.pairs {
-            let (ca, cb) = self.pair([a, b])?;
-            let (sa, sb) = segments
-                .get(a)
-                .zip(segments.get(b))
-                .ok_or(CollisionError::InvalidMesh)?;
-            let available = (segment_distance(sa, sb) as f32 - clearance).max(0.0);
-            let sum = ca.radius + cb.radius;
-            if available < sum {
-                let scale = available / sum;
-                for (index, radius) in [(a, ca.radius), (b, cb.radius)] {
-                    let fitted = radii.get_mut(index).ok_or(CollisionError::InvalidMesh)?;
-                    *fitted = fitted.min(radius * scale);
-                }
-            }
-        }
-        for (capsule, radius) in self.capsules.iter_mut().zip(radii) {
-            capsule.radius = radius;
-        }
-        Ok(())
-    }
-
     pub fn bones(&self) -> impl Iterator<Item = Entity> + '_ {
         self.bones.iter().copied()
     }
@@ -758,7 +859,9 @@ impl CollisionGeometry {
                     .point(socket.pivot);
                 let pivot = Vector::from_array(pivot.to_array().map(f64::from));
                 distance = distance.max(
-                    socket.radius
+                    // Include both capsule rounding shells at the joint;
+                    // they must not force the arm away from its attached torso.
+                    socket.radius + ca.radius + cb.radius
                         - intersection_radius(
                             &[sa.a - pivot, sa.b - pivot],
                             ca.radius,
@@ -837,7 +940,7 @@ impl CollisionGeometry {
                     a.radius as f32 + joint_padding,
                     &relative(&b),
                     b.radius as f32 + joint_padding,
-                ) > socket.radius
+                ) > socket.radius + ca.radius + cb.radius
                 {
                     return Ok(false);
                 }
@@ -953,65 +1056,124 @@ mod tests {
         })
     }
     #[test]
-    fn neutral_fit_is_shared_by_pose_and_sweep_contacts() {
-        let mut geometry = CollisionGeometry::new(
-            vec![
-                capsule(1, Region::Torso, 0.0),
-                capsule(2, Region::Forearm(ArmSide::Left), 0.15),
-            ],
-            &[],
-        );
-        assert!(!geometry.pose_is_clear(&identity, 0.0).unwrap());
-        geometry.fit_neutral(identity, 0.002).unwrap();
-        assert!(geometry.pose_is_clear(&identity, 0.0019).unwrap());
-        assert!(
-            geometry
-                .sweep_is_clear(&identity, &identity, |_| 0.0)
-                .unwrap()
-        );
-        let inward = |bone| {
-            identity(bone).map(|mut m| {
-                if bone == entity(2) {
-                    m.translation.x = -0.01;
-                }
-                m
-            })
+    fn forearm_proxy_uses_transverse_knuckle_breadth_and_bone_length() {
+        use crate::arm::*;
+        let pose = |position| RestSpaceBonePose {
+            position,
+            global_rotation: Quat::from_rotation_y(0.7),
+            local_rotation: Quat::from_rotation_z(-0.3),
         };
-        assert!(!geometry.pose_is_clear(&inward, 0.0).unwrap());
-        assert!(
-            !geometry
-                .sweep_is_clear(&identity, &inward, |_| 0.0)
-                .unwrap()
-        );
+        let joint = |id, position| FingerJointRestBinding {
+            entity: entity(id),
+            rest: pose(position),
+        };
+        let mut fingers = FingerRestReferences::default();
+        fingers.thumb.metacarpal = Some(joint(4, Vec3::new(0.34, 0.0, 0.04)));
+        // An extended articulated thumb is not the width of the rigid palm.
+        fingers.thumb.proximal = Some(joint(6, Vec3::new(0.38, 0.0, 0.4)));
+        fingers.little.proximal = Some(joint(5, Vec3::new(0.38, 0.0, -0.04)));
+        let mut chain = ArmChainBinding {
+            side: ArmSide::Left,
+            shoulder: None,
+            upper_arm: entity(1),
+            lower_arm: entity(2),
+            hand: entity(3),
+            fingers: FingerReferences::default(),
+            finger_rest: fingers,
+            capabilities: ArmChainCapabilities::default(),
+            rest: ArmRestGeometry {
+                shoulder: None,
+                upper_arm: pose(Vec3::ZERO),
+                elbow: pose(Vec3::X * 0.1),
+                wrist: pose(Vec3::X * 0.3),
+                upper_arm_length: 0.1,
+                forearm_length: 0.2,
+                total_arm_length: 0.3,
+            },
+        };
+        let proxy = forearm_capsule(chain).unwrap();
+        assert!((proxy.radius - 0.04).abs() < 1.0e-6);
+        assert!(proxy.endpoints[0].distance(Vec3::X * 0.14) < 1.0e-6);
+        assert!(proxy.endpoints[1].distance(Vec3::X * 0.26) < 1.0e-6);
+        assert_eq!(proxy.bone, chain.lower_arm);
+        chain.finger_rest = FingerRestReferences::default();
+        assert!(forearm_capsule(chain).is_none());
     }
 
     #[test]
-    fn upper_capsule_stops_short_of_the_axilla() {
-        let mut upper = CapsuleCollider {
-            bone: entity(2),
-            region: Region::Upper(ArmSide::Left),
-            endpoints: [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, -0.3, 0.0)],
-            radius: 0.06,
-        };
-        let shoulder = Vec3::ZERO;
-        let elbow = Vec3::new(0.0, -0.3, 0.0);
-        trim_upper_capsule(&mut upper, shoulder, elbow).unwrap();
-        let uppermost = upper
-            .endpoints
-            .iter()
-            .map(|p| p.y + upper.radius)
-            .fold(f32::NEG_INFINITY, f32::max);
-        assert!((uppermost - (-0.3 + 0.3 * 0.25)).abs() < 1.0e-6);
-        assert_eq!(upper.endpoints[1], elbow);
+    fn rigid_palm_covers_all_mcp_centres_without_a_wide_wrist_shell() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let mut chain = crate::upper_limb::tests::chain(side);
+            let wrist = chain.rest.wrist.position;
+            let index = chain.finger_rest.index.proximal.unwrap();
+            let little = chain.finger_rest.little.proximal.unwrap();
+            let mut middle = index;
+            middle.entity = entity(100);
+            middle.rest.position = index.rest.position.lerp(little.rest.position, 1.0 / 3.0);
+            let mut ring = middle;
+            ring.entity = entity(101);
+            ring.rest.position = index.rest.position.lerp(little.rest.position, 2.0 / 3.0);
+            chain.finger_rest.middle.proximal = Some(middle);
+            chain.finger_rest.ring.proximal = Some(ring);
+            let palm = palm_capsules(chain);
+            assert_eq!(palm.len(), 4);
+            for joint in [index, middle, ring, little] {
+                let point = Vector::from_array(joint.rest.position.to_array().map(f64::from));
+                assert!(palm.iter().any(|c| {
+                    let [a, b] = c
+                        .endpoints
+                        .map(|p| Vector::from_array(p.to_array().map(f64::from)));
+                    segment_distance(&Segment::new(point, point), &Segment::new(a, b))
+                        <= f64::from(c.radius) + 1.0e-6
+                }));
+            }
+            // The wrist shell follows knuckle spacing, not a mesh-bound cuff.
+            let forward = (index.rest.position + little.rest.position - wrist * 2.0).normalize();
+            for c in palm {
+                assert_eq!(c.bone, chain.hand);
+                assert!(c.radius < 0.01);
+                assert!(c.endpoints.iter().all(|p| (*p - wrist).dot(forward) >= 0.0));
+            }
+            chain.finger_rest.middle.proximal = None;
+            assert!(palm_capsules(chain).is_empty());
+        }
+    }
 
-        let mut broad_sleeve = CapsuleCollider {
-            endpoints: [shoulder, elbow],
-            radius: 0.2,
-            ..upper
-        };
-        trim_upper_capsule(&mut broad_sleeve, shoulder, elbow).unwrap();
-        assert!((broad_sleeve.radius - 0.075).abs() < 1.0e-6);
-        assert!(broad_sleeve.endpoints[0].y + broad_sleeve.radius <= -0.225 + 1.0e-6);
+    #[test]
+    fn proximal_upper_arm_contact_is_checked_outside_the_shoulder_socket() {
+        // The old distal-quarter trim omitted this contact entirely.
+        let points: Vec<_> = [0.0, -0.3]
+            .into_iter()
+            .flat_map(|y| {
+                [-0.03, 0.03]
+                    .into_iter()
+                    .flat_map(move |x| [-0.03, 0.03].into_iter().map(move |z| Vec3::new(x, y, z)))
+            })
+            .collect();
+        let mut capsules = fit_capsules(
+            entity(2),
+            Region::Upper(ArmSide::Left),
+            &points,
+            Quat::IDENTITY,
+        )
+        .unwrap();
+        capsules.push(CapsuleCollider {
+            endpoints: [Vec3::new(0.0, -0.12, 0.0); 2],
+            radius: 0.03,
+            ..capsule(1, Region::Torso, 0.0)
+        });
+        let mut geometry = CollisionGeometry::new(capsules, &[]);
+        geometry.shoulders.push(ShoulderSocket {
+            bone: entity(2),
+            pivot: Vec3::ZERO,
+            radius: 0.05,
+        });
+        assert!(!geometry.pose_is_clear(&identity, 0.0).unwrap());
+        assert!(
+            !geometry
+                .sweep_is_clear(&identity, &identity, |_| 0.0)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1112,6 +1274,17 @@ mod tests {
         });
         assert!(g.pose_is_clear(&identity, 0.0).unwrap());
         assert!(g.sweep_is_clear(&identity, &identity, |_| 0.0).unwrap());
+        // A narrow blended skin seam still includes the capsule rounding
+        // shells. Their contact must not be mistaken for a distant arm/body
+        // intersection that requires opening the armpit.
+        let mut narrow_seam = g.clone();
+        narrow_seam.shoulders[0].radius = 0.04;
+        assert!(narrow_seam.pose_is_clear(&identity, 0.0).unwrap());
+        assert!(
+            narrow_seam
+                .sweep_is_clear(&identity, &identity, |_| 0.0)
+                .unwrap()
+        );
         // Move the arm/socket below the chest: the distal part now intersects
         // the torso outside the socket, despite involving the same two bones.
         let moved = |bone| {
@@ -1184,6 +1357,119 @@ mod tests {
         };
         assert!(g.sweep_is_clear(&identity, &tangent, |_| 0.0).unwrap());
     }
+    #[test]
+    fn bind_shapes_ignore_authored_bone_axes_for_the_same_skinned_t_pose() {
+        use crate::{arm::ArmSide, binding::AvatarBinding, lifecycle::AvatarGeneration};
+        use bevy::{asset::RenderAssetUsages, mesh::PrimitiveTopology};
+
+        let bind = |rotation: Quat| {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<Assets<Mesh>>()
+                .init_resource::<Assets<SkinnedMeshInverseBindposes>>()
+                .add_systems(Update, bind_collision_geometry);
+            let root = app.world_mut().spawn_empty().id();
+            let positions = [
+                Vec3::new(0.0, 1.1, 0.0),
+                Vec3::new(0.3, 1.35, 0.0),
+                Vec3::new(0.6, 1.35, 0.0),
+                Vec3::new(0.86, 1.35, 0.0),
+            ];
+            let globals = positions.map(|p| {
+                GlobalTransform::from(Transform::from_translation(p).with_rotation(rotation))
+            });
+            let bones = globals.map(|g| app.world_mut().spawn((g, RestGlobalTransform(g))).id());
+            let [hips, upper, lower, hand] = bones;
+            let mut chain = crate::upper_limb::tests::chain(ArmSide::Left);
+            chain.shoulder = None;
+            chain.rest.shoulder = None;
+            chain.upper_arm = upper;
+            chain.lower_arm = lower;
+            chain.hand = hand;
+            chain.finger_rest = Default::default();
+            for (rest, p) in [
+                &mut chain.rest.upper_arm,
+                &mut chain.rest.elbow,
+                &mut chain.rest.wrist,
+            ]
+            .into_iter()
+            .zip(positions.into_iter().skip(1))
+            {
+                rest.position = p;
+                rest.global_rotation = rotation;
+            }
+            let mut binding = AvatarBinding::head_only(root, root, AvatarGeneration(1));
+            binding.left_arm = Some(chain);
+            app.world_mut()
+                .entity_mut(root)
+                .insert((binding, HipsBoneEntity(hips)));
+            let mut vertices = Vec::new();
+            let mut indices = Vec::new();
+            let mut weights = Vec::new();
+            let sizes = [
+                Vec3::new(0.18, 0.25, 0.07),
+                Vec3::new(0.13, 0.045, 0.04),
+                Vec3::new(0.12, 0.035, 0.03),
+                Vec3::new(0.05, 0.012, 0.03),
+            ];
+            for (i, (centre, size)) in positions.into_iter().zip(sizes).enumerate() {
+                for x in [-1.0, 1.0] {
+                    for y in [-1.0, 1.0] {
+                        for z in [-1.0, 1.0] {
+                            vertices.push((centre + size * Vec3::new(x, y, z)).to_array());
+                            indices.push([i as u16, 0, 0, 0]);
+                            weights.push([1.0, 0.0, 0.0, 0.0]);
+                        }
+                    }
+                }
+            }
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            );
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
+            mesh.insert_attribute(
+                Mesh::ATTRIBUTE_JOINT_INDEX,
+                VertexAttributeValues::Uint16x4(indices),
+            );
+            mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, weights);
+            let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+            let inverse_bindposes = app
+                .world_mut()
+                .resource_mut::<Assets<SkinnedMeshInverseBindposes>>()
+                .add(SkinnedMeshInverseBindposes::from(
+                    globals.map(|g| g.to_matrix().inverse()).to_vec(),
+                ));
+            app.world_mut().spawn((
+                Mesh3d(mesh),
+                SkinnedMesh {
+                    inverse_bindposes,
+                    joints: bones.to_vec(),
+                },
+                ChildOf(root),
+            ));
+            app.update();
+            app.world()
+                .get::<AvatarCollision>(root)
+                .unwrap()
+                .0
+                .as_ref()
+                .unwrap()
+                .capsules
+                .clone()
+        };
+        let normalized = bind(Quat::IDENTITY);
+        let authored = bind(Quat::from_euler(EulerRot::XYZ, 0.34, -0.5, 0.7));
+        assert_eq!(normalized.len(), authored.len());
+        for (a, b) in normalized.iter().zip(authored) {
+            assert_eq!(a.region, b.region);
+            assert!((a.radius - b.radius).abs() < 2.0e-6);
+            for (a, b) in a.endpoints.into_iter().zip(b.endpoints) {
+                assert!(a.distance(b) < 2.0e-6);
+            }
+        }
+    }
+
     #[test]
     fn broad_torso_uses_several_capsules_and_preserves_scale() {
         let points: Vec<_> = [-0.18, 0.18]

@@ -109,6 +109,93 @@ fn rotation_close(actual: Quat, expected: Quat) -> bool {
 }
 
 #[test]
+fn final_arm_pose_drives_roll_aim_and_copy_helpers_in_the_same_frame() {
+    use vtuber_avatar::node_constraints::{
+        NodeConstraintBindings, NodeConstraintDestination, NodeConstraintKind,
+    };
+    let mut app = build_app();
+    let angle = 0.6;
+    let chain = spawn_avatar(
+        &mut app,
+        Quat::from_rotation_y(0.4),
+        Quat::from_rotation_y(angle),
+    );
+    let roll_rest = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let twist = spawn_child(&mut app, chain.upper, Transform::from_rotation(roll_rest));
+    let copy_rest = Quat::from_rotation_x(-0.2);
+    let copy = spawn_child(&mut app, chain.root, Transform::from_rotation(copy_rest));
+    let sleeve = spawn_child(
+        &mut app,
+        chain.upper,
+        Transform::from_rotation(Quat::from_rotation_z(0.3)),
+    );
+    let second_sleeve = spawn_child(&mut app, chain.upper, Transform::IDENTITY);
+    app.world_mut()
+        .entity_mut(chain.root)
+        .insert(NodeConstraintBindings(std::collections::HashMap::from([
+            (
+                chain.upper,
+                vec![
+                    NodeConstraintDestination {
+                        destination: twist,
+                        kind: NodeConstraintKind::Roll(Vec3::X),
+                        weight: 0.5,
+                    },
+                    NodeConstraintDestination {
+                        destination: copy,
+                        kind: NodeConstraintKind::Rotation,
+                        weight: 1.0,
+                    },
+                    // This helper is an ancestor of the admitted elbow. Applying a
+                    // constraint here would change bone positions after admission.
+                    NodeConstraintDestination {
+                        destination: chain.helper,
+                        kind: NodeConstraintKind::Rotation,
+                        weight: 1.0,
+                    },
+                ],
+            ),
+            (
+                chain.lower,
+                vec![sleeve, second_sleeve]
+                    .into_iter()
+                    .map(|destination| NodeConstraintDestination {
+                        destination,
+                        kind: NodeConstraintKind::Aim(Vec3::X),
+                        weight: 1.0,
+                    })
+                    .collect(),
+            ),
+        ])));
+
+    for _ in 0..3 {
+        app.update();
+        let world = app.world();
+        assert!(rotation_close(
+            world.get::<Transform>(twist).unwrap().rotation,
+            roll_rest * Quat::from_rotation_x(angle * 0.5),
+        ));
+        assert!(rotation_close(
+            world.get::<Transform>(copy).unwrap().rotation,
+            copy_rest * Quat::from_rotation_y(angle),
+        ));
+        assert!(rotation_close(
+            world.get::<Transform>(chain.helper).unwrap().rotation,
+            Quat::IDENTITY,
+        ));
+        let elbow = world
+            .get::<GlobalTransform>(chain.lower)
+            .unwrap()
+            .translation();
+        for sleeve in [sleeve, second_sleeve] {
+            let sleeve_global = world.get::<GlobalTransform>(sleeve).unwrap();
+            let direction = (elbow - sleeve_global.translation()).normalize();
+            assert!((sleeve_global.rotation() * Vec3::X).dot(direction) > 1.0 - EPSILON);
+        }
+    }
+}
+
+#[test]
 fn admitted_pose_uses_authored_rest_without_accumulation() {
     let mut app = build_app();
     let base = Quat::from_rotation_y(0.25);

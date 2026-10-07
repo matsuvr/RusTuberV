@@ -39,6 +39,7 @@ pub mod lifecycle;
 pub mod load;
 pub mod look;
 pub mod mirror;
+pub mod node_constraints;
 pub mod placeholder;
 pub mod plugin;
 pub mod pose;

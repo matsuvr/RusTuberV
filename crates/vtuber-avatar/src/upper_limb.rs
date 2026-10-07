@@ -371,6 +371,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn arm_motion_has_the_same_physical_pose_with_arbitrary_vrm1_rest_axes() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let mut normalized = chain(side);
+            let mut authored = normalized;
+            for rest in [
+                normalized.rest.shoulder.as_mut().unwrap(),
+                &mut normalized.rest.upper_arm,
+                &mut normalized.rest.elbow,
+                &mut normalized.rest.wrist,
+            ] {
+                rest.global_rotation = Quat::IDENTITY;
+                rest.local_rotation = Quat::IDENTITY;
+            }
+            for (i, rest) in [
+                authored.rest.shoulder.as_mut().unwrap(),
+                &mut authored.rest.upper_arm,
+                &mut authored.rest.elbow,
+                &mut authored.rest.wrist,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                rest.global_rotation = Quat::from_euler(EulerRot::XYZ, 0.3 + i as f32, -0.5, 0.7);
+                rest.local_rotation = Quat::from_rotation_y(0.6 - i as f32);
+            }
+            for step in 0..120 {
+                let t = step as f32 / 119.0;
+                let mut joints = state(0.7 + 0.5 * t.sin(), 0.5 + 1.1 * t, -0.4 * t.sin(), 0.2 + t);
+                joints.angles[4] = 0.7 * t.sin();
+                joints.angles[5] = 0.3 * t.sin();
+                joints.angles[6] = 0.15 * t.cos();
+                let a = joints.forward(&normalized).unwrap();
+                let b = joints.forward(&authored).unwrap();
+                for (a, b) in [
+                    (a.shoulder, b.shoulder),
+                    (a.elbow, b.elbow),
+                    (a.wrist, b.wrist),
+                ] {
+                    assert!(a.distance(b) < 2.0e-6);
+                }
+                let (an, af) = a.palm.unwrap();
+                let (bn, bf) = b.palm.unwrap();
+                assert!(an.distance(bn) < 2.0e-6);
+                assert!(af.distance(bf) < 2.0e-6);
+                for (bone, motion) in a.motion {
+                    let other = b.motion[&bone];
+                    assert!(motion.translation.distance(other.translation) < 2.0e-6);
+                    assert!(motion.rotation.dot(other.rotation).abs() > 1.0 - 2.0 * f32::EPSILON);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn candidate_matches_local_hierarchy_with_oblique_elbow_and_moving_shoulder() {
         for side in [ArmSide::Left, ArmSide::Right] {
             let chain = chain(side);

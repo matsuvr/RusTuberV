@@ -43,12 +43,12 @@ impl JointPath {
         }
     }
 
-    /// Match playback to the measured producer period instead of displaying a
+    /// Match playback to the producer period instead of displaying a
     /// slow result in two frames and then freezing until the next one arrives.
     /// A fast producer still supplies a pose each camera interval. A distant
     /// IK branch/route must take as long as the equivalent local SQP steps;
     /// a collision-free shortcut is not permission for a two-frame snap.
-    pub fn retime(&mut self, computation_seconds: f32) {
+    pub fn retime(&mut self, producer_seconds: f32) {
         for segment in self.segment.iter_mut().chain(&mut self.queued) {
             if !segment.eased {
                 let distance = segment
@@ -60,7 +60,7 @@ impl JointPath {
                     .map(|(a, b)| (b - a).abs())
                     .fold(0.0_f32, f32::max);
                 let steps = (distance / crate::upper_limb_solver::MAX_STEP_RADIANS).max(1.0);
-                segment.duration = computation_seconds.max(RESPONSE_SECONDS * steps);
+                segment.duration = producer_seconds.max(RESPONSE_SECONDS * steps);
             }
         }
     }

@@ -48,11 +48,12 @@ fn prepare_avatar_load(
     // material bind entries included) is the single source of truth the
     // bind step resolves against the live scene. An unreadable managed copy
     // also fails the runtime asset load, so the facts are best-effort here.
-    let expressions =
-        crate::import::read_runtime_expression_facts(&pending.model.asset_path).unwrap_or_default();
+    let (expressions, constraints) =
+        crate::import::read_runtime_source_facts(&pending.model.asset_path).unwrap_or_default();
     let imported = vtuber_avatar::ImportedAvatar::new(id, path, &pending.model.name)
         .with_warnings(pending.model.summary.compatibility_warnings.clone())
-        .with_expressions(expressions);
+        .with_expressions(expressions)
+        .with_node_constraints(constraints);
     Ok((
         vtuber_avatar::LoadImportedAvatarRequest {
             request_id: pending.request_id,

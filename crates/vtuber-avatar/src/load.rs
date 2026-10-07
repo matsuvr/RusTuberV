@@ -187,6 +187,8 @@ pub struct ImportedAvatar {
     /// (`VRMC_vrm.expressions`, including the app-retained custom-origin
     /// record and material bind entries).
     pub expressions: SourceExpressions,
+    /// Authored helper constraints from the same managed model.
+    pub node_constraints: crate::node_constraints::SourceNodeConstraints,
 }
 
 impl ImportedAvatar {
@@ -199,6 +201,7 @@ impl ImportedAvatar {
             name: name.into(),
             warnings: Vec::new(),
             expressions: SourceExpressions::default(),
+            node_constraints: Default::default(),
         }
     }
 
@@ -213,6 +216,16 @@ impl ImportedAvatar {
     #[must_use]
     pub fn with_expressions(mut self, expressions: SourceExpressions) -> Self {
         self.expressions = expressions;
+        self
+    }
+
+    /// Attaches every authored helper constraint from the managed model.
+    #[must_use]
+    pub fn with_node_constraints(
+        mut self,
+        constraints: crate::node_constraints::SourceNodeConstraints,
+    ) -> Self {
+        self.node_constraints = constraints;
         self
     }
 }
@@ -371,6 +384,7 @@ pub fn handle_load_imported_avatar_requests(
                 request.imported.id.clone(),
                 VrmSourceWarnings(request.imported.warnings.clone()),
                 VrmSourceExpressions(request.imported.expressions.clone()),
+                request.imported.node_constraints.clone(),
                 VrmHandle(asset_server.load(asset_path)),
                 Transform::default(),
                 GlobalTransform::default(),

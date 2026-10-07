@@ -51,11 +51,7 @@ pub(crate) fn rotation_bound(chain: &ArmChainBinding, a: [f32; 9], b: [f32; 9]) 
     let ac = (0.140 + 0.079 + 0.028) * p + (0.049 + 0.396 + 0.184) * e;
     let speed =
         (clavicle * ((asp - bsp).abs() + (ase - bse).abs()) + scapula * ac) / (clavicle - scapula);
-    let Some(reference) = crate::shoulder::coordinates(chain, chain.rest.upper_arm.global_rotation)
-    else {
-        return f32::INFINITY;
-    };
-    let rest = source_centre(rhythm(reference.plane.unwrap_or(0.0), reference.elevation));
+    let rest = source_centre([0.0; 5]);
     let mut midpoint = rhythm((ap + bp) * 0.5, (ae + be) * 0.5);
     midpoint[0] = (asp + bsp) * 0.5;
     midpoint[1] = (ase + bse) * 0.5;
@@ -90,11 +86,7 @@ pub(crate) fn acceleration_bound(chain: &ArmChainBinding, a: [f32; 9], b: [f32; 
     let ac = (0.140 + 0.079 + 0.028) * p + (0.049 + 0.396 + 0.184) * e;
     let u1 = (c * sc + s * ac) / (c - s);
     let u2 = (c * sc * sc + s * ac * ac) / (c - s) + 3.0 * u1 * u1;
-    let Some(reference) = crate::shoulder::coordinates(chain, chain.rest.upper_arm.global_rotation)
-    else {
-        return f32::INFINITY;
-    };
-    let rest = source_centre(rhythm(reference.plane.unwrap_or(0.0), reference.elevation));
+    let rest = source_centre([0.0; 5]);
     let mut mid = rhythm((ap + bp) * 0.5, (ae + be) * 0.5);
     mid[0] = (asp + bsp) * 0.5;
     mid[1] = (ase + bse) * 0.5;
@@ -133,14 +125,10 @@ pub(crate) fn forward(
         };
         Vec3::new(x, v.y, v.x)
     };
-    // The source zero is arm-down; an authored VRM usually has a T/A rest.
-    // Subtract the source rhythm at that actual rest, not at arm-down.
-    let reference = crate::shoulder::coordinates(chain, chain.rest.upper_arm.global_rotation)?;
-    let rest = polar(source_centre(rhythm(
-        reference.plane.unwrap_or(0.0),
-        reference.elevation,
-    )))
-    .try_normalize()?;
+    // VRM T-pose definition 1.5 already places the shoulders at their relaxed,
+    // lowest position, despite raised arms. Bind that link to the source's
+    // arm-down zero; subtracting the raised-arm rhythm lowers it a second time.
+    let rest = polar(source_centre([0.0; 5])).try_normalize()?;
     let mut joints = rhythm(plane, elevation);
     if let Some(sc) = observed_sc {
         joints[0] = sc.x;
@@ -161,6 +149,20 @@ pub(crate) fn forward(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
+
+    #[test]
+    fn vrm_t_pose_shoulders_are_the_arm_down_girdle_reference() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let chain = crate::upper_limb::tests::chain(side);
+            let down = forward(&chain, 0.0, 0.0, None).unwrap();
+            assert!(down.rotation.dot(Quat::IDENTITY).abs() > 1.0 - f32::EPSILON);
+            assert!(down.centre.distance(chain.rest.upper_arm.position) < 1.0e-6);
+            let raised = forward(&chain, 0.0, std::f32::consts::FRAC_PI_2, None).unwrap();
+            assert!(raised.centre.y > down.centre.y);
+            let pivot = chain.rest.shoulder.unwrap().position;
+            assert!((raised.centre.distance(pivot) - down.centre.distance(pivot)).abs() < 1.0e-6);
+        }
+    }
 
     #[test]
     fn full_rhythm_changes_with_plane_and_has_no_double_parent_rotation() {

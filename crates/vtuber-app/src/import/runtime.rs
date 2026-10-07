@@ -75,3 +75,28 @@ pub fn read_runtime_expression_facts(
     let json = glb.document;
     Ok(vtuber_avatar::parse_source_expressions(&json))
 }
+
+/// Reads expression facts and every helper constraint in one managed-model read.
+///
+/// Read, container and invalid-constraint errors propagate as [`ModelImportError`].
+pub fn read_runtime_source_facts(
+    managed_path: &Path,
+) -> Result<
+    (
+        vtuber_avatar::SourceExpressions,
+        vtuber_avatar::node_constraints::SourceNodeConstraints,
+    ),
+    ModelImportError,
+> {
+    let bytes = fs::read(managed_path)?;
+    let glb = Glb::parse(&bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
+    let constraints = vtuber_avatar::node_constraints::parse_source_node_constraints(&glb.document)
+        .map_err(|index| ModelImportError::InvalidVrmField {
+            path: format!("nodes[{index}].extensions.VRMC_node_constraint"),
+            reason: "invalid constraint source, axis or weight".into(),
+        })?;
+    Ok((
+        vtuber_avatar::parse_source_expressions(&glb.document),
+        constraints,
+    ))
+}

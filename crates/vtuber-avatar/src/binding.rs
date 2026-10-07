@@ -355,6 +355,14 @@ pub fn bind_humanoid_bones(
                 .map(|facts| facts.0.clone())
                 .unwrap_or_default();
             let descendant_names = descendant_names_of(root_entity, &name_query, &parents);
+            if let Some(source) = root_ref.get::<crate::node_constraints::SourceNodeConstraints>() {
+                let nodes = name_query
+                    .iter()
+                    .filter(|(entity, _)| is_descendant(*entity, root_entity, &parents))
+                    .map(|(entity, name)| (name.to_string(), entity))
+                    .collect();
+                commands.entity(root_entity).insert(source.bind(&nodes));
+            }
             let material_kinds = resolved_material_kinds(root_entity, &material_query, &parents);
             let statuses = crate::expression::source::build_binding_statuses(
                 &source_facts,

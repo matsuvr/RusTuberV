@@ -272,20 +272,74 @@ pub(crate) fn rest_palm_forward(chain: &ArmChainBinding) -> Option<Vec3> {
     (index + little).try_normalize()
 }
 
-/// Wrist-relative MCP markers carried by a measured palm frame. Keeping their
-/// authored lengths makes orientation error a distance, like the elbow/wrist
-/// tasks, instead of treating each unit palm vector as an entire arm length.
-pub(crate) fn palm_markers(
+/// Apply a camera palm's normalized T-pose rotation to the authored hand.
+/// Slightly slanted model T-poses retain their own rest geometry, as in the
+/// VRM normalized-pose conversion, rather than biasing a half-turn's branch.
+pub(crate) fn retarget_palm_frame(
     chain: &ArmChainBinding,
-    (normal, forward): (Vec3, Vec3),
-) -> Option<[Vec3; 2]> {
-    let rest = palm_frame(rest_palm_normal(chain)?, rest_palm_forward(chain)?)?;
-    let rotation = palm_frame(normal, forward)? * rest.inverse();
+    normal: Vec3,
+    forward: Vec3,
+) -> Option<(Vec3, Vec3)> {
+    let side = if chain.side == crate::arm::ArmSide::Left {
+        1.0
+    } else {
+        -1.0
+    };
+    let canonical = palm_frame(Vec3::Y * side, Vec3::X * side)?;
+    let delta = palm_frame(normal, forward)? * canonical.inverse();
+    Some((
+        delta * rest_palm_normal(chain)?,
+        delta * rest_palm_forward(chain)?,
+    ))
+}
+
+/// SO(3) palm orientation error, scaled by authored palm length. Each
+/// rotational axis has the same observational confidence; a narrow palm must
+/// not make a half-turn around its longitudinal axis nearly unobservable.
+/// The length keeps angular and Cartesian tasks in physical distance units.
+pub(crate) fn palm_orientation_error(
+    chain: &ArmChainBinding,
+    current: (Vec3, Vec3),
+    wanted: (Vec3, Vec3),
+) -> Option<Vec3> {
+    Some(palm_rotation_error(current, wanted)? * palm_length(chain)?)
+}
+
+/// Differentiate one continuous logarithm branch around the current pose.
+/// At a half-turn the shortest logarithm flips sign; central differences
+/// across that cut produce a spurious derivative of approximately PI / h.
+pub(crate) fn palm_orientation_derivative_error(
+    chain: &ArmChainBinding,
+    current: (Vec3, Vec3),
+    wanted: (Vec3, Vec3),
+    reference: (Vec3, Vec3),
+) -> Option<Vec3> {
+    let error = palm_rotation_error(current, wanted)?;
+    let reference = palm_rotation_error(reference, wanted)?;
+    let error = error
+        .try_normalize()
+        .map(|axis| error - std::f32::consts::TAU * axis)
+        .filter(|alternate| {
+            alternate.distance_squared(reference) < error.distance_squared(reference)
+        })
+        .unwrap_or(error);
+    Some(error * palm_length(chain)?)
+}
+
+fn palm_rotation_error(current: (Vec3, Vec3), wanted: (Vec3, Vec3)) -> Option<Vec3> {
+    let mut rotation =
+        (palm_frame(wanted.0, wanted.1)? * palm_frame(current.0, current.1)?.inverse()).normalize();
+    if rotation.w < 0.0 {
+        rotation = -rotation;
+    }
+    Some(rotation.to_scaled_axis())
+}
+
+fn palm_length(chain: &ArmChainBinding) -> Option<f32> {
     let wrist = chain.rest.wrist.position;
-    Some([
-        rotation * (chain.finger_rest.index.proximal?.rest.position - wrist),
-        rotation * (chain.finger_rest.little.proximal?.rest.position - wrist),
-    ])
+    let index = chain.finger_rest.index.proximal?.rest.position - wrist;
+    let little = chain.finger_rest.little.proximal?.rest.position - wrist;
+    Some(((index.length_squared() + little.length_squared()) * 0.5).sqrt())
 }
 
 #[cfg(test)]
@@ -330,6 +384,74 @@ mod tests {
             palm_normal: None,
             palm_forward: None,
             fingers: None,
+        }
+    }
+
+    #[test]
+    fn half_turn_palm_has_a_unit_angular_derivative() {
+        for side in [crate::arm::ArmSide::Left, crate::arm::ArmSide::Right] {
+            let chain = crate::upper_limb::tests::chain(side);
+            let normal = rest_palm_normal(&chain).unwrap();
+            let forward = rest_palm_forward(&chain).unwrap();
+            let wanted = (-normal, forward);
+            let h = f32::EPSILON.cbrt();
+            let sample = |angle| {
+                let turn = Quat::from_axis_angle(forward, angle);
+                palm_orientation_derivative_error(
+                    &chain,
+                    (turn * normal, forward),
+                    wanted,
+                    (normal, forward),
+                )
+                .unwrap()
+            };
+            let wrist = chain.rest.wrist.position;
+            let index = chain.finger_rest.index.proximal.unwrap().rest.position - wrist;
+            let little = chain.finger_rest.little.proximal.unwrap().rest.position - wrist;
+            let length = ((index.length_squared() + little.length_squared()) * 0.5).sqrt();
+            let derivative = (sample(h) - sample(-h)) / (2.0 * h * length);
+            assert!((derivative.length() - 1.0).abs() < 0.001, "{derivative:?}");
+        }
+    }
+
+    #[test]
+    fn normalized_palm_motion_preserves_authored_t_pose_tilt_on_both_sides() {
+        for side in [crate::arm::ArmSide::Left, crate::arm::ArmSide::Right] {
+            let sign = if side == crate::arm::ArmSide::Left {
+                1.0
+            } else {
+                -1.0
+            };
+            for tilt in [-0.05, 0.0, 0.05] {
+                let mut chain = crate::upper_limb::tests::chain(side);
+                let wrist = chain.rest.wrist.position;
+                let authored = Quat::from_euler(EulerRot::XYZ, tilt, -tilt * 0.5, tilt * 0.3);
+                for finger in [&mut chain.finger_rest.index, &mut chain.finger_rest.little] {
+                    let joint = finger.proximal.as_mut().unwrap();
+                    joint.rest.position = wrist + authored * (joint.rest.position - wrist);
+                }
+                let rest = (
+                    rest_palm_normal(&chain).unwrap(),
+                    rest_palm_forward(&chain).unwrap(),
+                );
+                for angle in [
+                    0.0,
+                    0.7,
+                    std::f32::consts::PI - 0.01,
+                    std::f32::consts::PI + 0.01,
+                ] {
+                    let delta = Quat::from_axis_angle(Vec3::new(0.2, 0.8, -0.3).normalize(), angle);
+                    let mapped =
+                        retarget_palm_frame(&chain, delta * Vec3::Y * sign, delta * Vec3::X * sign)
+                            .unwrap();
+                    near(mapped.0, delta * rest.0);
+                    near(mapped.1, delta * rest.1);
+                    let normalized = (palm_frame(mapped.0, mapped.1).unwrap()
+                        * palm_frame(rest.0, rest.1).unwrap().inverse())
+                    .normalize();
+                    assert!(normalized.dot(delta).abs() > 1.0 - 8.0 * f32::EPSILON);
+                }
+            }
         }
     }
 
