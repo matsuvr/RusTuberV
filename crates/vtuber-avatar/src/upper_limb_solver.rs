@@ -426,6 +426,76 @@ mod tests {
     }
 
     #[test]
+    fn elbow_contact_swivel_reaches_clear_pose_while_preserving_hand_performance() {
+        use crate::collision::{CapsuleCollider, Region};
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let chain = chain(side);
+            let initial = state(1.0, 0.6, -0.4, 1.2);
+            let pose = initial.forward(&chain).unwrap();
+            let axis = (pose.wrist - pose.shoulder).normalize();
+            let offset = pose.elbow - pose.shoulder;
+            let radial = (offset - axis * offset.dot(axis)).normalize();
+            let torso = Entity::from_raw_u32(100).unwrap();
+            let geometry = CollisionGeometry::new(
+                vec![
+                    CapsuleCollider {
+                        bone: torso,
+                        region: Region::Torso,
+                        endpoints: [pose.elbow - radial * 0.04; 2],
+                        radius: 0.025,
+                    },
+                    CapsuleCollider {
+                        bone: chain.lower_arm,
+                        region: Region::Forearm(side),
+                        endpoints: [chain.rest.elbow.position, chain.rest.wrist.position],
+                        radius: chain.rest.forearm_length * 0.15,
+                    },
+                ],
+                &[],
+            );
+            let body = HashMap::from([(
+                torso,
+                BoneMotion {
+                    rotation: Quat::IDENTITY,
+                    translation: Vec3::ZERO,
+                },
+            )]);
+            let mut target = goal(initial, &chain);
+            target.palm = None;
+            target.weight.palm = 0.0;
+            target.neutral_girdle = Some(Vec2::new(initial.angles[7], initial.angles[8]));
+            target.elbow =
+                Some(geometry.elbow_target(pose.shoulder, pose.elbow, pose.wrist, side, &body));
+            assert_eq!(target.wrist, pose.wrist);
+            assert!(target.elbow.unwrap().distance(pose.elbow) > 0.01);
+            let problem = Problem {
+                chains: [Some(&chain), None],
+                goals: [Some(target), None],
+                geometry: &geometry,
+                body: &body,
+                body_curve: None,
+                tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+            };
+            assert!(!problem.feasible(&problem.evaluate([Some(initial), None]).unwrap()));
+            let (solved, status) = problem.solve([Some(initial), None], 96);
+            let evaluated = problem.evaluate(solved).unwrap();
+            assert!(
+                matches!(status, SolveStatus::Feasible { .. }),
+                "{side:?}: {status:?}"
+            );
+            assert!(problem.feasible(&evaluated));
+            let arm = evaluated.arms[0].as_ref().unwrap();
+            assert!(
+                arm.wrist.distance(pose.wrist) < 0.002,
+                "wrist drift {}",
+                arm.wrist.distance(pose.wrist)
+            );
+            assert!((arm.shoulder.distance(arm.elbow) - chain.rest.upper_arm_length).abs() < 2e-6);
+            assert!((arm.elbow.distance(arm.wrist) - chain.rest.forearm_length).abs() < 2e-6);
+        }
+    }
+
+    #[test]
     fn bilateral_solve_reaches_a_feasible_fk_goal_and_reports_unreachable_residual() {
         let left = chain(ArmSide::Left);
         let right = chain(ArmSide::Right);
@@ -658,7 +728,7 @@ pub enum SolveStatus {
     },
     /// No feasible candidate was found within the local solve budget.
     NoFeasibleSolution,
-    /// Render geometry could not be used for collision checks.
+    /// Skeleton proxies could not be used for collision checks.
     InvalidGeometry(CollisionError),
     /// The current transition did not pass the continuous ROM/skin checks.
     BlockedPath,
@@ -700,7 +770,9 @@ impl Problem<'_> {
             let Some((chain, state)) = chain.zip(state) else {
                 continue;
             };
-            let pose = state.forward(chain).ok_or(CollisionError::InvalidMesh)?;
+            let pose = state
+                .forward(chain)
+                .ok_or(CollisionError::InvalidGeometry)?;
             let reference_palm = reference
                 .and_then(|r| r.arms.get(side))
                 .and_then(Option::as_ref)
@@ -739,7 +811,7 @@ impl Problem<'_> {
                 let neutral = goal
                     .neutral
                     .forward(chain)
-                    .ok_or(CollisionError::InvalidMesh)?;
+                    .ok_or(CollisionError::InvalidGeometry)?;
                 distance(
                     pose.wrist / scale,
                     neutral.wrist / scale,

@@ -562,7 +562,6 @@ pub fn update_upper_limb_targets(
         let initial = path.current.iter().all(Option::is_none);
         let geometry = std::sync::Arc::clone(geometry);
         let snapshot = body.clone();
-        let tracked_pose = selection.mode == ArmPoseSourceKind::TrackedPose;
         let neutral_snapshot = neutral_body;
         let neutral_body_pose = state.neutral_body.clone();
         let chains = [binding.left_arm, binding.right_arm];
@@ -655,22 +654,20 @@ pub fn update_upper_limb_targets(
                         goal.neutral_girdle = Some(Vec2::new(protract, elevate));
                     }
                 }
-                if tracked_pose {
-                    for (goal, chain) in goals.iter_mut().zip(chains.iter()) {
-                        if let Some((goal, chain)) = goal.as_mut().zip(chain.as_ref())
-                            && goal.weight.wrist > 0.0
-                            && goal.weight.pole > 0.0
-                            && let Some(elbow) = goal.elbow
-                        {
-                            let [elbow, wrist] = geometry.visible_forearm_target(
-                                [elbow, goal.wrist],
-                                tracking_to_rest * Vec3::Z,
-                                chain.side,
-                                &snapshot,
-                            );
-                            goal.elbow = Some(elbow);
-                            goal.wrist = wrist;
-                        }
+                for (goal, chain) in goals.iter_mut().zip(chains.iter()) {
+                    if let Some((goal, chain)) = goal.as_mut().zip(chain.as_ref())
+                        && goal.weight.wrist > 0.0
+                        && goal.weight.pole > 0.0
+                        && let Some(elbow) = goal.elbow
+                        && let Some(neutral) = goal.neutral.forward(chain)
+                    {
+                        goal.elbow = Some(geometry.elbow_target(
+                            goal.shoulder.unwrap_or(neutral.shoulder),
+                            elbow,
+                            goal.wrist,
+                            chain.side,
+                            &snapshot,
+                        ));
                     }
                 }
                 let problem = Problem {

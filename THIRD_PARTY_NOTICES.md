@@ -149,3 +149,28 @@ Copyright (c) 2021 Daniel Holden, MIT. The implementation was adapted to Rust
 and an offline ASF/AMC converter. See [the MIT terms](LICENSE).
 Its LAFAN1-derived demonstration database and PosePrior data are not included
 or used to fit these limits.
+
+## Skeleton collision proxy references
+
+`crates/vtuber-avatar/src/collision.rs` independently implements skeleton-based
+capsule dimensions informed by [Wicked Engine, wiPhysics_Jolt.cpp](https://github.com/turanszkij/WickedEngine/blob/7f776d02094571dd2c8166c7e5879d5e93d2b642/WickedEngine/wiPhysics_Jolt.cpp#L1471-L1536)
+(MIT, Copyright (c) 2026 Turánszki János). No Jolt or ragdoll code is included.
+Upper-arm and forearm radii use .20 and .15 of their rest lengths; the torso
+radius is .1 times object rest scale, at unit fatness. This is a standard proxy,
+not a measurement of every avatar's body or clothing.
+
+RusTuberV deliberately differs in capsule placement: torso links follow the
+animated hips/spine/chest hierarchy; forearm centre lines reach the elbow and
+wrist so the elbow has a full rounded cap. Existing MCP-based palm proxies are
+retained. Optional missing MCPs leave the wrist protected by its forearm cap,
+without claiming coverage of unknown fingers. Upper arms may overlap the torso;
+forearms, palms and opposite arms are still checked, including swept paths.
+
+Elbow target correction uses the shoulder--wrist swivel idea from Unzueta et al.,
+[Full-body performance animation with Sequential Inverse Kinematics](https://doi.org/10.1016/j.gmod.2008.03.002),
+Graphical Models 70 (2008), section 8. This is an independent bounded target
+search, not their mesh collision detector or full SIK solver. It changes neither
+the wrist target nor skeletal translations. Joint limits and collision checks
+remain authoritative in the existing solver. Straight arms and circles with no
+clear sampled target are left to that solver; a sampled target is not a proof
+of anatomical or path feasibility. No extra contact clearance is imposed.
