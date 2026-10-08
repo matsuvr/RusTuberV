@@ -42,6 +42,9 @@ pub struct UiState {
     /// Last laid-out avatar monitor image rectangle, reused as the starting
     /// rect of the next preview transition.
     pub(crate) monitor_image_rect: Option<egui::Rect>,
+    /// Current preview input surface; reset on every UI pass.
+    pub(crate) monitor_pointer_hovered: bool,
+    pub(crate) monitor_input_size: Option<egui::Vec2>,
     pub(crate) camera_consent: CameraPreviewConsent,
     last_pane: Option<Pane>,
     pub(crate) import_requested: bool,
@@ -54,6 +57,8 @@ impl Default for UiState {
             controls_open: true,
             avatar_only_progress: 0.0,
             monitor_image_rect: None,
+            monitor_pointer_hovered: false,
+            monitor_input_size: None,
             camera_consent: CameraPreviewConsent::Hidden,
             last_pane: None,
             import_requested: false,
@@ -251,9 +256,18 @@ impl UiSurfaceHover {
 fn sync_camera_pointer_input_gate(
     egui_wants_input: Res<bevy_egui::input::EguiWantsInput>,
     hover: Res<UiSurfaceHover>,
+    state: Res<UiState>,
     mut gate: ResMut<CameraPointerInputGate>,
 ) {
-    gate.set_egui_owns_pointer(egui_wants_input.wants_any_pointer_input() || hover.over_ui());
+    gate.set_egui_owns_pointer(
+        !state.monitor_pointer_hovered
+            && (egui_wants_input.wants_any_pointer_input() || hover.over_ui()),
+    );
+    gate.set_preview_size(
+        state
+            .monitor_input_size
+            .map(|size| Vec2::new(size.x, size.y)),
+    );
 }
 
 #[expect(
@@ -414,6 +428,41 @@ mod tests {
         state.emit(UiAction::RefreshCameras);
         state.emit(UiAction::RefreshCameras);
         assert_eq!(state.take_actions().len(), 2);
+    }
+
+    #[test]
+    fn preview_pointer_routes_through_the_camera_gate_but_settings_do_not() {
+        let mut app = App::new();
+        app.init_resource::<bevy_egui::input::EguiWantsInput>()
+            .init_resource::<UiSurfaceHover>()
+            .init_resource::<UiState>()
+            .init_resource::<CameraPointerInputGate>()
+            .add_systems(Update, sync_camera_pointer_input_gate);
+        app.world_mut().resource_mut::<UiSurfaceHover>().set(true);
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<CameraPointerInputGate>()
+                .allows_camera_input()
+        );
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .monitor_pointer_hovered = true;
+        app.update();
+        assert!(
+            app.world()
+                .resource::<CameraPointerInputGate>()
+                .allows_camera_input()
+        );
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .monitor_pointer_hovered = false;
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<CameraPointerInputGate>()
+                .allows_camera_input()
+        );
     }
 
     #[test]

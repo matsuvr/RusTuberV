@@ -350,12 +350,22 @@ pub struct AvatarCameraControl {
 
 /// Gate published by the UI layer to distinguish egui-owned pointer input
 /// from the main 3D background. The avatar crate remains independent of egui.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct CameraPointerInputGate {
     egui_owns_pointer: bool,
+    preview_size: Option<Vec2>,
 }
 
 impl CameraPointerInputGate {
+    /// Sets the displayed preview size while it is hovered or being dragged.
+    pub fn set_preview_size(&mut self, size: Option<Vec2>) {
+        self.preview_size = size;
+    }
+
+    pub(super) fn preview_size(&self) -> Option<Vec2> {
+        self.preview_size
+    }
+
     /// Sets whether egui currently owns the pointer.
     pub fn set_egui_owns_pointer(&mut self, owns_pointer: bool) {
         self.egui_owns_pointer = owns_pointer;

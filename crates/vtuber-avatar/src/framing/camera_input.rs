@@ -162,7 +162,10 @@ pub(crate) fn apply_camera_pointer_input(
         CameraPointerGesture::Pan {
             generation: captured,
         } if captured == generation => {
-            if let Some(viewport_size) = camera.logical_viewport_size()
+            if let Some(viewport_size) = input
+                .gate
+                .preview_size()
+                .or_else(|| camera.logical_viewport_size())
                 && let Ok(candidate) = geometry::pan(next, mouse_motion.delta, viewport_size)
             {
                 next = candidate;
@@ -509,6 +512,45 @@ mod tests {
             .expect("control pose");
         assert!(after.distance() < before.distance());
         assert_eq!(after.transform().rotation, before.transform().rotation);
+    }
+
+    #[test]
+    fn preview_pan_uses_the_displayed_size() {
+        let (mut app, _, generation) = ready_app();
+        let before = app
+            .world()
+            .resource::<AvatarCameraControl>()
+            .current_for(generation)
+            .expect("ready camera");
+        let size = Vec2::new(640.0, 360.0);
+        let delta = Vec2::new(32.0, -18.0);
+        app.world_mut()
+            .resource_mut::<CameraPointerInputGate>()
+            .set_preview_size(Some(size));
+        press(&mut app, MouseButton::Right);
+        app.world_mut()
+            .resource_mut::<AccumulatedMouseMotion>()
+            .delta = delta;
+        app.update();
+        let after = app
+            .world()
+            .resource::<AvatarCameraControl>()
+            .current_for(generation)
+            .expect("panned camera");
+        assert_eq!(
+            after,
+            geometry::pan(before, delta, size).expect("valid pan")
+        );
+        // Moving the same fraction of either view produces the same pan.
+        let full_view = geometry::pan(before, delta * 2.5, size * 2.5).expect("full view pan");
+        assert!(
+            after
+                .transform()
+                .translation
+                .distance(full_view.transform().translation)
+                < 1e-6
+        );
+        assert!(after.target().distance(full_view.target()) < 1e-6);
     }
 
     #[test]

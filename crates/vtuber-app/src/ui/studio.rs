@@ -494,6 +494,11 @@ fn avatar_monitor(
                 );
             }
             if draw_preview {
+                state.monitor_pointer_hovered = response.hovered()
+                    || (response.contains_pointer() && response.is_pointer_button_down_on());
+                if state.monitor_pointer_hovered || response.dragged() || response.drag_stopped() {
+                    state.monitor_input_size = Some(response.rect.size());
+                }
                 let hint = lang.pick(
                     "クリックでアバターを全面表示",
                     "Click to show the avatar full screen",
@@ -548,6 +553,8 @@ pub(crate) fn render_studio(
     dialog_active: bool,
     lang: UiLanguage,
 ) -> bool {
+    state.monitor_pointer_hovered = false;
+    state.monitor_input_size = None;
     let viewport = ctx.viewport_rect();
     // `avatar_only` is the single linear animation clock: 0.0 is the
     // workspace, 1.0 is the fullscreen avatar. egui stores it per `Id`,
@@ -742,6 +749,10 @@ pub(crate) fn render_studio(
         root.with_visual_transform(egui::emath::TSTransform::IDENTITY, &mut draw_workspace);
     }
     state.monitor_image_rect = monitor_rect;
+    if dialog_active || vm.avatar_import_review.review.is_some() || egui::Popup::is_any_open(ctx) {
+        state.monitor_pointer_hovered = false;
+        state.monitor_input_size = None;
+    }
     let over_ui = ctx
         .input(|input| input.pointer.interact_pos())
         .is_some_and(|pos| viewport.contains(pos));
@@ -2492,6 +2503,113 @@ mod tests {
             );
         });
         state.monitor_image_rect.map_or(0.0, |rect| rect.width())
+    }
+
+    #[test]
+    fn preview_accepts_pointer_gestures_in_wide_and_compact_layouts() {
+        for width in [1600.0, 700.0] {
+            for button in [egui::PointerButton::Primary, egui::PointerButton::Secondary] {
+                let ctx = egui::Context::default();
+                let mut state = UiState::default();
+                let mut vm = UiViewModel::default();
+                vm.avatar.is_ready = true;
+                vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+                let render = |state: &mut UiState, events: Vec<egui::Event>, dialog_active| {
+                    let _ = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                vec2(width, 900.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            render_studio(
+                                ui.ctx(),
+                                &vm,
+                                state,
+                                &DiagnosticsSnapshot::default(),
+                                None,
+                                &PreviewState::default(),
+                                &PreviewLandmarkState::default(),
+                                AvatarMotionMirror::default(),
+                                None,
+                                Some(AvatarPreviewTexture::new(
+                                    bevy::asset::Handle::default(),
+                                    vtuber_core::VideoOutputProfile::default(),
+                                )),
+                                dialog_active,
+                                UiLanguage::Ja,
+                            );
+                        },
+                    );
+                };
+                // Let egui finish panel sizing and register widgets for hit testing.
+                render(&mut state, vec![], false);
+                render(&mut state, vec![], false);
+                let rect = state.monitor_image_rect.expect("preview rectangle");
+                let start = rect.center();
+                let pointer_button = |pos, pressed| egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                render(&mut state, vec![egui::Event::PointerMoved(start)], false);
+                assert!(
+                    state.monitor_pointer_hovered,
+                    "width={width}, button={button:?}, rect={rect:?}, current={:?}",
+                    state.monitor_image_rect
+                );
+                render(
+                    &mut state,
+                    vec![egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Line,
+                        delta: vec2(0.0, 1.0),
+                        modifiers: egui::Modifiers::NONE,
+                        phase: egui::TouchPhase::Move,
+                    }],
+                    false,
+                );
+                assert!(state.monitor_pointer_hovered, "wheel remains camera input");
+                render(&mut state, vec![pointer_button(start, true)], false);
+                assert!(state.monitor_pointer_hovered);
+                let end = start + vec2(30.0, 20.0);
+                render(&mut state, vec![egui::Event::PointerMoved(end)], false);
+                assert_eq!(state.monitor_input_size, Some(rect.size()));
+                render(&mut state, vec![pointer_button(end, false)], false);
+                assert!(
+                    state.controls_open,
+                    "drag release must not open full screen"
+                );
+
+                render(&mut state, vec![], true);
+                assert!(
+                    !state.monitor_pointer_hovered,
+                    "dialog blocks preview input"
+                );
+                assert_eq!(state.monitor_input_size, None);
+                render(
+                    &mut state,
+                    vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))],
+                    false,
+                );
+                assert!(
+                    !state.monitor_pointer_hovered,
+                    "outside preview is settings UI"
+                );
+                assert_eq!(state.monitor_input_size, None);
+
+                // A plain click still opens the avatar-only view.
+                if button == egui::PointerButton::Primary {
+                    render(&mut state, vec![egui::Event::PointerMoved(start)], false);
+                    render(&mut state, vec![pointer_button(start, true)], false);
+                    render(&mut state, vec![pointer_button(start, false)], false);
+                    assert!(!state.controls_open);
+                }
+            }
+        }
     }
 
     #[test]

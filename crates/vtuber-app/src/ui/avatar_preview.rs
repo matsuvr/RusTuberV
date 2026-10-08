@@ -65,7 +65,7 @@ pub fn paint_avatar_preview(
     size: Vec2,
     corner_radius: f32,
 ) -> Response {
-    let (response, painter) = ui.allocate_painter(size, Sense::click());
+    let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
     paint_avatar_preview_at(&painter, response.rect, image, corner_radius);
     response
 }
