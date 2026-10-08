@@ -2,7 +2,7 @@
 
 use crate::{
     arm::{ArmChainBinding, ArmIkInput, ArmIkTarget, RestSpaceBonePose},
-    arm_pose::{ResolvedArmPose, ResolvedBoneDelta, ResolvedFingerPose},
+    arm_pose::{ResolvedArmPose, ResolvedBoneDelta},
     collision::BoneMotion,
 };
 use bevy::prelude::*;
@@ -130,6 +130,28 @@ impl ArmJoints {
         crate::joint_limits::shoulder_margins(chain, girdle.rotation, upper)
     }
 
+    /// Resolve digits only for the admitted display pose. Collision capsules
+    /// are attached to the arm and rigid palm, never to digit bones.
+    pub fn display_pose(
+        self,
+        chain: &ArmChainBinding,
+        mut pose: ResolvedArmPose,
+    ) -> ResolvedArmPose {
+        pose.fingers = self
+            .fingers
+            .and_then(|f| {
+                crate::tracked_arm::observed_finger_deltas(
+                    chain,
+                    f,
+                    self.finger_weight,
+                    self.rest_curl,
+                )
+            })
+            .unwrap_or_else(|| crate::arm_pose::resolve_finger_pose(chain, self.rest_curl));
+        pose
+    }
+
+    /// Arm and rigid-palm FK used by search and continuous collision checks.
     pub fn forward(self, chain: &ArmChainBinding) -> Option<ArmCandidate> {
         let (upper, girdle) = self.shoulder_frame(chain)?;
         let [_, _, _, flexion, roll, wrist_f, wrist_d, _, _] = self.angles;
@@ -168,17 +190,6 @@ impl ArmJoints {
             * chain.rest.wrist.global_rotation
             * wrist_delta
             * chain.rest.wrist.global_rotation.inverse();
-        let fingers = self
-            .fingers
-            .and_then(|f| {
-                crate::tracked_arm::observed_finger_deltas(
-                    chain,
-                    f,
-                    self.finger_weight,
-                    self.rest_curl,
-                )
-            })
-            .unwrap_or_else(|| crate::arm_pose::resolve_finger_pose(chain, self.rest_curl));
         let shoulder = chain
             .shoulder
             .zip(chain.rest.shoulder)
@@ -199,7 +210,7 @@ impl ArmJoints {
                 entity: chain.hand,
                 delta: wrist_delta,
             }),
-            fingers,
+            fingers: Default::default(),
         };
         let mut motion = HashMap::new();
         let mut add = |entity, rest: RestSpaceBonePose, position, rotation: Quat| {
@@ -222,7 +233,6 @@ impl ArmJoints {
         );
         add(chain.lower_arm, chain.rest.elbow, elbow, lower_model);
         add(chain.hand, chain.rest.wrist, wrist, hand_model);
-        append_fingers(chain, &fingers, hand_model, wrist, &mut motion);
         let (joint_margins, _) =
             crate::joint_limits::shoulder_margins(chain, girdle.rotation, upper)?;
         Some(ArmCandidate {
@@ -238,49 +248,6 @@ impl ArmJoints {
     }
 }
 
-fn append_fingers(
-    chain: &ArmChainBinding,
-    pose: &ResolvedFingerPose,
-    hand_rotation: Quat,
-    wrist: Vec3,
-    motion: &mut HashMap<Entity, BoneMotion>,
-) {
-    for (rest, solved) in [
-        (chain.finger_rest.thumb, pose.thumb),
-        (chain.finger_rest.index, pose.index),
-        (chain.finger_rest.middle, pose.middle),
-        (chain.finger_rest.ring, pose.ring),
-        (chain.finger_rest.little, pose.little),
-    ] {
-        let mut parent_rest = chain.rest.wrist.position;
-        let mut parent_position = wrist;
-        let mut parent_rotation = hand_rotation;
-        for (joint, delta) in [
-            (rest.metacarpal, solved.metacarpal),
-            (rest.proximal, solved.proximal),
-            (rest.intermediate, solved.intermediate),
-            (rest.distal, solved.distal),
-        ] {
-            let Some(joint) = joint else { continue };
-            let position = parent_position + parent_rotation * (joint.rest.position - parent_rest);
-            let rotation = parent_rotation
-                * joint.rest.global_rotation
-                * delta.map_or(Quat::IDENTITY, |d| d.delta)
-                * joint.rest.global_rotation.inverse();
-            motion.insert(
-                joint.entity,
-                BoneMotion {
-                    rotation,
-                    translation: position - rotation * joint.rest.position,
-                },
-            );
-            parent_rest = joint.rest.position;
-            parent_position = position;
-            parent_rotation = rotation;
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     #![allow(
@@ -291,6 +258,70 @@ pub(crate) mod tests {
     )]
     use super::*;
     use crate::arm::*;
+
+    #[test]
+    fn search_ignores_digits_but_display_resolves_the_interpolated_fingers() {
+        for side in [ArmSide::Left, ArmSide::Right] {
+            let mut chain = chain(side);
+            let proximal = chain.finger_rest.index.proximal.unwrap();
+            let mut intermediate = proximal;
+            intermediate.entity = Entity::from_raw_u32(80).unwrap();
+            intermediate.rest.position += if side == ArmSide::Left {
+                Vec3::X
+            } else {
+                -Vec3::X
+            } * 0.03;
+            chain.finger_rest.index.intermediate = Some(intermediate);
+            let start = state(0.8, 0.7, -0.3, 1.0);
+            let mut end = start;
+            end.rest_curl = 0.4;
+            end.finger_weight = 0.8;
+            end.fingers = Some(HandFingerPose {
+                fingers: [[0.3, 0.5, 0.2]; 4],
+                spread: [0.0; 4],
+                thumb: [0.2; 2],
+                thumb_spread: 0.0,
+                thumb_cmc: [0.0; 2],
+            });
+            let baseline = start.forward(&chain).unwrap();
+            for amount in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let joints = crate::upper_limb_path::interpolate(
+                    [Some(start), None],
+                    [Some(end), None],
+                    amount,
+                )[0]
+                .unwrap();
+                let search = joints.forward(&chain).unwrap();
+                assert_eq!(search.motion, baseline.motion);
+                assert_eq!(search.resolved.fingers, Default::default());
+                assert!(!search.motion.contains_key(&proximal.entity));
+                assert!(!search.motion.contains_key(&intermediate.entity));
+                let displayed = joints.display_pose(&chain, search.resolved);
+                let expected = joints
+                    .fingers
+                    .and_then(|f| {
+                        crate::tracked_arm::observed_finger_deltas(
+                            &chain,
+                            f,
+                            joints.finger_weight,
+                            joints.rest_curl,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        crate::arm_pose::resolve_finger_pose(&chain, joints.rest_curl)
+                    });
+                assert_eq!(displayed.fingers, expected);
+                assert!(displayed.fingers.index.proximal.is_some());
+                assert_eq!(displayed.upper_arm_delta, baseline.resolved.upper_arm_delta);
+                if amount > 0.0 {
+                    assert_ne!(
+                        displayed.fingers,
+                        start.display_pose(&chain, baseline.resolved).fingers
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn submilliradian_fk_arcs_do_not_snap_to_identity() {

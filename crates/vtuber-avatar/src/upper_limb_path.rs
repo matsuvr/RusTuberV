@@ -302,30 +302,6 @@ pub(crate) fn check_transition(
             .rest
             .shoulder
             .map_or(0.0, |s| s.position.distance(chain.rest.upper_arm.position));
-        let mut fingers = std::collections::HashMap::new();
-        for finger in [
-            chain.finger_rest.thumb,
-            chain.finger_rest.index,
-            chain.finger_rest.middle,
-            chain.finger_rest.ring,
-            chain.finger_rest.little,
-        ] {
-            let mut previous = chain.rest.wrist.position;
-            let mut length = 0.0;
-            for joint in [
-                finger.metacarpal,
-                finger.proximal,
-                finger.intermediate,
-                finger.distal,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                length += joint.rest.position.distance(previous);
-                fingers.insert(joint.entity, (length, joint.rest.position));
-                previous = joint.rest.position;
-            }
-        }
         let g2 = crate::girdle::acceleration_bound(chain, a.angles, b.angles);
         let upper_speed = 2.0 * p + e + axial;
         // log(q)=2*v*acos(w)/sqrt(1-w²), w>=0. On this hemisphere
@@ -346,40 +322,8 @@ pub(crate) fn check_transition(
         let lower_speed = upper_speed + f + r1 * roll;
         let lower_acceleration =
             (upper_speed + f).powi(2) + 2.0 * (upper_speed + f) * r1 * roll + r2 * roll * roll;
-        let hand_speed = lower_speed + wf + wd;
         let hand_acceleration =
             lower_acceleration + 2.0 * lower_speed * (wf + wd) + (wf + wd).powi(2);
-        // A point follows at most one digit (three bend axes and one
-        // opening axis, or two CMC axes and MCP/IP). Independent digits
-        // never inherit each other's rotations.
-        let weight_change = (a.finger_weight - b.finger_weight).abs();
-        let baseline_speed = 3.0
-            * ((a.rest_curl - b.rest_curl).abs()
-                + a.rest_curl.abs().max(b.rest_curl.abs()) * weight_change);
-        let baseline_accel = 6.0 * (a.rest_curl - b.rest_curl).abs() * weight_change;
-        let mut finger_speed = baseline_speed;
-        let mut finger_accel = baseline_accel;
-        if let Some((af, bf)) = a.fingers.or(b.fingers).zip(b.fingers.or(a.fingers)) {
-            let coords = |p: HandFingerPose| {
-                let [mcp, ip] = p.thumb;
-                let [cmc_flex, cmc_abduct] = p.thumb_cmc;
-                p.fingers
-                    .into_iter()
-                    .zip(p.spread)
-                    .map(|([a, b, c], d)| [a, b, c, d])
-                    .chain(std::iter::once([mcp, ip, cmc_flex, cmc_abduct]))
-            };
-            for (a, b) in coords(af).zip(coords(bf)) {
-                let mut speed = baseline_speed + 4.0 * std::f32::consts::PI * weight_change;
-                let mut acceleration = baseline_accel;
-                for (x, y) in a.into_iter().zip(b) {
-                    speed += (x - y).abs() + weight_change * x.abs().max(y.abs());
-                    acceleration += 2.0 * (x - y).abs() * weight_change;
-                }
-                finger_speed = finger_speed.max(speed);
-                finger_accel = finger_accel.max(acceleration);
-            }
-        }
         let point_acceleration = |bone, point: bevy::prelude::Vec3| {
             if Some(bone) == chain.shoulder {
                 chain
@@ -393,24 +337,11 @@ pub(crate) fn check_transition(
                 shoulder_length * g2
                     + chain.rest.upper_arm_length * upper_speed.powi(2)
                     + point.distance(chain.rest.elbow.position) * lower_acceleration
-            } else if bone == chain.hand || fingers.contains_key(&bone) {
-                let (digit_speed, digit_accel) = if fingers.contains_key(&bone) {
-                    (finger_speed, finger_accel)
-                } else {
-                    (0.0, 0.0)
-                };
-                let hand_length = fingers.get(&bone).map_or_else(
-                    || point.distance(chain.rest.wrist.position),
-                    |(length, rest)| length + point.distance(*rest),
-                );
+            } else if bone == chain.hand {
                 shoulder_length * g2
                     + chain.rest.upper_arm_length * upper_speed.powi(2)
                     + chain.rest.forearm_length * lower_acceleration
-                    + hand_length
-                        * (hand_acceleration
-                            + 2.0 * hand_speed * digit_speed
-                            + digit_speed.powi(2)
-                            + digit_accel)
+                    + point.distance(chain.rest.wrist.position) * hand_acceleration
             } else {
                 0.0
             }
