@@ -253,6 +253,63 @@ fn animation_cannot_override_the_admitted_arm_pose() {
 }
 
 #[test]
+fn arm_composition_preserves_spring_branch_pose_and_updates_its_attachment() {
+    use bevy_vrm1::vrm::spring_bone::{SpringJoints, SpringRoot};
+
+    let mut app = build_app();
+    let chain = spawn_avatar(&mut app, Quat::IDENTITY, Quat::from_rotation_z(0.6));
+    let ribbon = spawn_child(
+        &mut app,
+        chain.lower,
+        Transform::from_translation(Vec3::new(0.15, -0.04, 0.0)),
+    );
+    let tip = spawn_child(
+        &mut app,
+        ribbon,
+        Transform::from_translation(Vec3::new(0.0, -0.12, 0.0)),
+    );
+    app.world_mut().entity_mut(ribbon).insert(SpringRoot {
+        joints: SpringJoints(vec![ribbon, tip]),
+        ..default()
+    });
+    let ribbon_pose = Transform::from_translation(Vec3::new(0.15, -0.04, 0.0))
+        .with_rotation(Quat::from_rotation_x(0.8));
+    let tip_pose = Transform::from_translation(Vec3::new(0.0, -0.12, 0.0))
+        .with_rotation(Quat::from_rotation_z(-0.3));
+    *app.world_mut().get_mut::<Transform>(ribbon).unwrap() = ribbon_pose;
+    *app.world_mut().get_mut::<Transform>(tip).unwrap() = tip_pose;
+
+    // The rigid helper lies on the admitted elbow path; the ribbon is a
+    // separate physics branch. Only the rigid link must return to authored rest.
+    *app.world_mut().get_mut::<Transform>(chain.helper).unwrap() =
+        Transform::from_translation(Vec3::splat(4.0)).with_rotation(Quat::from_rotation_y(0.9));
+    for _ in 0..2 {
+        app.update();
+        let world = app.world();
+        assert_eq!(*world.get::<Transform>(ribbon).unwrap(), ribbon_pose);
+        assert_eq!(*world.get::<Transform>(tip).unwrap(), tip_pose);
+        assert_eq!(
+            *world.get::<Transform>(chain.helper).unwrap(),
+            **world
+                .get::<bevy_vrm1::prelude::RestTransform>(chain.helper)
+                .unwrap(),
+        );
+        let expected_ribbon = world
+            .get::<GlobalTransform>(chain.lower)
+            .unwrap()
+            .mul_transform(ribbon_pose);
+        assert_eq!(
+            *world.get::<GlobalTransform>(ribbon).unwrap(),
+            expected_ribbon
+        );
+        assert_eq!(
+            *world.get::<GlobalTransform>(tip).unwrap(),
+            expected_ribbon.mul_transform(tip_pose),
+        );
+    }
+}
+
+#[test]
 fn actual_child_of_path_propagates_intermediate_globals() {
     let mut app = build_app();
     let chain = spawn_avatar(

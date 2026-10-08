@@ -357,6 +357,7 @@ pub fn apply_default_arm_pose(
     rests: Query<&bevy_vrm1::prelude::RestTransform>,
     child_ofs: Query<&ChildOf>,
     children: Query<&Children>,
+    spring_roots: Query<(), With<bevy_vrm1::prelude::SpringRoot>>,
 ) {
     use crate::node_constraints::NodeConstraintKind;
     for (binding, targets, constraints) in &roots {
@@ -372,11 +373,15 @@ pub fn apply_default_arm_pose(
                 .shoulder
                 .map(|b| b.entity)
                 .unwrap_or(resolved.upper_arm);
-            // The candidate FK uses immutable local offsets, including helper
-            // joints. Animation may not translate/scale those links afterward.
+            // The candidate FK uses authored locals for rigid helper links.
+            // Spring branches retain their simulated pose: resetting it while
+            // keeping the spring's tail history makes the two states disagree.
             let mut stack = vec![refresh_root];
             let mut any_changed = false;
             while let Some(bone) = stack.pop() {
+                if spring_roots.contains(bone) {
+                    continue;
+                }
                 if let (Ok(rest), Ok((mut current, _))) =
                     (rests.get(bone), transforms.get_mut(bone))
                     && *current != **rest
