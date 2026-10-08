@@ -151,19 +151,289 @@ pub fn update_upper_limb_targets(
         });
     }
     let transforms = transform_queries.p0();
+    let ArmGoals {
+        neutral,
+        neutral_goals,
+        goals,
+        source_seq,
+    } = observation_arm_goals(
+        binding,
+        model_id,
+        motion,
+        scale,
+        position,
+        &selection,
+        &tracked,
+        &control,
+        mirror.as_deref(),
+        overrides.as_deref(),
+        &transforms,
+    );
+    let chains = [binding.left_arm.as_ref(), binding.right_arm.as_ref()];
+    let geometry = match &collision.0 {
+        Ok(g) => g,
+        Err(error) => {
+            report(
+                &mut commands,
+                root,
+                &mut state,
+                SolveStatus::InvalidGeometry(*error),
+            );
+            return;
+        }
+    };
+    if state
+        .geometry
+        .as_ref()
+        .is_some_and(|previous| !std::sync::Arc::ptr_eq(previous, geometry))
+    {
+        *state = UpperLimbState {
+            generation: Some(binding.generation),
+            ..Default::default()
+        };
+        *targets = DynamicArmTargets::default();
+        commands.entity(root).insert(Visibility::Hidden);
+    }
+    state.geometry = Some(std::sync::Arc::clone(geometry));
+    let body_pose = (|| -> Result<Option<BodyPose>, crate::collision::CollisionError> {
+        if geometry.capsules.is_empty() {
+            return Ok(None);
+        }
+        if state.body_rig.is_none() {
+            let controlled: std::collections::HashSet<_> = chains
+                .into_iter()
+                .zip(neutral)
+                .filter_map(|(c, s)| c.zip(s).and_then(|(c, s)| s.forward(c)))
+                .flat_map(|a| a.motion.into_keys())
+                .collect();
+            let chest = binding
+                .upper_chest
+                .or(binding.chest)
+                .or(binding.spine)
+                .ok_or(crate::collision::CollisionError::MissingBone)?;
+            let rig = BodyRig::bind(
+                root,
+                chest,
+                geometry.bones().filter(|b| !controlled.contains(b)),
+                |bone| {
+                    let (local, global, rest) = transforms.get(bone).ok()?;
+                    Some((
+                        *local,
+                        rest.map_or(*global, |r| r.0).affine(),
+                        parents.get(bone).ok().map(ChildOf::parent),
+                    ))
+                },
+            )?;
+            // The default is admitted against the imported rest body before
+            // any live torso pose can influence its contact solution.
+            let neutral_body = rig.capture(|b| rests.get(b).ok().map(|r| **r))?;
+            state.neutral_motions = std::sync::Arc::new(neutral_body.motions()?);
+            state.neutral_body = Some(neutral_body);
+            state.body_rig = Some(rig);
+        }
+        state
+            .body_rig
+            .as_ref()
+            .map(|rig| rig.capture(|b| transforms.get(b).ok().map(|(t, _, _)| *t)))
+            .transpose()
+    })();
+    let body_pose = match body_pose {
+        Ok(pose) => pose,
+        Err(e) => {
+            report(
+                &mut commands,
+                root,
+                &mut state,
+                SolveStatus::InvalidGeometry(e),
+            );
+            return;
+        }
+    };
+    state.producer_body = body_pose.clone();
+    let body = match body_pose.as_ref().map(BodyPose::motions).transpose() {
+        Ok(body) => body.unwrap_or_default(),
+        Err(e) => {
+            report(
+                &mut commands,
+                root,
+                &mut state,
+                SolveStatus::InvalidGeometry(e),
+            );
+            return;
+        }
+    };
+    let extent = chains
+        .into_iter()
+        .flatten()
+        .map(|c| c.rest.total_arm_length)
+        .fold(0.0_f32, f32::max);
+    let problem = Problem {
+        chains,
+        goals,
+        geometry,
+        body: &body,
+        body_curve: None,
+        tolerance: 64.0 * f32::EPSILON * extent,
+    };
+    use bevy::tasks::AsyncComputeTaskPool;
+    let body_changed = match (&state.solved_body, &body_pose) {
+        (Some(previous), Some(current)) => !previous.same(current),
+        (None, None) => false,
+        _ => true,
+    };
+    let (mut status, frame_seconds) = accept_completed_step(
+        &mut state,
+        &problem,
+        goals,
+        body_changed,
+        source_seq,
+        time.delta_secs(),
+    );
+    if state.pending.is_none()
+        && state.queued.is_none()
+        && (state.solved_goals != Some(goals) || body_changed || state.refine)
+        // A held observation gets the same continuation budget as a new one.
+        // Faster rendering/workers must not add extra optimization steps.
+        && (state.solved_goals.is_none()
+            || state.source_seq != source_seq
+            || state.solve_elapsed >= SOLVE_INTERVAL_SECONDS)
+    {
+        let path = state.path.after_current_segment();
+        let anchor = path.current;
+        let anchor_body = path.body.clone();
+        let body_curve = body_pose.clone().map(|to| BodyCurve {
+            from: anchor_body.clone().unwrap_or_else(|| to.clone()),
+            to,
+        });
+        // Constraint restoration may need more than one work batch. Resume
+        // its candidate without publishing it as a display pose.
+        // Each observation redirects the displayed joint path's continuation.
+        let mut seed = state.recovery_seed.unwrap_or(anchor);
+        for (seed, goal) in seed.iter_mut().zip(neutral) {
+            if let Some(goal) = goal {
+                if let Some(current) = seed {
+                    current.fingers = goal.fingers.or(current.fingers);
+                    current.finger_weight = goal.finger_weight;
+                    current.rest_curl = goal.rest_curl;
+                } else {
+                    *seed = Some(goal);
+                }
+            }
+        }
+        let geometry = std::sync::Arc::clone(geometry);
+        let snapshot = body.clone();
+        let neutral_snapshot = std::sync::Arc::clone(&state.neutral_motions);
+        let neutral_body_pose = state.neutral_body.clone();
+        let chains = [binding.left_arm, binding.right_arm];
+        // Publish a feasible local step promptly. Extra capacity completes
+        // contact restoration when that first iteration cannot yet be shown.
+        let pool = AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        // A 30 Hz camera naturally repeats a sample on alternating render
+        // ticks. That is not a stopped target: batching four task steps there
+        // creates a large jump in the next two-frame display interval.
+        let unchanged = state.solved_goals == Some(goals) && !body_changed;
+        let cached_status = (unchanged && state.source_seq == source_seq)
+            .then_some(status)
+            .filter(|s| {
+                matches!(
+                    s,
+                    SolveStatus::Feasible {
+                        converged: true,
+                        ..
+                    }
+                )
+            });
+        let cached_neutral = state.neutral.clone().filter(|n| n.goals == neutral_goals);
+        let obsolete = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let search_obsolete = std::sync::Arc::clone(&obsolete);
+        state.solve_elapsed = 0.0;
+        state.pending = Some(PendingSolve {
+            obsolete,
+            source_seq,
+            task: pool.spawn(async move {
+                prepare_step(SolveInput {
+                    chains,
+                    goals,
+                    neutral_goals,
+                    geometry,
+                    snapshot,
+                    neutral_snapshot,
+                    neutral_body_pose,
+                    body_curve,
+                    path,
+                    seed,
+                    cached_status,
+                    cached_neutral,
+                    search_obsolete,
+                    extent,
+                    source_seq,
+                })
+            }),
+        });
+        state.solved_goals = Some(goals);
+        state.solved_body = body_pose;
+    }
+    status = apply_arm_targets(
+        &mut commands,
+        root,
+        binding.generation,
+        chains,
+        &problem,
+        &mut state,
+        &mut targets,
+        status,
+        frame_seconds,
+    );
+    if let Some(body) = &state.path.body {
+        let mut transforms = transform_queries.p1();
+        for (bone, local) in body.locals() {
+            if let Ok((mut current, _)) = transforms.get_mut(bone) {
+                *current = local;
+            }
+        }
+        if let Some(global) = crate::skeleton::refresh_global(root, &mut transforms, &parents, None)
+        {
+            crate::skeleton::refresh_subtree(root, global, &mut transforms, &children);
+        }
+    }
+    report(&mut commands, root, &mut state, status);
+}
+
+struct ArmGoals {
+    neutral: [Option<ArmJoints>; 2],
+    neutral_goals: [Option<ArmGoal>; 2],
+    goals: [Option<ArmGoal>; 2],
+    source_seq: Option<vtuber_core::FrameSeq>,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "converts the current ECS control sources into bilateral solver goals"
+)]
+fn observation_arm_goals(
+    binding: &AvatarBinding,
+    model_id: &crate::load::AvatarAssetId,
+    motion: &crate::arm_motion_geometry::ArmMotionGeometry,
+    scale: &crate::body_scale::BodyScaleMeters,
+    position: &crate::direct_position::BodyTrackingPositionInput,
+    selection: &ArmSourceSelection,
+    tracked: &TrackedArmControl,
+    control: &crate::unload::ActiveControlFrame,
+    mirror: Option<&crate::mirror::AvatarMotionMirror>,
+    overrides: Option<&crate::arm_pose::ArmPoseOverrideStore>,
+    transforms: &Query<(&Transform, &GlobalTransform, Option<&RestGlobalTransform>)>,
+) -> ArmGoals {
     let frame = tracked
         .frame
         .filter(|_| tracked.generation == Some(binding.generation));
-    let mirrored = mirror.as_deref().is_none_or(|m| m.is_enabled());
+    let mirrored = mirror.is_none_or(|m| m.is_enabled());
     let thorax = frame
         .and_then(|f| f.thorax)
         .map(|t| if mirrored { t.mirrored() } else { t });
     let pose_profile = overrides
-        .as_deref()
         .and_then(|s| s.profile_for(model_id))
         .unwrap_or_default();
     let dynamic_profile = overrides
-        .as_deref()
         .and_then(|s| s.dynamic_profile_for(model_id))
         .unwrap_or(selection.profile);
     let control_current = control
@@ -326,120 +596,28 @@ pub fn update_upper_limb_targets(
         }
         *goal = Some(wanted);
     }
-    let geometry = match &collision.0 {
-        Ok(g) => g,
-        Err(error) => {
-            report(
-                &mut commands,
-                root,
-                &mut state,
-                SolveStatus::InvalidGeometry(*error),
-            );
-            return;
-        }
-    };
-    if state
-        .geometry
-        .as_ref()
-        .is_some_and(|previous| !std::sync::Arc::ptr_eq(previous, geometry))
-    {
-        *state = UpperLimbState {
-            generation: Some(binding.generation),
-            ..Default::default()
-        };
-        *targets = DynamicArmTargets::default();
-        commands.entity(root).insert(Visibility::Hidden);
-    }
-    state.geometry = Some(std::sync::Arc::clone(geometry));
-    let body_pose = (|| -> Result<Option<BodyPose>, crate::collision::CollisionError> {
-        if geometry.capsules.is_empty() {
-            return Ok(None);
-        }
-        if state.body_rig.is_none() {
-            let controlled: std::collections::HashSet<_> = chains
-                .into_iter()
-                .zip(neutral)
-                .filter_map(|(c, s)| c.zip(s).and_then(|(c, s)| s.forward(c)))
-                .flat_map(|a| a.motion.into_keys())
-                .collect();
-            let chest = binding
-                .upper_chest
-                .or(binding.chest)
-                .or(binding.spine)
-                .ok_or(crate::collision::CollisionError::MissingBone)?;
-            let rig = BodyRig::bind(
-                root,
-                chest,
-                geometry.bones().filter(|b| !controlled.contains(b)),
-                |bone| {
-                    let (local, global, rest) = transforms.get(bone).ok()?;
-                    Some((
-                        *local,
-                        rest.map_or(*global, |r| r.0).affine(),
-                        parents.get(bone).ok().map(ChildOf::parent),
-                    ))
-                },
-            )?;
-            // The default is admitted against the imported rest body before
-            // any live torso pose can influence its contact solution.
-            let neutral_body = rig.capture(|b| rests.get(b).ok().map(|r| **r))?;
-            state.neutral_motions = std::sync::Arc::new(neutral_body.motions()?);
-            state.neutral_body = Some(neutral_body);
-            state.body_rig = Some(rig);
-        }
-        state
-            .body_rig
-            .as_ref()
-            .map(|rig| rig.capture(|b| transforms.get(b).ok().map(|(t, _, _)| *t)))
-            .transpose()
-    })();
-    let body_pose = match body_pose {
-        Ok(pose) => pose,
-        Err(e) => {
-            report(
-                &mut commands,
-                root,
-                &mut state,
-                SolveStatus::InvalidGeometry(e),
-            );
-            return;
-        }
-    };
-    state.producer_body = body_pose.clone();
-    let body = match body_pose.as_ref().map(BodyPose::motions).transpose() {
-        Ok(body) => body.unwrap_or_default(),
-        Err(e) => {
-            report(
-                &mut commands,
-                root,
-                &mut state,
-                SolveStatus::InvalidGeometry(e),
-            );
-            return;
-        }
-    };
-    let extent = chains
-        .into_iter()
-        .flatten()
-        .map(|c| c.rest.total_arm_length)
-        .fold(0.0_f32, f32::max);
-    let problem = Problem {
-        chains,
-        goals,
-        geometry,
-        body: &body,
-        body_curve: None,
-        tolerance: 64.0 * f32::EPSILON * extent,
-    };
-    use bevy::tasks::{AsyncComputeTaskPool, futures_lite::future};
     let source_seq = frame
         .map(|f| f.source_seq)
         .or_else(|| control_current.map(|f| f.source_seq));
-    let body_changed = match (&state.solved_body, &body_pose) {
-        (Some(previous), Some(current)) => !previous.same(current),
-        (None, None) => false,
-        _ => true,
-    };
+    ArmGoals {
+        neutral,
+        neutral_goals,
+        goals,
+        source_seq,
+    }
+}
+
+/// Poll and adopt completed work only at its admitted anchor. Generation and
+/// geometry resets drop pending/queued work before reaching this boundary.
+fn accept_completed_step(
+    state: &mut UpperLimbState,
+    problem: &Problem<'_>,
+    goals: [Option<ArmGoal>; 2],
+    body_changed: bool,
+    source_seq: Option<vtuber_core::FrameSeq>,
+    delta_seconds: f32,
+) -> (SolveStatus, f32) {
+    use bevy::tasks::futures_lite::future;
     if let Some(pending) = &state.pending
         && pending.source_seq != source_seq
         && (state.solved_goals != Some(goals) || body_changed)
@@ -465,10 +643,10 @@ pub fn update_upper_limb_targets(
         state.pending = None;
     }
     let mut status = state.status.unwrap_or(SolveStatus::Solving);
-    let mut frame_seconds = time.delta_secs();
+    let mut frame_seconds = delta_seconds;
     if matches!(status, SolveStatus::Feasible { .. }) && state.path.busy() {
         let current = state.path.current;
-        match state.path.advance(&problem, current, frame_seconds) {
+        match state.path.advance(problem, current, frame_seconds) {
             Ok(remaining) => frame_seconds = remaining,
             Err(error) => {
                 status = error;
@@ -515,114 +693,7 @@ pub fn update_upper_limb_targets(
         // solution. Retain provenance without solving that pose again.
         state.source_seq = source_seq;
     }
-    if state.pending.is_none()
-        && state.queued.is_none()
-        && (state.solved_goals != Some(goals) || body_changed || state.refine)
-        // A held observation gets the same continuation budget as a new one.
-        // Faster rendering/workers must not add extra optimization steps.
-        && (state.solved_goals.is_none()
-            || state.source_seq != source_seq
-            || state.solve_elapsed >= SOLVE_INTERVAL_SECONDS)
-    {
-        let path = state.path.after_current_segment();
-        let anchor = path.current;
-        let anchor_body = path.body.clone();
-        let body_curve = body_pose.clone().map(|to| BodyCurve {
-            from: anchor_body.clone().unwrap_or_else(|| to.clone()),
-            to,
-        });
-        // Constraint restoration may need more than one work batch. Resume
-        // its candidate without publishing it as a display pose.
-        // Each observation redirects the displayed joint path's continuation.
-        let mut seed = state.recovery_seed.unwrap_or(anchor);
-        for (seed, goal) in seed.iter_mut().zip(neutral) {
-            if let Some(goal) = goal {
-                if let Some(current) = seed {
-                    current.fingers = goal.fingers.or(current.fingers);
-                    current.finger_weight = goal.finger_weight;
-                    current.rest_curl = goal.rest_curl;
-                } else {
-                    *seed = Some(goal);
-                }
-            }
-        }
-        let geometry = std::sync::Arc::clone(geometry);
-        let snapshot = body.clone();
-        let neutral_snapshot = std::sync::Arc::clone(&state.neutral_motions);
-        let neutral_body_pose = state.neutral_body.clone();
-        let chains = [binding.left_arm, binding.right_arm];
-        // Publish a feasible local step promptly. Extra capacity completes
-        // contact restoration when that first iteration cannot yet be shown.
-        let pool = AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
-        // A 30 Hz camera naturally repeats a sample on alternating render
-        // ticks. That is not a stopped target: batching four task steps there
-        // creates a large jump in the next two-frame display interval.
-        let unchanged = state.solved_goals == Some(goals) && !body_changed;
-        let cached_status = (unchanged && state.source_seq == source_seq)
-            .then_some(status)
-            .filter(|s| {
-                matches!(
-                    s,
-                    SolveStatus::Feasible {
-                        converged: true,
-                        ..
-                    }
-                )
-            });
-        let cached_neutral = state.neutral.clone().filter(|n| n.goals == neutral_goals);
-        let obsolete = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let search_obsolete = std::sync::Arc::clone(&obsolete);
-        state.solve_elapsed = 0.0;
-        state.pending = Some(PendingSolve {
-            obsolete,
-            source_seq,
-            task: pool.spawn(async move {
-                prepare_step(SolveInput {
-                    chains,
-                    goals,
-                    neutral_goals,
-                    geometry,
-                    snapshot,
-                    neutral_snapshot,
-                    neutral_body_pose,
-                    body_curve,
-                    path,
-                    seed,
-                    cached_status,
-                    cached_neutral,
-                    search_obsolete,
-                    extent,
-                    source_seq,
-                })
-            }),
-        });
-        state.solved_goals = Some(goals);
-        state.solved_body = body_pose;
-    }
-    status = apply_arm_targets(
-        &mut commands,
-        root,
-        binding.generation,
-        chains,
-        &problem,
-        &mut state,
-        &mut targets,
-        status,
-        frame_seconds,
-    );
-    if let Some(body) = &state.path.body {
-        let mut transforms = transform_queries.p1();
-        for (bone, local) in body.locals() {
-            if let Ok((mut current, _)) = transforms.get_mut(bone) {
-                *current = local;
-            }
-        }
-        if let Some(global) = crate::skeleton::refresh_global(root, &mut transforms, &parents, None)
-        {
-            crate::skeleton::refresh_subtree(root, global, &mut transforms, &children);
-        }
-    }
-    report(&mut commands, root, &mut state, status);
+    (status, frame_seconds)
 }
 
 #[expect(
@@ -1161,6 +1232,108 @@ mod tests {
             .wrist = 1.0;
         app.update();
         assert!(obsolete.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn completed_paths_require_matching_joint_and_body_anchors() {
+        let left = crate::upper_limb::tests::chain(ArmSide::Left);
+        let joints = crate::upper_limb::tests::state(0.8, 0.7, -0.3, 1.0);
+        let current = [Some(joints), None];
+        let geometry = crate::collision::CollisionGeometry::default();
+        let body = std::collections::HashMap::new();
+        let problem = Problem {
+            chains: [Some(&left), None],
+            goals: [None, None],
+            geometry: &geometry,
+            body: &body,
+            body_curve: None,
+            tolerance: 64.0 * f32::EPSILON,
+        };
+        let root = Entity::from_raw_u32(100).unwrap();
+        let chest = Entity::from_raw_u32(101).unwrap();
+        let rig = BodyRig::bind(root, chest, std::iter::once(chest), |bone| {
+            Some((
+                Transform::IDENTITY,
+                bevy::math::Affine3A::IDENTITY,
+                (bone == chest).then_some(root),
+            ))
+        })
+        .unwrap();
+        let original_body = rig.capture(|_| Some(Transform::IDENTITY)).unwrap();
+        let changed_body = rig
+            .capture(|_| Some(Transform::from_rotation(Quat::from_rotation_y(0.2))))
+            .unwrap();
+        for mismatch in [None, Some("joints"), Some("body")] {
+            let mut anchor = current;
+            if mismatch == Some("joints") {
+                anchor[0].as_mut().unwrap().angles[0] += 0.1;
+            }
+            let mut path = JointPath::default();
+            path.current = current;
+            path.body = Some(original_body.clone());
+            let mut state = UpperLimbState {
+                path: path.clone(),
+                status: Some(SolveStatus::Feasible {
+                    residual: 0.0,
+                    converged: true,
+                }),
+                solved_goals: Some([None, None]),
+                source_seq: Some(vtuber_core::FrameSeq(1)),
+                queued: Some(PreparedStep {
+                    anchor,
+                    anchor_body: Some(if mismatch == Some("body") {
+                        changed_body.clone()
+                    } else {
+                        original_body.clone()
+                    }),
+                    path,
+                    status: SolveStatus::Feasible {
+                        residual: 0.2,
+                        converged: false,
+                    },
+                    refine: true,
+                    source_seq: Some(vtuber_core::FrameSeq(2)),
+                    neutral: None,
+                    recovery_seed: Some(current),
+                }),
+                ..Default::default()
+            };
+            let (status, remaining) = accept_completed_step(
+                &mut state,
+                &problem,
+                [None, None],
+                false,
+                Some(vtuber_core::FrameSeq(3)),
+                1.0 / 60.0,
+            );
+            assert!(state.queued.is_none());
+            assert_eq!(state.path.current, current);
+            assert_eq!(remaining, 1.0 / 60.0);
+            if mismatch.is_some() {
+                assert!(state.solved_goals.is_none());
+                assert_eq!(state.source_seq, Some(vtuber_core::FrameSeq(1)));
+                assert!(state.recovery_seed.is_none());
+                assert!(!state.refine);
+                assert!(matches!(
+                    status,
+                    SolveStatus::Feasible {
+                        converged: true,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(state.refine);
+                assert_eq!(state.source_seq, Some(vtuber_core::FrameSeq(2)));
+                assert_eq!(state.recovery_seed, Some(current));
+                assert!(matches!(
+                    status,
+                    SolveStatus::Feasible {
+                        converged: false,
+                        ..
+                    }
+                ));
+            }
+        }
     }
 
     #[test]

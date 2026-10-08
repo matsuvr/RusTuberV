@@ -22,7 +22,7 @@ pub(super) fn render_avatar_import_review(
 /// Apple-style centered consent sheet shown before an imported VRM reaches the
 /// asset store. The newly selected model stays unloaded until this sheet is
 /// accepted.
-pub(super) fn avatar_import_review_modal(
+fn avatar_import_review_modal(
     ctx: &egui::Context,
     review: &VrmLicenseReview,
     accepted: bool,
@@ -304,4 +304,69 @@ fn paint_license_glyph(painter: &egui::Painter, center: egui::Pos2, color: Color
         ],
         stroke,
     );
+}
+
+#[cfg(test)]
+pub(super) fn review_fixture() -> VrmLicenseReview {
+    VrmLicenseReview {
+        generation: crate::import::VrmGeneration::Vrm1,
+        model_name: "Test model".to_string(),
+        version: None,
+        authors: vec!["Author".to_string()],
+        contact_information: None,
+        references: Vec::new(),
+        avatar_permission: Some("everyone".to_string()),
+        allow_violent_usage: Some("false".to_string()),
+        allow_sexual_usage: Some("false".to_string()),
+        commercial_usage: Some("personalNonProfit".to_string()),
+        other_permission_url: None,
+        modification_license: Some("prohibited".to_string()),
+        license_name: None,
+        license_url: None,
+        other_license_url: None,
+        source_path: std::path::PathBuf::from("model.vrm"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn license_review_modal_escape_emits_cancel() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let review = review_fixture();
+        // Frame 1 registers the modal; frame 2 receives the Escape.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+        });
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(input, |ui| {
+            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+        });
+        assert!(
+            state
+                .pending_actions
+                .contains(&UiAction::CancelAvatarImportReview)
+        );
+    }
+
+    #[test]
+    fn license_review_modal_does_not_import_while_unchecked() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let review = review_fixture();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+        });
+        assert!(state.pending_actions.is_empty());
+    }
 }

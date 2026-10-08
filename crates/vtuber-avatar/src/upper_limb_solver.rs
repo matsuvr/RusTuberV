@@ -9,7 +9,7 @@ use crate::{
 use bevy::prelude::*;
 
 pub(crate) const MAX_STEP_RADIANS: f32 = 0.25;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 struct Linearization {
     tasks: nalgebra::DMatrix<f64>,
@@ -198,6 +198,31 @@ pub(crate) struct Problem<'a> {
     pub tolerance: f32,
 }
 
+#[derive(Clone, Copy)]
+struct NeutralPose {
+    wrist: Vec3,
+    elbow: Vec3,
+    palm: Option<(Vec3, Vec3)>,
+}
+
+// A solve owns its neutral FK tasks; no cache survives a changed Problem.
+struct PreparedProblem<'a> {
+    problem: Problem<'a>,
+    neutral: [Option<NeutralPose>; 2],
+    #[cfg(test)]
+    full_recomputation: bool,
+    #[cfg(test)]
+    whole_arm_differences: bool,
+}
+
+impl<'a> std::ops::Deref for PreparedProblem<'a> {
+    type Target = Problem<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.problem
+    }
+}
+
 /// Result of the current constrained upper-limb solve and transition.
 #[derive(Component, Clone, Copy, Debug)]
 pub enum SolveStatus {
@@ -220,16 +245,83 @@ pub enum SolveStatus {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Evaluation {
-    pub arms: [Option<ArmCandidate>; 2],
+    // Difference samples share the unchanged arm without copying its motion map.
+    pub arms: [Option<Arc<ArmCandidate>>; 2],
     pub clearance: f32,
     pub joint_margin: f32,
     pub error: f64,
     residuals: Vec<f64>,
+    residual_counts: [usize; 2],
     constraints: Vec<f64>,
     contact_pairs: Vec<bool>,
 }
 
-impl Problem<'_> {
+impl<'a> Problem<'a> {
+    fn prepare(&self) -> Result<PreparedProblem<'a>, CollisionError> {
+        let mut neutral = [None, None];
+        for ((slot, chain), goal) in neutral.iter_mut().zip(self.chains).zip(self.goals) {
+            if let Some((chain, goal)) = chain.zip(goal) {
+                let pose = goal
+                    .neutral
+                    .forward(chain)
+                    .ok_or(CollisionError::InvalidGeometry)?;
+                *slot = Some(NeutralPose {
+                    wrist: pose.wrist,
+                    elbow: pose.elbow,
+                    palm: pose.palm,
+                });
+            }
+        }
+        Ok(PreparedProblem {
+            problem: *self,
+            neutral,
+            #[cfg(test)]
+            full_recomputation: false,
+            #[cfg(test)]
+            whole_arm_differences: false,
+        })
+    }
+
+    pub(crate) fn kinematics(
+        &self,
+        state: [Option<ArmJoints>; 2],
+    ) -> Result<Evaluation, CollisionError> {
+        self.prepare()?.kinematics(state)
+    }
+
+    pub fn evaluate(&self, state: [Option<ArmJoints>; 2]) -> Result<Evaluation, CollisionError> {
+        self.prepare()?.evaluate(state)
+    }
+
+    pub fn solve_neutral(
+        &self,
+        seed: [Option<ArmJoints>; 2],
+    ) -> ([Option<ArmJoints>; 2], SolveStatus) {
+        self.solve_at_resolution(seed, 96, 1.0e-4)
+    }
+
+    pub fn solve(
+        &self,
+        seed: [Option<ArmJoints>; 2],
+        rounds: usize,
+    ) -> ([Option<ArmJoints>; 2], SolveStatus) {
+        self.solve_at_resolution(seed, rounds, 1.0e-3)
+    }
+
+    fn solve_at_resolution(
+        &self,
+        seed: [Option<ArmJoints>; 2],
+        rounds: usize,
+        angle_resolution: f32,
+    ) -> ([Option<ArmJoints>; 2], SolveStatus) {
+        match self.prepare() {
+            Ok(problem) => problem.solve_at_resolution(seed, rounds, angle_resolution),
+            Err(error) => (seed, SolveStatus::InvalidGeometry(error)),
+        }
+    }
+}
+
+impl PreparedProblem<'_> {
     pub(crate) fn kinematics(
         &self,
         state: [Option<ArmJoints>; 2],
@@ -237,161 +329,276 @@ impl Problem<'_> {
         self.kinematics_near(state, None)
     }
 
-    fn kinematics_near(
+    fn arm_residuals(
         &self,
-        state: [Option<ArmJoints>; 2],
-        reference: Option<&Evaluation>,
-    ) -> Result<Evaluation, CollisionError> {
-        let mut arms = [None, None];
+        side: usize,
+        chain: &ArmChainBinding,
+        state: ArmJoints,
+        pose: &ArmCandidate,
+        reference: Option<&ArmCandidate>,
+    ) -> Result<Vec<f64>, CollisionError> {
+        let goal = self.goals.get(side).copied().flatten();
         let mut residuals = Vec::new();
-        for (side, (((slot, chain), state), goal)) in arms
-            .iter_mut()
-            .zip(self.chains)
-            .zip(state)
-            .zip(self.goals)
-            .enumerate()
-        {
-            let Some((chain, state)) = chain.zip(state) else {
-                continue;
+        let reference_palm = reference.and_then(|arm| arm.palm);
+        let palm_error_for_target = |wanted| {
+            let current = pose.palm?;
+            match reference_palm {
+                Some(reference) => crate::tracked_arm::palm_orientation_error_near_reference(
+                    chain, current, wanted, reference,
+                ),
+                None => crate::tracked_arm::palm_orientation_error(chain, current, wanted),
+            }
+        };
+        if let Some(goal) = goal {
+            let scale = chain.rest.total_arm_length;
+            let mut distance = |a: Vec3, b: Vec3, weight: f32| {
+                residuals.extend(((a - b) * weight.sqrt()).to_array().map(f64::from))
             };
-            let pose = state
-                .forward(chain)
-                .ok_or(CollisionError::InvalidGeometry)?;
-            let reference_palm = reference
-                .and_then(|r| r.arms.get(side))
-                .and_then(Option::as_ref)
-                .and_then(|arm| arm.palm);
-            let palm_error_for_target = |wanted| {
-                let current = pose.palm?;
-                match reference_palm {
-                    Some(reference) => crate::tracked_arm::palm_orientation_error_near_reference(
-                        chain, current, wanted, reference,
-                    ),
-                    None => crate::tracked_arm::palm_orientation_error(chain, current, wanted),
-                }
-            };
-            if let Some(goal) = goal {
-                let scale = chain.rest.total_arm_length;
-                let mut distance = |a: Vec3, b: Vec3, weight: f32| {
-                    residuals.extend(((a - b) * weight.sqrt()).to_array().map(f64::from))
-                };
-                distance(pose.wrist / scale, goal.wrist / scale, goal.weight.wrist);
-                if let Some(elbow) = goal.elbow {
-                    distance(pose.elbow / scale, elbow / scale, goal.weight.pole);
-                }
-                if let Some(error) = goal.palm.and_then(palm_error_for_target) {
-                    distance(error / scale, Vec3::ZERO, goal.weight.palm);
-                }
-                if let Some(shoulder) = goal.shoulder {
-                    distance(
-                        pose.shoulder / scale,
-                        shoulder / scale,
-                        goal.shoulder_weight,
-                    );
-                }
-                // A missing channel returns to the neutral FK task. Solve it
-                // before the path update; do not re-IK a damped Cartesian
-                // wrist or penalize every unobserved joint as a measurement.
-                let neutral = goal
-                    .neutral
-                    .forward(chain)
-                    .ok_or(CollisionError::InvalidGeometry)?;
+            distance(pose.wrist / scale, goal.wrist / scale, goal.weight.wrist);
+            if let Some(elbow) = goal.elbow {
+                distance(pose.elbow / scale, elbow / scale, goal.weight.pole);
+            }
+            if let Some(error) = goal.palm.and_then(palm_error_for_target) {
+                distance(error / scale, Vec3::ZERO, goal.weight.palm);
+            }
+            if let Some(shoulder) = goal.shoulder {
                 distance(
-                    pose.wrist / scale,
-                    neutral.wrist / scale,
-                    1.0 - goal.weight.wrist,
+                    pose.shoulder / scale,
+                    shoulder / scale,
+                    goal.shoulder_weight,
                 );
-                // Startup uses the explicit profile goals above. Only after
-                // admission do missing channels return to the solved neutral
-                // FK, rather than the bounded analytic starting point.
-                if goal.neutral_girdle.is_some() {
-                    distance(
-                        pose.elbow / scale,
-                        neutral.elbow / scale,
-                        1.0 - goal.weight.pole,
-                    );
-                }
-                // Once the entire arm is unobserved, recover its neutral palm
-                // as well as elbow/wrist positions. Position-only recovery
-                // leaves humeral axial rotation undetermined on a straight arm.
-                let unobserved = 1.0
-                    - goal
-                        .weight
-                        .wrist
-                        .max(goal.weight.pole)
-                        .max(goal.weight.palm);
-                if let Some(error) = neutral.palm.and_then(palm_error_for_target) {
-                    distance(error / scale, Vec3::ZERO, unobserved);
-                }
-                // A resting profile must move the arm to clear the body, not
-                // bend the wrist or twist the humerus to keep pursuing its
-                // unreachable Cartesian wrist. Preserve the neutral joint
-                // articulation while resolving startup contacts.
-                if goal.neutral_girdle.is_none() {
-                    residuals.extend(
-                        state
-                            .angles
-                            .iter()
-                            .zip(goal.neutral.angles)
-                            .skip(2)
-                            .take(2)
-                            .map(|(q, neutral)| f64::from(q - neutral)),
-                    );
-                }
-                // Missing palm orientation returns only radioulnar/wrist
-                // articulation to rest. A neutral world-space palm would
-                // falsely oppose an observed arm lift or thorax rotation.
+            }
+            // A missing channel returns to the neutral FK task. Solve it
+            // before the path update; do not re-IK a damped Cartesian
+            // wrist or penalize every unobserved joint as a measurement.
+            let neutral = self
+                .neutral
+                .get(side)
+                .copied()
+                .flatten()
+                .ok_or(CollisionError::InvalidGeometry)?;
+            distance(
+                pose.wrist / scale,
+                neutral.wrist / scale,
+                1.0 - goal.weight.wrist,
+            );
+            // Startup uses the explicit profile goals above. Only after
+            // admission do missing channels return to the solved neutral
+            // FK, rather than the bounded analytic starting point.
+            if goal.neutral_girdle.is_some() {
+                distance(
+                    pose.elbow / scale,
+                    neutral.elbow / scale,
+                    1.0 - goal.weight.pole,
+                );
+            }
+            // Once the entire arm is unobserved, recover its neutral palm
+            // as well as elbow/wrist positions. Position-only recovery
+            // leaves humeral axial rotation undetermined on a straight arm.
+            let unobserved = 1.0
+                - goal
+                    .weight
+                    .wrist
+                    .max(goal.weight.pole)
+                    .max(goal.weight.palm);
+            if let Some(error) = neutral.palm.and_then(palm_error_for_target) {
+                distance(error / scale, Vec3::ZERO, unobserved);
+            }
+            // A resting profile must move the arm to clear the body, not
+            // bend the wrist or twist the humerus to keep pursuing its
+            // unreachable Cartesian wrist. Preserve the neutral joint
+            // articulation while resolving startup contacts.
+            if goal.neutral_girdle.is_none() {
                 residuals.extend(
                     state
                         .angles
                         .iter()
                         .zip(goal.neutral.angles)
-                        .skip(4)
-                        .take(3)
-                        .map(|(q, neutral)| {
-                            let weight = if goal.neutral_girdle.is_none() {
-                                1.0
-                            } else {
-                                1.0 - goal.weight.palm
-                            };
-                            f64::from((q - neutral) * weight.sqrt())
-                        }),
-                );
-                // Unobserved SC motion is estimated from the published
-                // rhythm. This is a model prior, not a measured scapula pose.
-                let [p, e, _, _, _, _, _, protract, elevate] = state.angles;
-                let [rp, re, ..] = crate::girdle::rhythm(p, e);
-                let Vec2 { x: np, y: ne } = goal.neutral_girdle.unwrap_or(Vec2::new(rp, re));
-                let observed = goal
-                    .weight
-                    .wrist
-                    .max(goal.weight.pole)
-                    .max(goal.weight.palm);
-                residuals.extend(
-                    [
-                        protract - (np + observed * (rp - np)),
-                        elevate - (ne + observed * (re - ne)),
-                    ]
-                    .map(|v| f64::from(v * (1.0 - goal.shoulder_weight).sqrt())),
+                        .skip(2)
+                        .take(2)
+                        .map(|(q, neutral)| f64::from(q - neutral)),
                 );
             }
-            *slot = Some(pose);
+            // Missing palm orientation returns only radioulnar/wrist
+            // articulation to rest. A neutral world-space palm would
+            // falsely oppose an observed arm lift or thorax rotation.
+            residuals.extend(
+                state
+                    .angles
+                    .iter()
+                    .zip(goal.neutral.angles)
+                    .skip(4)
+                    .take(3)
+                    .map(|(q, neutral)| {
+                        let weight = if goal.neutral_girdle.is_none() {
+                            1.0
+                        } else {
+                            1.0 - goal.weight.palm
+                        };
+                        f64::from((q - neutral) * weight.sqrt())
+                    }),
+            );
+            // Unobserved SC motion is estimated from the published
+            // rhythm. This is a model prior, not a measured scapula pose.
+            let [p, e, _, _, _, _, _, protract, elevate] = state.angles;
+            let [rp, re, ..] = crate::girdle::rhythm(p, e);
+            let Vec2 { x: np, y: ne } = goal.neutral_girdle.unwrap_or(Vec2::new(rp, re));
+            let observed = goal
+                .weight
+                .wrist
+                .max(goal.weight.pole)
+                .max(goal.weight.palm);
+            residuals.extend(
+                [
+                    protract - (np + observed * (rp - np)),
+                    elevate - (ne + observed * (re - ne)),
+                ]
+                .map(|v| f64::from(v * (1.0 - goal.shoulder_weight).sqrt())),
+            );
         }
+        Ok(residuals)
+    }
+
+    fn kinematics_near(
+        &self,
+        state: [Option<ArmJoints>; 2],
+        reference: Option<&Evaluation>,
+    ) -> Result<Evaluation, CollisionError> {
+        #[cfg(test)]
+        if self.full_recomputation {
+            return tests::uncached_kinematics_near(&self.problem, state, reference);
+        }
+        let mut arms = [None, None];
+        for ((slot, chain), state) in arms.iter_mut().zip(self.chains).zip(state) {
+            if let Some((chain, state)) = chain.zip(state) {
+                *slot = Some(Arc::new(
+                    state
+                        .forward(chain)
+                        .ok_or(CollisionError::InvalidGeometry)?,
+                ));
+            }
+        }
+        self.residuals_near(state, arms, reference)
+    }
+
+    fn residuals_near(
+        &self,
+        state: [Option<ArmJoints>; 2],
+        arms: [Option<Arc<ArmCandidate>>; 2],
+        reference: Option<&Evaluation>,
+    ) -> Result<Evaluation, CollisionError> {
+        let mut residuals = Vec::new();
+        let mut residual_counts = [0; 2];
+        for (side, ((chain, state), pose)) in
+            self.chains.into_iter().zip(state).zip(&arms).enumerate()
+        {
+            if let Some(((chain, state), pose)) = chain.zip(state).zip(pose.as_deref()) {
+                let arm_residuals = self.arm_residuals(
+                    side,
+                    chain,
+                    state,
+                    pose,
+                    reference
+                        .and_then(|r| r.arms.get(side))
+                        .and_then(Option::as_deref),
+                )?;
+                if let Some(count) = residual_counts.get_mut(side) {
+                    *count = arm_residuals.len();
+                }
+                residuals.extend(arm_residuals);
+            }
+        }
+        Ok(Self::kinematic_evaluation(arms, residuals, residual_counts))
+    }
+
+    fn kinematic_evaluation(
+        arms: [Option<Arc<ArmCandidate>>; 2],
+        residuals: Vec<f64>,
+        residual_counts: [usize; 2],
+    ) -> Evaluation {
         let joint_margin = arms
             .iter()
             .flatten()
             .map(|a| a.joint_margin)
             .fold(f32::INFINITY, f32::min);
         let error = residuals.iter().map(|v| v * v).sum();
-        Ok(Evaluation {
+        Evaluation {
             arms,
             clearance: f32::INFINITY,
             joint_margin,
             error,
             residuals,
+            residual_counts,
             constraints: Vec::new(),
             contact_pairs: Vec::new(),
-        })
+        }
+    }
+
+    fn differential_kinematics(
+        &self,
+        state: [Option<ArmJoints>; 2],
+        side: usize,
+        reference: &Evaluation,
+    ) -> Result<Evaluation, CollisionError> {
+        #[cfg(test)]
+        if self.full_recomputation {
+            return tests::uncached_kinematics_near(&self.problem, state, Some(reference));
+        }
+        #[cfg(test)]
+        if self.whole_arm_differences {
+            return self.kinematics_near(state, Some(reference));
+        }
+        let chain = self
+            .chains
+            .get(side)
+            .copied()
+            .flatten()
+            .ok_or(CollisionError::InvalidGeometry)?;
+        let state = state
+            .get(side)
+            .copied()
+            .flatten()
+            .ok_or(CollisionError::InvalidGeometry)?;
+        let pose = state
+            .forward(chain)
+            .ok_or(CollisionError::InvalidGeometry)?;
+        let changed = self.arm_residuals(
+            side,
+            chain,
+            state,
+            &pose,
+            reference.arms.get(side).and_then(Option::as_deref),
+        )?;
+        let mut pose = Some(Arc::new(pose));
+        let arms = std::array::from_fn(|i| {
+            if i == side {
+                pose.take()
+            } else {
+                reference.arms.get(i).cloned().flatten()
+            }
+        });
+        // On the unchanged arm, current and reference palms coincide, so the
+        // near-reference branch has the same residual as the admitted evaluation.
+        let mut residuals = Vec::with_capacity(reference.residuals.len());
+        let mut residual_counts = reference.residual_counts;
+        let mut start = 0;
+        for (i, count) in reference.residual_counts.into_iter().enumerate() {
+            if i == side {
+                residuals.extend(&changed);
+                if let Some(count) = residual_counts.get_mut(i) {
+                    *count = changed.len();
+                }
+            } else {
+                residuals.extend(
+                    reference
+                        .residuals
+                        .get(start..start + count)
+                        .ok_or(CollisionError::InvalidGeometry)?,
+                );
+            }
+            start += count;
+        }
+        Ok(Self::kinematic_evaluation(arms, residuals, residual_counts))
     }
 
     pub fn evaluate(&self, state: [Option<ArmJoints>; 2]) -> Result<Evaluation, CollisionError> {
@@ -512,8 +719,12 @@ impl Problem<'_> {
             .zip(change(&mut minus, -h))
             .map(|(a, b)| a - b);
         if let Some(span) = span.filter(|v| *v > 0.0) {
-            let a = self.kinematics_near(minus, Some(evaluation)).ok()?;
-            let b = self.kinematics_near(plus, Some(evaluation)).ok()?;
+            let a = self
+                .differential_kinematics(minus, index / 9, evaluation)
+                .ok()?;
+            let b = self
+                .differential_kinematics(plus, index / 9, evaluation)
+                .ok()?;
             let moved = [&a, &b]
                 .into_iter()
                 .flat_map(|sample| {
@@ -649,23 +860,6 @@ impl Problem<'_> {
                 .sum(),
             evaluation.error,
         )
-    }
-
-    /// Resolve the configured initial posture within the same anatomical and
-    /// contact domain as tracking. An unreachable profile retains a residual.
-    pub fn solve_neutral(
-        &self,
-        seed: [Option<ArmJoints>; 2],
-    ) -> ([Option<ArmJoints>; 2], SolveStatus) {
-        self.solve_at_resolution(seed, 96, 1.0e-4)
-    }
-
-    pub fn solve(
-        &self,
-        seed: [Option<ArmJoints>; 2],
-        rounds: usize,
-    ) -> ([Option<ArmJoints>; 2], SolveStatus) {
-        self.solve_at_resolution(seed, rounds, 1.0e-3)
     }
 
     fn solve_at_resolution(
@@ -805,7 +999,9 @@ impl Problem<'_> {
         };
         (current, status)
     }
+}
 
+impl Problem<'_> {
     /// Keep an endpoint gap equal to both capsules' existing chord resolution.
     /// Near-zero contact leaves no room for the curved link motion between
     /// observations. This is a geometric contact offset, not a joint limit.

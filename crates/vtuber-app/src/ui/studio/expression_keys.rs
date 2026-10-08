@@ -19,7 +19,7 @@ pub(super) fn expression_keys_page(
 }
 
 /// Translates standard presets and keeps the exact runtime ID visible.
-pub(super) fn expression_entry_name(entry: &ExpressionEntryViewModel, lang: UiLanguage) -> String {
+fn expression_entry_name(entry: &ExpressionEntryViewModel, lang: UiLanguage) -> String {
     // Only expressions classified as standard presets get a translated label.
     // A custom expression that happens to be named `happy` keeps its author
     // string and is never displayed as the standard 喜 label.
@@ -51,7 +51,7 @@ pub(super) fn expression_entry_name(entry: &ExpressionEntryViewModel, lang: UiLa
 }
 
 /// Describes availability as a disabled-candidate suffix.
-pub(super) fn expression_availability_suffix(
+fn expression_availability_suffix(
     availability: &ExpressionAvailability,
     lang: UiLanguage,
 ) -> String {
@@ -334,7 +334,7 @@ fn expression_status_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
 
 /// Translates an egui physical key into the fixed expression key, if bound.
 #[must_use]
-pub(crate) fn expression_key_from_egui(key: egui::Key) -> Option<ExpressionKey> {
+fn expression_key_from_egui(key: egui::Key) -> Option<ExpressionKey> {
     use egui::Key;
     Some(match key {
         Key::Num1 => ExpressionKey::Digit1,
@@ -435,5 +435,460 @@ pub(crate) fn expression_key_input(
     });
     for action in actions {
         state.emit(action);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_generation() -> vtuber_avatar::AvatarGeneration {
+        vtuber_avatar::AvatarGeneration(1)
+    }
+
+    fn ready_expression_view_model() -> UiViewModel {
+        let mut vm = UiViewModel::default();
+        vm.avatar.is_ready = true;
+        vm.avatar.lifecycle = AvatarLifecycleState::Ready;
+        vm.expression.target = Some(crate::actions::ModelActionTarget {
+            model_id: "model".into(),
+            generation: test_generation(),
+        });
+        vm
+    }
+
+    fn expression_key_event(
+        key: egui::Key,
+        repeat: bool,
+        modifiers: egui::Modifiers,
+    ) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat,
+            modifiers,
+        }
+    }
+
+    fn run_expression_key_input(
+        vm: &UiViewModel,
+        state: &mut UiState,
+        input: egui::RawInput,
+        dialog_active: bool,
+    ) {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(input, |ctx| {
+            expression_key_input(ctx, vm, state, dialog_active)
+        });
+    }
+
+    fn focused_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn expression_key_input_emits_toggle_even_in_avatar_only_mode() {
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        state.set_controls_open(false);
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            false,
+        );
+        assert_eq!(
+            state.take_actions(),
+            vec![UiAction::ToggleExpressionKey {
+                generation: test_generation(),
+                key: ExpressionKey::Digit1
+            }]
+        );
+    }
+
+    #[test]
+    fn expression_key_input_escape_and_space_clear_the_manual_expression() {
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![
+                expression_key_event(egui::Key::Escape, false, egui::Modifiers::NONE),
+                expression_key_event(egui::Key::Space, false, egui::Modifiers::NONE),
+            ]),
+            false,
+        );
+        assert_eq!(
+            state.take_actions(),
+            vec![
+                UiAction::ClearManualExpression {
+                    generation: test_generation()
+                },
+                UiAction::ClearManualExpression {
+                    generation: test_generation()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn expression_key_input_ignores_modified_and_repeated_clear_keys() {
+        let ctx = egui::Context::default();
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        // Frame 1: Escape goes down once and clears.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Escape,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert_eq!(state.take_actions().len(), 1);
+
+        // Frame 2: the OS repeats the held Escape. egui marks the event as a
+        // repeat, which must not clear again.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Escape,
+                true,
+                egui::Modifiers::NONE,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert!(
+            state.take_actions().is_empty(),
+            "OS key repeat never clears again"
+        );
+
+        // A modified Space stays with the existing shortcut handling.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Space,
+                false,
+                egui::Modifiers::SHIFT,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert!(
+            state.take_actions().is_empty(),
+            "modifiers never clear the expression"
+        );
+    }
+
+    #[test]
+    fn expression_key_input_processes_multiple_keys_in_event_order() {
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![
+                expression_key_event(egui::Key::Num1, false, egui::Modifiers::NONE),
+                expression_key_event(egui::Key::Q, false, egui::Modifiers::NONE),
+            ]),
+            false,
+        );
+        assert_eq!(
+            state.take_actions(),
+            vec![
+                UiAction::ToggleExpressionKey {
+                    generation: test_generation(),
+                    key: ExpressionKey::Digit1
+                },
+                UiAction::ToggleExpressionKey {
+                    generation: test_generation(),
+                    key: ExpressionKey::KeyQ
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn expression_key_input_ignores_os_key_repeat_and_key_up() {
+        let ctx = egui::Context::default();
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        // Frame 1: the physical key goes down once.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert_eq!(state.take_actions().len(), 1);
+
+        // Frame 2: the OS repeats the held key. egui marks the event as a
+        // repeat, which must not toggle again.
+        let _ = ctx.run_ui(
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert!(
+            state.take_actions().is_empty(),
+            "OS key repeat never toggles"
+        );
+
+        // Key-up alone never clears.
+        let _ = ctx.run_ui(
+            focused_input(vec![egui::Event::Key {
+                key: egui::Key::Num1,
+                physical_key: Some(egui::Key::Num1),
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]),
+            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+        );
+        assert!(state.take_actions().is_empty(), "key-up never clears");
+    }
+
+    #[test]
+    fn expression_key_input_ignores_modifiers_and_unfocused_window() {
+        let vm = ready_expression_view_model();
+
+        let mut state = UiState::default();
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::SHIFT,
+            )]),
+            false,
+        );
+        assert!(
+            state.take_actions().is_empty(),
+            "Shift+1 must stay with the existing shortcut handling"
+        );
+
+        let mut state = UiState::default();
+        let mut input = focused_input(vec![expression_key_event(
+            egui::Key::Num1,
+            false,
+            egui::Modifiers::NONE,
+        )]);
+        input.focused = false;
+        run_expression_key_input(&vm, &mut state, input, false);
+        assert!(state.take_actions().is_empty(), "unfocused window is inert");
+    }
+
+    #[test]
+    fn expression_key_input_ignores_dialog_and_license_modal() {
+        let mut vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            true,
+        );
+        assert!(state.take_actions().is_empty(), "file dialog owns input");
+
+        vm.avatar_import_review.review = Some(super::super::import_review::review_fixture());
+        let mut state = UiState::default();
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            false,
+        );
+        assert!(state.take_actions().is_empty(), "license modal owns input");
+    }
+
+    #[test]
+    fn expression_key_input_defers_to_a_focused_text_edit() {
+        let ctx = egui::Context::default();
+        let vm = ready_expression_view_model();
+        let mut state = UiState::default();
+        let mut text = String::new();
+        // First frame registers and focuses the text edit.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.text_edit_singleline(&mut text).request_focus();
+            });
+        });
+        assert!(ctx.egui_wants_keyboard_input());
+        let input = focused_input(vec![expression_key_event(
+            egui::Key::Num1,
+            false,
+            egui::Modifiers::NONE,
+        )]);
+        let _ = ctx.run_ui(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.text_edit_singleline(&mut text);
+            });
+            expression_key_input(ctx, &vm, &mut state, false);
+        });
+        assert!(
+            state.take_actions().is_empty(),
+            "typing in a text field must not trigger expressions"
+        );
+    }
+
+    #[test]
+    fn expression_key_input_requires_a_ready_avatar() {
+        let mut vm = UiViewModel::default();
+        let mut state = UiState::default();
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            false,
+        );
+        assert!(state.take_actions().is_empty());
+
+        vm.avatar.is_ready = true;
+        vm.avatar.lifecycle = AvatarLifecycleState::Loading;
+        run_expression_key_input(
+            &vm,
+            &mut state,
+            focused_input(vec![expression_key_event(
+                egui::Key::Num1,
+                false,
+                egui::Modifiers::NONE,
+            )]),
+            false,
+        );
+        assert!(state.take_actions().is_empty());
+    }
+
+    #[test]
+    fn expression_ui_strings_exist_in_all_four_languages() {
+        let entry = ExpressionEntryViewModel {
+            id: "happy".into(),
+            source_name: "happy".into(),
+            kind: ExpressionKind::EmotionalPreset,
+            availability: ExpressionAvailability::Ready,
+        };
+        let custom = ExpressionEntryViewModel {
+            id: "笑顔".into(),
+            source_name: "笑顔".into(),
+            kind: ExpressionKind::Tracking,
+            availability: ExpressionAvailability::Unsupported {
+                reason: "test".into(),
+            },
+        };
+        for lang in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            assert!(!expression_entry_name(&entry, lang).is_empty());
+            let custom_label = expression_entry_name(&custom, lang);
+            assert!(custom_label.contains("笑顔"), "custom names stay verbatim");
+            assert!(!expression_availability_suffix(&custom.availability, lang).is_empty());
+            assert!(
+                expression_availability_suffix(&ExpressionAvailability::Ready, lang).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn expression_settings_section_renders_with_and_without_a_catalog() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let mut vm = ready_expression_view_model();
+        // Without a catalog: the load-model message renders.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            expression_keys_page(ui, &vm, &mut state, UiLanguage::Ja);
+        });
+
+        // With a catalog: a disabled unavailable candidate and a saved
+        // unknown binding render without panicking.
+        vm.expression.has_catalog = true;
+        vm.expression.entries = vec![ExpressionEntryViewModel {
+            id: "happy".into(),
+            source_name: "happy".into(),
+            kind: ExpressionKind::EmotionalPreset,
+            availability: ExpressionAvailability::Empty,
+        }];
+        vm.expression.bindings = vec![crate::ui_model::ExpressionKeyBindingViewModel {
+            key: ExpressionKey::Digit1,
+            expression: Some("vanished".into()),
+            selected: false,
+        }];
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            expression_keys_page(ui, &vm, &mut state, UiLanguage::Ja);
+        });
+    }
+
+    #[test]
+    fn expression_key_mapping_covers_the_fixed_36_keys() {
+        for key in ExpressionKey::ALL {
+            let egui_key = match key {
+                ExpressionKey::Digit1 => egui::Key::Num1,
+                ExpressionKey::Digit2 => egui::Key::Num2,
+                ExpressionKey::Digit3 => egui::Key::Num3,
+                ExpressionKey::Digit4 => egui::Key::Num4,
+                ExpressionKey::Digit5 => egui::Key::Num5,
+                ExpressionKey::Digit6 => egui::Key::Num6,
+                ExpressionKey::Digit7 => egui::Key::Num7,
+                ExpressionKey::Digit8 => egui::Key::Num8,
+                ExpressionKey::Digit9 => egui::Key::Num9,
+                ExpressionKey::Digit0 => egui::Key::Num0,
+                ExpressionKey::KeyQ => egui::Key::Q,
+                ExpressionKey::KeyW => egui::Key::W,
+                ExpressionKey::KeyE => egui::Key::E,
+                ExpressionKey::KeyR => egui::Key::R,
+                ExpressionKey::KeyT => egui::Key::T,
+                ExpressionKey::KeyY => egui::Key::Y,
+                ExpressionKey::KeyU => egui::Key::U,
+                ExpressionKey::KeyI => egui::Key::I,
+                ExpressionKey::KeyO => egui::Key::O,
+                ExpressionKey::KeyP => egui::Key::P,
+                ExpressionKey::KeyA => egui::Key::A,
+                ExpressionKey::KeyS => egui::Key::S,
+                ExpressionKey::KeyD => egui::Key::D,
+                ExpressionKey::KeyF => egui::Key::F,
+                ExpressionKey::KeyG => egui::Key::G,
+                ExpressionKey::KeyH => egui::Key::H,
+                ExpressionKey::KeyJ => egui::Key::J,
+                ExpressionKey::KeyK => egui::Key::K,
+                ExpressionKey::KeyL => egui::Key::L,
+                ExpressionKey::KeyZ => egui::Key::Z,
+                ExpressionKey::KeyX => egui::Key::X,
+                ExpressionKey::KeyC => egui::Key::C,
+                ExpressionKey::KeyV => egui::Key::V,
+                ExpressionKey::KeyB => egui::Key::B,
+                ExpressionKey::KeyN => egui::Key::N,
+                ExpressionKey::KeyM => egui::Key::M,
+            };
+            assert_eq!(expression_key_from_egui(egui_key), Some(key));
+        }
+        assert_eq!(expression_key_from_egui(egui::Key::Escape), None);
+        assert_eq!(expression_key_from_egui(egui::Key::Space), None);
+        assert_eq!(expression_key_from_egui(egui::Key::F1), None);
     }
 }
