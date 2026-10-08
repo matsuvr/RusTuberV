@@ -459,7 +459,7 @@ impl Problem<'_> {
         };
         // Each task owns a disjoint final matrix column. No per-column output
         // buffers, sorting, concatenation or matrix copy is required.
-        let columns = bevy::tasks::AsyncComputeTaskPool::get_or_init(
+        let column_results = bevy::tasks::AsyncComputeTaskPool::get_or_init(
             bevy::tasks::TaskPool::default,
         )
         .scope(|scope| {
@@ -480,8 +480,8 @@ impl Problem<'_> {
                 });
             }
         });
-        for column in columns {
-            column?;
+        for column_result in column_results {
+            column_result?;
         }
         Some(linearization)
     }

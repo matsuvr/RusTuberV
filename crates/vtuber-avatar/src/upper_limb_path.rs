@@ -254,9 +254,9 @@ pub(crate) fn interpolate(
     out
 }
 
-/// Continuous ROM and capsule checks. Chord bounds allow 0.001 arm
-/// lengths of spatial approximation per collider; this is not a strict
-/// zero-penetration certificate. See the upper-limb anatomy ADR.
+/// Checks joint-domain margins and swept capsules along the interpolated path.
+/// Capsule chord bounds use half the problem's contact offset as a spatial
+/// allowance, so acceptance does not certify zero penetration.
 pub(crate) fn check_transition(
     problem: &Problem<'_>,
     from: [Option<ArmJoints>; 2],

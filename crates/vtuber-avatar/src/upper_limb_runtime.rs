@@ -1047,7 +1047,7 @@ mod tests {
         use crate::collision::{CapsuleCollider, CollisionGeometry, Region};
         let (mut app, root, _, _) = rig();
         let local = Transform::from_xyz(0.0, 1.0, 0.0);
-        let chest = app
+        let chest_entity = app
             .world_mut()
             .spawn((
                 local,
@@ -1060,10 +1060,10 @@ mod tests {
         app.world_mut()
             .get_mut::<AvatarBinding>(root)
             .unwrap()
-            .chest = Some(chest);
+            .chest = Some(chest_entity);
         let geometry = std::sync::Arc::new(CollisionGeometry::new(
             vec![CapsuleCollider {
-                bone: chest,
+                bone: chest_entity,
                 region: Region::Torso,
                 endpoints: [Vec3::new(0.0, 0.9, 0.0), Vec3::new(0.0, 1.1, 0.0)],
                 radius: 0.08,
