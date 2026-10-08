@@ -437,27 +437,102 @@ mod tests {
             .init_resource::<UiSurfaceHover>()
             .init_resource::<UiState>()
             .init_resource::<CameraPointerInputGate>()
-            .add_systems(Update, sync_camera_pointer_input_gate);
-        app.world_mut().resource_mut::<UiSurfaceHover>().set(true);
-        app.update();
-        assert!(
-            !app.world()
-                .resource::<CameraPointerInputGate>()
-                .allows_camera_input()
+            .add_systems(
+                Update,
+                (
+                    bevy_egui::input::write_egui_wants_input_system,
+                    sync_camera_pointer_input_gate,
+                )
+                    .chain(),
+            );
+        let mut egui_context = bevy_egui::EguiContext::default();
+        let ctx = egui_context.get_mut().clone();
+        app.world_mut().spawn(egui_context);
+        let mut vm = UiViewModel::default();
+        vm.avatar.is_ready = true;
+        vm.avatar.lifecycle = crate::ui_model::AvatarLifecycleState::Ready;
+        let render = |app: &mut App, events| {
+            let mut over_ui = false;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1600.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    over_ui = super::super::studio::render_studio(
+                        ui.ctx(),
+                        &vm,
+                        &mut app.world_mut().resource_mut::<UiState>(),
+                        &DiagnosticsSnapshot::default(),
+                        None,
+                        &PreviewState::default(),
+                        &PreviewLandmarkState::default(),
+                        AvatarMotionMirror::default(),
+                        None,
+                        Some(super::super::avatar_preview::AvatarPreviewTexture::new(
+                            Handle::default(),
+                            vtuber_core::VideoOutputProfile::default(),
+                        )),
+                        false,
+                        crate::settings::UiLanguage::Ja,
+                    );
+                },
+            );
+            app.world_mut()
+                .resource_mut::<UiSurfaceHover>()
+                .set(over_ui);
+            app.update();
+        };
+        // Finish initial panel sizing before sending pointer input.
+        render(&mut app, vec![]);
+        render(&mut app, vec![]);
+        let preview_rect = app
+            .world()
+            .resource::<UiState>()
+            .monitor_image_rect
+            .expect("ready avatar has a preview");
+        render(
+            &mut app,
+            vec![egui::Event::PointerMoved(preview_rect.center())],
         );
-        app.world_mut()
-            .resource_mut::<UiState>()
-            .monitor_pointer_hovered = true;
-        app.update();
+        render(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: preview_rect.center(),
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            app.world()
+                .resource::<bevy_egui::input::EguiWantsInput>()
+                .wants_any_pointer_input(),
+            "preview is an egui widget, so its camera input must override egui ownership"
+        );
         assert!(
             app.world()
                 .resource::<CameraPointerInputGate>()
                 .allows_camera_input()
         );
-        app.world_mut()
-            .resource_mut::<UiState>()
-            .monitor_pointer_hovered = false;
-        app.update();
+        render(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: preview_rect.center(),
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        render(
+            &mut app,
+            vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))],
+        );
+        assert!(app.world().resource::<UiSurfaceHover>().over_ui());
         assert!(
             !app.world()
                 .resource::<CameraPointerInputGate>()
