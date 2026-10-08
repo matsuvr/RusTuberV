@@ -210,8 +210,11 @@ mod tests {
                     assert!((0.0..=limit).contains(&angle), "{name}: {angle}");
                 }
             }
-            assert!((0.0..=0.88).contains(&target.thumb[0]), "{name}");
-            assert!((0.0..=1.23).contains(&target.thumb[1]), "{name}");
+            assert!(
+                (0.0..=std::f32::consts::FRAC_PI_4).contains(&target.thumb[0]),
+                "{name}"
+            );
+            assert!((0.0..=1.309).contains(&target.thumb[1]), "{name}");
             assert!(
                 target.spread.into_iter().all(|angle| angle.abs() <= 0.35),
                 "{name}"

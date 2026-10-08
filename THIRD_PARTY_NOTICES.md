@@ -115,15 +115,15 @@ The exact source URL, schema path, and redistribution record are maintained in
 
 ## MyoHub MyoArm anatomical parameters
 
-The CMC joint axes, ranges and hand offsets in `vtuber-avatar/src/thumb.rs`,
+The CMC, MCP and IP joint axes, ranges and hand offsets in `vtuber-avatar/src/thumb.rs`,
 elbow/radioulnar axes and offsets in `vtuber-avatar/src/arm_anatomy.rs`,
 and girdle axes and offsets in `vtuber-avatar/src/girdle.rs`
 are adapted from `myo_sim/models/arm/assets/myoarm_r_chain.xml` at
 [MyoHub/myo_sim revision 93b0ca8f4ec90c9899ee7f05fee561e9911da91b](https://github.com/MyoHub/myo_sim/tree/93b0ca8f4ec90c9899ee7f05fee561e9911da91b).
 Copyright 2025 Vikash Kumar, Vittorio Caggiano. Apache License, Version 2.0;
 see [the retained license](vendor/mediapipe-rs/LICENSE).
-The adaptation maps source joint axes to the VRM's authored metacarpal/palm
-frame, including left-hand reflection. The forearm adapter retains the radial offset and neutral carrying angle,
+The adaptation maps source joint axes to the VRM's authored thumb shaft/palm
+frames, including left-hand reflection. The forearm adapter retains the radial offset and neutral carrying angle,
 while mapping the resulting direction onto the fixed VRM forearm length. No MuJoCo runtime or meshes are included.
 
 ## CMU Graphics Lab shoulder range-of-motion data and Joint Limits

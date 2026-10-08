@@ -111,8 +111,9 @@ pub struct HandFingerPose {
     /// Thumb `[mcp, ip]` coordinates. Raw landmark features use the signed
     /// MCP-to-IP elevation and the signed IP bend. After pose selection these
     /// are authored flexion amounts applied relative to the rig's resting
-    /// thumb, preserving its base orientation rather than flattening it into
-    /// the palm plane. The Hand Landmarker CMC is not used.
+    /// thumb about the anatomical MCP/IP axes, with the same handed sign as
+    /// `fingers` (left negative, right positive). The Hand Landmarker CMC is
+    /// not used.
     pub thumb: [f32; 2],
     /// The thumb's in-plane opening, from forward toward across. Used for pose
     /// recognition only; CMC uses the selected catalog coordinates separately.

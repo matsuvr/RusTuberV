@@ -28,21 +28,61 @@ FINGERS = ["Index", "Middle", "Ring", "Little"]
 OPEN = [0, 0, 0]
 FOLDED = [85, 100, 60]
 # Additional authored poses in degrees, using the same MCP/PIP/DIP freedoms.
-# Each tuple is (name, four finger curls, spreads, thumb MCP/IP, thumb spread).
+# Each tuple is (name, four finger curls, spreads, thumb spread).
 ADDITIONAL = [
-    ("ring_only", [FOLDED, FOLDED, OPEN, FOLDED], [0, 0, 0, 0], [40, 60], 35),
-    ("little_only", [FOLDED, FOLDED, FOLDED, OPEN], [0, 0, 0, -12], [40, 60], 35),
-    ("ok", [[45, 80, 35], OPEN, OPEN, OPEN], [10, 0, -8, -16], [35, 40], 28),
-    ("crossed_fingers", [[12, 8, 0], [5, 5, 0], FOLDED, FOLDED], [-18, 15, 0, 0], [40, 55], 35),
-    ("vulcan", [OPEN] * 4, [14, 14, -14, -14], [5, 0], 65),
-    ("half_heart", [[35, 55, 25], [40, 60, 30], [45, 65, 35], [50, 70, 40]], [5, 0, -5, -10], [10, 5], 70),
-    ("three_thumb_index_middle", [OPEN, OPEN, FOLDED, FOLDED], [12, -10, 0, 0], [0, 0], 65),
-    ("i_love_you", [OPEN, FOLDED, FOLDED, OPEN], [12, 0, 0, -15], [0, 0], 70),
-    ("four_with_thumb", [OPEN, OPEN, OPEN, FOLDED], [12, 0, -12, 0], [0, 0], 65),
-    ("open_together", [OPEN] * 4, [0, 0, 0, 0], [5, 0], 25),
-    ("two_together", [OPEN, OPEN, FOLDED, FOLDED], [0, 0, 0, 0], [40, 55], 35),
-    ("pinch", [[30, 60, 25], [25, 30, 15], [30, 35, 20], [35, 40, 25]], [8, 0, -5, -10], [30, 35], 28),
+    ("ring_only", [FOLDED, FOLDED, OPEN, FOLDED], [0, 0, 0, 0], 35),
+    ("little_only", [FOLDED, FOLDED, FOLDED, OPEN], [0, 0, 0, -12], 35),
+    ("ok", [[32, 75, 21], OPEN, OPEN, OPEN], [20, 0, -8, -16], 28),
+    ("crossed_fingers", [[12, 8, 0], [5, 5, 0], FOLDED, FOLDED], [-18, 15, 0, 0], 35),
+    ("vulcan", [OPEN] * 4, [14, 14, -14, -14], 65),
+    ("half_heart", [[35, 55, 25], [40, 60, 30], [45, 65, 35], [50, 70, 40]], [5, 0, -5, -10], 70),
+    ("three_thumb_index_middle", [OPEN, OPEN, FOLDED, FOLDED], [12, -10, 0, 0], 65),
+    ("i_love_you", [OPEN, FOLDED, FOLDED, OPEN], [12, 0, 0, -15], 70),
+    ("four_with_thumb", [OPEN, OPEN, OPEN, FOLDED], [12, 0, -12, 0], 65),
+    ("open_together", [OPEN] * 4, [0, 0, 0, 0], 25),
+    ("two_together", [OPEN, OPEN, FOLDED, FOLDED], [0, 0, 0, 0], 35),
+    ("pinch", [[32, 75, 21], [25, 30, 15], [30, 35, 20], [35, 40, 25]], [20, 0, -5, -10], 28),
 ]
+
+# Artist-authored thumb coordinates for the anatomical VRM adapter, in degrees:
+# (MCP/IP flexion, CMC flexion/abduction). Unity's normalized thumb muscles do
+# not specify this model's oblique joint angles. In particular, a folded thumb
+# must oppose the fingers, rather than inherit positive CMC extension from a
+# VRChat clip. The spread feature remains available for pose recognition.
+THUMBS = {
+    "relaxed": ([25, 17.5], [0, 0]),
+    "open": ([0, 0], [0, 7]),
+    "soft_open": ([12.5, 0], [-21, 0]),
+    "fist": ([37.5, 70], [0, 37]),
+    "soft_fist": ([30, 30], [-20, 25]),
+    "thumbs_up": ([12.5, 0], [-30, 0]),
+    "point": ([35, 50], [-25, 25]),
+    "peace": ([35, 55], [-30, 25]),
+    "fox": ([25, 20], [-15, 35]),
+    "horns": ([35, 55], [-30, 25]),
+    "shaka": ([0, 0], [0, 0]),
+    "finger_gun": ([5, 0], [-30, 0]),
+    "three": ([40, 35], [-35, 30]),
+    "four": ([37.5, 52.5], [-25, 25]),
+    "finger_heart": ([25, 0], [-15, 30]),
+    "claw": ([5, 52.5], [0, 37]),
+    "chin_support": ([20, 0], [-21, 0]),
+    "elegant": ([25, 0], [0, 18]),
+    "elegant_straight": ([12.5, 0], [0, 37]),
+    "gentle_open": ([37.5, 0], [-13, -18]),
+    "ring_only": ([40, 60], [-20, 20]),
+    "little_only": ([40, 60], [-20, 20]),
+    "ok": ([15, 30], [-8, 44]),
+    "crossed_fingers": ([40, 55], [-20, 20]),
+    "vulcan": ([5, 0], [10, -10]),
+    "half_heart": ([10, 5], [-10, -10]),
+    "three_thumb_index_middle": ([0, 0], [15, -5]),
+    "i_love_you": ([0, 0], [15, -10]),
+    "four_with_thumb": ([0, 0], [15, -5]),
+    "open_together": ([5, 0], [0, 10]),
+    "two_together": ([40, 55], [-20, 20]),
+    "pinch": ([15, 30], [-8, 44]),
+}
 
 
 def stretch(value, maximum):
@@ -76,7 +116,7 @@ def read_clips(archive):
             return result
 
 
-def convert(clip, reference):
+def convert(clip, name):
     def muscle(finger, channel):
         return clip[f"LeftHand.{finger}.{channel}"]
 
@@ -84,24 +124,14 @@ def convert(clip, reference):
               for joint, maximum in enumerate([90, 100, 60], 1)] for f in FINGERS]
     spreads = [max(-20, min(20, muscle(f, "Spread") * sign * 20))
                for f, sign in zip(FINGERS, [1, 1, -1, -1])]
-    # MCP/IP remain authored flexion amounts.
-    thumb = [stretch(muscle("Thumb", "2 Stretched"), 50),
-             stretch(muscle("Thumb", "3 Stretched"), 70)]
+    thumb, cmc = THUMBS[name]
     thumb_spread = max(20, min(75, 55 + muscle("Thumb", "Spread") * 20))
-    # Retarget normalized muscle differences from the relaxed clip to the
-    # public CMC ranges. Preserve the avatar's own resting base orientation;
-    # do not interpret Unity muscle values as measured anatomical angles.
-    # In MyoArm's right-hand axes, negative cmc_flexion moves the shaft
-    # toward the palm's ulnar side; positive cmc_abduction lifts it volarly.
-    # In these clips increasing Thumb.1 Stretched brings the thumb toward
-    # the finger direction (e.g. thumbs-up); decreasing Spread opposes it.
-    flex = (reference["LeftHand.Thumb.1 Stretched"] - muscle("Thumb", "1 Stretched")) * (0.7 + 0.78) / 2
-    abduct = (reference["LeftHand.Thumb.Spread"] - muscle("Thumb", "Spread")) * (0.78 + 0.5) / 2
-    cmc = [math.degrees(max(-0.78, min(0.7, flex))), math.degrees(max(-0.5, min(0.78, abduct)))]
     return curls, spreads, thumb, thumb_spread, cmc
 
 
 def radian(value):
+    if value < 0:
+        return "-" + radian(-value)
     for degrees, constant in [(90, "FRAC_PI_2"), (60, "FRAC_PI_3"),
                               (45, "FRAC_PI_4"), (30, "FRAC_PI_6"), (22.5, "FRAC_PI_8")]:
         if math.isclose(value, degrees, abs_tol=1e-6):
@@ -123,23 +153,16 @@ def main():
     lines = [
         "// Generated by tools/convert_hand_poses.py; angles are radians.",
         "// UmebocDC_Hand.211010 (CC0), adapted from the left-hand muscle curves.",
+        "// Thumb joint coordinates are artist-authored for the anatomical VRM axes.",
         f"// Source archive SHA-256: {digest}",
         "// No Unity clips, models, textures or archive are shipped.",
         "use std::f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8};",
         "use vtuber_core::arm_tracking::HandFingerPose;", "",
         "pub(super) const POSES: &[(&str, HandFingerPose)] = &[",
     ]
-    # Additional artist-authored CMC poses (degrees), not anatomical coupling
-    # coefficients. The hand model constrains their two oblique hinges.
-    cmc_extra = {
-        "ring_only": [-20, 20], "little_only": [-20, 20], "ok": [-25, 20],
-        "crossed_fingers": [-20, 20], "vulcan": [10, -10], "half_heart": [-10, -10],
-        "three_thumb_index_middle": [15, -5], "i_love_you": [15, -10],
-        "four_with_thumb": [15, -5], "open_together": [0, 10],
-        "two_together": [-20, 20], "pinch": [-20, 15],
-    }
-    poses = [(name, *convert(clips[clip], clips["Defo"])) for clip, name in CLIPS]
-    poses += [(*pose, cmc_extra[pose[0]]) for pose in ADDITIONAL]
+    poses = [(name, *convert(clips[clip], name)) for clip, name in CLIPS]
+    poses += [(name, fingers, spread, THUMBS[name][0], thumb_spread, THUMBS[name][1])
+              for name, fingers, spread, thumb_spread in ADDITIONAL]
     for name, fingers, spread, thumb, thumb_spread, cmc in poses:
         lines += [f'    ("{name}", HandFingerPose {{',
                   "        fingers: [" + ", ".join(radians(f) for f in fingers) + "],",

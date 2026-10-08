@@ -60,12 +60,9 @@ pub fn observed_finger_deltas(
     Some(ResolvedFingerPose {
         thumb: ResolvedFingerJointPose {
             metacarpal: crate::thumb::cmc_delta(chain, observed.thumb_cmc, weight),
-            ..thumb_deltas(
-                &rest.thumb,
-                [thumb_curl, thumb_ip],
-                normal,
-                weight,
-                baseline,
+            ..crate::thumb::flexion_deltas(
+                chain,
+                [thumb_curl, thumb_ip].map(|angle| angle * weight + baseline),
             )
         },
         index: four(&rest.index, index_curl, index_spread),
@@ -73,37 +70,6 @@ pub fn observed_finger_deltas(
         ring: four(&rest.ring, ring_curl, ring_spread),
         little: four(&rest.little, little_curl, little_spread),
     })
-}
-
-/// MCP/IP retain the authored rest basis. CMC is supplied independently by
-/// the public two-axis model, never by redirecting MCP toward a landmark ray.
-fn thumb_deltas(
-    finger: &FingerJointRestReferences,
-    [mcp, ip]: [f32; 2],
-    normal: Vec3,
-    weight: f32,
-    baseline: f32,
-) -> ResolvedFingerJointPose {
-    ResolvedFingerJointPose {
-        metacarpal: None,
-        proximal: crate::arm_pose::resolve_finger_joint(
-            finger.proximal,
-            finger.distal,
-            finger.metacarpal,
-            mcp * weight + baseline,
-            normal,
-        ),
-        intermediate: None,
-        distal: observed_joint_bend(
-            finger.distal,
-            None,
-            finger.proximal,
-            ip,
-            normal,
-            weight,
-            baseline,
-        ),
-    }
 }
 
 fn three_joint_deltas(
@@ -785,13 +751,111 @@ mod tests {
     }
 
     #[test]
+    fn thumb_hinges_flex_toward_the_index_and_reflect_with_the_hand() {
+        let mut chain = articulated_chain();
+        chain.side = crate::arm::ArmSide::Right;
+        chain.rest.wrist.position = Vec3::ZERO;
+        chain
+            .finger_rest
+            .index
+            .proximal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position = Vec3::new(0.022178, -0.080917, 0.010979);
+        chain
+            .finger_rest
+            .little
+            .proximal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position = Vec3::new(-0.019501, -0.071168, -0.003387);
+        let shaft = Vec3::new(0.014, -0.0259, -0.0101);
+        chain
+            .finger_rest
+            .thumb
+            .proximal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position = Vec3::ZERO;
+        chain
+            .finger_rest
+            .thumb
+            .distal
+            .as_mut()
+            .unwrap()
+            .rest
+            .position = shaft;
+        let basis = Quat::from_euler(EulerRot::XYZ, 0.3, -0.4, 0.6);
+        for joint in [
+            &mut chain.finger_rest.thumb.proximal,
+            &mut chain.finger_rest.thumb.distal,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            joint.rest.global_rotation = basis;
+        }
+        let reflect = |v: Vec3| Vec3::new(-v.x, v.y, v.z);
+        let reflect_rotation = |q: Quat| Quat::from_xyzw(q.x, -q.y, -q.z, q.w);
+        let mut left = chain;
+        left.side = crate::arm::ArmSide::Left;
+        for joint in [
+            &mut left.finger_rest.index.proximal,
+            &mut left.finger_rest.little.proximal,
+            &mut left.finger_rest.thumb.proximal,
+            &mut left.finger_rest.thumb.distal,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            joint.rest.position = reflect(joint.rest.position);
+            joint.rest.global_rotation = reflect_rotation(joint.rest.global_rotation);
+        }
+        for angle in [0.0, 0.4, 2.0, -0.4] {
+            let right_pose = crate::thumb::flexion_deltas(&chain, [angle; 2]);
+            let left_pose = crate::thumb::flexion_deltas(&left, [-angle; 2]);
+            for (right, left, axis, limit) in [
+                (
+                    right_pose.proximal,
+                    left_pose.proximal,
+                    Vec3::new(-0.084295, -0.203488, 0.975442),
+                    std::f32::consts::FRAC_PI_4,
+                ),
+                (
+                    right_pose.distal,
+                    left_pose.distal,
+                    Vec3::new(-0.050102, -0.479623, 0.876043),
+                    1.309,
+                ),
+            ] {
+                let delta = right.unwrap().delta;
+                let rotation = basis * delta * basis.inverse();
+                let expected = Quat::from_axis_angle(axis.normalize(), -angle.clamp(0.0, limit));
+                assert!(rotation.angle_between(expected) < 1.0e-3);
+                assert!(left.unwrap().delta.angle_between(reflect_rotation(delta)) < 1.0e-3);
+                let bent = rotation * shaft;
+                assert!((bent.length() - shaft.length()).abs() < 1.0e-6);
+                if angle > 0.0 {
+                    assert!(
+                        bent.x < shaft.x,
+                        "flexion must move ulnarly toward the index, not outwards: {bent:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_thumb_is_not_folded_by_a_four_finger_axis() {
         // The thumb's rest chain runs diagonally and its joints do not share the
         // four fingers' geometry, so its flexion must still resolve to a real
         // rotation on its own bones rather than a missing or identity delta.
         let chain = articulated_chain();
         let mut observed = straight_fingers();
-        observed.thumb = [0.5, 0.7];
+        observed.thumb = [-0.5, -0.7];
         let pose = resolved_fingers(&chain, observed, 1.0);
         let proximal = pose.thumb.proximal.expect("thumb proximal");
         let distal = pose.thumb.distal.expect("thumb distal");
@@ -983,7 +1047,7 @@ mod tests {
             (0.3, 0.9),
         ] {
             let mut observed = straight_fingers();
-            observed.thumb = [curl, curl];
+            observed.thumb = [-curl, -curl];
             observed.thumb_spread += spread;
             let pose = resolved_fingers(&chain, observed, 1.0);
             assert!(
@@ -1062,8 +1126,11 @@ mod tests {
                         .expect("the thumb has a knuckle")
                         .delta
                         .angle_between(Quat::IDENTITY);
-                    if elevation == 0.0 {
-                        assert!(moved < 1.0e-5, "opening must not rotate the MCP: {moved}");
+                    if elevation >= 0.0 {
+                        assert!(
+                            moved < 1.0e-5,
+                            "opening/outward elevation must not hyperextend the left MCP: {moved}"
+                        );
                     } else {
                         assert!(
                             moved > 1.0e-3,
@@ -1316,7 +1383,6 @@ mod tests {
             observed.thumb = [curl; 2];
             let pose = observed_finger_deltas(&chain, observed, 1.0, 0.0).unwrap();
             for (row, deltas) in [
-                (chain.finger_rest.thumb, pose.thumb),
                 (chain.finger_rest.index, pose.index),
                 (chain.finger_rest.middle, pose.middle),
                 (chain.finger_rest.ring, pose.ring),
