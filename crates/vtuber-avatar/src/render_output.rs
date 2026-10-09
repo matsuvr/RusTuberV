@@ -7,7 +7,7 @@ use crate::lifecycle::AvatarGeneration;
 use bevy::camera::{CameraUpdateSystems, ClearColorConfig, RenderTarget, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::render::gpu_readback::{Readback, ReadbackComplete};
+use bevy::render::gpu_readback::ReadbackComplete;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::renderer::RenderDevice;
 use vtuber_core::{FrameSeq, VideoOutputFrame, VideoOutputProfile, monotonic_now};
@@ -41,6 +41,7 @@ impl AvatarOutputTarget {
 pub struct AvatarOutputState {
     active: bool,
     preview_visible: bool,
+    readback_epoch: u64,
     profile: VideoOutputProfile,
 }
 impl AvatarOutputState {
@@ -65,7 +66,10 @@ impl AvatarOutputState {
     }
     /// Activate or deactivate transport readback without hiding the local preview.
     pub fn set_active(&mut self, active: bool) {
-        self.active = active;
+        if self.active != active {
+            self.readback_epoch = self.readback_epoch.wrapping_add(1);
+            self.active = active;
+        }
     }
     /// Activate transparent output readback.
     pub fn activate(&mut self) {
@@ -75,12 +79,29 @@ impl AvatarOutputState {
     pub fn deactivate(&mut self) {
         self.set_active(false);
     }
+    pub(crate) const fn readback_epoch(&self) -> u64 {
+        self.readback_epoch
+    }
+
+    pub(crate) fn accepts_readback(
+        &self,
+        epoch: u64,
+        generation: u64,
+        power: vtuber_platform::PowerState,
+    ) -> bool {
+        self.active
+            && epoch == self.readback_epoch
+            && !power.sleeping
+            && generation == power.generation
+    }
+
     /// Create an inactive output state with a caller-selected profile.
     #[must_use]
     pub const fn with_profile(profile: VideoOutputProfile) -> Self {
         Self {
             active: false,
             preview_visible: false,
+            readback_epoch: 0,
             profile,
         }
     }
@@ -154,9 +175,6 @@ pub struct AvatarViewportSnapshot {
 #[derive(Component, Debug)]
 pub struct AvatarOutputCamera;
 
-#[derive(Component, Debug)]
-struct AvatarOutputReadbackInFlight;
-
 #[derive(SystemParam)]
 struct OutputCameraQuery<'w, 's> {
     #[expect(
@@ -172,7 +190,6 @@ struct OutputCameraQuery<'w, 's> {
             &'static mut Projection,
             &'static mut Transform,
             &'static mut GlobalTransform,
-            Option<&'static AvatarOutputReadbackInFlight>,
         ),
         (
             With<AvatarOutputCamera>,
@@ -236,7 +253,6 @@ pub fn setup_output_camera(
 fn sync_output_camera(
     lifecycle: Res<crate::lifecycle::AvatarLifecycle>,
     state: Res<AvatarOutputState>,
-    target: Res<AvatarOutputTarget>,
     mut snapshot: ResMut<AvatarViewportSnapshot>,
     main_cameras: Query<
         (&Transform, &Projection),
@@ -246,7 +262,6 @@ fn sync_output_camera(
         ),
     >,
     mut output_cameras: OutputCameraQuery,
-    mut commands: Commands,
 ) {
     snapshot.generation = lifecycle.current_generation();
     let Ok((main_transform, main_projection)) = main_cameras.single() else {
@@ -270,7 +285,7 @@ fn sync_output_camera(
     }) {
         snapshot.projection = Some(main_projection.clone());
     }
-    for (entity, mut camera, mut projection, mut transform, mut global_transform, in_flight) in
+    for (_entity, mut camera, mut projection, mut transform, mut global_transform) in
         &mut output_cameras.cameras
     {
         if *transform != *main_transform {
@@ -293,31 +308,15 @@ fn sync_output_camera(
             *projection = Projection::Perspective(main_projection.clone());
         }
         camera.is_active = state.is_rendering();
-        if state.is_active() && in_flight.is_none() {
-            commands.entity(entity).insert((
-                Readback::texture(target.image().clone()),
-                AvatarOutputReadbackInFlight,
-            ));
-        } else if !state.is_active() {
-            commands
-                .entity(entity)
-                .remove::<Readback>()
-                .remove::<AvatarOutputReadbackInFlight>();
-        }
     }
 }
 
 fn handle_output_readback(
     mut event: On<ReadbackComplete>,
-    mut commands: Commands,
     state: Res<AvatarOutputState>,
     target: Res<AvatarOutputTarget>,
     mut slot: ResMut<AvatarOutputFrameSlot>,
 ) {
-    commands
-        .entity(event.entity)
-        .remove::<Readback>()
-        .remove::<AvatarOutputReadbackInFlight>();
     if !state.is_active() {
         return;
     }
@@ -344,6 +343,7 @@ fn handle_output_readback(
 
 /// Register output resources and lifecycle systems.
 pub fn register_output_systems(app: &mut App) {
+    crate::output_readback::register(app);
     app.init_resource::<AvatarOutputState>()
         .init_resource::<AvatarOutputFrameSlot>()
         .init_resource::<AvatarViewportSnapshot>()
@@ -373,6 +373,35 @@ mod tests {
             image: Handle::default(),
             profile: VideoOutputProfile::default(),
         }
+    }
+
+    #[test]
+    fn late_gpu_readback_is_rejected_after_sleep_or_output_restart() {
+        let mut state = AvatarOutputState::default();
+        state.activate();
+        let epoch = state.readback_epoch();
+        let awake = vtuber_platform::PowerState::default();
+        assert!(state.accepts_readback(epoch, 0, awake));
+        assert!(!state.accepts_readback(
+            epoch,
+            0,
+            vtuber_platform::PowerState {
+                sleeping: true,
+                generation: 1
+            }
+        ));
+        assert!(!state.accepts_readback(
+            epoch,
+            0,
+            vtuber_platform::PowerState {
+                sleeping: false,
+                generation: 1
+            }
+        ));
+        state.deactivate();
+        state.activate();
+        assert!(!state.accepts_readback(epoch, 0, awake));
+        assert!(state.accepts_readback(state.readback_epoch(), 0, awake));
     }
 
     #[test]
@@ -725,23 +754,11 @@ mod tests {
         app.update();
         let output = camera_entity(&mut app, false);
         assert!(app.world().get::<Camera>(output).unwrap().is_active);
-        assert!(
-            app.world()
-                .get::<AvatarOutputReadbackInFlight>(output)
-                .is_some()
-        );
-        assert!(app.world().get::<Readback>(output).is_some());
         app.world_mut()
             .resource_mut::<AvatarOutputState>()
             .deactivate();
         app.update();
         assert!(!app.world().get::<Camera>(output).unwrap().is_active);
-        assert!(
-            app.world()
-                .get::<AvatarOutputReadbackInFlight>(output)
-                .is_none()
-        );
-        assert!(app.world().get::<Readback>(output).is_none());
         assert!(
             app.world()
                 .resource::<AvatarOutputFrameSlot>()
@@ -764,23 +781,15 @@ mod tests {
         app.update();
         assert!(app.world().get::<Camera>(output).unwrap().is_active);
         assert!(!app.world().resource::<AvatarOutputState>().is_active());
-        assert!(app.world().get::<Readback>(output).is_none());
-        assert!(
-            app.world()
-                .get::<AvatarOutputReadbackInFlight>(output)
-                .is_none()
-        );
         app.world_mut()
             .resource_mut::<AvatarOutputState>()
             .activate();
         app.update();
-        assert!(app.world().get::<Readback>(output).is_some());
         app.world_mut()
             .resource_mut::<AvatarOutputState>()
             .deactivate();
         app.update();
         assert!(app.world().get::<Camera>(output).unwrap().is_active);
-        assert!(app.world().get::<Readback>(output).is_none());
         app.world_mut()
             .resource_mut::<AvatarOutputState>()
             .set_preview_visible(false);

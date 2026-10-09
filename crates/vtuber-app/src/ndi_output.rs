@@ -51,6 +51,7 @@ impl NdiOutputIntent {
 pub struct NdiOutputRuntime {
     controller: NdiOutputController,
     attempted_generation: Option<u64>,
+    power: vtuber_platform::PowerState,
 }
 
 impl Default for NdiOutputRuntime {
@@ -68,6 +69,7 @@ impl NdiOutputRuntime {
         Self {
             controller,
             attempted_generation: None,
+            power: vtuber_platform::power_state(),
         }
     }
 }
@@ -101,8 +103,18 @@ impl NdiOutputRuntime {
     }
 
     fn stop(&mut self) {
-        let _ = self.controller.stop();
+        self.controller.request_stop();
         self.attempted_generation = None;
+    }
+
+    fn sync_power(&mut self, power: vtuber_platform::PowerState) -> bool {
+        let changed = power != self.power;
+        self.power = power;
+        let _ = self.controller.poll();
+        if changed || power.sleeping {
+            self.stop();
+        }
+        changed || power.sleeping || self.controller.is_stopping()
     }
 
     fn submit_frame(&self, frame: vtuber_core::VideoOutputFrame) {
@@ -163,6 +175,8 @@ pub fn ndi_output_bridge_system(
     ) else {
         return;
     };
+    // Preserve user intent while native teardown completes off the UI thread.
+    let suspended = runtime.sync_power(vtuber_platform::power_state());
     let ready = lifecycle.state() == vtuber_avatar::AvatarLifecycleState::Ready;
     let has_model = orchestrator.has_imported_model();
     let status = runtime.status();
@@ -186,6 +200,12 @@ pub fn ndi_output_bridge_system(
         ) {
             runtime.stop();
         }
+        let _ = frame_slot.take_latest();
+        return;
+    }
+
+    if suspended {
+        output_state.deactivate();
         let _ = frame_slot.take_latest();
         return;
     }
@@ -251,6 +271,69 @@ mod tests {
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
     use super::*;
+
+    fn finish_stop(runtime: &mut NdiOutputRuntime) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.controller.is_stopping() {
+            runtime.controller.poll().unwrap();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn missed_sleep_cycle_restarts_sender_without_losing_intent() {
+        let backend = vtuber_ndi::NdiScriptedBackend::successful();
+        let mut runtime = NdiOutputRuntime::from_controller(
+            NdiOutputController::with_scripted_backend(backend.clone()),
+        );
+        let mut intent = NdiOutputIntent::default();
+        intent.request_start();
+        runtime
+            .start_for_generation(intent.generation(), NdiOutputConfig::default())
+            .unwrap();
+        backend.wait_until_ready();
+        let awake = vtuber_platform::PowerState {
+            sleeping: false,
+            generation: runtime.power.generation + 1,
+        };
+        assert!(runtime.sync_power(awake));
+        assert!(intent.is_requested());
+        assert_eq!(runtime.attempted_generation, None);
+        finish_stop(&mut runtime);
+        assert_eq!(backend.live_senders(), 0);
+        assert!(!runtime.sync_power(awake));
+        runtime
+            .start_for_generation(intent.generation(), NdiOutputConfig::default())
+            .unwrap();
+        runtime.stop();
+        finish_stop(&mut runtime);
+    }
+
+    #[test]
+    fn explicit_stop_while_asleep_does_not_restart_on_wake() {
+        let backend = vtuber_ndi::NdiScriptedBackend::successful();
+        let mut app = ndi_app(backend.clone());
+        app.world_mut()
+            .resource_mut::<NdiOutputIntent>()
+            .request_start();
+        app.update();
+        backend.wait_until_ready();
+        let sleeping = vtuber_platform::PowerState {
+            sleeping: true,
+            generation: 1,
+        };
+        app.world_mut()
+            .resource_mut::<NdiOutputRuntime>()
+            .sync_power(sleeping);
+        app.world_mut()
+            .resource_mut::<NdiOutputIntent>()
+            .request_stop();
+        finish_stop(&mut app.world_mut().resource_mut::<NdiOutputRuntime>());
+        app.update();
+        assert!(!app.world().resource::<NdiOutputIntent>().is_requested());
+        assert_eq!(backend.live_senders(), 0);
+    }
 
     #[test]
     fn intent_start_is_idempotent_and_stop_clears_request() {
@@ -561,6 +644,7 @@ mod tests {
             NdiOutputStatus::Off
         );
         assert!(!app.world().resource::<AvatarOutputState>().is_active());
+        finish_stop(&mut app.world_mut().resource_mut::<NdiOutputRuntime>());
         assert_eq!(backend.live_senders(), 0);
     }
 
