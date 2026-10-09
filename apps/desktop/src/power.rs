@@ -82,10 +82,14 @@ mod tests {
     #[derive(Resource, Default)]
     struct Submitted(u32);
 
+    #[derive(Resource, Default)]
+    struct Extracted(u32);
+
     #[test]
     fn sleep_skips_entire_render_but_drains_extraction() {
         let mut world = World::new();
         world.init_resource::<Submitted>();
+        world.init_resource::<Extracted>();
         let mut render = Schedule::new(Render);
         render.add_systems(|mut submitted: ResMut<Submitted>| submitted.0 += 1);
         world.add_schedule(render);
@@ -93,12 +97,16 @@ mod tests {
         extract.set_apply_final_deferred(false);
         extract.add_systems(|mut commands: Commands| {
             commands.spawn(bevy::render::sync_world::TemporaryRenderEntity);
+            commands.queue(|world: &mut World| world.resource_mut::<Extracted>().0 += 1);
         });
         world.add_schedule(extract);
-        for _ in 0..3 {
+        for count in 1..=3 {
             world.run_schedule(ExtractSchedule);
             run_render(&mut world, true);
-            assert_eq!(world.entities().len(), 0);
+            assert_eq!(world.resource::<Extracted>().0, count);
+            let mut temporary = world
+                .query_filtered::<Entity, With<bevy::render::sync_world::TemporaryRenderEntity>>();
+            assert_eq!(temporary.iter(&world).count(), 0);
         }
         assert_eq!(world.resource::<Submitted>().0, 0);
         run_render(&mut world, false);
