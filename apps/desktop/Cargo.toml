@@ -31,5 +31,8 @@ ndi-output = ["vtuber-app/ndi-output"]
 
 [dev-dependencies]
 
+[target.'cfg(target_os = "macos")'.dependencies]
+vtuber-macos = { path = "../../crates/vtuber-macos" }
+
 [lints]
 workspace = true

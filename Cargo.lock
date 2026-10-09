@@ -6955,6 +6955,7 @@ dependencies = [
  "nokhwa-bindings-macos",
  "thiserror 2.0.19",
  "vtuber-core",
+ "vtuber-macos",
 ]
 
 [[package]]
@@ -6971,6 +6972,7 @@ dependencies = [
  "directories",
  "vtuber-app",
  "vtuber-avatar",
+ "vtuber-macos",
  "winres",
 ]
 
@@ -6988,6 +6990,16 @@ dependencies = [
  "tract-onnx",
  "tract-tflite",
  "vtuber-core",
+]
+
+[[package]]
+name = "vtuber-macos"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

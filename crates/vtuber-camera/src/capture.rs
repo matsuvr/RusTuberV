@@ -57,6 +57,8 @@ pub enum CaptureServiceState {
     Starting,
     /// Actively capturing frames.
     Running,
+    /// Capture is requested but the system is sleeping; resume reopens the device.
+    Suspended,
     /// Device was lost; waiting to reconnect.
     Reconnecting,
     /// A recoverable error occurred too many times.
@@ -437,12 +439,15 @@ where
     let mut reconnect_plan: Option<ReconnectPlan> = None;
     let mut next_frame_seq = 0u64;
     let mut metrics = CaptureMetrics::default();
+    let mut capture_requested = false;
+    let mut last_power = backend.power_state();
 
     while !stop.is_stopped() {
         // Drain control commands first so state changes take effect immediately.
         loop {
             match command_rx.try_recv() {
                 Ok(ControlCommand::Start(device, request)) => {
+                    capture_requested = true;
                     selected_device = Some(device);
                     requested_format = Some(request);
                     reconnect_plan = None;
@@ -450,6 +455,7 @@ where
                     // A failed stop must not be hidden by opening a second
                     // stream, so it is reported as this Start's failure.
                     if let Err(err) = stop_active_stream(&mut active_stream) {
+                        capture_requested = false;
                         metrics.last_error = Some(format!("{err:?}"));
                         update_state(&state, |s| {
                             s.state = CaptureServiceState::BackOff;
@@ -459,6 +465,11 @@ where
                         continue;
                     }
                     metrics.last_error = None;
+                    if backend.power_state().sleeping {
+                        clear_frame_slots(&slot, pose_slot.as_deref());
+                        update_state(&state, |s| s.state = CaptureServiceState::Suspended);
+                        continue;
+                    }
                     update_state(&state, |s| {
                         s.state = CaptureServiceState::Starting;
                         s.metrics.reconnect_attempts = 0;
@@ -469,6 +480,7 @@ where
                     let Some(device) = selected_device.as_ref() else {
                         continue;
                     };
+                    let start_power = backend.power_state();
                     match open_and_stream(
                         &backend,
                         device,
@@ -481,6 +493,7 @@ where
                         &mut next_frame_seq,
                     ) {
                         Ok(stream) => {
+                            last_power = start_power;
                             active_stream = Some(stream);
                             reconnect_plan = None;
                             update_state(&state, |s| {
@@ -499,6 +512,7 @@ where
                     }
                 }
                 Ok(ControlCommand::Stop) => {
+                    capture_requested = false;
                     reconnect_plan = None;
                     let stop_failed = record_stop_failure(
                         &mut metrics,
@@ -520,6 +534,7 @@ where
                     });
                 }
                 Ok(ControlCommand::Reset) => {
+                    capture_requested = false;
                     let stop_failed = record_stop_failure(
                         &mut metrics,
                         stop_active_stream(&mut active_stream).err(),
@@ -545,6 +560,48 @@ where
             }
         }
 
+        let power = backend.power_state();
+        if capture_requested
+            && (power.generation != last_power.generation
+                || (power.sleeping && (active_stream.is_some() || reconnect_plan.is_some()))
+                || (!power.sleeping && last_power.sleeping))
+        {
+            // Never keep a native session from before sleep. This also handles
+            // a complete sleep/wake cycle that happened during a frame read.
+            reconnect_plan = None;
+            clear_frame_slots(&slot, pose_slot.as_deref());
+            if record_stop_failure(&mut metrics, stop_active_stream(&mut active_stream).err()) {
+                capture_requested = false;
+                update_state(&state, |s| {
+                    s.state = CaptureServiceState::BackOff;
+                    s.metrics.last_error.clone_from(&metrics.last_error);
+                });
+            } else {
+                metrics.reconnect_attempts = 0;
+                metrics.last_error = None;
+                if !power.sleeping {
+                    reconnect_plan = Some(ReconnectPlan {
+                        attempts: 0,
+                        next_attempt_at: Instant::now() + reconnect_delay(1),
+                    });
+                }
+                update_state(&state, |s| {
+                    s.state = if power.sleeping {
+                        CaptureServiceState::Suspended
+                    } else {
+                        CaptureServiceState::Reconnecting
+                    };
+                    s.metrics.reconnect_attempts = 0;
+                    s.metrics.last_error = None;
+                });
+            }
+        }
+        last_power = power;
+        if power.sleeping {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
         // If a stream is active, capture one frame with a short timeout so we
         // remain responsive to stop/commands.
         if let Some(stream) = active_stream.as_mut() {
@@ -556,6 +613,11 @@ where
             // never turned into a reconnect episode.
             if stop.is_stopped() {
                 break;
+            }
+            let after_read = backend.power_state();
+            if after_read.sleeping || after_read.generation != last_power.generation {
+                // Let the next loop release the session before publishing.
+                continue;
             }
             match next {
                 Ok(frame) => {
@@ -716,6 +778,10 @@ fn open_and_stream<B>(
 where
     B: CameraBackend,
 {
+    let power = backend.power_state();
+    if power.sleeping {
+        return Err(CameraError::Disconnected);
+    }
     let mut stream = backend.open(device, &request)?;
     metrics.format = Some(stream.actual_format());
 
@@ -726,6 +792,11 @@ where
     // Capture one frame immediately to confirm the device is really alive.
     match stream.next_frame(stop) {
         Ok(frame) => {
+            let after_read = backend.power_state();
+            if after_read.sleeping || after_read.generation != power.generation {
+                let _ = stream.stop();
+                return Err(CameraError::Disconnected);
+            }
             let frame = stamp_frame_sequence(frame, next_frame_seq);
             metrics.frames_captured = metrics.frames_captured.saturating_add(1);
             if !publish_tracking_frame(frame, slot, pose_slot) {
@@ -1104,6 +1175,134 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    struct SleepBackend {
+        inner: ControllableBackend,
+        power: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl CameraBackend for SleepBackend {
+        fn power_state(&self) -> crate::device::CameraPowerState {
+            let value = self.power.load(std::sync::atomic::Ordering::Acquire);
+            crate::device::CameraPowerState {
+                sleeping: value & 1 != 0,
+                generation: value >> 1,
+            }
+        }
+
+        fn enumerate(&self) -> Result<Vec<CameraDescriptor>, CameraError> {
+            self.inner.enumerate()
+        }
+
+        fn open(
+            &self,
+            descriptor: &CameraDescriptor,
+            request: &CameraRequest,
+        ) -> Result<Box<dyn crate::device::CameraStream>, CameraError> {
+            assert!(!self.power_state().sleeping, "opened a sleeping camera");
+            self.inner.open(descriptor, request)
+        }
+    }
+
+    fn sleep_controller(
+        initial_power: u64,
+    ) -> (
+        CaptureController,
+        std::sync::mpsc::Receiver<()>,
+        Arc<StopProbe>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        let (opened, rx) = std::sync::mpsc::channel();
+        let probe = Arc::new(StopProbe::default());
+        let power = Arc::new(std::sync::atomic::AtomicU64::new(initial_power));
+        let mut controller = CaptureController::new();
+        controller
+            .start_worker(SleepBackend {
+                inner: ControllableBackend {
+                    outcome: StreamOutcome::Frames,
+                    stop_fails: false,
+                    probe: Arc::clone(&probe),
+                    opened,
+                },
+                power: Arc::clone(&power),
+            })
+            .unwrap();
+        controller
+            .select_and_start(test_device(), CameraRequest::default())
+            .unwrap();
+        (controller, rx, probe, power)
+    }
+
+    #[test]
+    fn sleep_releases_camera_and_wake_reopens_with_monotonic_sequence() {
+        use std::sync::atomic::Ordering;
+        let (controller, opened, probe, power) = sleep_controller(0);
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        let before = controller.frame_slot().try_read_after(0).unwrap();
+        let before_seq = match before {
+            vtuber_core::ReadResult::New { value, .. } => value.seq,
+            _ => panic!("expected a frame"),
+        };
+        power.store(3, Ordering::Release);
+        wait_for_state(&controller, CaptureServiceState::Suspended);
+        assert_eq!(probe.stop_calls.load(Ordering::Acquire), 1);
+        assert!(controller.frame_slot().try_read_after(0).is_none());
+        assert!(opened.recv_timeout(Duration::from_millis(250)).is_err());
+        assert_eq!(controller.metrics().reconnect_attempts, 0);
+        power.store(2, Ordering::Release);
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        let after = controller.frame_slot().try_read_after(0).unwrap();
+        match after {
+            vtuber_core::ReadResult::New { value, .. } => assert!(value.seq > before_seq),
+            _ => panic!("expected a frame"),
+        }
+        controller.shutdown().unwrap();
+        assert_eq!(probe.stop_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn stop_during_sleep_cancels_automatic_camera_resume() {
+        use std::sync::atomic::Ordering;
+        let (mut controller, opened, _, power) = sleep_controller(0);
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        power.store(3, Ordering::Release);
+        wait_for_state(&controller, CaptureServiceState::Suspended);
+        controller.stop().unwrap();
+        wait_for_state(&controller, CaptureServiceState::Selected);
+        power.store(2, Ordering::Release);
+        assert!(opened.recv_timeout(Duration::from_millis(350)).is_err());
+        assert_eq!(controller.state(), CaptureServiceState::Selected);
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn start_during_sleep_waits_for_wake_before_opening() {
+        use std::sync::atomic::Ordering;
+        let (controller, opened, _, power) = sleep_controller(3);
+        wait_for_state(&controller, CaptureServiceState::Suspended);
+        assert!(opened.recv_timeout(Duration::from_millis(250)).is_err());
+        power.store(2, Ordering::Release);
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn missed_sleep_wake_cycle_replaces_previous_camera_session() {
+        use std::sync::atomic::Ordering;
+        let (controller, opened, probe, power) = sleep_controller(0);
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        // Publish only the awake snapshot of a completed sleep cycle.
+        power.store(2, Ordering::Release);
+        opened.recv_timeout(Duration::from_secs(2)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Running);
+        assert_eq!(probe.stop_calls.load(Ordering::Acquire), 1);
+        controller.shutdown().unwrap();
     }
 
     #[test]

@@ -33,6 +33,8 @@ fn main() -> ExitCode {
 
 #[derive(Debug)]
 enum StartupError {
+    #[cfg(target_os = "macos")]
+    PowerNotifications,
     MissingModelPath,
     NonUnicodeAssetRoot(PathBuf),
     CreateManagedRoot(std::io::Error),
@@ -44,6 +46,10 @@ enum StartupError {
 impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::PowerNotifications => {
+                f.write_str("macOS power notifications require the main thread")
+            }
             Self::MissingModelPath => f.write_str("--model requires a path"),
             Self::NonUnicodeAssetRoot(path) => {
                 write!(f, "asset source root is not valid UTF-8: {path:?}")
@@ -66,11 +72,16 @@ impl std::error::Error for StartupError {
             Self::Settings(error) => Some(error),
             Self::Import(error) => Some(error),
             Self::MissingModelPath | Self::NonUnicodeAssetRoot(_) => None,
+            #[cfg(target_os = "macos")]
+            Self::PowerNotifications => None,
         }
     }
 }
 
 fn run() -> Result<(), StartupError> {
+    #[cfg(target_os = "macos")]
+    let _power_notifications =
+        vtuber_macos::PowerNotifications::new().ok_or(StartupError::PowerNotifications)?;
     let model_path = parse_model_arg(std::env::args_os().skip(1))?;
     let managed_root = managed_asset_root();
     std::fs::create_dir_all(&managed_root).map_err(StartupError::CreateManagedRoot)?;
@@ -106,12 +117,19 @@ fn run() -> Result<(), StartupError> {
         max_total_threads: 12,
         ..default()
     };
+    let plugins = DefaultPlugins.set(bevy::app::TaskPoolPlugin {
+        task_pool_options: pools,
+    });
+    // Metal surface creation/acquisition accesses NSView/NSWindow. Keep it on
+    // the macOS main thread alongside the sleep/wake notifications.
+    #[cfg(target_os = "macos")]
+    let plugins = plugins.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     let mut app = App::new();
     app.insert_resource(sources)
         // Avatar output must keep its cadence while OBS or another app has focus.
         // Window presentation still follows the existing VSync setting.
         .insert_resource(bevy::winit::WinitSettings::continuous())
-        .add_plugins(DefaultPlugins.set(bevy::app::TaskPoolPlugin { task_pool_options: pools }))
+        .add_plugins(plugins)
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
             SystemInformationDiagnosticsPlugin,
@@ -131,6 +149,24 @@ fn run() -> Result<(), StartupError> {
         .add_plugins(UiShellPlugin)
         .insert_resource(Orchestrator::new(managed_root));
 
+    #[cfg(target_os = "macos")]
+    app.add_systems(First, update_power_cadence);
+
+    #[cfg(target_os = "macos")]
+    if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        // Do not acquire Metal drawables or submit GPU work after willSleep.
+        // NSWorkspace notifications, unlike winit's macOS lifecycle events,
+        // describe actual machine sleep rather than application startup.
+        render.configure_sets(
+            bevy::render::Render,
+            (
+                bevy::render::RenderSystems::PrepareViews,
+                bevy::render::RenderSystems::Render,
+            )
+                .run_if(|| !vtuber_macos::power_state().sleeping),
+        );
+    }
+
     if let Some(imported) = startup_model {
         app.insert_resource(StartupModelPath(Some(imported.id.clone())));
         app.world_mut()
@@ -148,6 +184,21 @@ fn run() -> Result<(), StartupError> {
 
     app.run();
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn update_power_cadence(mut settings: ResMut<bevy::winit::WinitSettings>) {
+    // With GPU work suspended, VSync cannot pace the event loop. Avoid a busy
+    // loop during dark wake while still polling often enough to notice resume.
+    let mode = if vtuber_macos::power_state().sleeping {
+        bevy::winit::UpdateMode::reactive_low_power(std::time::Duration::from_millis(100))
+    } else {
+        bevy::winit::UpdateMode::Continuous
+    };
+    if settings.focused_mode != mode || settings.unfocused_mode != mode {
+        settings.focused_mode = mode;
+        settings.unfocused_mode = mode;
+    }
 }
 
 /// Locates packaged model resources without depending on the process cwd.
