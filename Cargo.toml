@@ -10,7 +10,7 @@ members = [
   "apps/desktop",
   "tools/xtask",
 ]
-exclude = ["vendor/mediapipe-rs"]
+exclude = ["vendor/mediapipe-rs", "vendor/nokhwa"]
 resolver = "2"
 
 [workspace.package]
@@ -34,6 +34,10 @@ rfd = { version = "=0.17.2", default-features = false }
 # `vendor/mediapipe-rs/vendor/REF`; THIRD_PARTY_NOTICES records the license.
 [patch."https://github.com/nikicat/mediapipe-rs"]
 mediapipe = { path = "vendor/mediapipe-rs" }
+
+# Bound AVFoundation reads so a sleeping camera cannot strand the worker.
+[patch.crates-io]
+nokhwa = { path = "vendor/nokhwa" }
 
 # Temporary upstream-bound fixes: MToon transparency (#94) and published
 # expression weights (#212). Remove when both APIs/fixes are available upstream.
