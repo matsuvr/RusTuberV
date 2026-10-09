@@ -20,7 +20,7 @@ use crate::ui_model::{CalibrationViewModel, TrackingState as UiTrackingState, Ui
 /// pipeline's normal `None` input. It prevents a last face observation from
 /// being replayed forever while keeping normal 15 Hz inference output from
 /// being mistaken for a loss.
-const INFERENCE_SILENCE_TIMEOUT: Duration = Duration::from_millis(250);
+pub(crate) const INFERENCE_SILENCE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq)]
 enum ObservationDispatch {
@@ -64,7 +64,7 @@ impl ObservationGate {
             return ObservationDispatch::NoFace;
         }
 
-        let age = Duration::from_nanos(now.0.saturating_sub(observation.inference_finished_at.0));
+        let age = Duration::from_nanos(now.0.saturating_sub(observation.captured_at.0));
         let fresh = age <= INFERENCE_SILENCE_TIMEOUT;
         let is_new = self.last_source_seq != Some(observation.source_seq);
         if is_new {
@@ -91,6 +91,7 @@ pub struct TrackingRuntime {
     auto_neutral: AutoNeutralCollector,
     recenter_requested: bool,
     last_update: Option<MonoTimeNs>,
+    power: vtuber_platform::PowerState,
     last_avatar_generation: vtuber_avatar::AvatarGeneration,
     last_recenter_error: Option<String>,
     observation_gate: ObservationGate,
@@ -124,6 +125,7 @@ impl Default for TrackingRuntime {
             auto_neutral: AutoNeutralCollector::new(),
             recenter_requested: false,
             last_update: None,
+            power: vtuber_platform::power_state(),
             last_avatar_generation: vtuber_avatar::AvatarGeneration::default(),
             last_recenter_error: None,
             observation_gate: ObservationGate::default(),
@@ -221,6 +223,11 @@ pub fn tracking_bridge_system(
     mut tracking_rate: Local<Option<RateCounter>>,
 ) {
     let now = vtuber_core::monotonic_now();
+    let power = vtuber_platform::power_state();
+    if power != tracking.power {
+        tracking.power = power;
+        tracking.invalidate_session(now);
+    }
     if lifecycle.current_generation() != tracking.last_avatar_generation {
         tracking.last_avatar_generation = lifecycle.current_generation();
         // The camera neutral is independent of the avatar model. Preserve it
@@ -236,7 +243,7 @@ pub fn tracking_bridge_system(
             crate::orchestrator::PipelineState::Idle | crate::orchestrator::PipelineState::Stopping
         );
     let pipeline_failed = pipeline_state == crate::orchestrator::PipelineState::Failed;
-    if capture_inactive || pipeline_failed {
+    if capture_inactive || pipeline_failed || power.sleeping {
         tracking.invalidate_session(now);
         tracking.recenter_requested = false;
         view_model.tracking = crate::ui_model::TrackingViewModel::default();
@@ -437,6 +444,17 @@ mod tests {
                 matrix_determinant: 1.0,
             },
         }
+    }
+
+    #[test]
+    fn late_completion_does_not_make_an_old_camera_frame_fresh() {
+        let mut gate = ObservationGate::default();
+        let mut face = sample(7, 5_000_000_000);
+        face.captured_at = MonoTimeNs(1_000_000_000);
+        assert_eq!(
+            gate.dispatch(Some(&face), MonoTimeNs(5_010_000_000)),
+            ObservationDispatch::NoFace
+        );
     }
 
     #[test]
