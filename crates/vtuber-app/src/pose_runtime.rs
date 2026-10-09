@@ -44,6 +44,7 @@ pub struct PoseRuntime {
     held_frame: Option<PoseArmFrame>,
     last_avatar_generation: AvatarGeneration,
     observations_after: MonoTimeNs,
+    power: vtuber_platform::PowerState,
     /// Debug-build raw observation log, opened lazily on the first frame.
     #[cfg(debug_assertions)]
     debug_log: Option<std::fs::File>,
@@ -75,6 +76,7 @@ impl PoseRuntime {
             held_frame: None,
             last_avatar_generation: AvatarGeneration::default(),
             observations_after: MonoTimeNs(0),
+            power: vtuber_platform::power_state(),
             #[cfg(debug_assertions)]
             debug_log: None,
         }
@@ -235,6 +237,14 @@ impl PoseRuntime {
         generation: AvatarGeneration,
         now: MonoTimeNs,
     ) -> Option<ArmControlFrame> {
+        let power = vtuber_platform::power_state();
+        if power != self.power {
+            self.power = power;
+            self.invalidate_session(now);
+        }
+        if power.sleeping {
+            return None;
+        }
         if generation != self.last_avatar_generation {
             self.last_avatar_generation = generation;
             self.invalidate_session(now);
@@ -250,6 +260,12 @@ impl PoseRuntime {
                 log_pose_frame(&frame, &mut self.debug_log);
                 self.held_frame = Some(frame);
             }
+        }
+        if self.held_frame.as_ref().is_some_and(|frame| {
+            std::time::Duration::from_nanos(now.0.saturating_sub(frame.captured_at.0))
+                > crate::tracking_runtime::INFERENCE_SILENCE_TIMEOUT
+        }) {
+            self.held_frame = None;
         }
         let profile = self.profile;
         let (next, control) =
@@ -404,8 +420,10 @@ fn should_start_pose(
 
 /// Starts or stops the Pose worker with the capture session.
 ///
-/// The Pose worker never runs while capture is not active, so a stopped camera
-/// cannot leave stale observations behind. A worker failure is reported once
+/// A temporarily suspended/reconnecting camera keeps its CPU worker waiting
+/// on the bounded input slot, avoiding a join/model reload on the UI thread.
+/// Sleep transitions separately invalidate observations and temporal state.
+/// A worker failure is reported once
 /// through the existing error presentation and then retained, leaving face
 /// tracking and capture untouched.
 pub fn pose_worker_bridge_system(
@@ -420,7 +438,10 @@ pub fn pose_worker_bridge_system(
     }
     let capture_active = matches!(
         capture.state(),
-        vtuber_camera::CaptureServiceState::Starting | vtuber_camera::CaptureServiceState::Running
+        vtuber_camera::CaptureServiceState::Starting
+            | vtuber_camera::CaptureServiceState::Running
+            | vtuber_camera::CaptureServiceState::Suspended
+            | vtuber_camera::CaptureServiceState::Reconnecting
     );
     // Read the retained failure under a short status lock, then spawn outside it.
     let start = should_start_pose(
@@ -550,6 +571,32 @@ mod tests {
                 .last_error()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn missed_sleep_cycle_clears_held_and_in_flight_pose_results() {
+        let mut pose = PoseRuntime::default();
+        let frame = PoseArmFrame {
+            source_seq: vtuber_core::FrameSeq(1),
+            captured_at: MonoTimeNs(100),
+            inference_finished_at: MonoTimeNs(110),
+            observation: None,
+        };
+        pose.held_frame = Some(frame);
+        pose.output_slot.publish(frame);
+        pose.power.generation = pose.power.generation.wrapping_sub(1);
+        assert!(
+            pose.read_latest(AvatarGeneration::default(), MonoTimeNs(200))
+                .is_none()
+        );
+        assert!(pose.held_frame.is_none());
+        // A CPU inference started before suspend can complete after resume.
+        pose.output_slot.publish(frame);
+        assert!(
+            pose.read_latest(AvatarGeneration::default(), MonoTimeNs(210))
+                .is_none()
+        );
+        assert!(pose.held_frame.is_none());
     }
 
     #[test]

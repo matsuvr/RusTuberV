@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Bevy and bevy_vrm1 adapter for RusTuberV."
 
 [dependencies]
+vtuber-platform = { path = "../vtuber-platform" }
 vtuber-core = { path = "../vtuber-core" }
 vtuber-tracking = { path = "../vtuber-tracking" }
 nalgebra = "=0.35.0"

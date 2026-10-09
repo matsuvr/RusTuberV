@@ -27,6 +27,7 @@ pub struct UpperLimbState {
     refine: bool,
     solved_body: Option<BodyPose>,
     pending: Option<PendingSolve>,
+    power: vtuber_platform::PowerState,
     queued: Option<PreparedStep>,
     geometry: Option<std::sync::Arc<crate::collision::CollisionGeometry>>,
     source_seq: Option<vtuber_core::FrameSeq>,
@@ -140,6 +141,16 @@ pub fn update_upper_limb_targets(
             generation: Some(binding.generation),
             ..Default::default()
         };
+    }
+    let power = vtuber_platform::power_state();
+    if state.power != power {
+        state.power = power;
+        state.pending = None;
+        state.queued = None;
+        state.solved_goals = None;
+    }
+    if power.sleeping {
+        return;
     }
     state.solve_elapsed += time.delta_secs();
     for change in profile_changes.read().filter(|c| &c.model_id == model_id) {

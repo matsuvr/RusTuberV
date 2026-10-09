@@ -304,8 +304,21 @@ pub struct LatestVideoFrame {
 pub(crate) fn read_latest_frame(
     mut capture: ResMut<CaptureRuntime>,
     mut latest: ResMut<LatestVideoFrame>,
+    mut power: Local<vtuber_platform::PowerState>,
+    mut after: Local<u64>,
 ) {
-    if let Some(frame) = capture.try_read_frame() {
+    let current = vtuber_platform::power_state();
+    if current != *power {
+        *power = current;
+        *after = monotonic_now().0;
+        latest.frame = None;
+    }
+    if current.sleeping {
+        return;
+    }
+    if let Some(frame) = capture.try_read_frame()
+        && frame.captured_at.0 >= *after
+    {
         latest.frame = Some(frame);
     }
 }

@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Optional NDI video sender boundary for RusTuberV."
 
 [dependencies]
+vtuber-platform = { path = "../vtuber-platform" }
 vtuber-core = { path = "../vtuber-core" }
 grafton-ndi = { version = "=1.0.0", default-features = false, optional = true }
 

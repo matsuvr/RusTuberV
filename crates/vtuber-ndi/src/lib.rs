@@ -5,8 +5,8 @@
 //! binding feature remain private to this crate. The default build is a
 //! deterministic feature-disabled stub so the rest of the workspace does not
 //! require an installed NDI SDK. Submission acknowledges the bounded mailbox,
-//! not network delivery. Explicit stop and controller Drop join the worker and
-//! can block; explicit stop reports a worker panic instead of hiding it.
+//! not network delivery. The UI requests stop without joining; only explicit blocking stop joins.
+//! Drop requests stop and lets the worker release its own native handles.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -571,7 +571,41 @@ impl NdiOutputController {
     /// Returns the current worker status.
     #[must_use]
     pub fn status(&self) -> NdiOutputStatus {
-        self.shared.status()
+        if self.is_stopping() {
+            NdiOutputStatus::Off
+        } else {
+            self.shared.status()
+        }
+    }
+
+    /// Whether the previous sender is still releasing its native resources.
+    #[must_use]
+    pub fn is_stopping(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(vtuber_core::WorkerHandle::is_stopped)
+    }
+
+    /// Requests shutdown without waiting for an SDK call or joining the worker.
+    /// A subsequent start must wait until [`Self::poll`] reaps this worker.
+    pub fn request_stop(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.stop();
+        }
+        if let Some(mailbox) = recover_lock(self.shared.mailbox.lock()).take()
+            && mailbox.close()
+        {
+            self.shared
+                .metrics
+                .dropped_frames
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.shared.set_status(NdiOutputStatus::Off);
+    }
+
+    /// Reaps an already finished worker without blocking the caller.
+    pub fn poll(&mut self) -> Result<(), NdiOutputError> {
+        self.reap_finished_worker()
     }
 
     /// Returns a bounded snapshot of sender metrics.
@@ -668,21 +702,13 @@ impl NdiOutputController {
     /// Stops and joins the sender worker. The operation is idempotent.
     ///
     /// Blocks until the worker exits, closes the mailbox and discards its pending
-    /// frame. Drop also stops and joins, but cannot return this method's error.
+    /// frame. UI callers should use `request_stop` and `poll` instead.
     ///
     /// # Errors
     /// Returns `WorkerStopFailed` for a worker panic; mailbox/worker resources are
     /// released even on that error.
     pub fn stop(&mut self) -> Result<(), NdiOutputError> {
-        let mailbox = recover_lock(self.shared.mailbox.lock()).take();
-        if let Some(mailbox) = mailbox
-            && mailbox.close()
-        {
-            self.shared
-                .metrics
-                .dropped_frames
-                .fetch_add(1, Ordering::Relaxed);
-        }
+        self.request_stop();
         let Some(worker) = self.worker.take() else {
             self.shared.set_status(NdiOutputStatus::Off);
             return Ok(());
@@ -780,11 +806,16 @@ impl NdiOutputController {
         if let Some(mailbox) = recover_lock(self.shared.mailbox.lock()).take() {
             mailbox.close();
         }
+        let stopping = worker.is_stopped();
         match worker.join() {
-            vtuber_core::WorkerResult::Completed(WorkerExit::Stopped)
-            | vtuber_core::WorkerResult::Completed(WorkerExit::StartupFailed) => {
-                // StartupFailed already records its typed cause. Reaping must
-                // not replace it with a clean Off status.
+            vtuber_core::WorkerResult::Completed(WorkerExit::Stopped) => {
+                self.shared.set_status(NdiOutputStatus::Off);
+                Ok(())
+            }
+            vtuber_core::WorkerResult::Completed(WorkerExit::StartupFailed) => {
+                if stopping {
+                    self.shared.set_status(NdiOutputStatus::Off);
+                }
                 Ok(())
             }
             vtuber_core::WorkerResult::Panicked => {
@@ -801,7 +832,10 @@ impl NdiOutputController {
 
 impl Drop for NdiOutputController {
     fn drop(&mut self) {
-        let _ = self.stop();
+        self.request_stop();
+        // Native teardown belongs to the worker. A stuck SDK must not hold the
+        // application event loop (including exit) hostage. No replacement is
+        // spawned while this controller retains a stopping worker.
     }
 }
 
@@ -1137,6 +1171,7 @@ fn run_ndi_worker(
 ) -> WorkerExit {
     use grafton_ndi::{NDI, Sender, SenderOptions, VideoFrame};
 
+    let power = vtuber_platform::power_state();
     let ndi = match NDI::new() {
         Ok(ndi) => ndi,
         Err(error) => {
@@ -1182,6 +1217,13 @@ fn run_ndi_worker(
         let Some(frame) = mailbox.take(|| stop.is_stopped()) else {
             return WorkerExit::Stopped;
         };
+        let current_power = vtuber_platform::power_state();
+        if stop.is_stopped()
+            || current_power.sleeping
+            || current_power.generation != power.generation
+        {
+            return WorkerExit::Stopped;
+        }
         let mapping = match map_video_frame(&frame, config.profile) {
             Ok(mapping) => mapping,
             Err(_) => {
@@ -1274,6 +1316,40 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use vtuber_core::MonoTimeNs;
+
+    #[test]
+    fn request_stop_and_drop_do_not_wait_for_a_stuck_sdk() {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut controller = NdiOutputController::new();
+        let shared = Arc::clone(&controller.shared);
+        controller.worker = Some(
+            vtuber_core::WorkerHandle::spawn("blocked-sdk", move |_stop| {
+                blocked.recv().unwrap();
+                // SDK startup can return after stop was requested.
+                shared.set_status(NdiOutputStatus::Live {
+                    connections: 0,
+                    source_name: "late".into(),
+                });
+                WorkerExit::Stopped
+            })
+            .unwrap(),
+        );
+        let started = Instant::now();
+        controller.request_stop();
+        controller.poll().unwrap();
+        assert!(controller.is_stopping());
+        assert_eq!(controller.status(), NdiOutputStatus::Off);
+        assert_eq!(
+            controller
+                .start(NdiOutputConfig::default())
+                .unwrap_err()
+                .code,
+            NdiErrorCode::AlreadyRunning
+        );
+        drop(controller);
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        release.send(()).unwrap();
+    }
 
     #[cfg(feature = "ndi-sdk")]
     #[test]
