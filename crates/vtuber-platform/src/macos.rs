@@ -1,5 +1,4 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use block2::RcBlock;
 use objc2::MainThreadMarker;
@@ -10,19 +9,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter};
 
-use crate::PowerState;
-
-static POWER: AtomicU64 = AtomicU64::new(0);
-
-/// Returns sleep state without calling AppKit or acquiring a lock.
-#[must_use]
-pub fn power_state() -> PowerState {
-    let value = POWER.load(Ordering::Acquire);
-    PowerState {
-        sleeping: value & 1 != 0,
-        generation: value >> 1,
-    }
-}
+use crate::POWER;
+#[cfg(test)]
+use crate::power_state;
 
 /// Owns workspace observers for the duration of the desktop event loop.
 /// Construct and drop this guard on the macOS main thread.
@@ -38,12 +27,13 @@ struct Observers {
 }
 
 impl PowerNotifications {
-    /// Registers sleep and wake notifications, or returns `None` off the main thread.
-    #[must_use]
-    pub fn new() -> Option<Self> {
-        let main_thread = MainThreadMarker::new()?;
+    /// Registers sleep and wake notifications on the main thread.
+    pub fn new() -> std::io::Result<Self> {
+        let main_thread = MainThreadMarker::new().ok_or_else(|| {
+            std::io::Error::other("macOS power notifications require the main thread")
+        })?;
         let center = NSWorkspace::sharedWorkspace().notificationCenter();
-        Some(Self {
+        Ok(Self {
             _observers: Observers::new(center),
             _main_thread: main_thread,
         })
@@ -53,14 +43,10 @@ impl PowerNotifications {
 impl Observers {
     fn new(center: Retained<NSNotificationCenter>) -> Self {
         let sleep_block = RcBlock::new(|_: NonNull<NSNotification>| {
-            // Increment on sleep so a worker that only runs after wake still
-            // knows to release its previous camera session.
-            let _ = POWER.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some((value & !1).wrapping_add(2) | 1)
-            });
+            POWER.suspend();
         });
         let wake_block = RcBlock::new(|_: NonNull<NSNotification>| {
-            POWER.fetch_and(!1, Ordering::Release);
+            POWER.resume();
         });
         // SAFETY: the named notifications come from NSWorkspace. No object or
         // queue filter is supplied; both copied blocks are sendable and only

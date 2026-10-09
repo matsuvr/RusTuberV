@@ -1,18 +1,21 @@
 [package]
-name = "vtuber-macos"
+name = "vtuber-platform"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Native macOS sleep notification boundary for RusTuberV."
+description = "Native system sleep notification boundary for RusTuberV."
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "=0.6.4"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSNotification", "NSOperation", "NSString", "block2"] }
 block2 = "=0.6.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
 [lints.rust]
 missing_docs = "warn"

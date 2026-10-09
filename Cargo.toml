@@ -2,7 +2,7 @@
 members = [
   "crates/vtuber-core",
   "crates/vtuber-camera",
-  "crates/vtuber-macos",
+  "crates/vtuber-platform",
   "crates/vtuber-inference",
   "crates/vtuber-tracking",
   "crates/vtuber-avatar",

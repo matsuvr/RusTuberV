@@ -37,6 +37,14 @@ impl Default for MsmfBackend {
 }
 
 impl CameraBackend for MsmfBackend {
+    fn power_state(&self) -> crate::device::CameraPowerState {
+        let state = vtuber_platform::power_state();
+        crate::device::CameraPowerState {
+            sleeping: state.sleeping,
+            generation: state.generation,
+        }
+    }
+
     fn enumerate(&self) -> Result<Vec<CameraDescriptor>, CameraError> {
         let devices = nokhwa::query(ApiBackend::MediaFoundation)
             .map_err(|e| map_nokhwa_error(CameraOperation::Enumerate, e))?;

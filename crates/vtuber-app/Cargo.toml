@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Orchestration, UI, settings, model import, and diagnostics for RusTuberV."
 
 [dependencies]
+vtuber-platform = { path = "../vtuber-platform" }
 vtuber-core = { path = "../vtuber-core" }
 vtuber-camera = { path = "../vtuber-camera" }
 vtuber-inference = { path = "../vtuber-inference", default-features = false }

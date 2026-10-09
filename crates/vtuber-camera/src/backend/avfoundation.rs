@@ -74,7 +74,7 @@ pub struct AvFoundationBackend;
 
 impl CameraBackend for AvFoundationBackend {
     fn power_state(&self) -> crate::device::CameraPowerState {
-        let power = vtuber_macos::power_state();
+        let power = vtuber_platform::power_state();
         crate::device::CameraPowerState {
             sleeping: power.sleeping,
             generation: power.generation,
