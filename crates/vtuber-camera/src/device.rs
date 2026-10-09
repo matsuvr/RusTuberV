@@ -135,6 +135,10 @@ impl fmt::Display for CameraFormat {
 
 /// Trait for camera backends.
 pub trait CameraBackend {
+    /// System sleep state and cycle counter. Non-suspending backends stay awake.
+    fn power_state(&self) -> CameraPowerState {
+        CameraPowerState::default()
+    }
     /// Enumerates available camera devices.
     fn enumerate(&self) -> Result<Vec<CameraDescriptor>, CameraError>;
     /// Opens the selected camera device and returns a stream.
@@ -146,6 +150,15 @@ pub trait CameraBackend {
         descriptor: &CameraDescriptor,
         request: &CameraRequest,
     ) -> Result<Box<dyn CameraStream>, CameraError>;
+}
+
+/// Sleep state observed by a camera worker independently of the UI event loop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CameraPowerState {
+    /// Suppress device opens while the system sleeps.
+    pub sleeping: bool,
+    /// Changes even when an entire sleep/wake cycle occurs between reads.
+    pub generation: u64,
 }
 
 /// Trait for an opened camera stream.

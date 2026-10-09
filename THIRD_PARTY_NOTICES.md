@@ -89,6 +89,13 @@ The Rust sender boundary uses
 under Apache-2.0. Its source and license are obtained through Cargo; the NDI
 SDK runtime remains a separately governed distribution component.
 
+## nokhwa (bounded macOS frame reads)
+
+`vendor/nokhwa` contains nokhwa 0.10.11 from crates.io, licensed under
+Apache-2.0. Its `LICENSE` is retained. The AVFoundation frame reads have a
+two-second receive timeout so an interrupted camera can be stopped and
+reopened after system sleep; see `vendor/nokhwa/PATCHES.md`.
+
 ## mediapipe-rs (vendored)
 
 `vendor/mediapipe-rs` is a copy of

@@ -73,6 +73,13 @@ impl CameraPermission {
 pub struct AvFoundationBackend;
 
 impl CameraBackend for AvFoundationBackend {
+    fn power_state(&self) -> crate::device::CameraPowerState {
+        let power = vtuber_macos::power_state();
+        crate::device::CameraPowerState {
+            sleeping: power.sleeping,
+            generation: power.generation,
+        }
+    }
     fn enumerate(&self) -> Result<Vec<CameraDescriptor>, CameraError> {
         nokhwa::query(ApiBackend::AVFoundation)
             .map_err(|error| CameraError::EnumFailed(error.to_string()))?
@@ -183,7 +190,7 @@ impl CameraStream for AvFoundationStream {
         let rgb = buffer
             .decode_image::<RgbFormat>()
             .map_err(|error| CameraError::FrameDecodeFailed(error.to_string()))?;
-        self.seq += 1;
+        self.seq = self.seq.saturating_add(1);
         Ok(VideoFrame {
             seq: FrameSeq(self.seq),
             captured_at,
