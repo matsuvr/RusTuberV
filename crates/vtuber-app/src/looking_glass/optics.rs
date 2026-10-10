@@ -17,34 +17,60 @@ pub(super) struct Layout {
 }
 
 impl Layout {
-    pub fn new(columns: u32, rows: u32, view_width: u32, view_height: u32) -> Result<Self, LookingGlassError> {
-        let products = [columns.checked_mul(rows), columns.checked_mul(view_width), rows.checked_mul(view_height)];
+    pub fn new(
+        columns: u32,
+        rows: u32,
+        view_width: u32,
+        view_height: u32,
+    ) -> Result<Self, LookingGlassError> {
+        let products = [
+            columns.checked_mul(rows),
+            columns.checked_mul(view_width),
+            rows.checked_mul(view_height),
+        ];
         if [columns, rows, view_width, view_height].contains(&0)
             || products.into_iter().any(|value| value.is_none())
             || columns.saturating_mul(rows) < 2
         {
-            return Err(LookingGlassError::Invalid("quilt needs at least two views, positive dimensions, and u32-sized products"));
+            return Err(LookingGlassError::Invalid(
+                "quilt needs at least two views, positive dimensions, and u32-sized products",
+            ));
         }
-        Ok(Self { columns, rows, view_width, view_height })
+        Ok(Self {
+            columns,
+            rows,
+            view_width,
+            view_height,
+        })
     }
 
-    pub fn count(self) -> u32 { self.columns * self.rows }
-    pub fn width(self) -> u32 { self.columns * self.view_width }
-    pub fn height(self) -> u32 { self.rows * self.view_height }
+    pub fn count(self) -> u32 {
+        self.columns * self.rows
+    }
+    pub fn width(self) -> u32 {
+        self.columns * self.view_width
+    }
+    pub fn height(self) -> u32 {
+        self.rows * self.view_height
+    }
 
     // Looking Glass view zero occupies the bottom-left tile. Bevy's 2D world
     // has +Y up; the interlacer converts the texture's top-left UV convention.
     pub fn tile_center(self, index: u32) -> Vec3 {
         Vec3::new(
-            (index % self.columns) as f32 * self.view_width as f32 + self.view_width as f32 * 0.5 - self.width() as f32 * 0.5,
-            (index / self.columns) as f32 * self.view_height as f32 + self.view_height as f32 * 0.5 - self.height() as f32 * 0.5,
+            (index % self.columns) as f32 * self.view_width as f32 + self.view_width as f32 * 0.5
+                - self.width() as f32 * 0.5,
+            (index / self.columns) as f32 * self.view_height as f32 + self.view_height as f32 * 0.5
+                - self.height() as f32 * 0.5,
             0.0,
         )
     }
 }
 
 #[derive(Deserialize)]
-pub(super) struct Value { pub value: f32 }
+pub(super) struct Value {
+    pub value: f32,
+}
 
 #[derive(Deserialize)]
 pub(super) struct RawCalibration {
@@ -105,36 +131,67 @@ impl Calibration {
     pub fn new(raw: RawCalibration) -> Result<Self, LookingGlassError> {
         let w = raw.width.value;
         let h = raw.height.value;
-        let scalars = [w, h, raw.pitch.value, raw.slope.value, raw.center.value, raw.dpi.value, raw.view_cone.value];
+        let scalars = [
+            w,
+            h,
+            raw.pitch.value,
+            raw.slope.value,
+            raw.center.value,
+            raw.dpi.value,
+            raw.view_cone.value,
+        ];
         if scalars.into_iter().any(|v| !v.is_finite())
-            || w < 1.0 || h < 1.0 || w >= u32::MAX as f32 || h >= u32::MAX as f32
-            || w.fract() != 0.0 || h.fract() != 0.0
-            || raw.dpi.value <= 0.0 || raw.slope.value == 0.0 || raw.pitch.value <= 0.0
-            || raw.view_cone.value <= 0.0 || raw.view_cone.value >= 180.0
+            || w < 1.0
+            || h < 1.0
+            || w >= u32::MAX as f32
+            || h >= u32::MAX as f32
+            || w.fract() != 0.0
+            || h.fract() != 0.0
+            || raw.dpi.value <= 0.0
+            || raw.slope.value == 0.0
+            || raw.pitch.value <= 0.0
+            || raw.view_cone.value <= 0.0
+            || raw.view_cone.value >= 180.0
         {
-            return Err(LookingGlassError::Invalid("visual.json contains invalid screen or lens geometry"));
+            return Err(LookingGlassError::Invalid(
+                "visual.json contains invalid screen or lens geometry",
+            ));
         }
-        let flag_values = [raw.inv_view.value, raw.flip_x.value, raw.flip_y.value, raw.flip_subp.value];
+        let flag_values = [
+            raw.inv_view.value,
+            raw.flip_x.value,
+            raw.flip_y.value,
+            raw.flip_subp.value,
+        ];
         if flag_values.into_iter().any(|v| v != 0.0 && v != 1.0) {
-            return Err(LookingGlassError::Invalid("visual.json orientation flags must be 0 or 1"));
+            return Err(LookingGlassError::Invalid(
+                "visual.json orientation flags must be 0 or 1",
+            ));
         }
         let mode = raw.cell_mode.map_or(0.0, |v| v.value);
         if !mode.is_finite() || mode.fract() != 0.0 || !(0.0..=4.0).contains(&mode) {
-            return Err(LookingGlassError::Invalid("this interlacer implements CellPatternMode 0 through 4"));
+            return Err(LookingGlassError::Invalid(
+                "this interlacer implements CellPatternMode 0 through 4",
+            ));
         }
-        let count = u32::try_from(raw.cells.len()).map_err(|_| LookingGlassError::Invalid("cell table exceeds u32 indexing"))?;
+        let count = u32::try_from(raw.cells.len())
+            .map_err(|_| LookingGlassError::Invalid("cell table exceeds u32 indexing"))?;
         let mut cells = Vec::new();
         for cell in raw.cells {
             let rg = Vec4::new(cell.rx / w, cell.ry / h, cell.gx / w, cell.gy / h);
             let b = Vec4::new(cell.bx / w, cell.by / h, 0.0, 0.0);
             if !rg.is_finite() || !b.is_finite() {
-                return Err(LookingGlassError::Invalid("subpixel offsets must be finite"));
+                return Err(LookingGlassError::Invalid(
+                    "subpixel offsets must be finite",
+                ));
             }
             cells.extend([rg, b]);
         }
         // A GPU storage binding cannot be empty. With count=0 the shader never
         // reads this padding; it evaluates the RGB-stripe equation instead.
-        if cells.is_empty() { cells.push(Vec4::ZERO); }
+        if cells.is_empty() {
+            cells.push(Vec4::ZERO);
+        }
         let sign = if raw.flip_x.value == 1.0 { -1.0 } else { 1.0 };
         let optics = Vec4::new(
             raw.pitch.value * w / raw.dpi.value * (1.0 / raw.slope.value).atan().cos(),
@@ -143,13 +200,23 @@ impl Calibration {
             sign / (3.0 * w),
         );
         if !optics.is_finite() {
-            return Err(LookingGlassError::Invalid("lens normalization is not finite"));
+            return Err(LookingGlassError::Invalid(
+                "lens normalization is not finite",
+            ));
         }
         Ok(Self {
-            width: w as u32, height: h as u32,
-            view_cone: raw.view_cone.value.to_radians(), optics,
-            flags: UVec4::new(count, mode as u32, raw.inv_view.value as u32,
-                raw.flip_x.value as u32 | ((raw.flip_y.value as u32) << 1) | ((raw.flip_subp.value as u32) << 2)),
+            width: w as u32,
+            height: h as u32,
+            view_cone: raw.view_cone.value.to_radians(),
+            optics,
+            flags: UVec4::new(
+                count,
+                mode as u32,
+                raw.inv_view.value as u32,
+                raw.flip_x.value as u32
+                    | ((raw.flip_y.value as u32) << 1)
+                    | ((raw.flip_subp.value as u32) << 2),
+            ),
             cells,
         })
     }
@@ -158,7 +225,12 @@ impl Calibration {
         InterlaceUniforms {
             optics: self.optics,
             screen: Vec4::new(self.width as f32, self.height as f32, 0.0, 0.0),
-            grid: UVec4::new(layout.columns, layout.rows, layout.view_width, layout.view_height),
+            grid: UVec4::new(
+                layout.columns,
+                layout.rows,
+                layout.view_width,
+                layout.view_height,
+            ),
             flags: self.flags,
         }
     }
@@ -199,12 +271,16 @@ impl CameraProjection for OffAxisProjection {
     fn update(&mut self, _width: f32, _height: f32) {
         // Optical aspect is the panel's, not the intentionally stretched tile's.
     }
-    fn far(&self) -> f32 { self.perspective.far }
+    fn far(&self) -> f32 {
+        self.perspective.far
+    }
     fn get_frustum_corners(&self, z_near: f32, z_far: f32) -> [Vec3A; 8] {
-        self.perspective.get_frustum_corners(z_near, z_far).map(|mut p| {
-            p.x += self.offset_over_focus * p.z;
-            p
-        })
+        self.perspective
+            .get_frustum_corners(z_near, z_far)
+            .map(|mut p| {
+                p.x += self.offset_over_focus * p.z;
+                p
+            })
     }
 }
 
@@ -217,9 +293,15 @@ pub(super) fn view_pose(
     view_cone: f32,
     depth_scale: f32,
 ) -> (Transform, OffAxisProjection) {
-    let ratio = (2.0 * index as f32 / (count - 1) as f32 - 1.0)
-        * (view_cone * 0.5).tan() * depth_scale;
+    let ratio =
+        (2.0 * index as f32 / (count - 1) as f32 - 1.0) * (view_cone * 0.5).tan() * depth_scale;
     let mut transform = center;
     transform.translation += center.rotation * Vec3::X * (ratio * focus_distance);
-    (transform, OffAxisProjection { perspective, offset_over_focus: ratio })
+    (
+        transform,
+        OffAxisProjection {
+            perspective,
+            offset_over_focus: ratio,
+        },
+    )
 }

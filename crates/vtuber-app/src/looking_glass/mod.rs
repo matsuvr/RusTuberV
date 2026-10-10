@@ -83,7 +83,10 @@ fn config_argument(
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--looking-glass" {
-            return args.next().map(PathBuf::from).map(Some)
+            return args
+                .next()
+                .map(PathBuf::from)
+                .map(Some)
                 .ok_or(LookingGlassError::MissingPath);
         }
     }
@@ -92,19 +95,31 @@ fn config_argument(
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, LookingGlassError> {
     let bytes = std::fs::read(path).map_err(|source| LookingGlassError::Read {
-        path: path.to_owned(), source,
+        path: path.to_owned(),
+        source,
     })?;
     serde_json::from_slice(&bytes).map_err(|source| LookingGlassError::Json {
-        path: path.to_owned(), source,
+        path: path.to_owned(),
+        source,
     })
 }
 
-fn output_config(settings: SettingsFile, raw: optics::RawCalibration) -> Result<OutputConfig, LookingGlassError> {
+fn output_config(
+    settings: SettingsFile,
+    raw: optics::RawCalibration,
+) -> Result<OutputConfig, LookingGlassError> {
     if !settings.depth_scale.is_finite() || settings.depth_scale < 0.0 {
-        return Err(LookingGlassError::Invalid("depth_scale must be finite and nonnegative"));
+        return Err(LookingGlassError::Invalid(
+            "depth_scale must be finite and nonnegative",
+        ));
     }
     Ok(OutputConfig {
-        layout: optics::Layout::new(settings.columns, settings.rows, settings.view_width, settings.view_height)?,
+        layout: optics::Layout::new(
+            settings.columns,
+            settings.rows,
+            settings.view_width,
+            settings.view_height,
+        )?,
         calibration: optics::Calibration::new(raw)?,
         depth_scale: settings.depth_scale,
     })

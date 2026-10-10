@@ -64,7 +64,9 @@ impl fmt::Display for StartupError {
             Self::Tracking(error) => write!(f, "could not load tracking profile: {error}"),
             Self::Settings(error) => write!(f, "could not load settings: {error}"),
             Self::Import(error) => write!(f, "could not import CLI model: {error}"),
-            Self::LookingGlass(error) => write!(f, "could not configure Looking Glass output: {error}"),
+            Self::LookingGlass(error) => {
+                write!(f, "could not configure Looking Glass output: {error}")
+            }
         }
     }
 }

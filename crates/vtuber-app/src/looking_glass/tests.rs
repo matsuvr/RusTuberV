@@ -1,7 +1,12 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
-use super::*;
 use super::optics::{Calibration, Layout, RawCalibration, view_pose};
+use super::*;
 use bevy::camera::CameraProjection;
 
 // Synthetic lens values for equation tests, not a usable device calibration.
@@ -23,21 +28,32 @@ fn calibration(value: serde_json::Value) -> Result<Calibration, LookingGlassErro
 #[test]
 fn absent_option_leaves_the_app_untouched() {
     let mut app = App::new();
+    let entities_before = app.world().entities().len();
     configure(&mut app, ["--model", "モデル.vrm"].map(OsString::from)).unwrap();
     assert!(!app.world().contains_resource::<OutputConfig>());
-    assert_eq!(app.world().entities().len(), 0);
+    assert_eq!(app.world().entities().len(), entities_before);
 }
 
 #[test]
 fn explicit_option_requires_a_path_and_preserves_unicode() {
-    assert!(matches!(config_argument([OsString::from("--looking-glass")]), Err(LookingGlassError::MissingPath)));
-    assert_eq!(config_argument(["--model", "a.vrm", "--looking-glass", "設定.json"].map(OsString::from)).unwrap(), Some(PathBuf::from("設定.json")));
+    assert!(matches!(
+        config_argument([OsString::from("--looking-glass")]),
+        Err(LookingGlassError::MissingPath)
+    ));
+    assert_eq!(
+        config_argument(["--model", "a.vrm", "--looking-glass", "設定.json"].map(OsString::from))
+            .unwrap(),
+        Some(PathBuf::from("設定.json"))
+    );
 }
 
 #[test]
 fn quilt_layout_starts_bottom_left_and_finishes_top_right() {
     let layout = Layout::new(3, 2, 10, 20).unwrap();
-    assert_eq!((layout.width(), layout.height(), layout.count()), (30, 40, 6));
+    assert_eq!(
+        (layout.width(), layout.height(), layout.count()),
+        (30, 40, 6)
+    );
     assert_eq!(layout.tile_center(0), Vec3::new(-10.0, -10.0, 0.0));
     assert_eq!(layout.tile_center(2), Vec3::new(10.0, -10.0, 0.0));
     assert_eq!(layout.tile_center(3), Vec3::new(-10.0, 10.0, 0.0));
@@ -77,8 +93,11 @@ fn cell_offsets_are_normalized_once_and_orientation_flags_are_retained() {
     }]);
     let c = calibration(value).unwrap();
     assert_eq!(c.flags, UVec4::new(1, 3, 1, 7));
-    assert_eq!(c.cells[0], Vec4::new(1.0/1440.0, 2.0/2560.0, 3.0/1440.0, 4.0/2560.0));
-    assert_eq!(c.cells[1], Vec4::new(5.0/1440.0, 6.0/2560.0, 0.0, 0.0));
+    assert_eq!(
+        c.cells[0],
+        Vec4::new(1.0 / 1440.0, 2.0 / 2560.0, 3.0 / 1440.0, 4.0 / 2560.0)
+    );
+    assert_eq!(c.cells[1], Vec4::new(5.0 / 1440.0, 6.0 / 2560.0, 0.0, 0.0));
     let before = c.cells.clone();
     let layout = Layout::new(11, 6, 186, 341).unwrap();
     let _ = c.uniforms(layout);
@@ -92,7 +111,10 @@ fn missing_calibration_is_not_replaced_with_a_default_lens() {
     assert!(serde_json::from_value::<RawCalibration>(serde_json::json!({})).is_err());
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("absent.json");
-    assert!(matches!(read_json::<RawCalibration>(&path), Err(LookingGlassError::Read { .. })));
+    assert!(matches!(
+        read_json::<RawCalibration>(&path),
+        Err(LookingGlassError::Read { .. })
+    ));
     let mut value = raw();
     value["slope"]["value"] = 0.into();
     assert!(calibration(value).is_err());
@@ -102,7 +124,15 @@ fn missing_calibration_is_not_replaced_with_a_default_lens() {
 fn focus_plane_remains_at_the_same_screen_position_for_every_view() {
     let center = Transform::from_xyz(0.0, 1.0, 4.0);
     for index in 0..66 {
-        let (camera, lens) = view_pose(center, 4.0, PerspectiveProjection::default(), index, 66, 40_f32.to_radians(), 1.0);
+        let (camera, lens) = view_pose(
+            center,
+            4.0,
+            PerspectiveProjection::default(),
+            index,
+            66,
+            40_f32.to_radians(),
+            1.0,
+        );
         let offset = camera.translation.x - center.translation.x;
         let projected = lens.get_clip_from_view() * Vec4::new(-offset, 0.0, -4.0, 1.0);
         assert!((projected.x / projected.w).abs() < 1e-5);
@@ -113,7 +143,15 @@ fn focus_plane_remains_at_the_same_screen_position_for_every_view() {
 #[test]
 fn depth_has_opposite_disparity_on_either_side_of_the_focus_plane() {
     let center = Transform::from_xyz(0.0, 0.0, 4.0);
-    let (camera, lens) = view_pose(center, 4.0, PerspectiveProjection::default(), 65, 66, 40_f32.to_radians(), 1.0);
+    let (camera, lens) = view_pose(
+        center,
+        4.0,
+        PerspectiveProjection::default(),
+        65,
+        66,
+        40_f32.to_radians(),
+        1.0,
+    );
     let clip = lens.get_clip_from_view();
     let front = clip * Vec4::new(-camera.translation.x, 0.0, -2.0, 1.0);
     let back = clip * Vec4::new(-camera.translation.x, 0.0, -6.0, 1.0);
@@ -124,8 +162,24 @@ fn depth_has_opposite_disparity_on_either_side_of_the_focus_plane() {
 #[test]
 fn view_offsets_follow_camera_right_without_rotating_the_cameras() {
     let center = Transform::from_rotation(Quat::from_rotation_y(0.7));
-    let (left, _) = view_pose(center, 4.0, PerspectiveProjection::default(), 0, 45, 0.7, 1.0);
-    let (right, _) = view_pose(center, 4.0, PerspectiveProjection::default(), 44, 45, 0.7, 1.0);
+    let (left, _) = view_pose(
+        center,
+        4.0,
+        PerspectiveProjection::default(),
+        0,
+        45,
+        0.7,
+        1.0,
+    );
+    let (right, _) = view_pose(
+        center,
+        4.0,
+        PerspectiveProjection::default(),
+        44,
+        45,
+        0.7,
+        1.0,
+    );
     assert!((left.translation + right.translation).length() < 1e-6);
     assert!((right.translation.cross(*center.right())).length() < 1e-6);
     assert_eq!(left.rotation, right.rotation);
@@ -133,7 +187,10 @@ fn view_offsets_follow_camera_right_without_rotating_the_cameras() {
 
 #[test]
 fn off_axis_frustum_corners_and_tile_aspect_agree_with_the_projection() {
-    let perspective = PerspectiveProjection { aspect_ratio: 1440.0 / 2560.0, ..default() };
+    let perspective = PerspectiveProjection {
+        aspect_ratio: 1440.0 / 2560.0,
+        ..default()
+    };
     let (_, mut lens) = view_pose(Transform::default(), 4.0, perspective, 0, 66, 0.7, 1.0);
     lens.update(186.0, 341.0);
     assert_eq!(lens.perspective.aspect_ratio, 1440.0 / 2560.0);
