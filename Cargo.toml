@@ -11,7 +11,7 @@ members = [
   "apps/desktop",
   "tools/xtask",
 ]
-exclude = ["vendor/mediapipe-rs", "vendor/nokhwa"]
+exclude = ["vendor/mediapipe-rs", "vendor/nokhwa", "vendor/bevy_window"]
 resolver = "2"
 
 [workspace.package]
@@ -36,9 +36,10 @@ rfd = { version = "=0.17.2", default-features = false }
 [patch."https://github.com/nikicat/mediapipe-rs"]
 mediapipe = { path = "vendor/mediapipe-rs" }
 
-# Bound AVFoundation reads so a sleeping camera cannot strand the worker.
+# Local fixes for camera and window lifetime across sleep transitions.
 [patch.crates-io]
 nokhwa = { path = "vendor/nokhwa" }
+bevy_window = { path = "vendor/bevy_window" }
 
 # Temporary upstream-bound fixes: MToon transparency (#94) and published
 # expression weights (#212). Remove when both APIs/fixes are available upstream.
