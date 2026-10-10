@@ -47,7 +47,11 @@ pub fn finish_worker_join(
             status
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record_failure(FailureStage::WorkerPanic, InferenceError::WorkerPanicked);
+                .record_failure(
+                    vtuber_core::monotonic_now(),
+                    FailureStage::WorkerPanic,
+                    InferenceError::WorkerPanicked,
+                );
             Err(InferenceError::WorkerPanicked)
         }
     }

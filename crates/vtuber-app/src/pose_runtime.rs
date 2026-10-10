@@ -182,8 +182,11 @@ impl PoseRuntime {
                     kind: spawn_error.kind(),
                     message: spawn_error.to_string(),
                 };
-                self.lock_status()
-                    .record_failure(FailureStage::WorkerSpawn, error.clone());
+                self.lock_status().record_failure(
+                    vtuber_core::monotonic_now(),
+                    FailureStage::WorkerSpawn,
+                    error.clone(),
+                );
                 Err(error)
             }
         }

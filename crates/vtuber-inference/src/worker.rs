@@ -96,7 +96,11 @@ pub(crate) fn run_inference_worker(
                         Err(err) => {
                             failed = true;
                             update_status(&status, |s| {
-                                s.record_failure(FailureStage::ModelLoad, err);
+                                s.record_failure(
+                                    vtuber_core::monotonic_now(),
+                                    FailureStage::ModelLoad,
+                                    err,
+                                );
                             });
                         }
                     }
@@ -129,7 +133,11 @@ pub(crate) fn run_inference_worker(
                         Err(err) => {
                             failed = true;
                             update_status(&status, |s| {
-                                s.record_failure(FailureStage::ModelLoad, err);
+                                s.record_failure(
+                                    vtuber_core::monotonic_now(),
+                                    FailureStage::ModelLoad,
+                                    err,
+                                );
                             });
                         }
                     }
@@ -160,7 +168,11 @@ pub(crate) fn run_inference_worker(
                         Err(err) => {
                             failed = true;
                             update_status(&status, |s| {
-                                s.record_failure(FailureStage::ModelLoad, err);
+                                s.record_failure(
+                                    vtuber_core::monotonic_now(),
+                                    FailureStage::ModelLoad,
+                                    err,
+                                );
                             });
                         }
                     }
@@ -284,6 +296,7 @@ pub(crate) fn run_inference_worker(
                                     pipeline.mark_lost();
                                     let halt = update_status(&status, |s| {
                                         s.record_frame_error(
+                                            vtuber_core::monotonic_now(),
                                             FailureStage::Decode,
                                             err,
                                             MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -356,6 +369,7 @@ pub(crate) fn run_inference_worker(
                                 pipeline.mark_lost();
                                 let halt = update_status(&status, |s| {
                                     s.record_frame_error(
+                                        vtuber_core::monotonic_now(),
                                         FailureStage::Runtime,
                                         err,
                                         MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -371,6 +385,7 @@ pub(crate) fn run_inference_worker(
                         pipeline.mark_lost();
                         let halt = update_status(&status, |s| {
                             s.record_frame_error(
+                                vtuber_core::monotonic_now(),
                                 FailureStage::Preprocess,
                                 err,
                                 MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -436,6 +451,7 @@ fn process_composite_frame(
             if let Err(error) = validate_observation(&observation) {
                 return update_status(status, |s| {
                     s.record_frame_error(
+                        vtuber_core::monotonic_now(),
                         FailureStage::Decode,
                         error,
                         MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -475,6 +491,7 @@ fn process_composite_frame(
         }
         Err(error) => update_status(status, |s| {
             s.record_frame_error(
+                vtuber_core::monotonic_now(),
                 composite_failure_stage(&error),
                 error,
                 MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -530,6 +547,7 @@ fn process_mediapipe_frame(
         }
         Err(error) => update_status(status, |s| {
             s.record_frame_error(
+                vtuber_core::monotonic_now(),
                 mediapipe_failure_stage(&error),
                 error,
                 MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -621,6 +639,7 @@ pub fn run_composite_inference_worker(
                         if let Err(error) = validate_observation(&observation) {
                             let halt = update_status(&status, |s| {
                                 s.record_frame_error(
+                                    vtuber_core::monotonic_now(),
                                     FailureStage::Decode,
                                     error,
                                     MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -656,6 +675,7 @@ pub fn run_composite_inference_worker(
                     Err(error) => {
                         let halt = update_status(&status, |s| {
                             s.record_frame_error(
+                                vtuber_core::monotonic_now(),
                                 composite_failure_stage(&error),
                                 error,
                                 MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -785,7 +805,7 @@ pub fn run_pose_worker(
             Ok(runtime) => runtime,
             Err(error) => {
                 update_status(&status, |s| {
-                    s.record_failure(FailureStage::ModelLoad, error);
+                    s.record_failure(vtuber_core::monotonic_now(), FailureStage::ModelLoad, error);
                 });
                 return InferenceWorkerResult {
                     final_metrics: status
@@ -844,6 +864,7 @@ pub fn run_pose_worker(
                     Err(error) => {
                         let halt = update_status(&status, |s| {
                             s.record_frame_error(
+                                vtuber_core::monotonic_now(),
                                 mediapipe_failure_stage(&error),
                                 error,
                                 MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -1389,6 +1410,7 @@ mod tests {
                                     if let Err(err) = validate_observation(&observation) {
                                         let halt = update_status(&status, |s| {
                                             s.record_frame_error(
+                                                vtuber_core::monotonic_now(),
                                                 FailureStage::Decode,
                                                 err,
                                                 MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -1445,6 +1467,7 @@ mod tests {
                                 Err(err) => {
                                     let halt = update_status(&status, |s| {
                                         s.record_frame_error(
+                                            vtuber_core::monotonic_now(),
                                             FailureStage::Runtime,
                                             err,
                                             MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
@@ -1459,6 +1482,7 @@ mod tests {
                         Err(err) => {
                             let halt = update_status(&status, |s| {
                                 s.record_frame_error(
+                                    vtuber_core::monotonic_now(),
                                     FailureStage::Preprocess,
                                     err,
                                     MAX_CONSECUTIVE_RECOVERABLE_ERRORS,

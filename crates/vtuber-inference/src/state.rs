@@ -183,9 +183,14 @@ impl InferenceWorkerStatus {
     }
 
     /// Records a failure and transitions to [`InferenceWorkerState::Failed`].
-    pub fn record_failure(&mut self, stage: FailureStage, error: InferenceError) {
+    pub fn record_failure(
+        &mut self,
+        observed_at: MonoTimeNs,
+        stage: FailureStage,
+        error: InferenceError,
+    ) {
         self.last_failure = Some(WorkerFailure {
-            observed_at: MonoTimeNs(now_nanos()),
+            observed_at,
             stage,
             error,
         });
@@ -200,13 +205,14 @@ impl InferenceWorkerStatus {
     /// [`InferenceWorkerState::Failed`].
     pub fn record_frame_error(
         &mut self,
+        observed_at: MonoTimeNs,
         stage: FailureStage,
         error: InferenceError,
         max_consecutive: u32,
     ) -> bool {
         self.consecutive_errors += 1;
         self.last_failure = Some(WorkerFailure {
-            observed_at: MonoTimeNs(now_nanos()),
+            observed_at,
             stage,
             error,
         });
@@ -246,10 +252,6 @@ impl InferenceWorkerStatus {
         self.detector_confidence = confidence;
         self.roi_state = state;
     }
-}
-
-fn now_nanos() -> u64 {
-    vtuber_core::monotonic_now().0
 }
 
 #[cfg(test)]
@@ -296,8 +298,12 @@ mod tests {
         let mut status = InferenceWorkerStatus::new();
         status.transition_to(InferenceWorkerState::LoadingModel);
         let err = InferenceError::LoadFailed("missing file".into());
-        status.record_failure(FailureStage::ModelLoad, err.clone());
+        status.record_failure(MonoTimeNs(1234), FailureStage::ModelLoad, err.clone());
         assert_eq!(status.state, InferenceWorkerState::Failed);
+        assert_eq!(
+            status.last_failure.as_ref().map(|f| f.observed_at),
+            Some(MonoTimeNs(1234))
+        );
         assert!(matches!(
             status.last_failure,
             Some(WorkerFailure {
@@ -312,6 +318,7 @@ mod tests {
     fn record_failure_distinguishes_stages() {
         let mut status = InferenceWorkerStatus::new();
         status.record_failure(
+            MonoTimeNs(5678),
             FailureStage::FrameInference,
             InferenceError::ExecutionFailed("oops".into()),
         );
@@ -319,5 +326,28 @@ mod tests {
             status.last_failure.as_ref().map(|f| f.stage),
             Some(FailureStage::FrameInference)
         );
+    }
+
+    #[test]
+    fn frame_errors_replay_with_explicit_observation_times() {
+        let mut status = InferenceWorkerStatus::new();
+        status.transition_to(InferenceWorkerState::Running);
+        let mut replay = status.clone();
+        for (time, stops) in [(MonoTimeNs(12), false), (MonoTimeNs(34), true)] {
+            let error = InferenceError::ExecutionFailed("frame failed".into());
+            assert_eq!(
+                status.record_frame_error(time, FailureStage::Runtime, error.clone(), 1),
+                stops
+            );
+            assert_eq!(
+                replay.record_frame_error(time, FailureStage::Runtime, error, 1),
+                stops
+            );
+            assert_eq!(status, replay);
+            assert_eq!(
+                status.last_failure.as_ref().map(|f| f.observed_at),
+                Some(time)
+            );
+        }
     }
 }
