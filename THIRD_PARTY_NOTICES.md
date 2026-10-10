@@ -89,6 +89,13 @@ The Rust sender boundary uses
 under Apache-2.0. Its source and license are obtained through Cargo; the NDI
 SDK runtime remains a separately governed distribution component.
 
+## bevy_window (monitor disconnect lifetime)
+
+`vendor/bevy_window` contains bevy_window 0.19.0 from crates.io, licensed
+under MIT OR Apache-2.0. Both license texts are retained. Its monitor-to-window
+relationship no longer despawns windows when a display disconnects or sleeps;
+see `vendor/bevy_window/PATCHES.md` for the patch and regression test.
+
 ## nokhwa (bounded macOS frame reads)
 
 `vendor/nokhwa` contains nokhwa 0.10.11 from crates.io, licensed under
