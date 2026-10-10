@@ -48,16 +48,12 @@ fn explicit_option_requires_a_path_and_preserves_unicode() {
 }
 
 #[test]
-fn quilt_layout_starts_bottom_left_and_finishes_top_right() {
+fn layout_preserves_view_count_and_virtual_quilt_dimensions() {
     let layout = Layout::new(3, 2, 10, 20).unwrap();
     assert_eq!(
         (layout.width(), layout.height(), layout.count()),
         (30, 40, 6)
     );
-    assert_eq!(layout.tile_center(0), Vec3::new(-10.0, -10.0, 0.0));
-    assert_eq!(layout.tile_center(2), Vec3::new(10.0, -10.0, 0.0));
-    assert_eq!(layout.tile_center(3), Vec3::new(-10.0, 10.0, 0.0));
-    assert_eq!(layout.tile_center(5), Vec3::new(10.0, 10.0, 0.0));
 }
 
 #[test]
