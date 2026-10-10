@@ -44,27 +44,29 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     if (flags & 1u) != 0u { image_uv.x = 1.0 - image_uv.x; }
     if (flags & 2u) != 0u { image_uv.y = 1.0 - image_uv.y; }
     let count = calibration.grid.x * calibration.grid.y;
-    // Compute the screen-space lens phase once per output pixel. Only the
-    // subpixel offset differs between R/G/B; all three channels share the
-    // same base phase, quilt coordinates and output orientation.
+    // Share cell lookup and offsets across RGB, but retain the original
+    // coordinate addition order: reassociating phase arithmetic can change
+    // the selected view near a lens boundary through f32 rounding.
     let pitch = calibration.optics.x;
     let tilt = calibration.optics.y;
-    let base_phase = (screen_uv.x + screen_uv.y * tilt) * pitch - calibration.optics.z;
-    var offsets = vec3<f32>(0.0, calibration.optics.w, 2.0 * calibration.optics.w);
+    var offset_x = vec3<f32>(0.0, calibration.optics.w, 2.0 * calibration.optics.w);
+    var offset_y = vec3<f32>(0.0);
     if calibration.flags.x != 0u {
         // Cell-pattern lookup and storage-buffer reads happen once per pixel,
         // rather than once for each color channel.
         let cell = cell_at(vec2<u32>(floor(screen_uv * calibration.screen.xy)));
         let rg = cells[2u * cell];
         let b = cells[2u * cell + 1u];
-        offsets = vec3<f32>(
-            rg.x + rg.y * tilt,
-            rg.z + rg.w * tilt,
-            b.x + b.y * tilt
-        );
+        offset_x = vec3<f32>(rg.x, rg.z, b.x);
+        offset_y = vec3<f32>(rg.y, rg.w, b.y);
     }
-    if (flags & 4u) != 0u { offsets = offsets.zyx; }
-    var phases = fract(vec3<f32>(base_phase) + offsets * pitch);
+    if (flags & 4u) != 0u {
+        offset_x = offset_x.zyx;
+        offset_y = offset_y.zyx;
+    }
+    let position_x = vec3<f32>(screen_uv.x) + offset_x;
+    let position_y = vec3<f32>(screen_uv.y) + offset_y;
+    var phases = fract((position_x + position_y * tilt) * pitch - vec3<f32>(calibration.optics.z));
     if calibration.flags.z != 0u { phases = vec3<f32>(1.0) - phases; }
     let views = min(vec3<u32>(floor(phases * f32(count))), vec3<u32>(count - 1u));
     let red = textureSampleLevel(quilt, quilt_sampler, quilt_uv(views.x, image_uv), 0.0).r;
