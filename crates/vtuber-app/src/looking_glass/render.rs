@@ -50,12 +50,12 @@ struct InterlaceMaterial {
 
 impl Material2d for InterlaceMaterial {
     fn fragment_shader() -> ShaderRef {
-        "embedded://vtuber_app/looking_glass/interlace.wgsl".into()
+        "embedded://vtuber_app/looking_glass/interlace.wesl".into()
     }
 }
 
 pub(super) fn install(app: &mut App, config: OutputConfig) {
-    embedded_asset!(app, "interlace.wgsl");
+    embedded_asset!(app, "interlace.wesl");
     app.insert_resource(config)
         .add_plugins(Material2dPlugin::<InterlaceMaterial>::default())
         .add_systems(Startup, setup)

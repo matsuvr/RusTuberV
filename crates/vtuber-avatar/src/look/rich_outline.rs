@@ -44,7 +44,8 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::RenderDevice;
 use bevy::render::sync_world::{MainEntity, MainEntityHashMap};
 use bevy::render::view::{
-    ExtractedView, Msaa, RenderVisibleEntities, RetainedViewEntity, ViewDepthTexture, ViewTarget,
+    ExtractedView, Msaa, RenderVisibleEntities, RetainedViewEntity, ViewDepthStencilTexture,
+    ViewTarget,
 };
 use bevy::render::{
     Extract, GpuResourceAppExt, Render, RenderApp, RenderDebugFlags, RenderStartup, RenderSystems,
@@ -422,7 +423,7 @@ fn rich_outline_draw_pass(
         &bevy::render::camera::ExtractedCamera,
         &ExtractedView,
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
     )>,
     outline_phases: Res<ViewSortedRenderPhases<RichOutlinePhaseItem>>,
     mut render_context: bevy::render::renderer::RenderContext,

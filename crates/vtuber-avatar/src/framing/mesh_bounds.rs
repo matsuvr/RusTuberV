@@ -63,7 +63,7 @@ pub(super) fn mesh_world_bounds(
             if values.iter().flatten().all(|value| value.is_finite()) => {}
         _ => return None,
     }
-    let bounds = mesh.compute_aabb()?;
+    let bounds = mesh.get_aabb()?;
     let local_bounds = WorldBounds::new(bounds.min().into(), bounds.max().into())?;
     let mut corners = local_bounds.corners().into_iter();
     let first = global_transform.transform_point(corners.next()?);

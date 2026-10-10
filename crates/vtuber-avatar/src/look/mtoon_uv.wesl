@@ -1,5 +1,3 @@
-#define_import_path rustuberv::mtoon_uv
-
 // Shared arithmetic; sampling and time masking stay in each shader stage.
 fn animate_uv(uv: vec2<f32>, time: f32, scroll_speed: vec2<f32>, rotation_speed: f32) -> vec2<f32> {
     let translate = time * scroll_speed;

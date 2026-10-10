@@ -96,7 +96,7 @@ mod tests {
         let mut extract = Schedule::new(ExtractSchedule);
         extract.set_apply_final_deferred(false);
         extract.add_systems(|mut commands: Commands| {
-            commands.spawn(bevy::render::sync_world::TemporaryRenderEntity);
+            commands.spawn(bevy::render::sync_world::TemporaryRenderEntity::default());
             commands.queue(|world: &mut World| world.resource_mut::<Extracted>().0 += 1);
         });
         world.add_schedule(extract);

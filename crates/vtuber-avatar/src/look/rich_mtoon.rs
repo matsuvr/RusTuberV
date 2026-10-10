@@ -3,8 +3,9 @@
 //! OFF uses the transparency-fixed upstream `MToonMaterial`. ON wraps the
 //! current native material in Bevy's `ExtendedMaterial`, which keeps the
 //! upstream bindings, alpha/depth behavior, and specialization while replacing
-//! only the fragment shader with the additive Rich shader. The native asset
-//! remains the owner of current expression and UV values.
+//! the shaders with the additive Rich path. WESL imports the Native fragment
+//! helpers, so the base calculation is shared rather than copied. The native
+//! asset remains the owner of current expression and UV values.
 
 use bevy::asset::{Handle, load_internal_asset, uuid_handle};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
@@ -51,20 +52,20 @@ pub(crate) fn register_rich_mtoon(app: &mut App) {
     load_internal_asset!(
         app,
         MTOON_UV_SHADER_HANDLE,
-        "mtoon_uv.wgsl",
-        Shader::from_wgsl
+        "mtoon_uv.wesl",
+        |source, _| Shader::from_wesl(source, "embedded://vtuber_avatar/look/mtoon_uv.wesl")
     );
     load_internal_asset!(
         app,
         RICH_MTOON_FRAGMENT_SHADER_HANDLE,
-        "mtoon_rich.wgsl",
-        Shader::from_wgsl
+        "mtoon_rich.wesl",
+        |source, _| Shader::from_wesl(source, "embedded://vtuber_avatar/look/mtoon_rich.wesl")
     );
     load_internal_asset!(
         app,
         RICH_MTOON_VERTEX_SHADER_HANDLE,
-        "mtoon_rich_vertex.wgsl",
-        Shader::from_wgsl
+        "mtoon_rich_vertex.wesl",
+        |source, _| Shader::from_wesl(source, "embedded://vtuber_avatar/look/mtoon_rich_vertex.wesl")
     );
     register_rich_material_systems::<RichMtoonExtension>(app);
     crate::look::rich_outline::register_rich_outline(app);

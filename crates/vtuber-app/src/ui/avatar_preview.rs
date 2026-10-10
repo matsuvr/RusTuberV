@@ -132,6 +132,7 @@ impl SpecializedRenderPipeline for AvatarPreviewPipeline {
                 shader_defs: vec![],
                 entry_point: Some("vertex".into()),
                 buffers: vec![],
+                constants: vec![],
             },
             fragment: Some(FragmentState {
                 shader: AVATAR_PREVIEW_SHADER_HANDLE,
@@ -142,6 +143,7 @@ impl SpecializedRenderPipeline for AvatarPreviewPipeline {
                     blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
+                constants: vec![],
             }),
             primitive: PrimitiveState::default(),
             depth_stencil: None,

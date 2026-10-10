@@ -115,7 +115,7 @@ static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
         expression: "MIT OR Apache-2.0",
         items: &[LicensedItem {
             name: "bevy_window (vendor/bevy_window)",
-            version: "0.19.0",
+            version: "0.20.0",
         }],
         texts: &[
             LicenseText {

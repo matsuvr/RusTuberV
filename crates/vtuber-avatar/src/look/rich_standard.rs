@@ -35,8 +35,8 @@ pub(crate) fn register_rich_standard(app: &mut App) {
     load_internal_asset!(
         app,
         RICH_STANDARD_FRAGMENT_SHADER_HANDLE,
-        "standard_rich.wgsl",
-        Shader::from_wgsl
+        "standard_rich.wesl",
+        |source, _| Shader::from_wesl(source, "embedded://vtuber_avatar/look/standard_rich.wesl")
     );
     register_rich_material_systems::<RichStandardExtension>(app);
 }
