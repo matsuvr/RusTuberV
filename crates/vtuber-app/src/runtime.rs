@@ -49,6 +49,32 @@ use crate::tracking_runtime::{TrackingRuntime, tracking_bridge_system};
 /// Add the avatar plugin first; this plugin can run without the UI shell.
 pub struct AppRuntimePlugin;
 
+/// Keeps short ordered scene systems and blocking render work inline.
+/// Call after installing the avatar, runtime and UI plugins, in both the
+/// desktop and recorded-camera measurement application.
+pub fn configure_execution_schedules(app: &mut App) {
+    use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
+    for label in [
+        First.intern(),
+        PreUpdate.intern(),
+        Update.intern(),
+        PostUpdate.intern(),
+        Last.intern(),
+        bevy_egui::EguiPrimaryContextPass.intern(),
+    ] {
+        app.edit_schedule(label, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
+    // Keep surface/VSync work on the render thread instead of dispatching it
+    // into the shared frame task pool used by the anatomy solver.
+    if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render.edit_schedule(bevy::render::Render, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
+}
+
 impl Plugin for AppRuntimePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActionQueue>()

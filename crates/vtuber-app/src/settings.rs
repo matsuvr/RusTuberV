@@ -1196,10 +1196,7 @@ mod dynamic_profile_tests {
     )] // tests may panic (AGENTS.md)
     use super::*;
     use tempfile::tempdir;
-    use vtuber_avatar::{
-        ArmPoseProfile, ArmPoseProfileOverride, AvatarAssetId,
-        DYNAMIC_ARM_PROFILE_OVERRIDE_VERSION, DynamicArmProfile, DynamicArmProfileOverride,
-    };
+    use vtuber_avatar::{AvatarAssetId, DynamicArmProfile, DynamicArmProfileOverride};
 
     fn dynamic_override(trim: f32) -> DynamicArmProfileOverride {
         DynamicArmProfileOverride::from_profile(DynamicArmProfile {

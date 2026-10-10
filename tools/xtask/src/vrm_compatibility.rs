@@ -133,7 +133,7 @@ fn fingerprint(path: &Path) -> Result<(u64, String), String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok((file_size, format!("{:X}", hasher.finalize())))
+    Ok((file_size, hex::encode_upper(hasher.finalize())))
 }
 
 fn load_and_inspect(

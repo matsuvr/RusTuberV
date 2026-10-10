@@ -202,7 +202,7 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:X}", hasher.finalize())
+    hex::encode_upper(hasher.finalize())
 }
 
 fn next_value(iter: &mut std::slice::Iter<'_, String>, key: &str) -> Result<String, String> {

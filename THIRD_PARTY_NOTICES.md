@@ -32,7 +32,7 @@ The VRM runtime is based on [not-elm/bevy_vrm1](https://github.com/not-elm/bevy_
 tag `v0.10.0` (commit `671b71fca7c24f905f71d1be7698a350da262f0e`),
 licensed under MIT OR Apache-2.0. The Cargo patch uses
 [matsuvr/bevy_vrm1](https://github.com/matsuvr/bevy_vrm1) commit
-`8859632571f852b2dbdc0221b7d6226b7b7824ba`, which ports the runtime to
+`96678a0c761c2839ccbf6a0d9a92421339fdbafc`, which ports the runtime to
 Bevy 0.20: WESL modules, vertex decompression and morph descriptor indexing,
 outline depth-stencil views, and lifecycle observer syntax.
 The transparency discard fix (upstream PR #68) and final expression weights

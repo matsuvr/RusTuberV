@@ -49,12 +49,9 @@ pub type RichMtoonMaterial = ExtendedMaterial<MToonMaterial, RichMtoonExtension>
 /// Registers the Rich material, its shaders, the switch and the sync.
 pub(crate) fn register_rich_mtoon(app: &mut App) {
     app.add_plugins(MaterialPlugin::<RichMtoonMaterial>::default());
-    load_internal_asset!(
-        app,
-        MTOON_UV_SHADER_HANDLE,
-        "mtoon_uv.wesl",
-        |source, _| Shader::from_wesl(source, "embedded://vtuber_avatar/look/mtoon_uv.wesl")
-    );
+    load_internal_asset!(app, MTOON_UV_SHADER_HANDLE, "mtoon_uv.wesl", |source, _| {
+        Shader::from_wesl(source, "embedded://vtuber_avatar/look/mtoon_uv.wesl")
+    });
     load_internal_asset!(
         app,
         RICH_MTOON_FRAGMENT_SHADER_HANDLE,
@@ -65,7 +62,10 @@ pub(crate) fn register_rich_mtoon(app: &mut App) {
         app,
         RICH_MTOON_VERTEX_SHADER_HANDLE,
         "mtoon_rich_vertex.wesl",
-        |source, _| Shader::from_wesl(source, "embedded://vtuber_avatar/look/mtoon_rich_vertex.wesl")
+        |source, _| Shader::from_wesl(
+            source,
+            "embedded://vtuber_avatar/look/mtoon_rich_vertex.wesl"
+        )
     );
     register_rich_material_systems::<RichMtoonExtension>(app);
     crate::look::rich_outline::register_rich_outline(app);

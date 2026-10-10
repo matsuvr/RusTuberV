@@ -1,6 +1,6 @@
 # Looking Glass output prototype
 
-Rust/Bevy 0.19 plus an embedded WGSL interlacer. No Bridge DLL, C/C++, JavaScript,
+Rust/Bevy 0.20 plus an embedded WESL interlacer. No Bridge DLL, C/C++, JavaScript,
 texture-sharing API or CPU image readback is added. This is a direct-display
 experiment, not an implementation of the Bridge SDK API. Hardware output and
 frame rate have not yet been verified.
@@ -97,6 +97,9 @@ one native-resolution interlace pass. Low pixel count does not remove the
 66-view draw-call, vertex/skinning, culling or shadow cost. Measure with the actual
 VRM and GPU before drawing a frame-rate conclusion. The base application's
 single-view performance target is not a measured guarantee for this experiment.
+Looking Glass is optional and exempt from the 60fps rendering requirement;
+the normal application still targets rendering at 60fps and inference at 30Hz
+on three CPU cores with this output disabled.
 
 ## Verification
 
@@ -145,7 +148,7 @@ pending.
 - Bridge SDK: https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge-sdk
 - Calibration-file instructions: https://lfdocs.lookingglassfactory.com/software/index/unity-plugin-4.0-alpha
 - Raw calibration and quilt conventions: https://github.com/Looking-Glass/looking-glass-webxr/blob/b44ed27fea197f28fbe4cb669bc350d141a9f8b1/src/LookingGlassConfig.ts
-- Bevy custom projections: https://github.com/bevyengine/bevy/blob/v0.19.0/examples/camera/custom_projection.rs
+- Bevy custom projections: https://github.com/bevyengine/bevy/blob/v0.20.0/examples/camera/custom_projection.rs
 
-The Rust and WGSL here implement the geometric/pixel-mapping equations directly;
+The Rust and WESL here implement the geometric/pixel-mapping equations directly;
 no manufacturer SDK binaries or JavaScript source are redistributed.

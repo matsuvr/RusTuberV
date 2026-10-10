@@ -457,7 +457,7 @@ fn import_reduces_morph_targets_beyond_bevy_limit() {
     // Identity remains keyed to the original bytes; the stored copy is
     // the VRM 1.0-shaped conversion, morph-normalized.
     let source_bytes = fs::read(&source).unwrap();
-    assert_eq!(imported.id, format!("{:x}", Sha256::digest(&source_bytes)));
+    assert_eq!(imported.id, hex::encode(Sha256::digest(&source_bytes)));
     assert_ne!(fs::read(&imported.asset_path).unwrap(), source_bytes);
 
     let json = stored_glb_json(&imported);
@@ -510,7 +510,7 @@ fn import_converts_vrm0_within_limits_to_vrm1_shape() {
     // Identity stays keyed to the source bytes, but the managed copy is
     // the converted VRM 1.0 shape with the binary chunk preserved.
     let source_bytes = fs::read(&source).unwrap();
-    assert_eq!(imported.id, format!("{:x}", Sha256::digest(&source_bytes)));
+    assert_eq!(imported.id, hex::encode(Sha256::digest(&source_bytes)));
     let json = stored_glb_json(&imported);
     assert!(
         json["extensions"].get("VRM").is_none(),

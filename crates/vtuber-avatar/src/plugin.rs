@@ -6,8 +6,8 @@
 
 use bevy::app::AnimationSystems;
 use bevy::camera::{Exposure, visibility::RenderLayers};
-use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
+use bevy::render::view::{DebandDither, Tonemapping};
 use bevy_vrm1::prelude::*;
 
 use crate::arm_pose::ArmPoseOverrideStore;

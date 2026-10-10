@@ -146,6 +146,7 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
         )
         .add_plugins(VtuberAvatarPlugin)
         .init_resource::<vtuber_app::ui::UiState>()
+        .init_resource::<vtuber_app::actions::ActionQueue>()
         .init_resource::<vtuber_app::ui_model::UiViewModel>()
         .init_resource::<vtuber_app::preview::PreviewState>()
         .init_resource::<vtuber_app::ndi_output::NdiOutputIntent>()
@@ -364,15 +365,24 @@ fn set_look(app: &mut App, enabled: bool, strength: f32) -> Result<(), RenderErr
         .model_target
         .clone()
         .ok_or_else(|| RenderError::Failed("ready avatar has no UI action target".into()))?;
-    let mut ui = app.world_mut().resource_mut::<vtuber_app::ui::UiState>();
-    ui.emit(UiAction::ChangeRichLook {
-        target: target.clone(),
-        change: RichLookChange::Enabled(enabled),
-    });
-    ui.emit(UiAction::ChangeRichLook {
-        target,
-        change: RichLookChange::Strength(strength),
-    });
+    app.world_mut()
+        .resource_scope(|world, mut ui: Mut<vtuber_app::ui::UiState>| {
+            let mut actions = world.resource_mut::<vtuber_app::actions::ActionQueue>();
+            ui.emit(
+                &mut actions,
+                UiAction::ChangeRichLook {
+                    target: target.clone(),
+                    change: RichLookChange::Enabled(enabled),
+                },
+            );
+            ui.emit(
+                &mut actions,
+                UiAction::ChangeRichLook {
+                    target,
+                    change: RichLookChange::Strength(strength),
+                },
+            );
+        });
     Ok(())
 }
 

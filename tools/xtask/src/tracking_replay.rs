@@ -11,8 +11,10 @@ use bevy_vrm1::prelude::{HipsBoneEntity, RestGlobalTransform, RestTransform};
 use serde::Serialize;
 use serde_json::json;
 use vtuber_app::{
+    AppRuntimePlugin,
     actions::UiAction,
     capture_runtime::{CameraBackendKind, CaptureRuntime},
+    configure_execution_schedules,
     diagnostics::DiagnosticsSnapshot,
     inference_runtime::{InferenceProjectRoot, InferenceRuntime},
     orchestrator::Orchestrator,
@@ -138,8 +140,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         .insert_resource(InferenceProjectRoot(root))
         .insert_resource(pose)
         .insert_resource(capture)
-        .add_plugins(UiShellPlugin)
         .insert_resource(orchestrator)
+        .add_plugins((AppRuntimePlugin, UiShellPlugin))
         .insert_resource(StartupModelPath(Some(model_id)))
         .insert_resource(Measurement {
             source,
@@ -173,6 +175,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         .add_systems(First, |mut m: ResMut<Measurement>| m.frame_started = Instant::now())
         // Exit is published before the shell's ordered Last-stage shutdown.
         .add_systems(Last, measure.before(vtuber_app::diagnostics::sync_engine_diagnostics));
+    configure_execution_schedules(&mut app);
     let exit = app.run();
     let summary = if paired {
         playback_out.join("summary.json")

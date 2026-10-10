@@ -1431,7 +1431,7 @@ fn read_json_optional<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Optio
 fn hex_sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:X}", hasher.finalize())
+    hex::encode_upper(hasher.finalize())
 }
 
 fn current_git_commit() -> Option<String> {

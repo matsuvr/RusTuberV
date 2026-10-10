@@ -37,7 +37,7 @@ impl PowerAtomic {
     fn suspend(&self) {
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 (value & 1 == 0).then_some((value & !1).wrapping_add(2) | 1)
             });
     }

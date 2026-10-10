@@ -21,13 +21,14 @@ use bevy::ecs::entity::EntityHash;
 use bevy::math::FloatOrd;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{
-    DrawMesh, MaterialExtensionBindGroupData, MaterialPipeline, MaterialPipelineKey, MeshPipeline,
-    MeshPipelineKey, PreparedMaterial, RenderMeshInstances, SetMaterialBindGroup, SetMeshBindGroup,
+    DrawMesh, MaterialPipeline, MaterialPipelineKey, MeshPipeline, MeshPipelineKey,
+    PreparedMaterial, RenderMeshInstances, SetMaterialBindGroup, SetMeshBindGroup,
     SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup, ViewKeyCache, alpha_mode_pipeline_key,
     init_material_pipeline, queue_material_meshes,
 };
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
+use bevy::render::combined_bind_group::CombinedBindGroupData;
 use bevy::render::erased_render_asset::ErasedRenderAssets;
 use bevy::render::mesh::RenderMesh;
 use bevy::render::render_asset::RenderAssets;
@@ -146,7 +147,7 @@ struct RichOutlinePipeline {
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct RichOutlineKey {
     mesh_key: MeshPipelineKey,
-    bind_group_data: MaterialExtensionBindGroupData<MToonMaterialKey, ()>,
+    bind_group_data: CombinedBindGroupData<MToonMaterialKey, ()>,
 }
 
 impl SpecializedMeshPipeline for RichOutlinePipeline {
@@ -376,7 +377,7 @@ fn queue_rich_outlines(
             let rich_key = material
                 .properties
                 .material_key
-                .to_key::<MaterialExtensionBindGroupData<MToonMaterialKey, ()>>();
+                .to_key::<CombinedBindGroupData<MToonMaterialKey, ()>>();
 
             // Skip the outline for double-sided meshes (cull_mode: None): the
             // inverted-hull outline assumes back faces are invisible in the

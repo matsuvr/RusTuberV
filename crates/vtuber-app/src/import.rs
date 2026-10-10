@@ -9,7 +9,7 @@
 //! over-limit morph target arrays. The public import API remains here.
 
 use std::fs;
-use std::io;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 pub use vtuber_avatar::vrm::VrmGeneration;
 use vtuber_avatar::vrm::{VrmParseError, VrmPrepareError};
@@ -332,7 +332,7 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     let source_bytes = fs::read(source)?;
-    let id = format!("{:x}", Sha256::digest(&source_bytes));
+    let id = hex::encode(Sha256::digest(&source_bytes));
     let (summary, runtime_bytes) = inspection::prepare_and_inspect_vrm(source, &source_bytes)?;
     let stored_bytes = runtime::finish_runtime_bytes(runtime_bytes)?;
 
@@ -369,7 +369,7 @@ pub fn import_vrm<P: AsRef<Path>, Q: AsRef<Path>>(
 }
 
 fn ensure_cached_model(dest: &Path, stored_bytes: &[u8]) -> Result<(), ModelImportError> {
-    let stored_hash = format!("{:x}", Sha256::digest(stored_bytes));
+    let stored_hash = hex::encode(Sha256::digest(stored_bytes));
     let cache_matches = fs::metadata(dest)
         .ok()
         .filter(|metadata| metadata.is_file() && metadata.len() as usize == stored_bytes.len())
@@ -382,10 +382,18 @@ fn ensure_cached_model(dest: &Path, stored_bytes: &[u8]) -> Result<(), ModelImpo
 }
 
 fn file_sha256(path: &Path) -> io::Result<String> {
-    let mut file = fs::File::open(path)?;
+    let mut file = io::BufReader::new(fs::File::open(path)?);
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    loop {
+        let bytes = file.fill_buf()?;
+        if bytes.is_empty() {
+            break;
+        }
+        let len = bytes.len();
+        hasher.update(bytes);
+        file.consume(len);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 #[cfg(test)]

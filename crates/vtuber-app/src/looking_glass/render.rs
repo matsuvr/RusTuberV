@@ -5,9 +5,9 @@ use bevy::camera::{
     CameraUpdateSystems, ClearColorConfig, Exposure, RenderTarget, ScalingMode,
     visibility::{RenderLayers, VisibilitySystems},
 };
-use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
+use bevy::render::view::{DebandDither, Tonemapping};
 use bevy::render::{
     render_resource::{AsBindGroup, TextureFormat},
     storage::ShaderBuffer,

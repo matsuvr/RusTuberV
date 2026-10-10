@@ -20,7 +20,7 @@ vtuber-avatar = { path = "../../crates/vtuber-avatar" }
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
 bevy_vrm1 = { workspace = true, features = ["log"] }
-directories = "5"
+directories = "6"
 
 [build-dependencies]
 winres = "0.1"

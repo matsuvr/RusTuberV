@@ -179,13 +179,15 @@ fn read_output(
     let (sender, receiver) = mpsc::sync_channel(1);
     let mapped_buffer = buffer.clone();
     buffer.slice(..).map_async(MapMode::Read, move |result| {
-        let data = result
-            .map(|()| {
-                let data = mapped_buffer.slice(..).get_mapped_range().to_vec();
-                mapped_buffer.unmap();
-                data
-            })
-            .map_err(|error| error.to_string());
+        let data = result.map_err(|error| error.to_string()).and_then(|()| {
+            let data = mapped_buffer
+                .slice(..)
+                .get_mapped_range()
+                .map(|view| view.to_vec())
+                .map_err(|error| error.to_string());
+            mapped_buffer.unmap();
+            data
+        });
         let _ = sender.try_send(data);
     });
     gpu.pending = Some(Pending {

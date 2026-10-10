@@ -18,7 +18,8 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-rust-version = "1.97.1"
+# Minimum supported compiler; rust-toolchain.toml follows the stable channel.
+rust-version = "1.99"
 authors = ["RusTuberV contributors"]
 repository = "https://github.com/matsuvr/RusTuberV"
 
@@ -44,7 +45,7 @@ bevy_window = { path = "vendor/bevy_window" }
 # Bevy 0.20/WESL runtime port of upstream v0.10.0. The transparency fix and
 # effective expression weights are now upstream; only the engine port is local.
 [patch."https://github.com/not-elm/bevy_vrm1"]
-bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "8859632571f852b2dbdc0221b7d6226b7b7824ba" }
+bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "96678a0c761c2839ccbf6a0d9a92421339fdbafc" }
 
 # Keep dev and test artifacts small. The test profile inherits dev settings.
 # This removes debugger symbols and incremental build caches;

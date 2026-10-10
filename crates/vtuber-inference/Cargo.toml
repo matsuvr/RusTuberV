@@ -11,10 +11,10 @@ description = "Model loading, Rust preprocessing, and native MediaPipe inference
 [dependencies]
 vtuber-core = { path = "../vtuber-core" }
 mediapipe = { workspace = true }
-tract-tflite = "=0.23.4"
-tract-onnx = { version = "=0.23.4", optional = true }
-tract-core = { version = "=0.23.4", optional = true }
-sha2 = "=0.10.8"
+tract-tflite = "=0.23.8"
+tract-onnx = { version = "=0.23.8", optional = true }
+tract-core = { version = "=0.23.8", optional = true }
+sha2 = "0.11"
 hex = "=0.4.3"
 thiserror = "2"
 anyhow = "=1.0.103"
@@ -28,7 +28,7 @@ legacy-face-stack = ["onnx"]
 onnx = ["dep:tract-onnx", "dep:tract-core"]
 
 [build-dependencies]
-toml = "0.9"
+toml = "1.1"
 
 [dev-dependencies]
 

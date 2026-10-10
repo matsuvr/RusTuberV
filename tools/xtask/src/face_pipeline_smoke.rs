@@ -380,7 +380,11 @@ fn run_windows(options: Options) -> Result<(), String> {
                     let mut status = worker_status
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    status.record_failure(FailureStage::ModelLoad, error);
+                    status.record_failure(
+                        vtuber_core::monotonic_now(),
+                        FailureStage::ModelLoad,
+                        error,
+                    );
                     status.metrics()
                 };
                 InferenceWorkerResult { final_metrics }

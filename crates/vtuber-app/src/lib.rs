@@ -6,7 +6,7 @@
 //!
 //! [`AppRuntimePlugin`] installs shared resources and worker bridges.
 //! [`ui::UiShellPlugin`] installs egui rendering and input; the desktop owns
-//! execution schedules.
+//! execution schedules through [`configure_execution_schedules`].
 //!
 //! - [`actions::UiAction`] carries UI intent to [`orchestrator::process_ui_actions_system`].
 //! - [`orchestrator::Orchestrator`] owns application state and pending requests.
@@ -29,7 +29,7 @@ mod file_io;
 mod runtime;
 
 pub use avatar_io::{AvatarIoRuntime, prepare_avatar_io_system};
-pub use runtime::AppRuntimePlugin;
+pub use runtime::{AppRuntimePlugin, configure_execution_schedules};
 
 /// UI action commands emitted by the UI layer.
 pub mod actions;

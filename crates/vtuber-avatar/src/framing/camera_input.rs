@@ -1,7 +1,9 @@
 //! Main viewport mouse input routing for camera controls.
 
 use bevy::ecs::system::SystemParam;
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::mouse::{
+    AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollPixelsPerLine, MouseScrollUnit,
+};
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, Window};
 use bevy_vrm1::prelude::{HeadBoneEntity, HipsBoneEntity};
@@ -34,7 +36,7 @@ pub enum CameraPointerGesture {
 /// Converts Bevy's line/pixel scroll units into one normalized dolly input.
 ///
 /// Horizontal scroll is intentionally ignored by the caller. Bevy's official
-/// `MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR` is used for pixel input so
+/// default `MouseScrollPixelsPerLine` is used for pixel input so
 /// line and high-resolution trackpad input share the same scale.
 pub fn normalized_vertical_scroll(
     scroll: Vec2,
@@ -45,7 +47,7 @@ pub fn normalized_vertical_scroll(
     }
     let normalized = match unit {
         MouseScrollUnit::Line => scroll.y,
-        MouseScrollUnit::Pixel => scroll.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+        MouseScrollUnit::Pixel => scroll.y / *MouseScrollPixelsPerLine::default(),
     };
     if normalized.is_finite() {
         Ok(normalized)

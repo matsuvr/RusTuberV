@@ -96,17 +96,15 @@ pub fn handle_dropped_files(
     ui_state: &mut super::UiState,
 ) {
     for event in ctx.input(|input| input.raw.dropped_files.clone()) {
-        if let Some(path) = event.path {
-            let path_buf = PathBuf::from(&path);
-            if let Some(ext) = path_buf.extension()
-                && ext.to_string_lossy().to_lowercase() == "vrm"
-            {
-                ui_state.emit(
-                    actions,
-                    UiAction::RequestAvatarImportReview { path: path_buf },
-                );
-                break;
-            }
+        let path_buf = event.path().to_path_buf();
+        if let Some(ext) = path_buf.extension()
+            && ext.to_string_lossy().to_lowercase() == "vrm"
+        {
+            ui_state.emit(
+                actions,
+                UiAction::RequestAvatarImportReview { path: path_buf },
+            );
+            break;
         }
     }
 }

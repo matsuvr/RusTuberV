@@ -15,13 +15,13 @@ use bevy::asset::io::{AssetSourceBuilder, AssetSourceBuilders};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, SystemInformationDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
-use vtuber_app::AppRuntimePlugin;
 use vtuber_app::import;
 use vtuber_app::inference_runtime::InferenceProjectRoot;
 use vtuber_app::orchestrator::Orchestrator;
 use vtuber_app::settings::AppSettings;
 use vtuber_app::tracking_file::{TRACKING_PROFILE_FILE_NAME, load_tracking_profile};
 use vtuber_app::ui::UiShellPlugin;
+use vtuber_app::{AppRuntimePlugin, configure_execution_schedules};
 use vtuber_avatar::{ArmPoseSourceKind, ArmSourceSelection, StartupModelPath, VtuberAvatarPlugin};
 
 fn main() -> ExitCode {
@@ -119,10 +119,10 @@ fn run() -> Result<(), StartupError> {
         AssetSourceBuilder::platform_default(asset_source_root(&managed_root)?, None),
     );
 
-    // Keep Bevy's default pool proportions: a three-CPU host needs one
-    // background worker so pose solving leaves room for inference and rendering.
+    // Keep one worker in each Bevy pool within the three-core CPU budget.
+    // Windows may report every host CPU even under a restricted process affinity.
     let pools = bevy::app::TaskPoolOptions {
-        max_total_threads: 12,
+        max_total_threads: 3,
         ..default()
     };
     let plugins = DefaultPlugins.set(bevy::app::TaskPoolPlugin {
@@ -181,32 +181,6 @@ fn run() -> Result<(), StartupError> {
 
     app.run();
     Ok(())
-}
-
-/// Keeps the short ordered scene systems and blocking render work inline.
-fn configure_execution_schedules(app: &mut App) {
-    // Run this single-avatar scene's short ordered systems inline.
-    // Inference and constrained arm solving keep their own workers.
-    use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
-    for label in [
-        First.intern(),
-        PreUpdate.intern(),
-        Update.intern(),
-        PostUpdate.intern(),
-        Last.intern(),
-        bevy_egui::EguiPrimaryContextPass.intern(),
-    ] {
-        app.edit_schedule(label, |schedule| {
-            schedule.set_executor(SingleThreadedExecutor::new());
-        });
-    }
-    // In particular, keep blocking surface/VSync work on the render
-    // thread instead of dispatching it into the shared frame task pool.
-    if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
-        render.edit_schedule(bevy::render::Render, |schedule| {
-            schedule.set_executor(SingleThreadedExecutor::new());
-        });
-    }
 }
 
 /// Locates packaged model resources without depending on the process cwd.
