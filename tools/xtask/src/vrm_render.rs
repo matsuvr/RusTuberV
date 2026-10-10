@@ -147,13 +147,22 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
         .add_plugins(VtuberAvatarPlugin)
         .init_resource::<vtuber_app::ui::UiState>()
         .init_resource::<vtuber_app::actions::ActionQueue>()
+        .init_resource::<vtuber_app::AvatarIoRuntime>()
         .init_resource::<vtuber_app::ui_model::UiViewModel>()
         .init_resource::<vtuber_app::preview::PreviewState>()
         .init_resource::<vtuber_app::ndi_output::NdiOutputIntent>()
-        .add_systems(Update, vtuber_app::orchestrator::process_ui_actions_system
-            .before(vtuber_avatar::look::apply_look_settings_changes))
-        .add_systems(Update, vtuber_app::orchestrator::sync_avatar_lifecycle_system
-            .after(vtuber_app::orchestrator::process_ui_actions_system))
+        .add_systems(
+            Update,
+            (
+                vtuber_app::orchestrator::process_ui_actions_system
+                    .before(vtuber_avatar::look::apply_look_settings_changes),
+                vtuber_app::prepare_avatar_io_system,
+                vtuber_app::orchestrator::sync_avatar_lifecycle_system
+                    .after(vtuber_avatar::unload::despawn_unloading_avatar)
+                    .before(vtuber_avatar::look::apply_look_settings_changes),
+            )
+                .chain(),
+        )
         .add_systems(Update, (place_camera, activate_output));
     app.finish();
     app.cleanup();
