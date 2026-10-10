@@ -44,6 +44,7 @@ enum StartupError {
     Tracking(vtuber_app::tracking_file::TrackingProfileFileError),
     Settings(vtuber_app::settings::SettingsError),
     Import(import::ModelImportError),
+    LookingGlass(vtuber_app::looking_glass::LookingGlassError),
 }
 
 impl fmt::Display for StartupError {
@@ -63,6 +64,9 @@ impl fmt::Display for StartupError {
             Self::Tracking(error) => write!(f, "could not load tracking profile: {error}"),
             Self::Settings(error) => write!(f, "could not load settings: {error}"),
             Self::Import(error) => write!(f, "could not import CLI model: {error}"),
+            Self::LookingGlass(error) => {
+                write!(f, "could not configure Looking Glass output: {error}")
+            }
         }
     }
 }
@@ -74,6 +78,7 @@ impl std::error::Error for StartupError {
             Self::Tracking(error) => Some(error),
             Self::Settings(error) => Some(error),
             Self::Import(error) => Some(error),
+            Self::LookingGlass(error) => Some(error),
             Self::MissingModelPath | Self::NonUnicodeAssetRoot(_) => None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             Self::PowerNotifications(error) => Some(error),
@@ -155,6 +160,8 @@ fn run() -> Result<(), StartupError> {
 
     configure_execution_schedules(&mut app);
 
+    vtuber_app::looking_glass::configure(&mut app, std::env::args_os().skip(1))
+        .map_err(StartupError::LookingGlass)?;
     power::configure(&mut app);
 
     if let Some(imported) = startup_model {
