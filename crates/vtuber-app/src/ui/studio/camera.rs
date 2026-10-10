@@ -1,4 +1,6 @@
 //! Camera selection, preview consent and display settings.
+use crate::actions::ActionQueue;
+
 use super::super::privacy::{CameraPreviewConsent, CameraPreviewEvent};
 use super::{RichText, Ui, UiLanguage, UiState, UiViewModel, egui};
 use super::{section, setup_section};
@@ -7,7 +9,13 @@ use bevy_egui::egui::{Color32, CornerRadius, TextureId, vec2};
 use vtuber_avatar::AvatarMotionMirror;
 use vtuber_core::monotonic_now;
 
-fn camera_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn camera_controls(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     let selected_label = vm
         .camera
         .selected_index
@@ -23,7 +31,7 @@ fn camera_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiL
                     .selectable_label(vm.camera.selected_index == Some(index), &camera.name)
                     .clicked()
                 {
-                    state.emit(UiAction::SelectCamera { index });
+                    state.emit(actions, UiAction::SelectCamera { index });
                 }
             }
         });
@@ -36,7 +44,7 @@ fn camera_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiL
         ))
         .clicked()
     {
-        state.emit(UiAction::RefreshCameras);
+        state.emit(actions, UiAction::RefreshCameras);
     }
     if vm.camera.available_cameras.is_empty() {
         ui.label(lang.pick(
@@ -49,6 +57,7 @@ fn camera_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiL
 }
 
 pub(super) fn camera_select_page(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -60,12 +69,13 @@ pub(super) fn camera_select_page(
         lang.pick("入力カメラ", "Input camera", "输入摄像头", "입력 카메라"),
         vm.camera.selected_index.is_none(),
         !dialog_active && vm.avatar_import_review.review.is_none(),
-        |ui| camera_controls(ui, vm, state, lang),
+        |ui| camera_controls(actions, ui, vm, state, lang),
     );
 }
 
 /// Camera preview consent and mirroring, moved from the camera page.
 fn camera_preview_section(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     state: &mut UiState,
     preview: &PreviewState,
@@ -211,7 +221,7 @@ fn camera_preview_section(
                 )
                 .changed()
             {
-                state.emit(UiAction::ToggleMirror);
+                state.emit(actions, UiAction::ToggleMirror);
             }
             ui.label(
                 RichText::new(lang.pick(
@@ -232,6 +242,7 @@ fn camera_preview_section(
     reason = "the pane draws from one argument per widget input, so each widget reads exactly the state it is given"
 )]
 pub(super) fn camera_status_page(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -241,12 +252,13 @@ pub(super) fn camera_status_page(
     mirror: AvatarMotionMirror,
     lang: UiLanguage,
 ) {
-    camera_preview_section(ui, state, preview, landmarks, texture, lang);
-    display_framing_section(ui, vm, state, mirror, lang);
+    camera_preview_section(actions, ui, state, preview, landmarks, texture, lang);
+    display_framing_section(actions, ui, vm, state, mirror, lang);
 }
 
 /// Avatar mirroring, framing reset, and viewport help.
 fn display_framing_section(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -275,7 +287,7 @@ fn display_framing_section(
                 )
                 .changed()
             {
-                state.emit(UiAction::ToggleAvatarMotionMirror);
+                state.emit(actions, UiAction::ToggleAvatarMotionMirror);
             }
             if ui
                 .add_enabled(
@@ -289,7 +301,7 @@ fn display_framing_section(
                 )
                 .clicked()
             {
-                state.emit(UiAction::ResetAvatarCamera);
+                state.emit(actions, UiAction::ResetAvatarCamera);
             }
             ui.label(lang.pick("F1でアバターのみを表示。左ドラッグで回転、右ドラッグで移動、ホイールでズームします。", "Use F1 for avatar-only view. Left-drag to orbit, right-drag to pan, and scroll to zoom.", "按F1仅显示虚拟形象。左键拖动旋转，右键拖动平移，滚轮缩放。", "F1로 아바타만 표시합니다. 왼쪽 드래그로 회전, 오른쪽 드래그로 이동, 휠로 확대·축소합니다."));
         },

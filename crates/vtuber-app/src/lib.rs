@@ -4,9 +4,9 @@
 //!
 //! # Application flow
 //!
-//! [`ui::UiShellPlugin`] is the composition point. It creates the shared resources,
-//! delegates worker initialization and scheduling to the private `runtime` module,
-//! and installs the egui rendering and input systems.
+//! [`AppRuntimePlugin`] installs shared resources and worker bridges.
+//! [`ui::UiShellPlugin`] installs egui rendering and input; the desktop owns
+//! execution schedules.
 //!
 //! - [`actions::UiAction`] carries UI intent to [`orchestrator::process_ui_actions_system`].
 //! - [`orchestrator::Orchestrator`] owns application state and pending requests.
@@ -24,8 +24,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod avatar_io;
 mod file_io;
 mod runtime;
+
+pub use avatar_io::{AvatarIoRuntime, prepare_avatar_io_system};
+pub use runtime::AppRuntimePlugin;
 
 /// UI action commands emitted by the UI layer.
 pub mod actions;

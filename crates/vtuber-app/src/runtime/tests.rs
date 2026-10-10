@@ -6,9 +6,9 @@
 )]
 
 use super::*;
+use crate::actions::ActionQueue;
 use crate::actions::UiAction;
 use crate::preview::PreviewState;
-use crate::ui::UiState;
 use crate::ui_model::UiViewModel;
 use std::sync::Arc;
 use vtuber_avatar::AvatarMotionMirror;
@@ -85,7 +85,7 @@ fn sync_error_presenter_records_camera_error_code_and_presentation() {
 fn auto_start_system_starts_tracking_when_lifecycle_reports_ready() {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()

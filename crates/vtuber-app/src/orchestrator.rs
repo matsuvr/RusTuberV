@@ -2,14 +2,11 @@
 //!
 //! The orchestrator receives [`UiAction`](crate::actions::UiAction) commands from
 //! the UI layer and translates them into domain service calls (camera, import,
-//! tracking, etc.). It updates the [`UiViewModel`](crate::ui_model::UiViewModel)
-//! snapshot that the UI reads each frame.
+//! tracking, etc.). The UI model projects this state into display snapshots.
 //!
-//! Avatar loading is bridged to the `vtuber-avatar` lifecycle through a
-//! pending-request protocol: after a successful import the orchestrator stores
-//! a [`PendingLoadRequest`](crate::orchestrator::PendingLoadRequest). A Bevy system
-//! drains it and emits the corresponding `LoadImportedAvatarRequest` message
-//! that the avatar plugin consumes.
+//! Avatar file requests are prepared by a one-shot worker and returned with
+//! their request ID. The lifecycle bridge emits prepared load messages and
+//! commits the model only when the avatar plugin accepts the request.
 //!
 //! State transitions live here. `action_system` dispatches ECS effects,
 //! `expressions` owns expression bindings and snapshots, and `lifecycle`
@@ -23,9 +20,10 @@ use bevy::prelude::Resource;
 use vtuber_camera::device::CameraDescriptor;
 
 use crate::actions::UiAction;
-use crate::import::{self, ImportedModel, ModelImportError};
-use crate::license_review::{self, VrmLicenseReview, VrmLicenseReviewError};
-use crate::ui_model::*;
+use crate::avatar_io::{AvatarFileResult, AvatarFileWork};
+use crate::import::ImportedModel;
+use crate::license_review::VrmLicenseReview;
+use vtuber_avatar::AvatarLifecycleState;
 
 mod action_system;
 mod expressions;
@@ -35,11 +33,10 @@ pub use action_system::{LookSystemParams, process_ui_actions_system};
 pub use expressions::sync_expression_view_model;
 pub use lifecycle::sync_avatar_lifecycle_system;
 
-/// A pending avatar load request waiting to be submitted to the lifecycle.
+/// An already imported model awaiting background load preparation.
 ///
-/// After a successful `import_vrm()` call the orchestrator stores the
-/// [`ImportedModel`] here. A Bevy system drains this value and emits a
-/// `LoadImportedAvatarRequest` message that the avatar plugin consumes.
+/// Used for CLI startup and retries. The file worker reads its managed copy
+/// and settings before the lifecycle bridge submits a prepared request.
 #[derive(Clone, Debug)]
 pub struct PendingLoadRequest {
     /// Monotonically increasing correlation identifier.
@@ -50,9 +47,9 @@ pub struct PendingLoadRequest {
 
 /// Model and saved look waiting for the corresponding lifecycle result.
 #[derive(Debug)]
-struct SubmittedAvatarLoad {
-    model: ImportedModel,
-    look: Option<vtuber_avatar::RichLookSettings>,
+pub(crate) struct SubmittedAvatarLoad {
+    pub(crate) model: ImportedModel,
+    pub(crate) look: Option<vtuber_avatar::RichLookSettings>,
 }
 
 /// A selected VRM awaiting explicit license acceptance before import.
@@ -74,27 +71,31 @@ pub struct Orchestrator {
     /// Current import state.
     import_state: ImportState,
     /// Model accepted by the avatar lifecycle, if any.
-    imported_model: Option<ImportedModel>,
+    pub(crate) imported_model: Option<ImportedModel>,
     /// Camera descriptors.
-    cameras: Vec<CameraDescriptor>,
+    pub(crate) cameras: Vec<CameraDescriptor>,
     /// Selected camera index.
-    selected_camera: Option<usize>,
+    pub(crate) selected_camera: Option<usize>,
     /// Last error, if any.
     last_error: Option<OrchestratorError>,
     /// Pipeline lifecycle state.
-    pipeline_state: PipelineState,
-    /// Current UI pane.
-    current_pane: Pane,
+    pub(crate) pipeline_state: PipelineState,
     /// Pending avatar load request not yet submitted to the lifecycle.
     pending_load: Option<PendingLoadRequest>,
+    pub(crate) pending_file_work: Option<(u64, AvatarFileWork)>,
+    active_request_id: Option<u64>,
+    prepared_load: Option<(
+        vtuber_avatar::LoadImportedAvatarRequest,
+        SubmittedAvatarLoad,
+    )>,
     /// Requests submitted to the engine but not yet confirmed.
     submitted_loads: BTreeMap<u64, SubmittedAvatarLoad>,
     /// Selected VRM awaiting license acceptance.
-    pending_avatar_import: Option<PendingAvatarImport>,
+    pub(crate) pending_avatar_import: Option<PendingAvatarImport>,
     /// Next avatar load request correlation identifier.
     next_load_request_id: u64,
     /// Mirror of the avatar lifecycle state, updated by the sync system.
-    lifecycle_state: crate::ui_model::AvatarLifecycleState,
+    pub(crate) lifecycle_state: AvatarLifecycleState,
     /// Whether capture should be running for the selected avatar and camera.
     capture_desired: bool,
     /// Whether the capture system has acknowledged the current intent.
@@ -209,12 +210,14 @@ impl Default for Orchestrator {
             selected_camera: None,
             last_error: None,
             pipeline_state: PipelineState::Idle,
-            current_pane: Pane::default(),
             pending_load: None,
             submitted_loads: BTreeMap::new(),
+            pending_file_work: None,
+            active_request_id: None,
+            prepared_load: None,
             pending_avatar_import: None,
             next_load_request_id: 1,
-            lifecycle_state: AvatarLifecycleState::None,
+            lifecycle_state: AvatarLifecycleState::NoAvatar,
             capture_desired: false,
             capture_ack: true,
             camera_refresh_requested: true,
@@ -237,9 +240,6 @@ impl Orchestrator {
     /// Process a UI action and update internal state.
     pub fn process_action(&mut self, action: &UiAction) {
         match action {
-            UiAction::SwitchPane(pane) => {
-                self.current_pane = *pane;
-            }
             UiAction::RefreshCameras => {
                 // Camera enumeration is handled by the capture bridge system,
                 // never by the UI renderer or a fabricated device list.
@@ -297,12 +297,30 @@ impl Orchestrator {
             UiAction::CancelCalibration => {
                 self.calibration_request = Some(CalibrationRequest::Cancel);
             }
-            UiAction::RetryCalibration if self.pipeline_state == PipelineState::Running => {
-                self.calibration_request = Some(CalibrationRequest::Retry);
+            UiAction::RetryCalibration => {
+                if self.pipeline_state == PipelineState::Running {
+                    self.calibration_request = Some(CalibrationRequest::Retry);
+                }
             }
-            _ => {
-                // Other actions handled by specific subsystems.
-            }
+            // These effects are owned by the outer application dispatcher.
+            UiAction::SwitchPane(_)
+            | UiAction::ResetAvatarCamera
+            | UiAction::StartNdiOutput
+            | UiAction::StopNdiOutput
+            | UiAction::ToggleMirror
+            | UiAction::TogglePreview
+            | UiAction::ToggleAvatarMotionMirror
+            | UiAction::SetArmTrackingEnabled { .. }
+            | UiAction::RecalibrateArms
+            | UiAction::SetArmPoseProfile { .. }
+            | UiAction::ResetArmPoseProfile { .. }
+            | UiAction::AssignExpressionKey { .. }
+            | UiAction::ResetExpressionBindings { .. }
+            | UiAction::ToggleExpressionKey { .. }
+            | UiAction::ClearManualExpression { .. }
+            | UiAction::SetLanguage(_)
+            | UiAction::ChangeRichLook { .. }
+            | UiAction::SaveRichLook { .. } => {}
         }
     }
 
@@ -339,26 +357,56 @@ impl Orchestrator {
         self.import_state = ImportState::InProgress;
         self.last_error = None;
 
-        match import::import_vrm(path, &self.asset_root, import::DEFAULT_SIZE_LIMIT) {
-            Ok(model) => {
-                self.queue_imported_model(model);
-            }
-            Err(e) => {
-                let msg = format_import_error(&e);
-                self.import_state = ImportState::Failed(msg.clone());
-                self.last_error = Some(OrchestratorError::ImportFailed(msg));
-            }
-        }
+        let request_id = self.begin_avatar_request();
+        self.pending_file_work = Some((request_id, AvatarFileWork::Import(path.to_path_buf())));
     }
 
-    /// Queues an imported model, including CLI startup, without replacing the
-    /// accepted model or its look until the engine confirms the request.
+    /// Queues an imported model for background load preparation without replacing
+    /// the accepted model or its look until the engine confirms the request.
     pub fn queue_imported_model(&mut self, model: ImportedModel) {
-        let request_id = self.next_load_request_id;
-        self.next_load_request_id += 1;
+        let request_id = self.begin_avatar_request();
         self.pending_load = Some(PendingLoadRequest { request_id, model });
-        self.import_state = ImportState::Success;
+        self.import_state = ImportState::InProgress;
         self.last_error = None;
+    }
+
+    fn begin_avatar_request(&mut self) -> u64 {
+        let request_id = self.next_load_request_id;
+        self.next_load_request_id = self.next_load_request_id.wrapping_add(1);
+        self.active_request_id = Some(request_id);
+        self.pending_file_work = None;
+        self.pending_load = None;
+        self.prepared_load = None;
+        self.pending_avatar_import = None;
+        request_id
+    }
+
+    pub(crate) fn complete_avatar_work(
+        &mut self,
+        request_id: u64,
+        result: Result<AvatarFileResult, OrchestratorError>,
+    ) {
+        if self.active_request_id != Some(request_id) {
+            return;
+        }
+        match result {
+            Ok(AvatarFileResult::Review { path, review }) => {
+                self.import_state = ImportState::Idle;
+                self.pending_avatar_import = Some(PendingAvatarImport {
+                    path,
+                    review,
+                    accepted: false,
+                });
+            }
+            Ok(AvatarFileResult::Load(request, submitted)) => {
+                self.prepared_load = Some((request, submitted));
+                self.import_state = ImportState::Success;
+            }
+            Err(error) => {
+                self.import_state = ImportState::Failed(error.to_string());
+                self.last_error = Some(error);
+            }
+        }
     }
 
     /// Unload the current avatar.
@@ -371,30 +419,22 @@ impl Orchestrator {
         self.import_state = ImportState::Idle;
         self.pending_load = None;
         self.submitted_loads.clear();
+        self.pending_file_work = None;
+        self.active_request_id = None;
+        self.prepared_load = None;
+        self.pending_avatar_import = None;
     }
 
-    /// Reads the selected file and opens a license review.
+    /// Requests background license extraction for the selected file.
     ///
     /// The model is not imported here. A failed extraction clears any previous
     /// review and surfaces a recoverable error; there is no bypass that would
     /// import a model whose license could not be reviewed.
     fn request_avatar_import_review(&mut self, path: &Path) {
         self.last_error = None;
-        let result = read_reviewable_bytes(path)
-            .and_then(|bytes| license_review::extract_vrm_license_review(path, &bytes));
-        match result {
-            Ok(review) => {
-                self.pending_avatar_import = Some(PendingAvatarImport {
-                    path: path.to_path_buf(),
-                    review,
-                    accepted: false,
-                });
-            }
-            Err(error) => {
-                self.pending_avatar_import = None;
-                self.last_error = Some(OrchestratorError::LicenseReviewFailed(error.to_string()));
-            }
-        }
+        let request_id = self.begin_avatar_request();
+        self.import_state = ImportState::InProgress;
+        self.pending_file_work = Some((request_id, AvatarFileWork::Review(path.to_path_buf())));
     }
 
     /// Records the review checkbox state.
@@ -419,7 +459,10 @@ impl Orchestrator {
 
     /// Dismisses the review without importing.
     fn cancel_avatar_import_review(&mut self) {
+        self.import_state = ImportState::Idle;
         self.pending_avatar_import = None;
+        self.pending_file_work = None;
+        self.active_request_id = None;
     }
 
     /// Retry a failed avatar load by re-submitting the current imported model.
@@ -428,11 +471,9 @@ impl Orchestrator {
             return;
         }
         if let Some(model) = self.imported_model.clone() {
-            let request_id = self.next_load_request_id;
-            self.next_load_request_id += 1;
-            self.pending_load = Some(PendingLoadRequest { request_id, model });
+            self.queue_imported_model(model);
             self.last_error = None;
-            self.lifecycle_state = AvatarLifecycleState::None;
+            self.lifecycle_state = AvatarLifecycleState::NoAvatar;
         }
     }
 
@@ -471,128 +512,6 @@ impl Orchestrator {
         self.pipeline_state
     }
 
-    /// Update the UI view model from current orchestrator state.
-    ///
-    /// The avatar `lifecycle` and `is_ready` fields are driven by the
-    /// lifecycle mirror maintained by the sync system, not by the presence of
-    /// an imported model. A model becomes ready only after the `bevy_vrm1`
-    /// asset has initialized and humanoid binding has completed.
-    pub fn update_view_model(&self, vm: &mut UiViewModel) {
-        // The view model is rebuilt only when an input to it actually changed;
-        // rebuilding it every frame clones strings and path buffers for the
-        // camera list and imported-model summary even in the steady state.
-        if !self.view_model_source_unchanged(vm) {
-            self.rebuild_view_model(vm);
-        }
-    }
-
-    /// Returns `true` when `vm` already reflects every current source value
-    /// consumed by [`Self::rebuild_view_model`].
-    fn view_model_source_unchanged(&self, vm: &UiViewModel) -> bool {
-        let lifecycle = match self.pipeline_state {
-            PipelineState::Idle => AppLifecycle::Idle,
-            PipelineState::Starting => AppLifecycle::Starting,
-            PipelineState::Running => AppLifecycle::Running,
-            PipelineState::Stopping => AppLifecycle::Stopping,
-            PipelineState::Failed => AppLifecycle::Failed,
-        };
-        if vm.pane != self.current_pane || vm.lifecycle != lifecycle {
-            return false;
-        }
-        if vm.camera.selected_index != self.selected_camera
-            || vm.camera.available_cameras.len() != self.cameras.len()
-        {
-            return false;
-        }
-        for (i, camera) in self.cameras.iter().enumerate() {
-            match vm.camera.available_cameras.get(i) {
-                Some(descriptor) if descriptor.name == camera.label => {}
-                _ => return false,
-            }
-        }
-        match (&vm.avatar.imported_model, &self.imported_model) {
-            (None, None) => {}
-            (Some(summary), model) => match model {
-                Some(model) => {
-                    let has_required_bones = model.summary.humanoid_nodes.hips < 1000
-                        && model.summary.humanoid_nodes.head < 1000;
-                    if summary.generation != model.summary.generation
-                        || summary.id != model.id
-                        || summary.name != model.name
-                        || summary.original_path != model.original_path
-                        || summary.has_required_bones != has_required_bones
-                        || summary.expression_count != model.summary.expression_presets.len()
-                    {
-                        return false;
-                    }
-                }
-                None => return false,
-            },
-            (None, Some(_)) => return false,
-        }
-        let pending_import = self.pending_avatar_import.as_ref();
-        if vm.avatar_import_review.review.as_ref() != pending_import.map(|pending| &pending.review)
-            || vm.avatar_import_review.accepted
-                != pending_import.is_some_and(|pending| pending.accepted)
-        {
-            return false;
-        }
-        vm.avatar.lifecycle == self.lifecycle_state
-    }
-
-    /// Rebuilds every view-model field from current orchestrator state.
-    fn rebuild_view_model(&self, vm: &mut UiViewModel) {
-        // Pane.
-        vm.pane = self.current_pane;
-
-        // Lifecycle.
-        vm.lifecycle = match self.pipeline_state {
-            PipelineState::Idle => AppLifecycle::Idle,
-            PipelineState::Starting => AppLifecycle::Starting,
-            PipelineState::Running => AppLifecycle::Running,
-            PipelineState::Stopping => AppLifecycle::Stopping,
-            PipelineState::Failed => AppLifecycle::Failed,
-        };
-
-        // Camera — convert from vtuber_camera descriptors to UI model descriptors.
-        vm.camera.available_cameras = self
-            .cameras
-            .iter()
-            .enumerate()
-            .map(|(i, c)| crate::ui_model::CameraDescriptor {
-                name: c.label.clone(),
-                index: i,
-            })
-            .collect();
-        vm.camera.selected_index = self.selected_camera;
-
-        // Avatar — imported model summary for display.
-        vm.avatar.imported_model = self.imported_model.as_ref().map(|m| ImportedModelSummary {
-            generation: m.summary.generation,
-            id: m.id.clone(),
-            name: m.name.clone(),
-            original_path: m.original_path.clone(),
-            has_required_bones: m.summary.humanoid_nodes.hips < 1000
-                && m.summary.humanoid_nodes.head < 1000,
-            expression_count: m.summary.expression_presets.len(),
-        });
-
-        // Avatar lifecycle — driven by the sync system, not by import state.
-        vm.avatar.lifecycle = self.lifecycle_state;
-        vm.avatar.is_ready = self.lifecycle_state == AvatarLifecycleState::Ready;
-        vm.avatar.load_failed = self.lifecycle_state == AvatarLifecycleState::Failed;
-
-        // License review — present only while an import waits for acceptance.
-        vm.avatar_import_review.review = self
-            .pending_avatar_import
-            .as_ref()
-            .map(|pending| pending.review.clone());
-        vm.avatar_import_review.accepted = self
-            .pending_avatar_import
-            .as_ref()
-            .is_some_and(|pending| pending.accepted);
-    }
-
     /// Get the last error, if any.
     #[must_use]
     pub fn last_error(&self) -> Option<&OrchestratorError> {
@@ -607,8 +526,7 @@ impl Orchestrator {
 
     /// Take the pending load request, if any.
     ///
-    /// The sync system calls this once per request to obtain the data needed
-    /// to construct a `LoadImportedAvatarRequest` message.
+    /// The file worker bridge drains this once to prepare the model and settings.
     pub fn take_pending_load_request(&mut self) -> Option<PendingLoadRequest> {
         self.pending_load.take()
     }
@@ -616,7 +534,7 @@ impl Orchestrator {
     /// Update the lifecycle state mirror.
     ///
     /// The sync system calls this after reading the `AvatarLifecycle` resource
-    /// so that `update_view_model` can report the true lifecycle state.
+    /// so that state decisions and the display projection use the true engine state.
     pub fn set_lifecycle_state(&mut self, state: AvatarLifecycleState) {
         self.lifecycle_state = state;
     }
@@ -732,54 +650,6 @@ impl Orchestrator {
         let requested = self.inference_retry_requested;
         self.inference_retry_requested = false;
         requested
-    }
-}
-
-/// Reads a file for review under the same size policy as `import_vrm`.
-fn read_reviewable_bytes(path: &Path) -> Result<Vec<u8>, VrmLicenseReviewError> {
-    let metadata = std::fs::metadata(path)?;
-    if metadata.len() > import::DEFAULT_SIZE_LIMIT {
-        return Err(VrmLicenseReviewError::SizeExceeded {
-            size: metadata.len(),
-            limit: import::DEFAULT_SIZE_LIMIT,
-        });
-    }
-    Ok(std::fs::read(path)?)
-}
-
-/// Format an import error for user display.
-fn format_import_error(error: &ModelImportError) -> String {
-    match error {
-        ModelImportError::InvalidExtension => "File must have .vrm extension".to_string(),
-        ModelImportError::NotRegularFile => "Not a regular file".to_string(),
-        ModelImportError::SizeExceeded { size, limit } => {
-            format!("File size ({size} bytes) exceeds limit ({limit} bytes)")
-        }
-        ModelImportError::NotVrm { reason } => {
-            format!("File is not a supported VRM model: {reason}")
-        }
-        ModelImportError::AmbiguousVrmVersion { reason } => {
-            format!("Model declares both VRM generations: {reason}")
-        }
-        ModelImportError::UnsupportedVersion(v) => format!("Unsupported VRM version: {v}"),
-        ModelImportError::DuplicateHumanBone(bone) => {
-            format!("Duplicate human bone declaration: {bone}")
-        }
-        ModelImportError::MissingRequiredBone(bone) => format!("Missing required bone: {bone}"),
-        ModelImportError::GlbParse(msg) => format!("Failed to parse model: {msg}"),
-        ModelImportError::ExternalUri(uri) => format!("External URI not allowed: {uri}"),
-        ModelImportError::InvalidNodeIndex { index } => {
-            format!("Invalid node index: {index}")
-        }
-        ModelImportError::InvalidMeshIndex { index } => format!("Invalid mesh index: {index}"),
-        ModelImportError::InvalidMorphTargetIndex { mesh, index } => {
-            format!("Invalid morph target index {index} for mesh {mesh}")
-        }
-        ModelImportError::InvalidVrmField { path, reason } => {
-            format!("Invalid VRM field {path}: {reason}")
-        }
-        ModelImportError::Io(e) => format!("I/O error: {e}"),
-        ModelImportError::LimitExceedsHardCap { .. } => "Configuration error".to_string(),
     }
 }
 

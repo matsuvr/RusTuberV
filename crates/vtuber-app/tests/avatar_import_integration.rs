@@ -37,7 +37,7 @@ fn sync_system_maps_no_avatar_to_none() {
 
     let orch = app.world().resource::<Orchestrator>();
     let mut vm = vtuber_app::ui_model::UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(orch);
     assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::None);
     assert!(!vm.avatar.is_ready);
     assert!(!vm.avatar.load_failed);
@@ -58,7 +58,7 @@ fn sync_system_maps_loading_state() {
 
     let orch = app.world().resource::<Orchestrator>();
     let mut vm = vtuber_app::ui_model::UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(orch);
     assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::Loading);
     assert!(!vm.avatar.is_ready);
 }
@@ -80,7 +80,7 @@ fn sync_system_maps_ready_state() {
 
     let orch = app.world().resource::<Orchestrator>();
     let mut vm = vtuber_app::ui_model::UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(orch);
     assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::Ready);
     assert!(vm.avatar.is_ready);
     assert!(!vm.avatar.load_failed);
@@ -106,7 +106,7 @@ fn sync_system_maps_failed_state() {
 
     let orch = app.world().resource::<Orchestrator>();
     let mut vm = vtuber_app::ui_model::UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(orch);
     assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::Failed);
     assert!(!vm.avatar.is_ready);
     assert!(vm.avatar.load_failed);
@@ -155,7 +155,7 @@ fn orchestrator_pending_load_is_none_by_default() {
 fn orchestrator_lifecycle_state_starts_at_none() {
     let orch = Orchestrator::default();
     let mut vm = vtuber_app::ui_model::UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
     assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::None);
     assert!(!vm.avatar.is_ready);
 }

@@ -1,15 +1,26 @@
 //! Application pipeline wiring: worker ownership, system ordering, and shutdown.
 //!
-//! Called by `UiShellPlugin` after its shared resources exist. The face and Pose
+//! Installed by `AppRuntimePlugin`, independently of the UI shell. The face and Pose
 //! workers share the capture source; shutdown stops consumers before capture.
 
+use crate::actions::ActionQueue;
+#[cfg(not(feature = "dev-synthetic-input"))]
+use crate::avatar_bridge::publish_control_frame_system;
+use crate::avatar_bridge::sync_avatar_diagnostics;
+use crate::avatar_io::{AvatarIoRuntime, prepare_avatar_io_system};
+use crate::expression_keys::ExpressionBindingStore;
+use crate::metrics_export::MetricsExportState;
+use crate::ndi_output::NdiOutputIntent;
+use crate::preview::PreviewState;
+use crate::preview_landmarks::PreviewLandmarkState;
+use crate::ui_model::UiViewModel;
 use bevy::prelude::*;
+use vtuber_avatar::AvatarMotionMirror;
 use vtuber_avatar::AvatarOutputState;
 
 use crate::capture_runtime::{
     CaptureRuntime, LatestVideoFrame, capture_bridge_system, default_camera_backend,
-    read_latest_frame, register_preview_texture_system, sync_capture_diagnostics,
-    update_preview_texture_system,
+    read_latest_frame, sync_capture_diagnostics,
 };
 use crate::diagnostics::{DiagnosticsSnapshot, sync_engine_diagnostics};
 use crate::error_presenter::ErrorPresenter;
@@ -34,6 +45,52 @@ use crate::settings::{
 };
 use crate::tracking_runtime::{TrackingRuntime, tracking_bridge_system};
 
+/// Installs application resources, worker bridges and their execution order.
+/// Add the avatar plugin first; this plugin can run without the UI shell.
+pub struct AppRuntimePlugin;
+
+impl Plugin for AppRuntimePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ActionQueue>()
+            .init_resource::<Orchestrator>()
+            .init_resource::<AppSettings>()
+            .init_resource::<UiViewModel>()
+            .init_resource::<ExpressionBindingStore>()
+            .insert_resource(PreviewState {
+                visible: false,
+                ..Default::default()
+            })
+            .init_resource::<PreviewLandmarkState>()
+            .init_resource::<NdiOutputIntent>()
+            .init_resource::<NdiOutputRuntime>()
+            .init_resource::<AvatarMotionMirror>()
+            .init_resource::<DiagnosticsSnapshot>()
+            .init_resource::<MetricsExportState>()
+            .init_resource::<ErrorPresenter>()
+            .init_resource::<AvatarIoRuntime>();
+        configure_pipeline(app);
+        #[cfg(not(feature = "dev-synthetic-input"))]
+        app.add_systems(
+            Update,
+            publish_control_frame_system.after(tracking_bridge_system),
+        )
+        .add_systems(
+            Update,
+            sync_avatar_diagnostics.after(publish_control_frame_system),
+        );
+        #[cfg(feature = "dev-synthetic-input")]
+        app.insert_resource(crate::synthetic_tracking::SyntheticTrackingSource::default())
+            .add_systems(
+                Update,
+                crate::synthetic_tracking::synthetic_tracking_system.after(tracking_bridge_system),
+            )
+            .add_systems(
+                Update,
+                sync_avatar_diagnostics.after(crate::synthetic_tracking::synthetic_tracking_system),
+            );
+    }
+}
+
 pub(crate) fn configure_pipeline(app: &mut App) {
     let project_root = app
         .world()
@@ -56,6 +113,7 @@ pub(crate) fn configure_pipeline(app: &mut App) {
             // Look-change messages written by the action processing must
             // reach the avatar side in the same frame.
             process_ui_actions_system.before(vtuber_avatar::look::apply_look_settings_changes),
+            prepare_avatar_io_system,
             sync_avatar_lifecycle_system
                 .after(vtuber_avatar::unload::despawn_unloading_avatar)
                 .before(vtuber_avatar::look::apply_look_settings_changes),
@@ -97,8 +155,6 @@ pub(crate) fn configure_pipeline(app: &mut App) {
         (
             capture_bridge_system,
             read_latest_frame,
-            update_preview_texture_system,
-            register_preview_texture_system,
             sync_capture_diagnostics,
         )
             .chain(),

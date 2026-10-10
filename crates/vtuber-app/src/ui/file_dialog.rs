@@ -1,6 +1,6 @@
 //! Async file dialog handling for VRM import.
 
-use crate::actions::UiAction;
+use crate::actions::{ActionQueue, UiAction};
 use crate::settings::UiLanguage;
 use bevy::prelude::*;
 use std::path::PathBuf;
@@ -79,21 +79,32 @@ impl FileDialogState {
 }
 
 /// Poll the dialog and request a license review for the selection.
-pub fn poll_file_dialog(state: &mut FileDialogState, ui_state: &mut super::UiState) {
+pub fn poll_file_dialog(
+    actions: &mut ActionQueue,
+    state: &mut FileDialogState,
+    ui_state: &mut super::UiState,
+) {
     if let Some(Some(path)) = state.take_result() {
-        ui_state.emit(UiAction::RequestAvatarImportReview { path });
+        ui_state.emit(actions, UiAction::RequestAvatarImportReview { path });
     }
 }
 
 /// Accept the first dropped VRM file as a license review request.
-pub fn handle_dropped_files(ctx: &bevy_egui::egui::Context, ui_state: &mut super::UiState) {
+pub fn handle_dropped_files(
+    actions: &mut ActionQueue,
+    ctx: &bevy_egui::egui::Context,
+    ui_state: &mut super::UiState,
+) {
     for event in ctx.input(|input| input.raw.dropped_files.clone()) {
         if let Some(path) = event.path {
             let path_buf = PathBuf::from(&path);
             if let Some(ext) = path_buf.extension()
                 && ext.to_string_lossy().to_lowercase() == "vrm"
             {
-                ui_state.emit(UiAction::RequestAvatarImportReview { path: path_buf });
+                ui_state.emit(
+                    actions,
+                    UiAction::RequestAvatarImportReview { path: path_buf },
+                );
                 break;
             }
         }
