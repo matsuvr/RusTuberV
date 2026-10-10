@@ -26,16 +26,18 @@ as CC0. See [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
 Only converted hand-local joint angles are included. The original Unity package,
 animation clips, models, and textures are not redistributed.
 
-## bevy_vrm1 (temporary transparency patch)
+## bevy_vrm1 (temporary Bevy 0.20 runtime port)
 
 The VRM runtime is based on [not-elm/bevy_vrm1](https://github.com/not-elm/bevy_vrm1)
-tag `v0.9.3` (commit `bf0ec103970fdf9091134fe0f208cf3590031c80`,
-Bevy 0.19 support), licensed under MIT OR Apache-2.0. The temporary Cargo
-patch uses [matsuvr/bevy_vrm1](https://github.com/matsuvr/bevy_vrm1) commit
-`6ee2f610d6c95b542a3317028da10aba26c9e8de`. Its only difference from
-the tag is a BLEND transparent-fragment discard in `mtoon_fragment.wgsl`,
-proposed upstream in [PR #68](https://github.com/not-elm/bevy_vrm1/pull/68).
-There is no vendored copy of this crate.
+tag `v0.10.0` (commit `671b71fca7c24f905f71d1be7698a350da262f0e`),
+licensed under MIT OR Apache-2.0. The Cargo patch uses
+[matsuvr/bevy_vrm1](https://github.com/matsuvr/bevy_vrm1) commit
+`8859632571f852b2dbdc0221b7d6226b7b7824ba`, which ports the runtime to
+Bevy 0.20: WESL modules, vertex decompression and morph descriptor indexing,
+outline depth-stencil views, and lifecycle observer syntax.
+The transparency discard fix (upstream PR #68) and final expression weights
+(upstream PR #70) are already included in v0.10.0. There is no vendored copy
+of this crate in this repository.
 
 The VRM 0.x import-time normalization, the direct-pose / direct-gaze input
 components and writers, and the expression bind-status records in
@@ -44,15 +46,15 @@ ported from the retired `vendor/bevy_vrm1` patch so the upstream runtime's
 other behavior can stay untouched. They carry no separate upstream license beyond
 the MIT terms of this application.
 
-`crates/vtuber-avatar/src/look/mtoon_rich.wgsl` and
-`crates/vtuber-avatar/src/look/mtoon_rich_vertex.wgsl` copy the MToon base
-fragment/vertex WGSL from the pinned fork commit (the vertex code is unchanged
-from upstream `v0.9.3`) so the Rich material can extend the corrected Native
-result without modifying the dependency's shader assets. The copies
-keep the upstream MIT OR Apache-2.0 terms; the app-side added terms are this
-repository's MIT code.
+`crates/vtuber-avatar/src/look/mtoon_rich.wesl` imports the Native MToon
+fragment helpers from the patched dependency instead of copying that base.
+The app-side added terms remain this repository's MIT code.
+`crates/vtuber-avatar/src/look/mtoon_rich_vertex.wesl` adapts the MToon
+vertex path from bevy_vrm1 v0.10.0 and Bevy 0.20's mesh vertex path; it keeps
+the upstream MIT OR Apache-2.0 terms. The shared UV arithmetic in
+`mtoon_uv.wesl` is retained from the MToon implementation under those terms.
 
-`crates/vtuber-avatar/src/look/standard_rich.wgsl` copies the Bevy 0.19.0
+`crates/vtuber-avatar/src/look/standard_rich.wesl` adapts the Bevy 0.20.0
 `bevy_pbr` Standard fragment path so the app can add a narrow Rich term to the
 unchanged PBR result. It keeps Bevy's MIT OR Apache-2.0 terms; the app-side
 additive rim is this repository's MIT code.
@@ -91,10 +93,11 @@ SDK runtime remains a separately governed distribution component.
 
 ## bevy_window (monitor disconnect lifetime)
 
-`vendor/bevy_window` contains bevy_window 0.19.0 from crates.io, licensed
-under MIT OR Apache-2.0. Both license texts are retained. Its monitor-to-window
-relationship no longer despawns windows when a display disconnects or sleeps;
-see `vendor/bevy_window/PATCHES.md` for the patch and regression test.
+`vendor/bevy_window` contains the local bevy_window port to Bevy 0.20.0,
+licensed under MIT OR Apache-2.0. Both license texts are retained. Its
+monitor-to-window relationship does not despawn windows when a display
+disconnects or sleeps; see `vendor/bevy_window/PATCHES.md` for the upstream
+source provenance, retained differences and existing regression test.
 
 ## nokhwa (bounded macOS frame reads)
 

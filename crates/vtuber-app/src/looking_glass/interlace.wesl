@@ -1,4 +1,4 @@
-#import bevy_sprite::mesh2d_vertex_output::VertexOutput
+import bevy_sprite_render::mesh2d::vertex_output::VertexOutput;
 
 struct Calibration {
     optics: vec4<f32>, // normalized pitch, tilt, center, RGB-stripe increment
@@ -6,10 +6,10 @@ struct Calibration {
     grid: vec4<u32>,   // columns, rows, tile width, tile height
     flags: vec4<u32>,  // cell count, pattern, inverted views, flips | quilt preview
 }
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> calibration: Calibration;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var quilt: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var quilt_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> cells: array<vec4<f32>>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> calibration: Calibration;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var quilt: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var quilt_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var<storage, read> cells: array<vec4<f32>>;
 
 fn cell_at(pixel: vec2<u32>) -> u32 {
     var cell = 0u;

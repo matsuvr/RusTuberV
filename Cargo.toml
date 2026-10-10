@@ -23,10 +23,10 @@ authors = ["RusTuberV contributors"]
 repository = "https://github.com/matsuvr/RusTuberV"
 
 [workspace.dependencies]
-bevy = "=0.19.0"
-bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", tag = "v0.9.3" }
+bevy = "=0.20.0"
+bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", tag = "v0.10.0" }
 mediapipe = { git = "https://github.com/nikicat/mediapipe-rs", rev = "527037fa0fe1339750140283930bbb9560460e9e", version = "=0.1.0" }
-bevy_egui = { version = "=0.41.1", default-features = false, features = ["default_fonts", "render", "open_url"] }
+bevy_egui = { version = "=0.43.1", default-features = false, features = ["default_fonts", "render", "open_url"] }
 rfd = { version = "=0.17.2", default-features = false }
 
 # ADR-009 fixes mediapipe-rs at this revision. It is vendored under
@@ -41,10 +41,10 @@ mediapipe = { path = "vendor/mediapipe-rs" }
 nokhwa = { path = "vendor/nokhwa" }
 bevy_window = { path = "vendor/bevy_window" }
 
-# Temporary upstream-bound fixes: MToon transparency (#94) and published
-# expression weights (#212). Remove when both APIs/fixes are available upstream.
+# Bevy 0.20/WESL runtime port of upstream v0.10.0. The transparency fix and
+# effective expression weights are now upstream; only the engine port is local.
 [patch."https://github.com/not-elm/bevy_vrm1"]
-bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "be60f99d35c4d786b0d17c93aef07e60aa31f34d" }
+bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "8859632571f852b2dbdc0221b7d6226b7b7824ba" }
 
 # Keep dev and test artifacts small. The test profile inherits dev settings.
 # This removes debugger symbols and incremental build caches;
