@@ -44,26 +44,31 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     if (flags & 1u) != 0u { image_uv.x = 1.0 - image_uv.x; }
     if (flags & 2u) != 0u { image_uv.y = 1.0 - image_uv.y; }
     let count = calibration.grid.x * calibration.grid.y;
-    var result = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    for (var channel = 0u; channel < 3u; channel += 1u) {
-        var subpixel = channel;
-        if (flags & 4u) != 0u { subpixel = 2u - channel; }
-        var offset = vec2<f32>(f32(subpixel) * calibration.optics.w, 0.0);
-        if calibration.flags.x != 0u {
-            let cell = cell_at(vec2<u32>(floor(screen_uv * calibration.screen.xy)));
-            let rg = cells[2u * cell];
-            switch subpixel {
-                case 0u: { offset = rg.xy; }
-                case 1u: { offset = rg.zw; }
-                default: { offset = cells[2u * cell + 1u].xy; }
-            }
-        }
-        let position = screen_uv + offset;
-        var phase = fract((position.x + position.y * calibration.optics.y) * calibration.optics.x - calibration.optics.z);
-        if calibration.flags.z != 0u { phase = 1.0 - phase; }
-        let view = min(u32(floor(phase * f32(count))), count - 1u);
-        let color = textureSampleLevel(quilt, quilt_sampler, quilt_uv(view, image_uv), 0.0);
-        result[channel] = color[channel];
+    // Compute the screen-space lens phase once per output pixel. Only the
+    // subpixel offset differs between R/G/B; all three channels share the
+    // same base phase, quilt coordinates and output orientation.
+    let pitch = calibration.optics.x;
+    let tilt = calibration.optics.y;
+    let base_phase = (screen_uv.x + screen_uv.y * tilt) * pitch - calibration.optics.z;
+    var offsets = vec3<f32>(0.0, calibration.optics.w, 2.0 * calibration.optics.w);
+    if calibration.flags.x != 0u {
+        // Cell-pattern lookup and storage-buffer reads happen once per pixel,
+        // rather than once for each color channel.
+        let cell = cell_at(vec2<u32>(floor(screen_uv * calibration.screen.xy)));
+        let rg = cells[2u * cell];
+        let b = cells[2u * cell + 1u];
+        offsets = vec3<f32>(
+            rg.x + rg.y * tilt,
+            rg.z + rg.w * tilt,
+            b.x + b.y * tilt
+        );
     }
-    return result;
+    if (flags & 4u) != 0u { offsets = offsets.zyx; }
+    var phases = fract(vec3<f32>(base_phase) + offsets * pitch);
+    if calibration.flags.z != 0u { phases = vec3<f32>(1.0) - phases; }
+    let views = min(vec3<u32>(floor(phases * f32(count))), vec3<u32>(count - 1u));
+    let red = textureSampleLevel(quilt, quilt_sampler, quilt_uv(views.x, image_uv), 0.0).r;
+    let green = textureSampleLevel(quilt, quilt_sampler, quilt_uv(views.y, image_uv), 0.0).g;
+    let blue = textureSampleLevel(quilt, quilt_sampler, quilt_uv(views.z, image_uv), 0.0).b;
+    return vec4<f32>(red, green, blue, 1.0);
 }
