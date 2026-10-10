@@ -103,7 +103,8 @@ on three CPU cores with this output disabled.
 
 ## Verification
 
-Review verification on 2026-10-10:
+Review verification on 2026-10-10 (Bevy 0.19, before the 0.20 migration;
+these results do not verify the migrated build):
 
 - Rust tests cover argument opt-in, absent calibration, lens normalization, cell
   normalization, quilt order, focus-plane invariance, front/back disparity,

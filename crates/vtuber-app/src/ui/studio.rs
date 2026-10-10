@@ -615,6 +615,9 @@ pub(crate) fn render_studio(
             egui::Panel::right("studio_monitor")
                 .exact_size(panel)
                 .resizable(false)
+                // egui 0.36 reserves an outer pixel for the separator; the
+                // custom monitor frame already defines its exact padding.
+                .show_separator_line(false)
                 .frame(panel_frame(250))
                 .show(ui, |ui| {
                     if let Some(rect) = avatar_monitor(
