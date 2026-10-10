@@ -139,7 +139,12 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
                     exit_condition: ExitCondition::DontExit,
                     ..default()
                 })
-                .set(RenderPlugin { ..default() })
+                // Pixel comparisons need every native material pipeline in
+                // the initial frame, including the slower Standard variants.
+                .set(RenderPlugin {
+                    synchronous_pipeline_compilation: true,
+                    ..default()
+                })
                 .disable::<PipelinedRenderingPlugin>()
                 .disable::<bevy::log::LogPlugin>()
                 .disable::<bevy::winit::WinitPlugin>(),
