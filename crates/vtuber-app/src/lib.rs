@@ -69,6 +69,9 @@ pub mod orchestrator;
 /// Optional NDI output orchestration and UI snapshot bridge.
 pub mod ndi_output;
 
+/// Optional pure-Rust Looking Glass multiview output.
+pub mod looking_glass;
+
 /// User-owned persistent settings, including per-model arm-pose overrides.
 pub mod settings;
 
