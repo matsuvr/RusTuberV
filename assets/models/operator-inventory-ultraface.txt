@@ -295,7 +295,7 @@ operator_count=452
 290	325	AddDims { axes: [0] }
 291	326	AddDims { axes: [0] }
 292	327	Concat { axis: 0 }
-293	328	Reshape
+293	328	Reshape { allowzero: false }
 294	329	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([3, 3]), padding: Explicit([1, 1], [1, 1]), strides: Some([1, 1]), group: Some(64), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
 295	330	Clip(Some(0.0), None)
 296	331	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([1, 1]), padding: Explicit([0, 0], [0, 0]), strides: Some([1, 1]), group: Some(1), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
@@ -309,7 +309,7 @@ operator_count=452
 304	339	AddDims { axes: [0] }
 305	340	AddDims { axes: [0] }
 306	341	Concat { axis: 0 }
-307	342	Reshape
+307	342	Reshape { allowzero: false }
 308	343	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([3, 3]), padding: Explicit([1, 1], [1, 1]), strides: Some([2, 2]), group: Some(64), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: None, override_output_datum_type: None }
 309	344	BatchNorm { data_format: NCHW, epsilon: 1e-5, spatial: true }
 310	345	Clip(Some(0.0), None)
@@ -341,7 +341,7 @@ operator_count=452
 336	371	AddDims { axes: [0] }
 337	372	AddDims { axes: [0] }
 338	373	Concat { axis: 0 }
-339	374	Reshape
+339	374	Reshape { allowzero: false }
 340	375	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([3, 3]), padding: Explicit([1, 1], [1, 1]), strides: Some([1, 1]), group: Some(128), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
 341	376	Clip(Some(0.0), None)
 342	377	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([1, 1]), padding: Explicit([0, 0], [0, 0]), strides: Some([1, 1]), group: Some(1), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
@@ -355,7 +355,7 @@ operator_count=452
 350	385	AddDims { axes: [0] }
 351	386	AddDims { axes: [0] }
 352	387	Concat { axis: 0 }
-353	388	Reshape
+353	388	Reshape { allowzero: false }
 354	389	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([3, 3]), padding: Explicit([1, 1], [1, 1]), strides: Some([2, 2]), group: Some(128), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: None, override_output_datum_type: None }
 355	390	BatchNorm { data_format: NCHW, epsilon: 1e-5, spatial: true }
 356	391	Clip(Some(0.0), None)
@@ -381,7 +381,7 @@ operator_count=452
 376	411	AddDims { axes: [0] }
 377	412	AddDims { axes: [0] }
 378	413	Concat { axis: 0 }
-379	414	Reshape
+379	414	Reshape { allowzero: false }
 380	415	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([3, 3]), padding: Explicit([1, 1], [1, 1]), strides: Some([1, 1]), group: Some(256), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
 381	416	Clip(Some(0.0), None)
 382	417	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([1, 1]), padding: Explicit([0, 0], [0, 0]), strides: Some([1, 1]), group: Some(1), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
@@ -395,7 +395,7 @@ operator_count=452
 390	425	AddDims { axes: [0] }
 391	426	AddDims { axes: [0] }
 392	427	Concat { axis: 0 }
-393	428	Reshape
+393	428	Reshape { allowzero: false }
 394	429	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([1, 1]), padding: Explicit([0, 0], [0, 0]), strides: Some([1, 1]), group: Some(1), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
 395	430	Clip(Some(0.0), None)
 396	431	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([3, 3]), padding: Explicit([1, 1], [1, 1]), strides: Some([2, 2]), group: Some(64), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
@@ -413,7 +413,7 @@ operator_count=452
 408	443	AddDims { axes: [0] }
 409	444	AddDims { axes: [0] }
 410	445	Concat { axis: 0 }
-411	446	Reshape
+411	446	Reshape { allowzero: false }
 412	447	Conv { data_format: NCHW, kernel_fmt: OIHW, dilations: Some([1, 1]), kernel_shape: Some([3, 3]), padding: Explicit([1, 1], [1, 1]), strides: Some([1, 1]), group: Some(1), x_scale_input: None, x_zero_point_input: None, k_input: None, k_scale_input: None, k_zero_point_input: None, y_scale_input: None, y_zero_point_input: None, bias_input: Some(2), override_output_datum_type: None }
 413	448	PermuteAxes { axes: Some([0, 2, 3, 1]) }
 414	449	Const(,I64 0, None)
@@ -425,7 +425,7 @@ operator_count=452
 420	455	AddDims { axes: [0] }
 421	456	AddDims { axes: [0] }
 422	457	Concat { axis: 0 }
-423	458	Reshape
+423	458	Reshape { allowzero: false }
 424	459	Concat { axis: 1 }
 425	460	Concat { axis: 1 }
 426	scores	LayerSoftmax { axis: 2, coerce_to_2d: true }
