@@ -28,12 +28,12 @@ fn smoke_ui_action_flow() {
         id: "test:0".into(),
         label: "Test camera".into(),
     }]);
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
     assert!(!vm.camera.available_cameras.is_empty());
 
     // 2. Select camera.
     orch.process_action(&UiAction::SelectCamera { index: 0 });
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
     assert_eq!(vm.camera.selected_index, Some(0));
 
     // 3. Camera selection waits quietly for an avatar.
@@ -53,7 +53,7 @@ fn smoke_view_model_reflects_state() {
     let mut vm = UiViewModel::default();
 
     // Initial state.
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
     assert_eq!(vm.lifecycle, AppLifecycle::Idle);
     assert!(vm.camera.available_cameras.is_empty());
     assert!(vm.camera.selected_index.is_none());
@@ -65,7 +65,7 @@ fn smoke_view_model_reflects_state() {
         label: "Test camera".into(),
     }]);
     orch.process_action(&UiAction::SelectCamera { index: 0 });
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
     assert!(!vm.camera.available_cameras.is_empty());
     assert_eq!(vm.camera.selected_index, Some(0));
 }

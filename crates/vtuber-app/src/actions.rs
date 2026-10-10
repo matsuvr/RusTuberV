@@ -8,6 +8,38 @@ use std::path::PathBuf;
 
 use vtuber_avatar::ArmPoseProfileOverride;
 
+/// Application-owned command queue shared by UI producers and the dispatcher.
+#[derive(bevy::prelude::Resource, Debug, Default)]
+pub struct ActionQueue {
+    pub(crate) pending_actions: Vec<UiAction>,
+}
+
+impl ActionQueue {
+    /// Enqueues an action, coalescing repeated one-shot UI commands.
+    pub fn emit(&mut self, action: UiAction) {
+        if matches!(
+            action,
+            UiAction::SwitchPane(_)
+                | UiAction::ToggleMirror
+                | UiAction::TogglePreview
+                | UiAction::ToggleAvatarMotionMirror
+                | UiAction::SetLanguage(_)
+                | UiAction::DismissError
+                | UiAction::StartNdiOutput
+                | UiAction::StopNdiOutput
+        ) && self.pending_actions.contains(&action)
+        {
+            return;
+        }
+        self.pending_actions.push(action);
+    }
+
+    /// Drains the commands accumulated since the previous update.
+    pub fn take_actions(&mut self) -> Vec<UiAction> {
+        std::mem::take(&mut self.pending_actions)
+    }
+}
+
 /// Model identity and avatar instance displayed when an edit was issued.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelActionTarget {

@@ -1,6 +1,8 @@
 //! UI view models — immutable snapshots for rendering the UI.
 //! These types hide Bevy queries from the UI, which emits UiAction commands.
 
+use crate::orchestrator::PipelineState;
+
 use crate::expression_keys::ExpressionKey;
 use crate::import::VrmGeneration;
 use crate::license_review::VrmLicenseReview;
@@ -337,6 +339,147 @@ impl UiViewModel {
             self.ndi_output.state,
             NdiOutputUiState::Starting | NdiOutputUiState::Live
         )
+    }
+}
+
+impl UiViewModel {
+    /// Update the UI view model from current orchestrator state.
+    ///
+    /// The avatar `lifecycle` and `is_ready` fields are driven by the
+    /// lifecycle mirror maintained by the sync system, not by the presence of
+    /// an imported model. A model becomes ready only after the `bevy_vrm1`
+    /// asset has initialized and humanoid binding has completed.
+    pub fn update_from_orchestrator(&mut self, source: &crate::orchestrator::Orchestrator) {
+        // The view model is rebuilt only when an input to it actually changed;
+        // rebuilding it every frame clones strings and path buffers for the
+        // camera list and imported-model summary even in the steady state.
+        if !self.view_model_source_unchanged(source) {
+            self.rebuild_view_model(source);
+        }
+    }
+
+    /// Returns `true` when this snapshot already reflects every source value
+    /// consumed by [`Self::rebuild_view_model`].
+    fn view_model_source_unchanged(&self, source: &crate::orchestrator::Orchestrator) -> bool {
+        let lifecycle = match source.pipeline_state {
+            PipelineState::Idle => AppLifecycle::Idle,
+            PipelineState::Starting => AppLifecycle::Starting,
+            PipelineState::Running => AppLifecycle::Running,
+            PipelineState::Stopping => AppLifecycle::Stopping,
+            PipelineState::Failed => AppLifecycle::Failed,
+        };
+        if self.lifecycle != lifecycle {
+            return false;
+        }
+        if self.camera.selected_index != source.selected_camera
+            || self.camera.available_cameras.len() != source.cameras.len()
+        {
+            return false;
+        }
+        for (i, camera) in source.cameras.iter().enumerate() {
+            match self.camera.available_cameras.get(i) {
+                Some(descriptor) if descriptor.name == camera.label => {}
+                _ => return false,
+            }
+        }
+        match (&self.avatar.imported_model, &source.imported_model) {
+            (None, None) => {}
+            (Some(summary), model) => match model {
+                Some(model) => {
+                    let has_required_bones = model.summary.humanoid_nodes.hips < 1000
+                        && model.summary.humanoid_nodes.head < 1000;
+                    if summary.generation != model.summary.generation
+                        || summary.id != model.id
+                        || summary.name != model.name
+                        || summary.original_path != model.original_path
+                        || summary.has_required_bones != has_required_bones
+                        || summary.expression_count != model.summary.expression_presets.len()
+                    {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+            (None, Some(_)) => return false,
+        }
+        let pending_import = source.pending_avatar_import.as_ref();
+        if self.avatar_import_review.review.as_ref()
+            != pending_import.map(|pending| &pending.review)
+            || self.avatar_import_review.accepted
+                != pending_import.is_some_and(|pending| pending.accepted)
+        {
+            return false;
+        }
+        self.avatar.lifecycle == map_avatar_lifecycle_state(source.lifecycle_state)
+    }
+
+    /// Rebuilds every view-model field from current orchestrator state.
+    fn rebuild_view_model(&mut self, source: &crate::orchestrator::Orchestrator) {
+        // Lifecycle.
+        self.lifecycle = match source.pipeline_state {
+            PipelineState::Idle => AppLifecycle::Idle,
+            PipelineState::Starting => AppLifecycle::Starting,
+            PipelineState::Running => AppLifecycle::Running,
+            PipelineState::Stopping => AppLifecycle::Stopping,
+            PipelineState::Failed => AppLifecycle::Failed,
+        };
+
+        // Camera — convert from vtuber_camera descriptors to UI model descriptors.
+        self.camera.available_cameras = source
+            .cameras
+            .iter()
+            .enumerate()
+            .map(|(i, c)| crate::ui_model::CameraDescriptor {
+                name: c.label.clone(),
+                index: i,
+            })
+            .collect();
+        self.camera.selected_index = source.selected_camera;
+
+        // Avatar — imported model summary for display.
+        self.avatar.imported_model = source
+            .imported_model
+            .as_ref()
+            .map(|m| ImportedModelSummary {
+                generation: m.summary.generation,
+                id: m.id.clone(),
+                name: m.name.clone(),
+                original_path: m.original_path.clone(),
+                has_required_bones: m.summary.humanoid_nodes.hips < 1000
+                    && m.summary.humanoid_nodes.head < 1000,
+                expression_count: m.summary.expression_presets.len(),
+            });
+
+        // Avatar lifecycle — driven by the sync system, not by import state.
+        self.avatar.lifecycle = map_avatar_lifecycle_state(source.lifecycle_state);
+        self.avatar.is_ready = source.lifecycle_state == vtuber_avatar::AvatarLifecycleState::Ready;
+        self.avatar.load_failed =
+            source.lifecycle_state == vtuber_avatar::AvatarLifecycleState::Failed;
+
+        // License review — present only while an import waits for acceptance.
+        self.avatar_import_review.review = source
+            .pending_avatar_import
+            .as_ref()
+            .map(|pending| pending.review.clone());
+        self.avatar_import_review.accepted = source
+            .pending_avatar_import
+            .as_ref()
+            .is_some_and(|pending| pending.accepted);
+    }
+}
+
+/// Converts the avatar lifecycle's internal state to the UI model's state.
+pub(crate) fn map_avatar_lifecycle_state(
+    state: vtuber_avatar::lifecycle::AvatarLifecycleState,
+) -> AvatarLifecycleState {
+    use vtuber_avatar::lifecycle::AvatarLifecycleState as Engine;
+    match state {
+        Engine::NoAvatar => AvatarLifecycleState::None,
+        Engine::Loading => AvatarLifecycleState::Loading,
+        Engine::Binding => AvatarLifecycleState::Binding,
+        Engine::Ready => AvatarLifecycleState::Ready,
+        Engine::Unloading => AvatarLifecycleState::Unloading,
+        Engine::Failed => AvatarLifecycleState::Failed,
     }
 }
 

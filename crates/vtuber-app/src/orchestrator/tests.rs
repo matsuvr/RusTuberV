@@ -4,13 +4,16 @@
     clippy::panic,
     clippy::indexing_slicing
 )] // tests may panic (AGENTS.md)
-use super::lifecycle::{current_model_target, map_avatar_lifecycle_state};
+use super::lifecycle::current_model_target;
 use super::*;
+use crate::actions::ActionQueue;
+use crate::avatar_io::{AvatarIoRuntime, format_import_error, prepare_avatar_io_system};
 use crate::expression_keys::{ExpressionBindingStore, ExpressionBindings, ExpressionKey};
+use crate::import::{self, ModelImportError};
 use crate::ndi_output::NdiOutputIntent;
 use crate::preview::PreviewState;
 use crate::settings::AppSettings;
-use crate::ui::UiState;
+use crate::ui_model::{UiViewModel, map_avatar_lifecycle_state};
 use bevy::prelude::*;
 use vtuber_avatar::{
     ArmPoseOverrideStore, ArmPoseProfileChange, ArmPoseProfileOverride, AvatarAssetId,
@@ -20,12 +23,13 @@ use vtuber_avatar::{
 fn rich_look_app(path: &std::path::Path) -> App {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()
         .init_resource::<NdiOutputIntent>()
         .init_resource::<AvatarLifecycle>()
+        .init_resource::<AvatarIoRuntime>()
         .init_resource::<vtuber_avatar::AvatarLookSettings>()
         .init_resource::<Assets<StandardMaterial>>()
         .init_resource::<Assets<bevy_vrm1::prelude::MToonMaterial>>()
@@ -38,6 +42,7 @@ fn rich_look_app(path: &std::path::Path) -> App {
             Update,
             (
                 process_ui_actions_system,
+                prepare_avatar_io_system,
                 sync_avatar_lifecycle_system,
                 vtuber_avatar::look::apply_look_settings_changes,
             )
@@ -65,11 +70,26 @@ fn rich_look_app(path: &std::path::Path) -> App {
 }
 
 fn select_look_model(app: &mut App, suffix: char) {
-    let model = stub_imported_model_with_id(&format!("sha256:{}", suffix.to_string().repeat(64)));
+    let directory = tempfile::tempdir().unwrap();
+    let mut model =
+        stub_imported_model_with_id(&format!("sha256:{}", suffix.to_string().repeat(64)));
+    model.asset_path = write_review_fixture(&directory);
     app.world_mut()
         .resource_mut::<Orchestrator>()
         .queue_imported_model(model);
-    app.update(); // submit; the caller's next update receives acceptance/rejection.
+    wait_for_avatar_preparation(app); // submitted; next update receives acceptance/rejection.
+}
+
+fn wait_for_avatar_preparation(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.world().resource::<Orchestrator>().import_state() == &ImportState::InProgress {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "avatar preparation timed out"
+        );
+        app.update();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 fn model_action_target(app: &App) -> crate::actions::ModelActionTarget {
@@ -96,7 +116,7 @@ fn save_look(app: &mut App) {
 }
 
 fn look_action(app: &mut App, action: UiAction) {
-    app.world_mut().resource_mut::<UiState>().emit(action);
+    app.world_mut().resource_mut::<ActionQueue>().emit(action);
     app.update();
 }
 
@@ -281,8 +301,7 @@ fn import_look_model(app: &mut App, model: &ImportedModel) {
     app.world_mut()
         .resource_mut::<Orchestrator>()
         .import_avatar(&model.original_path);
-    // First update submits; second runs the real handler and consumes its result.
-    app.update();
+    wait_for_avatar_preparation(app);
     app.update();
 }
 
@@ -373,12 +392,10 @@ fn rejected_switch_keeps_model(binding: bool) {
     let request_id = app
         .world()
         .resource::<Orchestrator>()
-        .pending_load
-        .as_ref()
-        .unwrap()
-        .request_id;
+        .active_request_id
+        .unwrap();
     assert_model_look(&app, &a, a_look);
-    app.update(); // prepared and submitted, but not accepted
+    wait_for_avatar_preparation(&mut app); // prepared and submitted, but not accepted
     assert_model_look(&app, &a, a_look);
     app.update(); // production rejection and result handling
     assert_model_look(&app, &a, a_look);
@@ -479,7 +496,7 @@ fn rich_lifecycle_accepted_switch_restores_and_saves_new_model() {
         .resource_mut::<Orchestrator>()
         .import_avatar(&b.original_path);
     assert_model_look(&app, &a, a_look);
-    app.update();
+    wait_for_avatar_preparation(&mut app);
     assert_model_look(&app, &a, a_look);
     app.update();
     finish_look_model(&mut app);
@@ -506,17 +523,18 @@ fn orchestrator_default_state() {
 fn preview_actions_update_preview_state_and_view_model() {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()
         .add_systems(Update, process_ui_actions_system);
 
     {
-        let mut ui_state = app.world_mut().resource_mut::<UiState>();
-        ui_state.emit(UiAction::TogglePreview);
-        ui_state.emit(UiAction::ToggleMirror);
-        ui_state.emit(UiAction::ToggleAvatarMotionMirror);
+        let mut actions = app.world_mut().resource_mut::<ActionQueue>();
+        actions.emit(UiAction::TogglePreview);
+        actions.emit(UiAction::ToggleMirror);
+        actions.emit(UiAction::ToggleAvatarMotionMirror);
+        actions.emit(UiAction::SwitchPane(crate::ui_model::Pane::PoseCamera));
     }
     app.update();
 
@@ -528,13 +546,26 @@ fn preview_actions_update_preview_state_and_view_model() {
     assert!(!view_model.preview_visible);
     assert!(!view_model.mirror_preview);
     assert!(!view_model.mirror_avatar_motion);
+    assert_eq!(view_model.pane, crate::ui_model::Pane::PoseCamera);
+    app.world_mut()
+        .resource_mut::<Orchestrator>()
+        .set_camera_list(vec![CameraDescriptor {
+            id: "test:0".into(),
+            label: "Camera".into(),
+        }]);
+    app.update();
+    // Domain snapshot rebuilding must preserve the UI-owned navigation choice.
+    assert_eq!(
+        app.world().resource::<UiViewModel>().pane,
+        crate::ui_model::Pane::PoseCamera
+    );
 }
 
 #[test]
 fn ndi_output_actions_update_session_intent_without_starting_tracking() {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<crate::ndi_output::NdiOutputIntent>()
         .init_resource::<PreviewState>()
@@ -542,7 +573,7 @@ fn ndi_output_actions_update_session_intent_without_starting_tracking() {
         .add_systems(Update, process_ui_actions_system);
 
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::StartNdiOutput);
     app.update();
     let intent = app.world().resource::<crate::ndi_output::NdiOutputIntent>();
@@ -554,7 +585,7 @@ fn ndi_output_actions_update_session_intent_without_starting_tracking() {
     );
 
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::StopNdiOutput);
     app.update();
     assert!(
@@ -568,7 +599,7 @@ fn ndi_output_actions_update_session_intent_without_starting_tracking() {
 fn reset_camera_action_bridges_the_ready_generation_once() {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()
@@ -590,7 +621,7 @@ fn reset_camera_action_bridges_the_ready_generation_once() {
         .resource_mut::<Orchestrator>()
         .set_pipeline_state(PipelineState::Running);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ResetAvatarCamera);
     app.update();
 
@@ -613,7 +644,7 @@ fn reset_camera_action_bridges_the_ready_generation_once() {
 fn reset_camera_action_skips_tracking_recenter_while_idle() {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()
@@ -631,7 +662,7 @@ fn reset_camera_action_skips_tracking_recenter_while_idle() {
         lifecycle.finish_ready();
     }
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ResetAvatarCamera);
     app.update();
 
@@ -654,7 +685,7 @@ fn arm_pose_settings_edits_commit_and_notify_only_after_a_successful_save() {
     };
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()
@@ -685,7 +716,7 @@ fn arm_pose_settings_edits_commit_and_notify_only_after_a_successful_save() {
     });
     let target = model_action_target(&app);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::SetArmPoseProfile {
             target: target.clone(),
             profile: ArmPoseProfileOverride::from_profile(profile),
@@ -732,7 +763,7 @@ fn arm_pose_settings_edits_commit_and_notify_only_after_a_successful_save() {
             target: target.clone(),
         },
     ] {
-        app.world_mut().resource_mut::<UiState>().emit(action);
+        app.world_mut().resource_mut::<ActionQueue>().emit(action);
         app.update();
         assert_eq!(
             app.world()
@@ -758,7 +789,7 @@ fn arm_pose_settings_edits_commit_and_notify_only_after_a_successful_save() {
     std::fs::write(&path, saved).unwrap();
 
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ResetArmPoseProfile {
             target: target.clone(),
         });
@@ -787,7 +818,7 @@ fn arm_pose_settings_edits_commit_and_notify_only_after_a_successful_save() {
 fn arm_tracking_action_app(settings: AppSettings) -> App {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()
@@ -810,7 +841,7 @@ fn arm_tracking_switches(app: &App) -> (bool, bool, bool) {
 
 fn toggle_arm_tracking(app: &mut App, enabled: bool) {
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::SetArmTrackingEnabled { enabled });
     app.update();
 }
@@ -1112,7 +1143,7 @@ fn orchestrator_update_view_model() {
     orch.process_action(&UiAction::SelectCamera { index: 0 });
 
     let mut vm = UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
 
     assert_eq!(vm.camera.available_cameras.len(), 2);
     assert_eq!(vm.camera.selected_index, Some(0));
@@ -1175,7 +1206,7 @@ fn orchestrator_retry_after_failure_creates_pending_load() {
         .expect("should have pending load");
     assert_eq!(pending.request_id, 1);
     assert_eq!(pending.model.id, model.id);
-    assert_eq!(orch.lifecycle_state, AvatarLifecycleState::None);
+    assert_eq!(orch.lifecycle_state, AvatarLifecycleState::NoAvatar);
 }
 
 #[test]
@@ -1262,12 +1293,15 @@ fn orchestrator_view_model_reflects_lifecycle_not_import() {
         ..Default::default()
     };
     let mut vm = UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
 
     // Model is imported but lifecycle is Loading, so is_ready must be false.
     assert!(vm.avatar.imported_model.is_some());
     assert!(!vm.avatar.is_ready);
-    assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::Loading);
+    assert_eq!(
+        vm.avatar.lifecycle,
+        crate::ui_model::AvatarLifecycleState::Loading
+    );
     assert!(!vm.avatar.load_failed);
 }
 
@@ -1279,10 +1313,13 @@ fn ready_lifecycle_sets_avatar_ready_in_view_model() {
         ..Default::default()
     };
     let mut vm = UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
 
     assert!(vm.avatar.is_ready);
-    assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::Ready);
+    assert_eq!(
+        vm.avatar.lifecycle,
+        crate::ui_model::AvatarLifecycleState::Ready
+    );
     assert!(!vm.avatar.load_failed);
 }
 
@@ -1294,11 +1331,14 @@ fn orchestrator_view_model_failed_sets_load_failed() {
         ..Default::default()
     };
     let mut vm = UiViewModel::default();
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
 
     assert!(!vm.avatar.is_ready);
     assert!(vm.avatar.load_failed);
-    assert_eq!(vm.avatar.lifecycle, AvatarLifecycleState::Failed);
+    assert_eq!(
+        vm.avatar.lifecycle,
+        crate::ui_model::AvatarLifecycleState::Failed
+    );
 }
 
 #[test]
@@ -1307,27 +1347,27 @@ fn map_lifecycle_state_round_trip() {
 
     assert_eq!(
         map_avatar_lifecycle_state(Engine::NoAvatar),
-        AvatarLifecycleState::None
+        crate::ui_model::AvatarLifecycleState::None
     );
     assert_eq!(
         map_avatar_lifecycle_state(Engine::Loading),
-        AvatarLifecycleState::Loading
+        crate::ui_model::AvatarLifecycleState::Loading
     );
     assert_eq!(
         map_avatar_lifecycle_state(Engine::Binding),
-        AvatarLifecycleState::Binding
+        crate::ui_model::AvatarLifecycleState::Binding
     );
     assert_eq!(
         map_avatar_lifecycle_state(Engine::Ready),
-        AvatarLifecycleState::Ready
+        crate::ui_model::AvatarLifecycleState::Ready
     );
     assert_eq!(
         map_avatar_lifecycle_state(Engine::Unloading),
-        AvatarLifecycleState::Unloading
+        crate::ui_model::AvatarLifecycleState::Unloading
     );
     assert_eq!(
         map_avatar_lifecycle_state(Engine::Failed),
-        AvatarLifecycleState::Failed
+        crate::ui_model::AvatarLifecycleState::Failed
     );
 }
 
@@ -1382,13 +1422,106 @@ fn write_review_fixture(dir: &tempfile::TempDir) -> PathBuf {
     path
 }
 
+fn complete_review(orch: &mut Orchestrator) {
+    let (request_id, work) = orch.pending_file_work.take().unwrap();
+    let AvatarFileWork::Review(path) = work else {
+        panic!("expected review work")
+    };
+    let binary = [0; 12];
+    let glb = vtuber_avatar::glb::Glb::new(
+        serde_json::from_str(REVIEW_FIXTURE_JSON).unwrap(),
+        Some(&binary),
+    )
+    .to_vec()
+    .unwrap();
+    let review = crate::license_review::extract_vrm_license_review(&path, &glb).unwrap();
+    orch.complete_avatar_work(request_id, Ok(AvatarFileResult::Review { path, review }));
+}
+
+#[test]
+fn cancelled_or_superseded_work_cannot_commit_a_model_or_report_an_error() {
+    for unload in [false, true] {
+        let mut orch = Orchestrator::default();
+        orch.queue_imported_model(stub_imported_model_with_id("candidate"));
+        let pending = orch.take_pending_load_request().unwrap();
+        if unload {
+            orch.process_action(&UiAction::UnloadAvatar);
+        } else {
+            orch.queue_imported_model(stub_imported_model_with_id("replacement"));
+        }
+        let id = vtuber_avatar::AvatarAssetId::new(&pending.model.id);
+        let imported = vtuber_avatar::ImportedAvatar::new(
+            id.clone(),
+            vtuber_avatar::UserAssetPath::avatar_model_path(&id).unwrap(),
+            "candidate",
+        );
+        orch.complete_avatar_work(
+            pending.request_id,
+            Ok(AvatarFileResult::Load(
+                vtuber_avatar::LoadImportedAvatarRequest {
+                    request_id: pending.request_id,
+                    imported,
+                },
+                SubmittedAvatarLoad {
+                    model: pending.model,
+                    look: None,
+                },
+            )),
+        );
+        orch.complete_avatar_work(
+            pending.request_id,
+            Err(OrchestratorError::AvatarLoadRejected("late failure".into())),
+        );
+        assert!(orch.prepared_load.is_none());
+        assert!(orch.last_error().is_none());
+        assert!(orch.imported_model.is_none());
+        if !unload {
+            assert_eq!(
+                orch.take_pending_load_request().unwrap().model.id,
+                "replacement"
+            );
+        }
+    }
+}
+
+#[test]
+fn cancelling_a_review_ignores_its_late_completion() {
+    let mut orch = Orchestrator::default();
+    orch.process_action(&UiAction::RequestAvatarImportReview {
+        path: PathBuf::from("review.vrm"),
+    });
+    let (request_id, _) = orch.pending_file_work.take().unwrap();
+    complete_review_value(&mut orch, request_id);
+    let pending = orch.pending_avatar_import.take().unwrap();
+    orch.process_action(&UiAction::CancelAvatarImportReview);
+    orch.complete_avatar_work(
+        request_id,
+        Ok(AvatarFileResult::Review {
+            path: pending.path,
+            review: pending.review,
+        }),
+    );
+    assert!(orch.pending_avatar_import.is_none());
+    assert_eq!(orch.import_state(), &ImportState::Idle);
+}
+
+fn complete_review_value(orch: &mut Orchestrator, request_id: u64) {
+    let path = PathBuf::from("review.vrm");
+    let bytes =
+        vtuber_avatar::glb::Glb::new(serde_json::from_str(REVIEW_FIXTURE_JSON).unwrap(), None)
+            .to_vec()
+            .unwrap();
+    let review = crate::license_review::extract_vrm_license_review(&path, &bytes).unwrap();
+    orch.complete_avatar_work(request_id, Ok(AvatarFileResult::Review { path, review }));
+}
+
 #[test]
 fn review_request_holds_the_model_until_explicit_acceptance() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_review_fixture(&dir);
-    let mut orch = Orchestrator::new(dir.path().join("assets"));
+    let path = PathBuf::from("review.vrm");
+    let mut orch = Orchestrator::default();
 
     orch.process_action(&UiAction::RequestAvatarImportReview { path: path.clone() });
+    complete_review(&mut orch);
 
     let pending = orch.pending_avatar_import.as_ref().expect("review pending");
     assert_eq!(pending.path, path);
@@ -1408,16 +1541,19 @@ fn review_request_holds_the_model_until_explicit_acceptance() {
 
     assert!(!orch.has_imported_model());
     assert!(orch.pending_avatar_import.is_none());
-    assert!(orch.take_pending_load_request().is_some());
+    assert!(matches!(
+        orch.pending_file_work,
+        Some((_, AvatarFileWork::Import(_)))
+    ));
 }
 
 #[test]
 fn import_is_blocked_while_the_review_is_unchecked() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_review_fixture(&dir);
-    let mut orch = Orchestrator::new(dir.path().join("assets"));
+    let path = PathBuf::from("review.vrm");
+    let mut orch = Orchestrator::default();
 
     orch.process_action(&UiAction::RequestAvatarImportReview { path });
+    complete_review(&mut orch);
     orch.process_action(&UiAction::AcceptAvatarImportReview);
 
     assert!(!orch.has_imported_model());
@@ -1427,11 +1563,11 @@ fn import_is_blocked_while_the_review_is_unchecked() {
 
 #[test]
 fn cancel_discards_the_pending_review_and_allows_a_fresh_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_review_fixture(&dir);
-    let mut orch = Orchestrator::new(dir.path().join("assets"));
+    let path = PathBuf::from("review.vrm");
+    let mut orch = Orchestrator::default();
 
     orch.process_action(&UiAction::RequestAvatarImportReview { path: path.clone() });
+    complete_review(&mut orch);
     orch.process_action(&UiAction::SetAvatarImportReviewAccepted { accepted: true });
     orch.process_action(&UiAction::CancelAvatarImportReview);
 
@@ -1440,55 +1576,29 @@ fn cancel_discards_the_pending_review_and_allows_a_fresh_one() {
 
     // The same file must be reviewed again; acceptance is never remembered.
     orch.process_action(&UiAction::RequestAvatarImportReview { path });
+    complete_review(&mut orch);
     let pending = orch.pending_avatar_import.as_ref().expect("review pending");
     assert!(!pending.accepted);
 }
 
 #[test]
-fn unreviewable_model_is_rejected_without_a_pending_review() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("broken.vrm");
-    std::fs::write(&path, b"not a glb").unwrap();
-    let mut orch = Orchestrator::new(dir.path().join("assets"));
-
-    orch.process_action(&UiAction::RequestAvatarImportReview { path });
-
+fn failed_review_result_leaves_no_pending_review_or_model() {
+    let mut orch = Orchestrator::default();
+    orch.process_action(&UiAction::RequestAvatarImportReview {
+        path: PathBuf::from("broken.vrm"),
+    });
+    let (id, _) = orch.pending_file_work.take().unwrap();
+    let error = OrchestratorError::LicenseReviewFailed("invalid GLB".into());
+    orch.complete_avatar_work(id, Err(error.clone()));
     assert!(orch.pending_avatar_import.is_none());
     assert!(!orch.has_imported_model());
-    assert!(matches!(
-        orch.last_error(),
-        Some(OrchestratorError::LicenseReviewFailed(_))
-    ));
-}
-
-#[test]
-fn oversized_file_review_reports_size_limit_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("oversized.vrm");
-    let file = std::fs::File::create(&path).unwrap();
-    file.set_len(import::DEFAULT_SIZE_LIMIT + 1).unwrap();
-    drop(file);
-    let mut orch = Orchestrator::new(dir.path().join("assets"));
-
-    orch.process_action(&UiAction::RequestAvatarImportReview { path });
-
-    assert!(orch.pending_avatar_import.is_none());
-    let expected = VrmLicenseReviewError::SizeExceeded {
-        size: import::DEFAULT_SIZE_LIMIT + 1,
-        limit: import::DEFAULT_SIZE_LIMIT,
-    };
-    assert_eq!(
-        orch.last_error(),
-        Some(&OrchestratorError::LicenseReviewFailed(
-            expected.to_string()
-        ))
-    );
+    assert_eq!(orch.last_error(), Some(&error));
 }
 
 fn expression_action_app(settings_path: PathBuf) -> App {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
-        .init_resource::<UiState>()
+        .init_resource::<ActionQueue>()
         .init_resource::<UiViewModel>()
         .init_resource::<PreviewState>()
         .init_resource::<AvatarMotionMirror>()
@@ -1577,7 +1687,7 @@ fn assigning_a_far_catalog_expression_persists_and_clears_manual() {
     let mut app = expression_action_app(path.clone());
     let (model_id, generation) = expression_target(&app);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::AssignExpressionKey {
             target: crate::actions::ModelActionTarget {
                 model_id,
@@ -1624,7 +1734,7 @@ fn reassign_moves_the_expression_and_vacates_the_old_key() {
     let mut app = expression_action_app(path);
     let (model_id, generation) = expression_target(&app);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::AssignExpressionKey {
             target: crate::actions::ModelActionTarget {
                 model_id,
@@ -1652,7 +1762,7 @@ fn reset_restores_the_deterministic_defaults() {
     let mut app = expression_action_app(path);
     let (model_id, generation) = expression_target(&app);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::AssignExpressionKey {
             target: crate::actions::ModelActionTarget {
                 model_id,
@@ -1673,7 +1783,7 @@ fn reset_restores_the_deterministic_defaults() {
 
     let (model_id, generation) = expression_target(&app);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ResetExpressionBindings {
             target: crate::actions::ModelActionTarget {
                 model_id,
@@ -1708,7 +1818,7 @@ fn save_failure_keeps_the_previous_assignment_and_reports_an_error() {
         .set("model-a".into(), defaults);
     let (model_id, generation) = expression_target(&app);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::AssignExpressionKey {
             target: crate::actions::ModelActionTarget {
                 model_id,
@@ -1745,7 +1855,7 @@ fn toggle_key_emits_a_generation_bound_manual_request() {
         .resource::<vtuber_avatar::AvatarLifecycle>()
         .current_generation();
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ToggleExpressionKey {
             generation,
             key: ExpressionKey::Digit1,
@@ -1762,7 +1872,7 @@ fn toggle_key_emits_a_generation_bound_manual_request() {
 
     // A key with no binding emits nothing.
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ToggleExpressionKey {
             generation,
             key: ExpressionKey::KeyM,
@@ -1792,18 +1902,18 @@ fn stale_model_actions_never_reach_the_replacement_model() {
 
     // Actions issued from model A's snapshot are already queued.
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ToggleExpressionKey {
             generation: generation_a,
             key: ExpressionKey::Digit1,
         });
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ClearManualExpression {
             generation: generation_a,
         });
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::AssignExpressionKey {
             target: crate::actions::ModelActionTarget {
                 model_id: model_a.clone(),
@@ -1813,7 +1923,7 @@ fn stale_model_actions_never_reach_the_replacement_model() {
             expression: Some("smile".into()),
         });
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ResetExpressionBindings {
             target: crate::actions::ModelActionTarget {
                 model_id: model_a.clone(),
@@ -1838,7 +1948,7 @@ fn stale_model_actions_never_reach_the_replacement_model() {
         },
         UiAction::SaveRichLook { target: target_a },
     ] {
-        app.world_mut().resource_mut::<UiState>().emit(action);
+        app.world_mut().resource_mut::<ActionQueue>().emit(action);
     }
 
     // Replace model A with model B before the orchestrator consumes them.
@@ -1875,7 +1985,7 @@ fn stale_model_actions_never_reach_the_replacement_model() {
 
     // A matching model ID also cannot authorize an old instance generation.
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ResetArmPoseProfile {
             target: crate::actions::ModelActionTarget {
                 model_id: "model-b".into(),
@@ -1980,13 +2090,13 @@ fn pending_model_bindings_are_not_used_for_old_generation_actions() {
         .set_imported_model_for_tests(Some(stub_imported_model_with_id("model-b")));
 
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ToggleExpressionKey {
             generation: generation_a,
             key: ExpressionKey::Digit1,
         });
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::AssignExpressionKey {
             target: crate::actions::ModelActionTarget {
                 model_id: "model-b".into(),
@@ -1996,7 +2106,7 @@ fn pending_model_bindings_are_not_used_for_old_generation_actions() {
             expression: Some("smile".into()),
         });
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ResetExpressionBindings {
             target: crate::actions::ModelActionTarget {
                 model_id: "model-b".into(),
@@ -2052,7 +2162,7 @@ fn pending_model_bindings_are_not_used_for_old_generation_actions() {
         lifecycle.current_generation()
     };
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::ToggleExpressionKey {
             generation: generation_b,
             key: ExpressionKey::Digit1,
@@ -2075,7 +2185,7 @@ fn expression_view_model_lists_every_entry_and_all_36_rows() {
     app.add_systems(Update, sync_expression_view_model);
     let (model_id, generation) = expression_target(&app);
     app.world_mut()
-        .resource_mut::<UiState>()
+        .resource_mut::<ActionQueue>()
         .emit(UiAction::AssignExpressionKey {
             target: crate::actions::ModelActionTarget {
                 model_id,
@@ -2127,20 +2237,20 @@ fn expression_view_model_lists_every_entry_and_all_36_rows() {
 
 #[test]
 fn view_model_exposes_review_and_acceptance_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_review_fixture(&dir);
-    let mut orch = Orchestrator::new(dir.path().join("assets"));
+    let path = PathBuf::from("review.vrm");
+    let mut orch = Orchestrator::default();
     let mut vm = UiViewModel::default();
 
     orch.process_action(&UiAction::RequestAvatarImportReview { path });
+    complete_review(&mut orch);
     orch.process_action(&UiAction::SetAvatarImportReviewAccepted { accepted: true });
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
 
     assert!(vm.avatar_import_review.review.is_some());
     assert!(vm.avatar_import_review.accepted);
 
     orch.process_action(&UiAction::CancelAvatarImportReview);
-    orch.update_view_model(&mut vm);
+    vm.update_from_orchestrator(&orch);
 
     assert!(vm.avatar_import_review.review.is_none());
     assert!(!vm.avatar_import_review.accepted);

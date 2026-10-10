@@ -1,4 +1,6 @@
 //! Expression assignment, status and keyboard input.
+use crate::actions::ActionQueue;
+
 use super::section;
 use super::{RichText, Ui, UiLanguage, UiState, UiViewModel, egui};
 use crate::{
@@ -9,13 +11,14 @@ use crate::{
 use vtuber_avatar::{ExpressionAvailability, ExpressionKind};
 
 pub(super) fn expression_keys_page(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
     lang: UiLanguage,
 ) {
-    expression_settings_section(ui, vm, state, lang);
-    expression_status_section(ui, vm, state, lang);
+    expression_settings_section(actions, ui, vm, state, lang);
+    expression_status_section(actions, ui, vm, state, lang);
 }
 
 /// Translates standard presets and keeps the exact runtime ID visible.
@@ -72,6 +75,7 @@ fn expression_availability_suffix(
 }
 
 fn expression_settings_section(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -162,11 +166,14 @@ fn expression_settings_section(
                                 && row.expression.is_some()
                                 && let Some(target) = target.clone()
                             {
-                                state.emit(UiAction::AssignExpressionKey {
-                                    target,
-                                    key: row.key,
-                                    expression: None,
-                                });
+                                state.emit(
+                                    actions,
+                                    UiAction::AssignExpressionKey {
+                                        target,
+                                        key: row.key,
+                                        expression: None,
+                                    },
+                                );
                             }
                             // A saved binding that no longer exists in the
                             // current catalog stays visible, never silently
@@ -209,11 +216,14 @@ fn expression_settings_section(
                                     .clicked()
                                     && let Some(target) = target.clone()
                                 {
-                                    state.emit(UiAction::AssignExpressionKey {
-                                        target,
-                                        key: row.key,
-                                        expression: Some(entry.id.clone()),
-                                    });
+                                    state.emit(
+                                        actions,
+                                        UiAction::AssignExpressionKey {
+                                            target,
+                                            key: row.key,
+                                            expression: Some(entry.id.clone()),
+                                        },
+                                    );
                                 }
                             }
                         });
@@ -238,7 +248,7 @@ fn expression_settings_section(
                         .as_ref()
                         .map(|target| target.generation)
                 {
-                    state.emit(UiAction::ClearManualExpression { generation });
+                    state.emit(actions, UiAction::ClearManualExpression { generation });
                 }
                 if ui
                     .button(lang.pick(
@@ -250,7 +260,7 @@ fn expression_settings_section(
                     .clicked()
                     && let Some(target) = target.clone()
                 {
-                    state.emit(UiAction::ResetExpressionBindings { target });
+                    state.emit(actions, UiAction::ResetExpressionBindings { target });
                 }
             });
             ui.label(
@@ -269,7 +279,13 @@ fn expression_settings_section(
 
 /// Studio list of assigned expressions. Clicking runs the same toggle action
 /// as the physical key.
-fn expression_status_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn expression_status_section(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     if !vm.expression.has_catalog {
         return;
     }
@@ -311,10 +327,13 @@ fn expression_status_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
                     .add(egui::Button::selectable(row.selected, text))
                     .clicked()
                 {
-                    state.emit(UiAction::ToggleExpressionKey {
-                        generation,
-                        key: row.key,
-                    });
+                    state.emit(
+                        actions,
+                        UiAction::ToggleExpressionKey {
+                            generation,
+                            key: row.key,
+                        },
+                    );
                 }
             }
             if !any {
@@ -385,6 +404,7 @@ fn expression_key_from_egui(key: egui::Key) -> Option<ExpressionKey> {
 /// modifiers, and no key repeat. Multiple key-downs are emitted in event
 /// order; the avatar runtime's request system applies them in the same order.
 pub(crate) fn expression_key_input(
+    actions: &mut ActionQueue,
     ctx: &egui::Context,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -408,7 +428,7 @@ pub(crate) fn expression_key_input(
     else {
         return;
     };
-    let actions: Vec<UiAction> = ctx.input(|input| {
+    let key_actions: Vec<UiAction> = ctx.input(|input| {
         if !input.focused {
             return Vec::new();
         }
@@ -433,8 +453,8 @@ pub(crate) fn expression_key_input(
             })
             .collect()
     });
-    for action in actions {
-        state.emit(action);
+    for action in key_actions {
+        state.emit(actions, action);
     }
 }
 
@@ -472,6 +492,7 @@ mod tests {
     }
 
     fn run_expression_key_input(
+        actions: &mut ActionQueue,
         vm: &UiViewModel,
         state: &mut UiState,
         input: egui::RawInput,
@@ -479,7 +500,7 @@ mod tests {
     ) {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(input, |ctx| {
-            expression_key_input(ctx, vm, state, dialog_active)
+            expression_key_input(actions, ctx, vm, state, dialog_active)
         });
     }
 
@@ -493,10 +514,12 @@ mod tests {
 
     #[test]
     fn expression_key_input_emits_toggle_even_in_avatar_only_mode() {
+        let mut actions = ActionQueue::default();
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
         state.set_controls_open(false);
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![expression_key_event(
@@ -507,7 +530,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            state.take_actions(),
+            actions.take_actions(),
             vec![UiAction::ToggleExpressionKey {
                 generation: test_generation(),
                 key: ExpressionKey::Digit1
@@ -517,9 +540,11 @@ mod tests {
 
     #[test]
     fn expression_key_input_escape_and_space_clear_the_manual_expression() {
+        let mut actions = ActionQueue::default();
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![
@@ -529,7 +554,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            state.take_actions(),
+            actions.take_actions(),
             vec![
                 UiAction::ClearManualExpression {
                     generation: test_generation()
@@ -543,6 +568,7 @@ mod tests {
 
     #[test]
     fn expression_key_input_ignores_modified_and_repeated_clear_keys() {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
@@ -553,9 +579,9 @@ mod tests {
                 false,
                 egui::Modifiers::NONE,
             )]),
-            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+            |ctx| expression_key_input(&mut actions, ctx, &vm, &mut state, false),
         );
-        assert_eq!(state.take_actions().len(), 1);
+        assert_eq!(actions.take_actions().len(), 1);
 
         // Frame 2: the OS repeats the held Escape. egui marks the event as a
         // repeat, which must not clear again.
@@ -565,10 +591,10 @@ mod tests {
                 true,
                 egui::Modifiers::NONE,
             )]),
-            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+            |ctx| expression_key_input(&mut actions, ctx, &vm, &mut state, false),
         );
         assert!(
-            state.take_actions().is_empty(),
+            actions.take_actions().is_empty(),
             "OS key repeat never clears again"
         );
 
@@ -579,19 +605,21 @@ mod tests {
                 false,
                 egui::Modifiers::SHIFT,
             )]),
-            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+            |ctx| expression_key_input(&mut actions, ctx, &vm, &mut state, false),
         );
         assert!(
-            state.take_actions().is_empty(),
+            actions.take_actions().is_empty(),
             "modifiers never clear the expression"
         );
     }
 
     #[test]
     fn expression_key_input_processes_multiple_keys_in_event_order() {
+        let mut actions = ActionQueue::default();
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![
@@ -601,7 +629,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            state.take_actions(),
+            actions.take_actions(),
             vec![
                 UiAction::ToggleExpressionKey {
                     generation: test_generation(),
@@ -617,6 +645,7 @@ mod tests {
 
     #[test]
     fn expression_key_input_ignores_os_key_repeat_and_key_up() {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
@@ -627,9 +656,9 @@ mod tests {
                 false,
                 egui::Modifiers::NONE,
             )]),
-            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+            |ctx| expression_key_input(&mut actions, ctx, &vm, &mut state, false),
         );
-        assert_eq!(state.take_actions().len(), 1);
+        assert_eq!(actions.take_actions().len(), 1);
 
         // Frame 2: the OS repeats the held key. egui marks the event as a
         // repeat, which must not toggle again.
@@ -639,10 +668,10 @@ mod tests {
                 false,
                 egui::Modifiers::NONE,
             )]),
-            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+            |ctx| expression_key_input(&mut actions, ctx, &vm, &mut state, false),
         );
         assert!(
-            state.take_actions().is_empty(),
+            actions.take_actions().is_empty(),
             "OS key repeat never toggles"
         );
 
@@ -655,17 +684,19 @@ mod tests {
                 repeat: false,
                 modifiers: egui::Modifiers::NONE,
             }]),
-            |ctx| expression_key_input(ctx, &vm, &mut state, false),
+            |ctx| expression_key_input(&mut actions, ctx, &vm, &mut state, false),
         );
-        assert!(state.take_actions().is_empty(), "key-up never clears");
+        assert!(actions.take_actions().is_empty(), "key-up never clears");
     }
 
     #[test]
     fn expression_key_input_ignores_modifiers_and_unfocused_window() {
+        let mut actions = ActionQueue::default();
         let vm = ready_expression_view_model();
 
         let mut state = UiState::default();
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![expression_key_event(
@@ -676,7 +707,7 @@ mod tests {
             false,
         );
         assert!(
-            state.take_actions().is_empty(),
+            actions.take_actions().is_empty(),
             "Shift+1 must stay with the existing shortcut handling"
         );
 
@@ -687,15 +718,20 @@ mod tests {
             egui::Modifiers::NONE,
         )]);
         input.focused = false;
-        run_expression_key_input(&vm, &mut state, input, false);
-        assert!(state.take_actions().is_empty(), "unfocused window is inert");
+        run_expression_key_input(&mut actions, &vm, &mut state, input, false);
+        assert!(
+            actions.take_actions().is_empty(),
+            "unfocused window is inert"
+        );
     }
 
     #[test]
     fn expression_key_input_ignores_dialog_and_license_modal() {
+        let mut actions = ActionQueue::default();
         let mut vm = ready_expression_view_model();
         let mut state = UiState::default();
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![expression_key_event(
@@ -705,11 +741,12 @@ mod tests {
             )]),
             true,
         );
-        assert!(state.take_actions().is_empty(), "file dialog owns input");
+        assert!(actions.take_actions().is_empty(), "file dialog owns input");
 
         vm.avatar_import_review.review = Some(super::super::import_review::review_fixture());
         let mut state = UiState::default();
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![expression_key_event(
@@ -719,11 +756,15 @@ mod tests {
             )]),
             false,
         );
-        assert!(state.take_actions().is_empty(), "license modal owns input");
+        assert!(
+            actions.take_actions().is_empty(),
+            "license modal owns input"
+        );
     }
 
     #[test]
     fn expression_key_input_defers_to_a_focused_text_edit() {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
@@ -744,19 +785,21 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.text_edit_singleline(&mut text);
             });
-            expression_key_input(ctx, &vm, &mut state, false);
+            expression_key_input(&mut actions, ctx, &vm, &mut state, false);
         });
         assert!(
-            state.take_actions().is_empty(),
+            actions.take_actions().is_empty(),
             "typing in a text field must not trigger expressions"
         );
     }
 
     #[test]
     fn expression_key_input_requires_a_ready_avatar() {
+        let mut actions = ActionQueue::default();
         let mut vm = UiViewModel::default();
         let mut state = UiState::default();
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![expression_key_event(
@@ -766,11 +809,12 @@ mod tests {
             )]),
             false,
         );
-        assert!(state.take_actions().is_empty());
+        assert!(actions.take_actions().is_empty());
 
         vm.avatar.is_ready = true;
         vm.avatar.lifecycle = AvatarLifecycleState::Loading;
         run_expression_key_input(
+            &mut actions,
             &vm,
             &mut state,
             focused_input(vec![expression_key_event(
@@ -780,7 +824,7 @@ mod tests {
             )]),
             false,
         );
-        assert!(state.take_actions().is_empty());
+        assert!(actions.take_actions().is_empty());
     }
 
     #[test]
@@ -817,12 +861,13 @@ mod tests {
 
     #[test]
     fn expression_settings_section_renders_with_and_without_a_catalog() {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let mut state = UiState::default();
         let mut vm = ready_expression_view_model();
         // Without a catalog: the load-model message renders.
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            expression_keys_page(ui, &vm, &mut state, UiLanguage::Ja);
+            expression_keys_page(&mut actions, ui, &vm, &mut state, UiLanguage::Ja);
         });
 
         // With a catalog: a disabled unavailable candidate and a saved
@@ -840,7 +885,7 @@ mod tests {
             selected: false,
         }];
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            expression_keys_page(ui, &vm, &mut state, UiLanguage::Ja);
+            expression_keys_page(&mut actions, ui, &vm, &mut state, UiLanguage::Ja);
         });
     }
 

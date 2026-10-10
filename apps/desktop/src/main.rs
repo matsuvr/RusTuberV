@@ -15,6 +15,7 @@ use bevy::asset::io::{AssetSourceBuilder, AssetSourceBuilders};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, SystemInformationDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
+use vtuber_app::AppRuntimePlugin;
 use vtuber_app::import;
 use vtuber_app::inference_runtime::InferenceProjectRoot;
 use vtuber_app::orchestrator::Orchestrator;
@@ -151,8 +152,11 @@ fn run() -> Result<(), StartupError> {
         })
         .insert_resource(settings)
         .insert_resource(InferenceProjectRoot(resource_root()))
-        .add_plugins(UiShellPlugin)
-        .insert_resource(Orchestrator::new(managed_root));
+        .insert_resource(Orchestrator::new(managed_root))
+        .add_plugins(AppRuntimePlugin)
+        .add_plugins(UiShellPlugin);
+
+    configure_execution_schedules(&mut app);
 
     vtuber_app::looking_glass::configure(&mut app, std::env::args_os().skip(1))
         .map_err(StartupError::LookingGlass)?;
@@ -169,12 +173,38 @@ fn run() -> Result<(), StartupError> {
     // sine waves so the avatar apply path can be verified without a camera.
     #[cfg(feature = "dev-synthetic-input")]
     {
-        // UiShellPlugin installs this source once, after the tracking bridge.
+        // AppRuntimePlugin installs this source once, after the tracking bridge.
         bevy::log::warn!("dev-synthetic-input enabled: using synthetic tracking source");
     }
 
     app.run();
     Ok(())
+}
+
+/// Keeps the short ordered scene systems and blocking render work inline.
+fn configure_execution_schedules(app: &mut App) {
+    // Run this single-avatar scene's short ordered systems inline.
+    // Inference and constrained arm solving keep their own workers.
+    use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
+    for label in [
+        First.intern(),
+        PreUpdate.intern(),
+        Update.intern(),
+        PostUpdate.intern(),
+        Last.intern(),
+        bevy_egui::EguiPrimaryContextPass.intern(),
+    ] {
+        app.edit_schedule(label, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
+    // In particular, keep blocking surface/VSync work on the render
+    // thread instead of dispatching it into the shared frame task pool.
+    if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render.edit_schedule(bevy::render::Render, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
 }
 
 /// Locates packaged model resources without depending on the process cwd.

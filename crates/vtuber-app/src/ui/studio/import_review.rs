@@ -1,4 +1,6 @@
 //! VRM import license confirmation.
+use crate::actions::ActionQueue;
+
 use super::{RichText, Ui, UiLanguage, UiState, UiViewModel, egui, primary_button};
 use crate::{actions::UiAction, license_review::VrmLicenseReview};
 use bevy_egui::egui::{Color32, Id, vec2};
@@ -6,6 +8,7 @@ use bevy_egui::egui::{Color32, Id, vec2};
 /// Renders the license review sheet on top of the workspace when a model is
 /// waiting for acceptance. Returns whether the pointer is over any UI.
 pub(super) fn render_avatar_import_review(
+    actions: &mut ActionQueue,
     ctx: &egui::Context,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -15,7 +18,14 @@ pub(super) fn render_avatar_import_review(
     let Some(review) = &vm.avatar_import_review.review else {
         return over_ui;
     };
-    avatar_import_review_modal(ctx, review, vm.avatar_import_review.accepted, state, lang);
+    avatar_import_review_modal(
+        actions,
+        ctx,
+        review,
+        vm.avatar_import_review.accepted,
+        state,
+        lang,
+    );
     true
 }
 
@@ -23,6 +33,7 @@ pub(super) fn render_avatar_import_review(
 /// asset store. The newly selected model stays unloaded until this sheet is
 /// accepted.
 fn avatar_import_review_modal(
+    actions: &mut ActionQueue,
     ctx: &egui::Context,
     review: &VrmLicenseReview,
     accepted: bool,
@@ -82,12 +93,15 @@ fn avatar_import_review_modal(
             });
         });
     if checked != accepted {
-        state.emit(UiAction::SetAvatarImportReviewAccepted { accepted: checked });
+        state.emit(
+            actions,
+            UiAction::SetAvatarImportReviewAccepted { accepted: checked },
+        );
     }
     if modal.should_close() || cancel_requested {
-        state.emit(UiAction::CancelAvatarImportReview);
+        state.emit(actions, UiAction::CancelAvatarImportReview);
     } else if import_requested {
-        state.emit(UiAction::AcceptAvatarImportReview);
+        state.emit(actions, UiAction::AcceptAvatarImportReview);
     }
 }
 
@@ -334,12 +348,20 @@ mod tests {
 
     #[test]
     fn license_review_modal_escape_emits_cancel() {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let mut state = UiState::default();
         let review = review_fixture();
         // Frame 1 registers the modal; frame 2 receives the Escape.
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+            avatar_import_review_modal(
+                &mut actions,
+                ui.ctx(),
+                &review,
+                false,
+                &mut state,
+                UiLanguage::Ja,
+            );
         });
         let mut input = egui::RawInput::default();
         input.events.push(egui::Event::Key {
@@ -350,10 +372,17 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         });
         let _ = ctx.run_ui(input, |ui| {
-            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+            avatar_import_review_modal(
+                &mut actions,
+                ui.ctx(),
+                &review,
+                false,
+                &mut state,
+                UiLanguage::Ja,
+            );
         });
         assert!(
-            state
+            actions
                 .pending_actions
                 .contains(&UiAction::CancelAvatarImportReview)
         );
@@ -361,12 +390,20 @@ mod tests {
 
     #[test]
     fn license_review_modal_does_not_import_while_unchecked() {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let mut state = UiState::default();
         let review = review_fixture();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            avatar_import_review_modal(ui.ctx(), &review, false, &mut state, UiLanguage::Ja);
+            avatar_import_review_modal(
+                &mut actions,
+                ui.ctx(),
+                &review,
+                false,
+                &mut state,
+                UiLanguage::Ja,
+            );
         });
-        assert!(state.pending_actions.is_empty());
+        assert!(actions.pending_actions.is_empty());
     }
 }

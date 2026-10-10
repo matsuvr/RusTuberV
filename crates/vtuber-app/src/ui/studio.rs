@@ -1,6 +1,8 @@
 //! Apple-style desktop workspace. The sidebar contains destinations only.
 //! Camera controls, session commands, and state never live in that sidebar.
 
+use crate::actions::ActionQueue;
+
 use super::avatar_preview::{AvatarPreviewTexture, paint_avatar_preview, paint_avatar_preview_at};
 use super::shell::UiState;
 use crate::actions::{RichLookChange, UiAction};
@@ -313,14 +315,21 @@ fn floating_settings_control(
     response
 }
 
-fn navigation(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn navigation(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     ui.add_space(12.0);
     for pane in destinations() {
-        navigation_button(ui, vm, state, pane, lang);
+        navigation_button(actions, ui, vm, state, pane, lang);
     }
 }
 
 fn navigation_button(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -334,12 +343,12 @@ fn navigation_button(
         )
         .clicked()
     {
-        state.emit(UiAction::SwitchPane(pane));
+        state.emit(actions, UiAction::SwitchPane(pane));
     }
 }
 
 /// Full-width language rows for the left pane.
-fn language_buttons(ui: &mut Ui, state: &mut UiState, lang: UiLanguage) {
+fn language_buttons(actions: &mut ActionQueue, ui: &mut Ui, state: &mut UiState, lang: UiLanguage) {
     ui.add_space(8.0);
     ui.label(
         RichText::new(lang.pick("表示言語", "Display language", "显示语言", "표시 언어"))
@@ -356,22 +365,33 @@ fn language_buttons(ui: &mut Ui, state: &mut UiState, lang: UiLanguage) {
             .clicked()
             && lang != language
         {
-            state.emit(UiAction::SetLanguage(language));
+            state.emit(actions, UiAction::SetLanguage(language));
         }
     }
     ui.add_space(8.0);
 }
 
 /// Inline language buttons for the toolbar when no left pane is shown.
-fn compact_language_buttons(ui: &mut Ui, state: &mut UiState, lang: UiLanguage) {
+fn compact_language_buttons(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     for (language, label) in LANGUAGES {
         if ui.selectable_label(lang == language, label).clicked() && lang != language {
-            state.emit(UiAction::SetLanguage(language));
+            state.emit(actions, UiAction::SetLanguage(language));
         }
     }
 }
 
-fn compact_navigation(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn compact_navigation(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     egui::ComboBox::from_id_salt("studio_navigation")
         .selected_text(page_title(vm.pane, lang))
         .show_ui(ui, |ui| {
@@ -380,18 +400,25 @@ fn compact_navigation(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: 
                     .selectable_label(vm.pane == pane, page_title(pane, lang))
                     .clicked()
                 {
-                    state.emit(UiAction::SwitchPane(pane));
+                    state.emit(actions, UiAction::SwitchPane(pane));
                 }
             }
         });
 }
 
-fn toolbar(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, sidebar: bool, lang: UiLanguage) {
+fn toolbar(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    sidebar: bool,
+    lang: UiLanguage,
+) {
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("RusTuberV").strong());
         if !sidebar {
-            compact_navigation(ui, vm, state, lang);
-            compact_language_buttons(ui, state, lang);
+            compact_navigation(actions, ui, vm, state, lang);
+            compact_language_buttons(actions, ui, state, lang);
         }
     });
 }
@@ -505,6 +532,7 @@ fn avatar_monitor(
     reason = "the pane draws from one argument per widget input, so each widget reads exactly the state it is given"
 )]
 pub(crate) fn render_studio(
+    actions: &mut ActionQueue,
     ctx: &egui::Context,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -551,7 +579,7 @@ pub(crate) fn render_studio(
         let over_ui = ctx
             .input(|input| input.pointer.interact_pos())
             .is_some_and(|pos| floating_control.is_some_and(|control| control.rect.contains(pos)));
-        return render_avatar_import_review(ctx, vm, state, lang, over_ui);
+        return render_avatar_import_review(actions, ctx, vm, state, lang, over_ui);
     }
     let sidebar = use_sidebar(viewport.width());
     let mut root = Ui::new(
@@ -569,7 +597,7 @@ pub(crate) fn render_studio(
         egui::Panel::top("studio_toolbar")
             .resizable(false)
             .frame(panel_frame(250))
-            .show(ui, |ui| toolbar(ui, vm, state, sidebar, lang));
+            .show(ui, |ui| toolbar(actions, ui, vm, state, sidebar, lang));
         if sidebar {
             egui::Panel::left("studio_sidebar")
                 .exact_size(SIDEBAR_PANEL_WIDTH)
@@ -579,8 +607,9 @@ pub(crate) fn render_studio(
                     egui::Panel::bottom("studio_sidebar_language")
                         .resizable(false)
                         .frame(Frame::new())
-                        .show(ui, |ui| language_buttons(ui, state, lang));
-                    egui::ScrollArea::vertical().show(ui, |ui| navigation(ui, vm, state, lang));
+                        .show(ui, |ui| language_buttons(actions, ui, state, lang));
+                    egui::ScrollArea::vertical()
+                        .show(ui, |ui| navigation(actions, ui, vm, state, lang));
                 });
             let panel = monitor_panel_width(viewport.width());
             egui::Panel::right("studio_monitor")
@@ -660,7 +689,7 @@ pub(crate) fn render_studio(
                                                 _ => continue,
                                             };
                                             if ui.button(label).clicked() {
-                                                state.emit(action.clone());
+                                                state.emit(actions, action.clone());
                                             }
                                         }
                                     },
@@ -668,13 +697,14 @@ pub(crate) fn render_studio(
                             }
                             match vm.pane {
                                 Pane::VrmCamera => {
-                                    vrm_page(ui, vm, state, dialog_active, lang);
-                                    camera_select_page(ui, vm, state, dialog_active, lang);
-                                    render_rich_look_controls(ui, vm, state, lang);
+                                    vrm_page(actions, ui, vm, state, dialog_active, lang);
+                                    camera_select_page(actions, ui, vm, state, dialog_active, lang);
+                                    render_rich_look_controls(actions, ui, vm, state, lang);
                                 }
                                 Pane::PoseCamera => {
-                                    calibration_page(ui, vm, state, lang);
+                                    calibration_page(actions, ui, vm, state, lang);
                                     camera_status_page(
+                                        actions,
                                         ui,
                                         vm,
                                         state,
@@ -685,8 +715,10 @@ pub(crate) fn render_studio(
                                         lang,
                                     );
                                 }
-                                Pane::ExpressionKeys => expression_keys_page(ui, vm, state, lang),
-                                Pane::NdiOutput => output_page(ui, vm, state, lang),
+                                Pane::ExpressionKeys => {
+                                    expression_keys_page(actions, ui, vm, state, lang)
+                                }
+                                Pane::NdiOutput => output_page(actions, ui, vm, state, lang),
                                 Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
                                 Pane::OssLicenses => oss_licenses_page(ui, lang),
                             }
@@ -721,7 +753,7 @@ pub(crate) fn render_studio(
     let over_ui = ctx
         .input(|input| input.pointer.interact_pos())
         .is_some_and(|pos| viewport.contains(pos));
-    render_avatar_import_review(ctx, vm, state, lang, over_ui)
+    render_avatar_import_review(actions, ctx, vm, state, lang, over_ui)
 }
 
 /// Paints the avatar preview card expanding from the monitor rectangle to the
@@ -818,6 +850,7 @@ fn import_controls(
 }
 
 fn vrm_page(
+    actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
@@ -844,21 +877,27 @@ fn vrm_page(
                     ))
                     .clicked()
             {
-                state.emit(UiAction::UnloadAvatar);
+                state.emit(actions, UiAction::UnloadAvatar);
             }
             if vm.avatar.load_failed
                 && ui
                     .button(lang.pick("再読み込み", "Retry load", "重新加载", "다시 불러오기"))
                     .clicked()
             {
-                state.emit(UiAction::RetryAfterError);
+                state.emit(actions, UiAction::RetryAfterError);
             }
         },
     );
 }
 
 /// Per-model default arm pose sliders, shown on the calibration page.
-fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn arm_pose_section(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     let Some(target) = vm.model_target.as_ref() else {
         return;
     };
@@ -926,10 +965,13 @@ fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
             if changed {
                 profile.arm_drop_radians = drop_degrees.to_radians();
                 profile.finger_curl_radians = curl_degrees.to_radians();
-                state.emit(UiAction::SetArmPoseProfile {
-                    target: target.clone(),
-                    profile: ArmPoseProfileOverride::from_profile(profile),
-                });
+                state.emit(
+                    actions,
+                    UiAction::SetArmPoseProfile {
+                        target: target.clone(),
+                        profile: ArmPoseProfileOverride::from_profile(profile),
+                    },
+                );
             }
             if vm.arm_pose.has_override
                 && ui
@@ -941,15 +983,24 @@ fn arm_pose_section(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                     ))
                     .clicked()
             {
-                state.emit(UiAction::ResetArmPoseProfile {
-                    target: target.clone(),
-                });
+                state.emit(
+                    actions,
+                    UiAction::ResetArmPoseProfile {
+                        target: target.clone(),
+                    },
+                );
             }
         },
     );
 }
 
-fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn calibration_page(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     section(
         ui,
         lang.pick("中立姿勢", "Neutral pose", "自然姿势", "중립 자세"),
@@ -966,7 +1017,7 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                     .button(lang.pick("キャンセル", "Cancel", "取消", "취소"))
                     .clicked()
                 {
-                    state.emit(UiAction::CancelCalibration);
+                    state.emit(actions, UiAction::CancelCalibration);
                 }
             } else if vm.calibration.is_complete {
                 ui.label(lang.pick(
@@ -979,7 +1030,7 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                     .button(lang.pick("やり直す", "Redo", "重新校准", "다시 하기"))
                     .clicked()
                 {
-                    state.emit(UiAction::RetryCalibration);
+                    state.emit(actions, UiAction::RetryCalibration);
                 }
             } else {
                 if vm.tracking.state == TrackingState::WaitingForFace {
@@ -1002,7 +1053,7 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                 )
                 .clicked()
                 {
-                    state.emit(UiAction::BeginCalibration);
+                    state.emit(actions, UiAction::BeginCalibration);
                 }
                 if !vm.can_calibrate() {
                     ui.label(lang.pick(
@@ -1045,7 +1096,7 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                 )
                 .changed()
             {
-                state.emit(UiAction::SetArmTrackingEnabled { enabled });
+                state.emit(actions, UiAction::SetArmTrackingEnabled { enabled });
             }
             if ui
                 .add_enabled(
@@ -1059,7 +1110,7 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
                 )
                 .clicked()
             {
-                state.emit(UiAction::RecalibrateArms);
+                state.emit(actions, UiAction::RecalibrateArms);
             }
             ui.label(
                 RichText::new(lang.pick(
@@ -1073,10 +1124,16 @@ fn calibration_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: Ui
             );
         },
     );
-    arm_pose_section(ui, vm, state, lang);
+    arm_pose_section(actions, ui, vm, state, lang);
 }
 
-fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn output_page(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     section(
         ui,
         lang.pick(
@@ -1143,7 +1200,7 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
                 )
                 .clicked()
                 {
-                    state.emit(UiAction::StartNdiOutput);
+                    state.emit(actions, UiAction::StartNdiOutput);
                 }
                 if ui
                     .add_enabled(
@@ -1157,7 +1214,7 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
                     )
                     .clicked()
                 {
-                    state.emit(UiAction::StopNdiOutput);
+                    state.emit(actions, UiAction::StopNdiOutput);
                 }
             });
             if let Some(code) = &vm.ndi_output.error_code {
@@ -1209,7 +1266,13 @@ fn output_page(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLangu
 /// The controls edit the live [`vtuber_avatar::AvatarLookSettings`] the look
 /// systems read, so the change is visible without a reload; the save button
 /// persists the same values for the loaded model.
-fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState, lang: UiLanguage) {
+fn render_rich_look_controls(
+    actions: &mut ActionQueue,
+    ui: &mut Ui,
+    vm: &UiViewModel,
+    state: &mut UiState,
+    lang: UiLanguage,
+) {
     let Some(target) = vm.model_target.as_ref() else {
         return;
     };
@@ -1217,10 +1280,13 @@ fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
     section(ui, switch, |ui| {
         let mut enabled = vm.look.enabled;
         if ui.checkbox(&mut enabled, switch).changed() {
-            state.emit(UiAction::ChangeRichLook {
-                target: target.clone(),
-                change: RichLookChange::Enabled(enabled),
-            });
+            state.emit(
+                actions,
+                UiAction::ChangeRichLook {
+                    target: target.clone(),
+                    change: RichLookChange::Enabled(enabled),
+                },
+            );
         }
         let mut percent = vm.look.strength * 100.0;
         if ui
@@ -1231,10 +1297,13 @@ fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
             )
             .changed()
         {
-            state.emit(UiAction::ChangeRichLook {
-                target: target.clone(),
-                change: RichLookChange::Strength(percent / 100.0),
-            });
+            state.emit(
+                actions,
+                UiAction::ChangeRichLook {
+                    target: target.clone(),
+                    change: RichLookChange::Strength(percent / 100.0),
+                },
+            );
         }
         if vm.avatar.imported_model.is_some()
             && ui
@@ -1246,9 +1315,12 @@ fn render_rich_look_controls(ui: &mut Ui, vm: &UiViewModel, state: &mut UiState,
                 ))
                 .clicked()
         {
-            state.emit(UiAction::SaveRichLook {
-                target: target.clone(),
-            });
+            state.emit(
+                actions,
+                UiAction::SaveRichLook {
+                    target: target.clone(),
+                },
+            );
         }
     });
 }
@@ -1455,6 +1527,7 @@ mod tests {
     /// The width the monitor card really gets, measured through the rendered
     /// panels rather than through the width arithmetic alone.
     fn rendered_preview_width(viewport_width: f32) -> f32 {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -1469,6 +1542,7 @@ mod tests {
         let mut state = UiState::default();
         let _ = ctx.run_ui(input, |ui| {
             render_studio(
+                &mut actions,
                 ui.ctx(),
                 &vm,
                 &mut state,
@@ -1491,6 +1565,7 @@ mod tests {
 
     #[test]
     fn preview_accepts_pointer_gestures_in_wide_and_compact_layouts() {
+        let mut actions = ActionQueue::default();
         for width in [1600.0, 700.0] {
             for button in [egui::PointerButton::Primary, egui::PointerButton::Secondary] {
                 let ctx = egui::Context::default();
@@ -1498,7 +1573,7 @@ mod tests {
                 let mut vm = UiViewModel::default();
                 vm.avatar.is_ready = true;
                 vm.avatar.lifecycle = AvatarLifecycleState::Ready;
-                let render = |state: &mut UiState, events: Vec<egui::Event>, dialog_active| {
+                let mut render = |state: &mut UiState, events: Vec<egui::Event>, dialog_active| {
                     let _ = ctx.run_ui(
                         egui::RawInput {
                             screen_rect: Some(egui::Rect::from_min_size(
@@ -1510,6 +1585,7 @@ mod tests {
                         },
                         |ui| {
                             render_studio(
+                                &mut actions,
                                 ui.ctx(),
                                 &vm,
                                 state,
@@ -1677,6 +1753,7 @@ mod tests {
 
     #[test]
     fn transition_advances_and_paints_the_collapsing_workspace() {
+        let mut actions = ActionQueue::default();
         let ctx = egui::Context::default();
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -1692,9 +1769,10 @@ mod tests {
         let diagnostics = DiagnosticsSnapshot::default();
         let preview = PreviewState::default();
         let landmarks = PreviewLandmarkState::default();
-        let render = |state: &mut UiState| {
+        let mut render = |state: &mut UiState| {
             let _ = ctx.run_ui(input(), |ui| {
                 render_studio(
+                    &mut actions,
                     ui.ctx(),
                     &vm,
                     state,
@@ -1739,12 +1817,9 @@ mod tests {
             UiLanguage::Ko,
         ] {
             let ctx = egui::Context::default();
-            let mut state = UiState::default();
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 oss_licenses_page(ui, lang);
             });
-            // The license bodies are reference material, so the page only reads.
-            assert!(state.take_actions().is_empty());
         }
     }
 
@@ -1776,6 +1851,7 @@ mod tests {
 
     #[test]
     fn rich_look_controls_emit_no_actions_without_input_in_any_language() {
+        let mut actions = ActionQueue::default();
         for lang in [
             UiLanguage::Ja,
             UiLanguage::En,
@@ -1796,15 +1872,15 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                render_rich_look_controls(ui, &vm, &mut state, lang);
+                render_rich_look_controls(&mut actions, ui, &vm, &mut state, lang);
             });
             let mut off = vm;
             off.look.enabled = false;
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-                render_rich_look_controls(ui, &off, &mut state, lang);
+                render_rich_look_controls(&mut actions, ui, &off, &mut state, lang);
             });
             // Neither enabled nor disabled controls emit actions without input.
-            assert!(state.take_actions().is_empty());
+            assert!(actions.take_actions().is_empty());
         }
     }
 }

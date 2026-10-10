@@ -13,12 +13,11 @@ use super::expressions::{
 };
 use super::lifecycle::current_model_target;
 use super::{Orchestrator, OrchestratorError};
-use crate::actions::UiAction;
+use crate::actions::{ActionQueue, UiAction};
 use crate::expression_keys::ExpressionBindingStore;
 use crate::ndi_output::NdiOutputIntent;
 use crate::preview::PreviewState;
 use crate::settings::AppSettings;
-use crate::ui::UiState;
 use crate::ui_model::{ArmPoseViewModel, UiViewModel};
 
 /// The look-related system parameters grouped to stay within the system
@@ -36,7 +35,7 @@ pub struct LookSystemParams<'w> {
 )]
 pub fn process_ui_actions_system(
     mut orchestrator: ResMut<Orchestrator>,
-    mut ui_state: ResMut<UiState>,
+    mut action_queue: ResMut<ActionQueue>,
     mut view_model: ResMut<UiViewModel>,
     mut ndi_intent: Option<ResMut<NdiOutputIntent>>,
     mut preview: ResMut<PreviewState>,
@@ -51,7 +50,7 @@ pub fn process_ui_actions_system(
     mut pose_runtime: Option<ResMut<crate::pose_runtime::PoseRuntime>>,
     mut look: LookSystemParams,
 ) {
-    let actions = ui_state.take_actions();
+    let actions = action_queue.take_actions();
     for action in &actions {
         if let Some(target) = action.model_target()
             && lifecycle
@@ -221,10 +220,22 @@ pub fn process_ui_actions_system(
             UiAction::ClearManualExpression { generation } => {
                 clear_manual_expression_action(*generation, &mut manual_requests);
             }
-            _ => orchestrator.process_action(action),
+            UiAction::SwitchPane(pane) => view_model.pane = *pane,
+            UiAction::RefreshCameras
+            | UiAction::SelectCamera { .. }
+            | UiAction::ImportAvatar { .. }
+            | UiAction::RequestAvatarImportReview { .. }
+            | UiAction::SetAvatarImportReviewAccepted { .. }
+            | UiAction::AcceptAvatarImportReview
+            | UiAction::CancelAvatarImportReview
+            | UiAction::BeginCalibration
+            | UiAction::CancelCalibration
+            | UiAction::RetryCalibration
+            | UiAction::DismissError
+            | UiAction::RetryAfterError => orchestrator.process_action(action),
         }
     }
-    orchestrator.update_view_model(&mut view_model);
+    view_model.update_from_orchestrator(&orchestrator);
     view_model.model_target = lifecycle
         .as_deref()
         .and_then(|lifecycle| current_model_target(&orchestrator, lifecycle));

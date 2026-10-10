@@ -88,8 +88,20 @@ pub fn read_runtime_source_facts(
     ),
     ModelImportError,
 > {
-    let bytes = fs::read(managed_path)?;
-    let glb = Glb::parse(&bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
+    parse_runtime_source_facts(&fs::read(managed_path)?)
+}
+
+/// Parses expression and constraint facts without accessing files or application state.
+pub fn parse_runtime_source_facts(
+    bytes: &[u8],
+) -> Result<
+    (
+        vtuber_avatar::SourceExpressions,
+        vtuber_avatar::node_constraints::SourceNodeConstraints,
+    ),
+    ModelImportError,
+> {
+    let glb = Glb::parse(bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
     let constraints = vtuber_avatar::node_constraints::parse_source_node_constraints(&glb.document)
         .map_err(|index| ModelImportError::InvalidVrmField {
             path: format!("nodes[{index}].extensions.VRMC_node_constraint"),
