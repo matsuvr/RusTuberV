@@ -37,6 +37,18 @@ restarting this prototype.
 cargo run --release -p vtuber-desktop -- --looking-glass /path/to/looking-glass.json
 ```
 
+For the packaged macOS application (built with `bash tools/build-macos.sh`):
+
+```sh
+open -n target/release/RusTuberV.app --args --looking-glass /path/to/looking-glass.json
+```
+
+For the Windows executable (PowerShell, after a normal Windows release build):
+
+```powershell
+.\target\release\RusTuberV.exe --looking-glass 'C:\path\to\looking-glass.json'
+```
+
 The existing `--model /path/to/avatar.vrm` argument can be combined with this.
 Without `--looking-glass`, no output systems, cameras or textures are installed.
 
@@ -69,6 +81,8 @@ the images into one quilt, and another applies calibrated RGB-subpixel selection
 to the output window. All image work stays on the GPU. Output excludes the floor
 and egui and does not change the preview or NDI paths. No custom changes to the
 avatar's MToon/Standard/unlit materials or scene lighting are made.
+The multiview cameras use the same fixed SDR exposure, disabled tonemapping and
+disabled dithering as the existing avatar preview and NDI camera.
 
 View zero is bottom-left in the quilt. Lens coordinates are bottom-left while
 Bevy image UVs are top-left. Tile sampling stays half a texel inside the selected
@@ -86,18 +100,34 @@ single-view performance target is not a measured guarantee for this experiment.
 
 ## Verification
 
-Rust tests cover argument opt-in, absent calibration, lens normalization, cell
-normalization, quilt order, focus-plane invariance, front/back disparity,
-rotated rigs, frustum corners and output entity cleanup. They are included but
-have **not been run in the authoring environment**, which lacks Rust/Cargo.
-The connected Windows development machine was offline. Build, shader pipeline
-validation and physical display checks remain unverified.
+Review verification on 2026-10-10:
+
+- Rust tests cover argument opt-in, absent calibration, lens normalization, cell
+  normalization, quilt order, focus-plane invariance, front/back disparity,
+  rotated rigs, frustum corners and output entity cleanup: **12 passed**.
+- Formatting and Clippy for the application and desktop, including all targets,
+  passed. Existing unrelated warnings remain.
+- The macOS release `.app` built with `tools/build-macos.sh` and passed
+  `codesign --verify --deep --strict`.
+- On an Apple M4 / Metal, `AvatarSample_A` rendered into all 66 views at
+  186 x 341. The interlace shader, F10 quilt toggle, F11 fullscreen round trip,
+  Escape closing only the output, continued main-window preview and application
+  quit were checked. The application exited with code 0.
+  This used **synthetic calibration on the internal LCD**, only to validate the
+  GPU pipeline; it does not validate any panel's optical output.
+- The unchanged Looking Glass source module and actual avatar crate passed a
+  focused `x86_64-pc-windows-msvc` check in a temporary manifest with
+  `blake3/pure` enabled to avoid the unavailable MSVC assembler. Shipping
+  dependencies were not changed. The normal full Windows application check on
+  this Mac was blocked by native dependencies requiring Windows build tools and
+  SDK headers. Windows execution remains unverified.
 
 ```sh
 cargo fmt --all -- --check
-cargo test -p vtuber-app looking_glass
-cargo check -p vtuber-desktop
-cargo clippy -p vtuber-app -p vtuber-desktop --all-targets
+cargo test --locked --offline --release -p vtuber-app --lib looking_glass
+cargo clippy --locked --offline --release -p vtuber-app -p vtuber-desktop --all-targets
+bash tools/build-macos.sh
+codesign --verify --deep --strict target/release/RusTuberV.app
 ```
 
 On the actual display, check the quilt first: all tiles must update together,
@@ -106,7 +136,9 @@ opposite directions around the focus plane. Then disable quilt preview and
 check left/right parallax, upright image, color-channel registration and native
 pixel alignment. Test VRM replacement/unload, main-window controls, NDI running
 at the same time, and auxiliary-window closure. Measure the same scene with the
-option absent and present. Windows/macOS and Looking Glass hardware are pending.
+option absent and present. Looking Glass hardware, Windows execution, model
+replacement/unload, NDI simultaneous output and comparative frame rates remain
+pending.
 
 ## References (not bundled SDK code)
 
