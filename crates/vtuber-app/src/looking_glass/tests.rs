@@ -7,18 +7,6 @@
 use super::*;
 
 #[test]
-fn absent_calibration_is_a_file_error_and_unloaded_avatar_has_no_pose() {
-    let directory = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        read_calibration(&directory.path().join("absent.json")),
-        Err(LookingGlassError::Read { .. })
-    ));
-    assert!(
-        avatar_view_pose(&AvatarCameraControl::default(), &AvatarLifecycle::default()).is_none()
-    );
-}
-
-#[test]
 fn absent_option_does_not_request_output() {
     assert!(
         config_argument(["--model", "モデル.vrm"].map(OsString::from))

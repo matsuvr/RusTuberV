@@ -5,6 +5,59 @@ texture-sharing API or CPU image readback is added. This is a direct-display
 experiment, not an implementation of the Bridge SDK API. The Windows GPU path
 has been measured; optical output on a physical panel remains unverified.
 
+## Independent plugin (2026-10-11)
+
+The renderer, calibration parser, optics, device catalog and embedded WESL now
+live in [bevy-looking-glass-rs](https://github.com/matsuvr/bevy-looking-glass-rs),
+crate `bevy_looking_glass` for Bevy 0.20. RusTuberV consumes a pinned Git revision.
+There is no second renderer copy in this workspace.
+
+`crates/vtuber-app/src/looking_glass/mod.rs` keeps application settings and file
+I/O, the avatar-to-`ViewPose` adapter, UI status, shortcuts, and the existing
+Core3d executor policy. The independent plugin never changes the shared executor
+or the host's other cameras/windows. RusTuberV explicitly selects its existing
+layers, exposure, direct draws and single light cluster through plugin settings.
+See the plugin README for the model-free example, scheduling hooks and packaging.
+The historical results below describe their original builds; extraction-specific
+validation is recorded separately.
+
+
+### Extraction validation
+
+- Independent repository: 21 tests passed; all-target Clippy with warnings denied,
+  formatting, package file listing and `cargo publish --dry-run` passed. The
+  dry-run compiled the extracted archive using only its normal dependencies.
+- A separate model-free consumer outside the RusTuberV workspace rendered quilt,
+  moved-camera and interlaced screenshots with ordinary registry Bevy (no window
+  patch). `pose: None` produced all-black RGB pixels; stop and exit completed with
+  code 0. Calibration was synthetic. Unpatched Bevy logged late window-close events.
+- RusTuberV's three CLI/settings tests passed during the workspace extraction.
+  The final pinned Git dependency passed the default-feature release desktop build
+  and all-target application/desktop Clippy. Existing unrelated `chunks_exact`
+  warnings remain; formatting and whitespace checks passed.
+- The WESL interlacer is byte-for-byte unchanged from the source implementation.
+
+Fresh Windows / i9-13900 / RTX 4090 / Vulkan presentation measurements used the
+preserved pre-extraction executable and the final Git-dependency release build.
+Both used Sapphy, 66 views at 186 x 341, a 720 x 1280 output, VSync, affinity
+`0x15`, and the same synthetic calibration. Camera/inference and NDI output were
+not started. Each capture ran for 30 seconds after 20 seconds of warmup, with no
+build running. Values show the slower swapchain and worse p95 of the two windows.
+
+| Build | Display fps | Display p95 ms | Mean CPU cores | Working set GiB |
+|---|---:|---:|---:|---:|
+| Preserved executable | 52.25 | 33.35 | 1.69 | 1.62 |
+| External plugin | 57.83 | 16.70 | 1.85 | 1.56 |
+
+Both applications exited with code 0. This single pair did not show a throughput
+regression; it does not establish a performance improvement or a 60fps guarantee.
+The measurements are OS presentation events on a desktop, not optical validation.
+Raw CSVs, logs, hashes and summaries are in `target/looking-glass-extraction/`
+(local, ignored). Pre-extraction binary SHA256: `d700c54e5342cd3dc1601741d2ab0f206299962b5a73650c4f309d0e24a7ec15`;
+final binary SHA256: `dc5039ab47e218a84e3795448008de2e32a3091eeb0e46bdb538adf2ed48246f`.
+Physical Looking Glass optics, macOS execution of the extracted crate, live
+camera/inference acceptance and simultaneous NDI output remain unrun.
+
 ## Settings UI and device presets (2026-10-11)
 
 Open **Settings → Looking Glass出力**, directly below NDI出力 at the same
@@ -24,7 +77,7 @@ model/orientation are reported without substituting lens values. Legacy
 hardware without USB storage needs raw calibration exported via the
 manufacturer's tooling; this application does not retrieve it over USB.
 
-`crates/vtuber-app/src/looking_glass/devices.json` is the embedded catalog. It
+The plugin's [`src/devices.json`](https://github.com/matsuvr/bevy-looking-glass-rs/blob/main/src/devices.json) is the embedded catalog. It
 records panel size/aspect, output format, recommended quilt geometry, HLD safe
 area, legacy status, research date and source URLs. All light field presets
 share the view-array/off-axis/interlacing code. Projection uses the physical

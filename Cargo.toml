@@ -1,6 +1,5 @@
 [workspace]
 members = [
-  "crates/bevy_looking_glass",
   "crates/vtuber-core",
   "crates/vtuber-camera",
   "crates/vtuber-platform",
