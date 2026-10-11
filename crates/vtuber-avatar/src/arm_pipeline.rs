@@ -204,10 +204,7 @@ fn swivel_adjusted_elbow_pole(input: &ArmPipelineInput<'_>, wrist_target: Vec3) 
     let base_direction = crate::arm::neutral_elbow_pole(input.chain, wrist_target)? - shoulder;
     // Right-handed VRM/glTF basis: the model faces +Z and its left side is
     // +X, so mirrored swivel angles need opposite signs per side.
-    let side_sign = match input.chain.side {
-        crate::arm::ArmSide::Left => 1.0,
-        crate::arm::ArmSide::Right => -1.0,
-    };
+    let side_sign = input.chain.side.outward_sign();
 
     // Fade the swivel out as the hand nears the chest center.
     let width = profile.swivel_transition_width_ratio

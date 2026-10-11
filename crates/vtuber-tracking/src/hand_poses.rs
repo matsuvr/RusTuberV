@@ -121,12 +121,11 @@ fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
         // The MCP keeps a hooked/claw hand distinct from a fist.
         result += (curl_a - curl_b).powi(2) + (knuckle_a - knuckle_b).powi(2);
     }
-    // Compare gaps only between extended neighbours. The noisy opening of
-    // folded ring/little fingers must not compete with the two visible V rays.
-    let extended = curls_a
-        .into_iter()
-        .zip(curls_b)
-        .map(|(a, b)| a < 0.5 && b < 0.5);
+    // Every candidate with extended neighbours must explain their observed
+    // opening, even when a noisy bend estimate calls one finger folded.
+    // Otherwise a V can become crossed fingers without comparing the gap
+    // that distinguishes them. Candidate-folded ring/little gaps stay unused.
+    let extended = curls_b.into_iter().map(|curl| curl < 0.5);
     for ((a, b), pair) in a
         .spread
         .windows(2)
@@ -266,6 +265,41 @@ mod tests {
                     thumb_cmc: [0.0; 2],
                 };
                 assert_eq!(selected_name(observed), "peace", "{observed:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_v_gap_survives_the_observed_curl_threshold_on_both_hands() {
+        // Left-hand features from camera frame 1024. The middle finger's
+        // estimated MCP + PIP is just above the old "extended" threshold,
+        // while its opening still clearly separates it from the index.
+        let observed = HandFingerPose {
+            fingers: [
+                [0.408599, 0.138518, 0.632538],
+                [0.549093, 0.652508, -0.280719],
+                [1.474802, 1.382137, 0.794503],
+                [1.284847, 1.411403, 0.781327],
+            ],
+            spread: [0.217769, -0.108644, 0.239300, 0.567489],
+            thumb: [0.364734, -0.553566],
+            thumb_spread: -0.538910,
+            thumb_cmc: [0.0; 2],
+        };
+        for pip in [0.63, 0.649, 0.651, observed.fingers[1][1], 0.67] {
+            let mut observed = observed;
+            observed.fingers[1][1] = pip;
+            for sign in [-1.0, 1.0] {
+                let mut selector = HandPoseSelector::new();
+                let input = with_flexion_sign(observed, sign);
+                for _ in 0..CONFIRM_FRAMES {
+                    selector.observe(Some(input), sign);
+                }
+                assert_eq!(
+                    catalog::POSES[selector.selected.unwrap()].0,
+                    "peace",
+                    "PIP {pip}, hand sign {sign}: an open V must not become crossed fingers"
+                );
             }
         }
     }

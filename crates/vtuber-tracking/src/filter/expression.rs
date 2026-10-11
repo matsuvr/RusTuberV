@@ -405,11 +405,10 @@ impl ExpressionFilter {
     /// later release starts from `1.0` with the correct elapsed time instead
     /// of jumping back to a mid-closure filter state.
     pub fn force_blink_closed(&mut self, left: bool, right: bool) {
-        if left {
-            self.blink_left.value = 1.0;
-        }
-        if right {
-            self.blink_right.value = 1.0;
+        for (state, closed) in [(&mut self.blink_left, left), (&mut self.blink_right, right)] {
+            if closed {
+                state.value = 1.0;
+            }
         }
     }
 
@@ -437,51 +436,50 @@ impl ExpressionFilter {
         observation: &RawExpressionObservation,
         now: MonoTimeNs,
     ) -> ExpressionCoefficients {
-        let left_present = is_present(
-            observation.blink_left,
-            observation.blink_left_confidence,
-            self.params.missing_confidence_threshold,
-        );
-        let right_present = is_present(
-            observation.blink_right,
-            observation.blink_right_confidence,
-            self.params.missing_confidence_threshold,
-        );
+        let [raw_left, raw_right] = [
+            (observation.blink_left, observation.blink_left_confidence),
+            (observation.blink_right, observation.blink_right_confidence),
+        ]
+        .map(|(value, confidence)| {
+            is_present(value, confidence, self.params.missing_confidence_threshold).then_some(value)
+        });
         let mouth_present = is_present(
             observation.mouth_open,
             observation.mouth_open_confidence,
             self.params.missing_confidence_threshold,
         );
 
-        let raw_left = if left_present {
-            Some(observation.blink_left)
-        } else {
-            None
-        };
-        let raw_right = if right_present {
-            Some(observation.blink_right)
-        } else {
-            None
-        };
         let raw_mouth = if mouth_present {
             Some(observation.mouth_open)
         } else {
             None
         };
 
-        let effective_left =
-            resolve_raw(raw_left, raw_right, self.params.missing_policy.blink_left);
-        let effective_right =
-            resolve_raw(raw_right, raw_left, self.params.missing_policy.blink_right);
+        let [blink_left, blink_right] = [
+            (
+                &mut self.blink_left,
+                self.calibration.blink_left,
+                self.params.missing_policy.blink_left,
+                raw_left,
+                raw_right,
+            ),
+            (
+                &mut self.blink_right,
+                self.calibration.blink_right,
+                self.params.missing_policy.blink_right,
+                raw_right,
+                raw_left,
+            ),
+        ]
+        .map(|(state, calibration, policy, own, opposite)| {
+            let target = calibration.normalize(resolve_raw(own, opposite, policy));
+            state.update(target, now, &self.params)
+        });
         let effective_mouth = resolve_mouth(raw_mouth, self.params.missing_policy.mouth);
 
-        let target_left = self.calibration.blink_left.normalize(effective_left);
-        let target_right = self.calibration.blink_right.normalize(effective_right);
         let target_mouth_norm = self.calibration.mouth.normalize(effective_mouth);
         let target_mouth = apply_dead_zone(target_mouth_norm, self.params.mouth_dead_zone);
 
-        let blink_left = self.blink_left.update(target_left, now, &self.params);
-        let blink_right = self.blink_right.update(target_right, now, &self.params);
         let aa = self.mouth.update(target_mouth, now, &self.params);
 
         ExpressionCoefficients {
@@ -590,6 +588,53 @@ mod tests {
             blink_right_confidence: 0.9,
             mouth_open,
             mouth_open_confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn swapping_eyes_preserves_independent_calibration_loss_and_closed_endpoints() {
+        let mut ranges = calibration();
+        ranges.blink_right = ExpressionRange::for_blink(0.1, 0.1, 0.8).unwrap();
+        let mut swapped_ranges = ranges;
+        std::mem::swap(
+            &mut swapped_ranges.blink_left,
+            &mut swapped_ranges.blink_right,
+        );
+        let mut original = ExpressionFilter::new(ranges, params());
+        let mut swapped = ExpressionFilter::new(swapped_ranges, params());
+        for tick in 0..180 {
+            let t = tick as f32 / 20.0;
+            let mut observation = obs(t.sin().abs(), t.cos().abs(), 0.3);
+            if (40..70).contains(&tick) {
+                observation.blink_left_confidence = 0.0;
+            }
+            if (90..120).contains(&tick) {
+                observation.blink_right = f32::NAN;
+            }
+            let mut opposite = observation;
+            std::mem::swap(&mut opposite.blink_left, &mut opposite.blink_right);
+            std::mem::swap(
+                &mut opposite.blink_left_confidence,
+                &mut opposite.blink_right_confidence,
+            );
+            let now = MonoTimeNs(tick * 16_666_667);
+            let a = original.update(&observation, now);
+            let b = swapped.update(&opposite, now);
+            assert_eq!(a.blink_left, b.blink_right);
+            assert_eq!(a.blink_right, b.blink_left);
+            assert_eq!(a.aa, b.aa);
+            let left_closed = (125..135).contains(&tick);
+            let right_closed = (140..150).contains(&tick);
+            original.force_blink_closed(left_closed, right_closed);
+            swapped.force_blink_closed(right_closed, left_closed);
+            assert_eq!(original.current().blink_left, swapped.current().blink_right);
+            assert_eq!(original.current().blink_right, swapped.current().blink_left);
+            if left_closed {
+                assert_eq!(original.current().blink_left, 1.0);
+            }
+            if right_closed {
+                assert_eq!(original.current().blink_right, 1.0);
+            }
         }
     }
 

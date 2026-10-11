@@ -3,7 +3,7 @@
 //! passive-tissue measurement. Fixed source-model ranges and skin collision
 //! constrain the elbow/radioulnar DOFs; the CMU shoulder fit does not claim to.
 
-use crate::arm::{ArmChainBinding, ArmSide};
+use crate::arm::ArmChainBinding;
 use bevy::prelude::{Quat, Vec3};
 
 mod data {
@@ -25,10 +25,9 @@ pub(crate) fn shoulder_margins(
             axial: 0.0,
         },
     )?;
-    let mut q = (girdle.inverse() * upper * reference.inverse()).normalize();
-    if chain.side == ArmSide::Left {
-        q = Quat::from_xyzw(q.x, -q.y, -q.z, q.w);
-    }
+    let q = (girdle.inverse() * upper * reference.inverse()).normalize();
+    let axis = chain.side.reflect_axial(q.xyz());
+    let mut q = Quat::from_xyzw(axis.x, axis.y, axis.z, q.w);
     if q.w < 0.0 {
         q = -q;
     }
@@ -62,7 +61,7 @@ mod tests {
         clippy::indexing_slicing,
         clippy::panic
     )]
-    use super::*;
+    use crate::arm::ArmSide;
     use crate::upper_limb::tests::{chain, state};
 
     #[test]

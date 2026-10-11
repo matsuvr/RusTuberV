@@ -5,7 +5,7 @@
 
 use bevy::prelude::{Quat, Vec2, Vec3};
 
-use crate::arm::{ArmChainBinding, ArmSide};
+use crate::arm::ArmChainBinding;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GirdlePose {
@@ -117,14 +117,7 @@ pub(crate) fn forward(
     };
     let offset = chain.rest.upper_arm.position - origin.position;
     let authored = offset.try_normalize()?;
-    let polar = |v: Vec3| {
-        let x = if chain.side == ArmSide::Left {
-            v.z
-        } else {
-            -v.z
-        };
-        Vec3::new(x, v.y, v.x)
-    };
+    let polar = |v: Vec3| chain.side.reflect_polar(Vec3::new(-v.z, v.y, v.x));
     // Use the source's zero-angle SC/AC direction as the alignment reference.
     // VRM T-pose definition 1.5 requires lowered shoulders despite raised arms:
     // https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_vrm-1.0/tpose.md
@@ -151,6 +144,7 @@ pub(crate) fn forward(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
+    use crate::arm::ArmSide;
 
     #[test]
     fn vrm_t_pose_shoulders_are_the_arm_down_girdle_reference() {

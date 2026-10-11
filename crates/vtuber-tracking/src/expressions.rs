@@ -201,24 +201,31 @@ pub fn map_mediapipe_gaze(values: &FaceBlendshapeSet) -> GazeSignal {
 /// Produces per-eye diagnostics and the fused common gaze.
 #[must_use]
 pub fn observe_mediapipe_gaze(values: &FaceBlendshapeSet) -> BinocularGazeObservation {
-    let left = PerEyeGazeObservation {
-        horizontal: (value(values, MediaPipeBlendshape::EyeLookOutLeft)
-            - value(values, MediaPipeBlendshape::EyeLookInLeft))
-        .clamp(-1.0, 1.0),
-        vertical: (value(values, MediaPipeBlendshape::EyeLookUpLeft)
-            - value(values, MediaPipeBlendshape::EyeLookDownLeft))
-        .clamp(-1.0, 1.0),
-        weight: (1.0 - value(values, MediaPipeBlendshape::EyeBlinkLeft)).clamp(0.0, 1.0),
-    };
-    let right = PerEyeGazeObservation {
-        horizontal: (value(values, MediaPipeBlendshape::EyeLookInRight)
-            - value(values, MediaPipeBlendshape::EyeLookOutRight))
-        .clamp(-1.0, 1.0),
-        vertical: (value(values, MediaPipeBlendshape::EyeLookUpRight)
-            - value(values, MediaPipeBlendshape::EyeLookDownRight))
-        .clamp(-1.0, 1.0),
-        weight: (1.0 - value(values, MediaPipeBlendshape::EyeBlinkRight)).clamp(0.0, 1.0),
-    };
+    use MediaPipeBlendshape::*;
+    // Image-right is outward for the left eye and inward for the right eye.
+    let [left, right] = [
+        [
+            EyeLookOutLeft,
+            EyeLookInLeft,
+            EyeLookUpLeft,
+            EyeLookDownLeft,
+            EyeBlinkLeft,
+        ],
+        [
+            EyeLookInRight,
+            EyeLookOutRight,
+            EyeLookUpRight,
+            EyeLookDownRight,
+            EyeBlinkRight,
+        ],
+    ]
+    .map(
+        |[positive, negative, up, down, blink]| PerEyeGazeObservation {
+            horizontal: (value(values, positive) - value(values, negative)).clamp(-1.0, 1.0),
+            vertical: (value(values, up) - value(values, down)).clamp(-1.0, 1.0),
+            weight: (1.0 - value(values, blink)).clamp(0.0, 1.0),
+        },
+    );
     fuse_binocular_gaze(left, right)
 }
 
@@ -473,6 +480,66 @@ mod tests {
             observe_mediapipe_gaze(&both_blinked).common,
             GazeSignal::UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn gaze_mapping_commutes_with_anatomical_eye_exchange() {
+        use MediaPipeBlendshape::*;
+        let pairs = [
+            (EyeLookOutLeft, EyeLookOutRight),
+            (EyeLookInLeft, EyeLookInRight),
+            (EyeLookUpLeft, EyeLookUpRight),
+            (EyeLookDownLeft, EyeLookDownRight),
+            (EyeBlinkLeft, EyeBlinkRight),
+        ];
+        for left_blink in [0.0, 0.6, 1.0] {
+            for right_blink in [0.0, 0.8, 1.0] {
+                let channels = [
+                    (EyeLookOutLeft, 0.8),
+                    (EyeLookInLeft, 0.1),
+                    (EyeLookOutRight, 0.2),
+                    (EyeLookInRight, 0.5),
+                    (EyeLookUpLeft, 0.4),
+                    (EyeLookDownLeft, 0.1),
+                    (EyeLookUpRight, 0.3),
+                    (EyeLookDownRight, 0.2),
+                    (EyeBlinkLeft, left_blink),
+                    (EyeBlinkRight, right_blink),
+                ];
+                let swapped: Vec<_> = channels
+                    .iter()
+                    .map(|&(channel, value)| {
+                        let opposite = pairs
+                            .iter()
+                            .find_map(|&(left, right)| {
+                                if channel == left {
+                                    Some(right)
+                                } else if channel == right {
+                                    Some(left)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap();
+                        (opposite, value)
+                    })
+                    .collect();
+                let original = observe_mediapipe_gaze(&set(&channels));
+                let reflected = observe_mediapipe_gaze(&set(&swapped));
+                for (actual, expected) in [
+                    (reflected.left, original.right),
+                    (reflected.right, original.left),
+                ] {
+                    assert_eq!(actual.horizontal, -expected.horizontal);
+                    assert_eq!(actual.vertical, expected.vertical);
+                    assert_eq!(actual.weight, expected.weight);
+                }
+                assert_eq!(reflected.common.horizontal(), -original.common.horizontal());
+                assert_eq!(reflected.common.vertical(), original.common.vertical());
+                assert_eq!(reflected.common.confidence(), original.common.confidence());
+                assert_eq!(reflected.common.state(), original.common.state());
+            }
+        }
     }
 
     #[test]

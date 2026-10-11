@@ -109,6 +109,197 @@ fn rotation_close(actual: Quat, expected: Quat) -> bool {
 }
 
 #[test]
+fn hand_driven_forearm_roll_distributes_skin_twist_without_changing_admitted_fk() {
+    use vtuber_avatar::node_constraints::{
+        NodeConstraintBindings, NodeConstraintDestination, NodeConstraintKind,
+    };
+
+    // The VRM1 twist reference uses hand-sourced X roll at weights 0.5/1,
+    // and an elbow-sourced Y roll at weight 0.5. Exercise both mirrored arms,
+    // arbitrary local rest axes, and a rigid intermediary before the hand.
+    for side in [ArmSide::Left, ArmSide::Right] {
+        for authored_axes in [false, true] {
+            for (has_helpers, axial_helper, weight, on_joint_path) in [
+                (false, true, 1.0, false),
+                (true, true, 1.0, false),
+                (true, false, 1.0, false),
+                (true, true, 0.0, false),
+                (true, true, 1.0, true),
+            ] {
+                let hand_roll = has_helpers && axial_helper && weight > 0.0 && !on_joint_path;
+                let sign = if side == ArmSide::Left { 1.0 } else { -1.0 };
+                let mut app = build_app();
+                let arm = spawn_avatar(&mut app, Quat::IDENTITY, Quat::IDENTITY);
+                let lower_rest = if authored_axes {
+                    Quat::from_euler(EulerRot::XYZ, 0.3, -0.4, 0.2)
+                } else {
+                    Quat::IDENTITY
+                };
+                let hand_rest = Quat::from_rotation_x(0.25);
+                let lower_position = Vec3::X * sign * 0.3;
+                let wrist_offset = Vec3::X * sign * 0.25;
+                let lower_tf =
+                    Transform::from_translation(lower_position).with_rotation(lower_rest);
+                app.world_mut().entity_mut(arm.lower).insert((
+                    lower_tf,
+                    bevy_vrm1::prelude::RestTransform(lower_tf),
+                    ChildOf(arm.upper),
+                ));
+                let bridge = spawn_child(
+                    &mut app,
+                    arm.lower,
+                    Transform::from_rotation(lower_rest.inverse()),
+                );
+                let hand_tf = Transform::from_translation(wrist_offset).with_rotation(hand_rest);
+                app.world_mut().entity_mut(arm.hand).insert((
+                    hand_tf,
+                    bevy_vrm1::prelude::RestTransform(hand_tf),
+                    ChildOf(bridge),
+                ));
+                let helper_rest = if authored_axes {
+                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)
+                } else {
+                    Quat::IDENTITY
+                };
+                let roll_axis = if !axial_helper {
+                    Vec3::Z
+                } else if authored_axes {
+                    Vec3::Y
+                } else {
+                    Vec3::X
+                };
+                let mid = spawn_child(
+                    &mut app,
+                    bridge,
+                    Transform::from_translation(wrist_offset * 0.5).with_rotation(helper_rest),
+                );
+                let end = spawn_child(
+                    &mut app,
+                    bridge,
+                    Transform::from_translation(wrist_offset).with_rotation(helper_rest),
+                );
+                let elbow = spawn_child(
+                    &mut app,
+                    arm.upper,
+                    Transform::from_translation(lower_position),
+                );
+                let rest = |position, rotation, local_rotation| RestSpaceBonePose {
+                    position,
+                    global_rotation: rotation,
+                    local_rotation,
+                };
+                let chain = ArmChainBinding {
+                    side,
+                    shoulder: None,
+                    upper_arm: arm.upper,
+                    lower_arm: arm.lower,
+                    hand: arm.hand,
+                    fingers: Default::default(),
+                    finger_rest: Default::default(),
+                    capabilities: Default::default(),
+                    rest: ArmRestGeometry {
+                        shoulder: None,
+                        upper_arm: rest(Vec3::ZERO, Quat::IDENTITY, Quat::IDENTITY),
+                        elbow: rest(lower_position, lower_rest, lower_rest),
+                        wrist: rest(lower_position + wrist_offset, hand_rest, hand_rest),
+                        upper_arm_length: 0.3,
+                        forearm_length: 0.25,
+                        total_arm_length: 0.55,
+                    },
+                };
+                app.world_mut()
+                    .get_mut::<AvatarBinding>(arm.root)
+                    .unwrap()
+                    .left_arm = Some(chain);
+                let roll = |destination, axis, weight| NodeConstraintDestination {
+                    destination,
+                    kind: NodeConstraintKind::Roll(axis),
+                    weight,
+                };
+                let mut bindings =
+                    std::collections::HashMap::from([(arm.lower, vec![roll(elbow, Vec3::Y, 0.5)])]);
+                if has_helpers {
+                    bindings.insert(
+                        arm.hand,
+                        if on_joint_path {
+                            vec![roll(bridge, roll_axis, weight)]
+                        } else {
+                            vec![
+                                roll(mid, roll_axis, 0.5 * weight),
+                                roll(end, roll_axis, weight),
+                            ]
+                        },
+                    );
+                }
+                app.world_mut()
+                    .entity_mut(arm.root)
+                    .insert(NodeConstraintBindings(bindings));
+
+                // A flexed elbow and a full pronation/supination sweep. The
+                // expected transforms are independent analytic rotations.
+                let bend = Quat::from_rotation_y(sign * 1.2);
+                let wrist_bend = Quat::from_rotation_z(0.2);
+                for step in (0..=90).chain((0..=90).rev()) {
+                    let angle = sign * (step as f32 - 45.0).to_radians() * 2.0;
+                    let twist = Quat::from_rotation_x(angle);
+                    let full_lower = bend * twist;
+                    let mut pose = arm.pose;
+                    pose.lower_arm_delta = lower_rest.inverse() * full_lower * lower_rest;
+                    pose.hand = Some(vtuber_avatar::ResolvedBoneDelta {
+                        entity: arm.hand,
+                        delta: hand_rest.inverse() * wrist_bend * hand_rest,
+                    });
+                    app.world_mut()
+                        .get_mut::<DynamicArmTargets>(arm.root)
+                        .unwrap()
+                        .left = Some(pose);
+                    app.update();
+                    let world = app.world();
+                    let upper = world.get::<GlobalTransform>(arm.upper).unwrap();
+                    let lower = world.get::<GlobalTransform>(arm.lower).unwrap();
+                    let hand = world.get::<GlobalTransform>(arm.hand).unwrap();
+                    let expected_elbow = upper.transform_point(lower_position);
+                    let expected_wrist =
+                        expected_elbow + upper.rotation() * full_lower * wrist_offset;
+                    assert!(lower.translation().distance(expected_elbow) < 2.0e-6);
+                    assert!(hand.translation().distance(expected_wrist) < 2.0e-6);
+                    assert!(rotation_close(
+                        hand.rotation(),
+                        upper.rotation() * full_lower * wrist_bend * hand_rest
+                    ));
+                    assert!(
+                        (hand.translation().distance(lower.translation()) - 0.25).abs() < 2.0e-6
+                    );
+                    if hand_roll {
+                        assert!(
+                            rotation_close(lower.rotation(), upper.rotation() * bend * lower_rest),
+                            "forearm roll must enter the authored hand-driven helpers, not accumulate at the elbow"
+                        );
+                        assert!(rotation_close(
+                            world.get::<Transform>(mid).unwrap().rotation,
+                            Quat::from_rotation_x(angle * 0.5) * helper_rest
+                        ));
+                        assert!(rotation_close(
+                            world.get::<Transform>(end).unwrap().rotation,
+                            twist * helper_rest
+                        ));
+                        assert!(rotation_close(
+                            world.get::<Transform>(elbow).unwrap().rotation,
+                            Quat::from_rotation_y(sign * 0.6)
+                        ));
+                    } else {
+                        assert!(rotation_close(
+                            lower.rotation(),
+                            upper.rotation() * full_lower * lower_rest
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn final_arm_pose_drives_roll_aim_and_copy_helpers_in_the_same_frame() {
     use vtuber_avatar::node_constraints::{
         NodeConstraintBindings, NodeConstraintDestination, NodeConstraintKind,

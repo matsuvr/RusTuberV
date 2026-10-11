@@ -42,6 +42,17 @@ pub struct UpperLimbState {
 }
 
 impl UpperLimbState {
+    /// Coordinates of the admitted path, independent of render-only skin roll.
+    pub(crate) fn joint_angles(
+        &self,
+        generation: crate::lifecycle::AvatarGeneration,
+    ) -> [Option<[f32; 9]>; 2] {
+        if self.generation != Some(generation) {
+            return [None, None];
+        }
+        self.path.current.map(|arm| arm.map(|arm| arm.angles))
+    }
+
     pub(crate) fn owns_bone(&self, bone: Entity) -> bool {
         self.body_rig.as_ref().is_some_and(|rig| rig.contains(bone))
     }

@@ -283,10 +283,7 @@ impl CollisionGeometry {
         // runs once per new observation, not per SQP candidate/render tick.
         let step = std::f32::consts::PI / 16.0;
         let mut best = None::<f32>;
-        let signs = match side {
-            crate::arm::ArmSide::Left => [-1.0, 1.0],
-            crate::arm::ArmSide::Right => [1.0, -1.0],
-        };
+        let signs = [-side.outward_sign(), side.outward_sign()];
         for sign in signs {
             for i in 1..=16 {
                 let angle = sign * i as f32 * step;

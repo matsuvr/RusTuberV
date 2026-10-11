@@ -275,10 +275,7 @@ pub(crate) fn resolve_finger_pose(
 /// The palm-frame normal reverses across the anatomical sides. Positive
 /// profile curl therefore needs the same handed sign as observed finger flexion.
 pub(crate) fn signed_finger_curl(side: crate::arm::ArmSide, curl: f32) -> f32 {
-    match side {
-        crate::arm::ArmSide::Left => -curl,
-        crate::arm::ArmSide::Right => curl,
-    }
+    side.reflection().horizontal(curl)
 }
 
 fn resolve_finger_joints(
@@ -367,7 +364,18 @@ pub fn apply_default_arm_pose(
         let resolved_poses = [targets.left, targets.right];
         let mut controlled = Vec::new();
 
-        for resolved in resolved_poses.into_iter().flatten() {
+        for (resolved, chain) in resolved_poses
+            .into_iter()
+            .zip([binding.left_arm.as_ref(), binding.right_arm.as_ref()])
+        {
+            let Some(mut resolved) = resolved else {
+                continue;
+            };
+            if let Some(adapted) = chain.zip(constraints).and_then(|(chain, constraints)| {
+                distribute_forearm_roll(resolved, chain, constraints, &rests, &child_ofs)
+            }) {
+                resolved = adapted;
+            }
             controlled.extend([resolved.upper_arm, resolved.lower_arm]);
             let refresh_root = resolved
                 .shoulder
@@ -533,6 +541,92 @@ pub fn apply_default_arm_pose(
             }
         }
     }
+}
+
+/// Adapt the radius pose to rigs whose forearm skin roll is driven by the hand.
+/// The solver's radioulnar coordinate remains anatomical; the hand's local roll
+/// here is a skinning channel, not an additional wrist degree of freedom.
+/// Removing twist about the elbow-to-wrist axis preserves both joint positions.
+/// Transferring that same twist through the authored rest chain preserves the
+/// complete hand/finger pose and the solver's forearm/palm collision capsules.
+fn distribute_forearm_roll(
+    mut pose: ResolvedArmPose,
+    chain: &ArmChainBinding,
+    constraints: &crate::node_constraints::NodeConstraintBindings,
+    rests: &Query<&bevy_vrm1::prelude::RestTransform>,
+    parents: &Query<&ChildOf>,
+) -> Option<ResolvedArmPose> {
+    use crate::node_constraints::NodeConstraintKind;
+
+    let destinations = constraints.0.get(&chain.hand)?;
+    let mut node = chain.hand;
+    let mut wrist = Vec3::ZERO;
+    let mut hand_rest = Quat::IDENTITY;
+    while node != chain.lower_arm {
+        let rest = rests.get(node).ok()?;
+        wrist = rest.transform_point(wrist);
+        hand_rest = rest.rotation * hand_rest;
+        node = parents.get(node).ok()?.parent();
+    }
+    let axis = wrist.try_normalize()?;
+    // Only an authored axial roll on a forearm branch selects this mapping.
+    // Other constraints (including wrist bend helpers) keep the original pose.
+    let has_forearm_roll = destinations.iter().any(|constraint| {
+        let NodeConstraintKind::Roll(mut roll_axis) = constraint.kind else {
+            return false;
+        };
+        if constraint.weight <= 0.0 || constraint.destination == chain.lower_arm {
+            return false;
+        }
+        // The compositor excludes constraints on the admitted joint path.
+        let mut ancestor = chain.hand;
+        while ancestor != chain.lower_arm {
+            if ancestor == constraint.destination {
+                return false;
+            }
+            let Ok(parent) = parents.get(ancestor) else {
+                return false;
+            };
+            ancestor = parent.parent();
+        }
+        let mut node = constraint.destination;
+        while node != chain.lower_arm {
+            if node == chain.hand {
+                return false;
+            }
+            let (Ok(rest), Ok(parent)) = (rests.get(node), parents.get(node)) else {
+                return false;
+            };
+            roll_axis = rest.rotation * roll_axis;
+            node = parent.parent();
+        }
+        roll_axis.dot(axis).abs() > 1.0 - 1.0e-4
+    });
+    if !has_forearm_roll {
+        return None;
+    }
+    let projected = axis * pose.lower_arm_delta.xyz().dot(axis);
+    let twist = Quat::from_xyzw(
+        projected.x,
+        projected.y,
+        projected.z,
+        pose.lower_arm_delta.w,
+    );
+    // A half-turn perpendicular to the forearm has no defined axial split.
+    if twist.length_squared() <= f32::EPSILON {
+        return None;
+    }
+    let twist = twist.normalize();
+    pose.lower_arm_delta = (pose.lower_arm_delta * twist.inverse()).normalize();
+    pose.hand = Some(ResolvedBoneDelta {
+        entity: chain.hand,
+        delta: (hand_rest.inverse()
+            * twist
+            * hand_rest
+            * pose.hand.map_or(Quat::IDENTITY, |hand| hand.delta))
+        .normalize(),
+    });
+    Some(pose)
 }
 
 fn apply_delta(

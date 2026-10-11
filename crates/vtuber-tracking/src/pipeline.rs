@@ -740,15 +740,13 @@ impl TrackingPipeline {
                     .detailed_expression_filter
                     .update(&cached.detailed_input, now);
                 if let Some(closure) = cached.closure {
-                    if closure.left.is_closed() {
-                        detailed = self
-                            .detailed_expression_filter
-                            .force_channel(ArkitBlendshape::EyeBlinkLeft, 1.0);
-                    }
-                    if closure.right.is_closed() {
-                        detailed = self
-                            .detailed_expression_filter
-                            .force_channel(ArkitBlendshape::EyeBlinkRight, 1.0);
+                    for (eye, channel) in [
+                        (closure.left, ArkitBlendshape::EyeBlinkLeft),
+                        (closure.right, ArkitBlendshape::EyeBlinkRight),
+                    ] {
+                        if eye.is_closed() {
+                            detailed = self.detailed_expression_filter.force_channel(channel, 1.0);
+                        }
                     }
                 }
                 let pose_result = cached.pose_result.map(|result| {
@@ -838,11 +836,13 @@ impl TrackingPipeline {
             if let Some(closure) = closure {
                 self.expression_filter
                     .force_blink_closed(closure.left.is_closed(), closure.right.is_closed());
-                if closure.left.is_closed() {
-                    expressions.blink_left = 1.0;
-                }
-                if closure.right.is_closed() {
-                    expressions.blink_right = 1.0;
+                for (eye, value) in [
+                    (closure.left, &mut expressions.blink_left),
+                    (closure.right, &mut expressions.blink_right),
+                ] {
+                    if eye.is_closed() {
+                        *value = 1.0;
+                    }
                 }
             }
 

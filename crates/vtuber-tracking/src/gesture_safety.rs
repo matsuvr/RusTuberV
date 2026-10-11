@@ -28,8 +28,9 @@ const STANDING_MAX_TOTAL_FLEXION_RAD: f32 = 1.2;
 /// and timestamps are preserved.
 #[must_use]
 pub fn suppress_isolated_middle_extension(mut frame: ArmControlFrame) -> ArmControlFrame {
-    frame.targets.left = frame.targets.left.map(sanitize_target);
-    frame.targets.right = frame.targets.right.map(sanitize_target);
+    for target in [&mut frame.targets.left, &mut frame.targets.right] {
+        *target = target.map(sanitize_target);
+    }
     frame
 }
 

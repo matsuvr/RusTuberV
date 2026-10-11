@@ -4,7 +4,7 @@
 
 use bevy::prelude::{Mat3, Quat, Vec3};
 
-use crate::arm::{ArmChainBinding, ArmSide, rest_palm_normal};
+use crate::arm::{ArmChainBinding, rest_palm_normal};
 use crate::arm_pose::{ResolvedBoneDelta, ResolvedFingerJointPose};
 
 fn frame(shaft: Vec3, normal: Vec3) -> Option<Mat3> {
@@ -28,11 +28,12 @@ fn mapped_axis(
     let value = source.transpose() * axis;
     // The palm normal is axial. In this shaft frame a reflected axial
     // vector changes X/Y sign, whereas its Z component is unchanged.
-    let value = if chain.side == ArmSide::Left {
-        Vec3::new(-value.x, -value.y, value.z)
-    } else {
-        value
-    };
+    let reflection = chain.side.reflection();
+    let value = Vec3::new(
+        reflection.horizontal(value.x),
+        reflection.horizontal(value.y),
+        value.z,
+    );
     (target * value).try_normalize()
 }
 

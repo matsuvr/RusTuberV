@@ -7,7 +7,7 @@
 
 use bevy::prelude::{Mat3, Quat, Vec3};
 
-use crate::arm::{ArmChainBinding, ArmIkInput, ArmIkTarget, ArmSide};
+use crate::arm::{ArmChainBinding, ArmIkInput, ArmIkTarget};
 
 /// Globe angles in radians. The elevation plane is undefined at either pole.
 #[derive(Clone, Copy, Debug)]
@@ -15,13 +15,6 @@ pub(crate) struct ShoulderCoordinates {
     pub plane: Option<f32>,
     pub elevation: f32,
     pub axial: f32,
-}
-
-fn sign(chain: &ArmChainBinding) -> f32 {
-    match chain.side {
-        ArmSide::Left => 1.0,
-        ArmSide::Right => -1.0,
-    }
 }
 
 pub(crate) fn neutral(chain: &ArmChainBinding) -> Option<Quat> {
@@ -63,7 +56,7 @@ pub(crate) fn coordinates(chain: &ArmChainBinding, rotation: Quat) -> Option<Sho
     let horizontal = direction.x.hypot(direction.z);
     let plane = (horizontal > 8.0 * f32::EPSILON).then(|| {
         let center = 20.0_f32.to_radians();
-        let raw = direction.z.atan2(sign(chain) * direction.x);
+        let raw = direction.z.atan2(chain.side.outward_sign() * direction.x);
         center + (raw - center).sin().atan2((raw - center).cos())
     });
     let twist = swing(direction)?.inverse() * relative;
@@ -71,7 +64,7 @@ pub(crate) fn coordinates(chain: &ArmChainBinding, rotation: Quat) -> Option<Sho
     Some(ShoulderCoordinates {
         plane,
         elevation: horizontal.atan2(-direction.y),
-        axial: 2.0 * (-sign(chain) * twist.y).atan2(twist.w),
+        axial: 2.0 * (-chain.side.outward_sign() * twist.y).atan2(twist.w),
     })
 }
 
@@ -80,7 +73,7 @@ pub(crate) fn from_coordinates(
     angles: ShoulderCoordinates,
 ) -> Option<Quat> {
     let swing = if let Some(plane) = angles.plane {
-        let side = sign(chain);
+        let side = chain.side.outward_sign();
         // A retained plane defines the frame even at the upper pole. Its
         // instantaneous recovery from a direction alone remains undefined.
         Quat::from_rotation_y(-side * plane)
@@ -92,7 +85,9 @@ pub(crate) fn from_coordinates(
         return None;
     };
     Some(
-        (swing * Quat::from_axis_angle(-sign(chain) * Vec3::Y, angles.axial) * neutral(chain)?)
-            .normalize(),
+        (swing
+            * Quat::from_axis_angle(-chain.side.outward_sign() * Vec3::Y, angles.axial)
+            * neutral(chain)?)
+        .normalize(),
     )
 }

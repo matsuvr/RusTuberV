@@ -219,8 +219,8 @@ pub fn tracked_arm_ik_target(
     }
 }
 
-/// Orthonormal palm frame; the normal and forward are independent observations
-/// but their filter outputs need orthogonalization before matrix conversion.
+/// Orthonormal palm frame, removing measurement/rounding error before matrix
+/// conversion. Tracking smooths the two observed axes as one rigid rotation.
 pub(crate) fn palm_frame(normal: Vec3, forward: Vec3) -> Option<Quat> {
     let forward = forward.try_normalize()?;
     let across = forward.cross(normal).try_normalize()?;
@@ -246,11 +246,7 @@ pub(crate) fn retarget_palm_frame(
     normal: Vec3,
     forward: Vec3,
 ) -> Option<(Vec3, Vec3)> {
-    let side_sign = if chain.side == crate::arm::ArmSide::Left {
-        1.0
-    } else {
-        -1.0
-    };
+    let side_sign = chain.side.outward_sign();
     let canonical = palm_frame(Vec3::Y * side_sign, Vec3::X * side_sign)?;
     let delta = palm_frame(normal, forward)? * canonical.inverse();
     Some((

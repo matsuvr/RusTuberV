@@ -427,6 +427,7 @@ pub fn debug_arm_frame_probe(
     bindings: Query<&AvatarBinding>,
     dynamic_targets: Query<&crate::arm_pipeline::DynamicArmTargets>,
     bones: Query<(&Transform, &RestTransform)>,
+    admitted: Option<Res<crate::upper_limb_runtime::UpperLimbState>>,
 ) {
     *frame_counter += 1;
     if log_file.is_none() {
@@ -484,6 +485,15 @@ pub fn debug_arm_frame_probe(
                     arm_side_text(chain, pose.as_ref(), target, weight, &bones)
                 ));
             }
+            if let Some(admitted) = admitted {
+                // Anatomical coordinates, before forearm skin-roll transfer:
+                // plane, elevation, axial, elbow, roll, wrist flexion/deviation,
+                // SC protraction/elevation. Local hand angle includes skin roll.
+                let [left, right] = admitted
+                    .joint_angles(binding.generation)
+                    .map(|arm| arm.map(|angles| angles.map(f32::to_degrees)));
+                line.push_str(&format!("|joints_deg(L={left:.2?} R={right:.2?})"));
+            }
         }
         None => line.push_str("|<no-avatar>"),
     }
@@ -515,9 +525,12 @@ fn arm_side_text(
             let [x, y, z] = target.wrist;
             let [ex, ey, ez] = target.elbow_pole;
             let palm = target.palm_normal.map_or("none".to_string(), |[x, y, z]| {
-                format!("{x:+.2},{y:+.2},{z:+.2}")
+                format!("{x:+.4},{y:+.4},{z:+.4}")
             });
-            format!("w={x:+.2},{y:+.2},{z:+.2} pole={ex:+.2},{ey:+.2},{ez:+.2} palm={palm}")
+            let forward = target.palm_forward.map_or("none".to_string(), |[x, y, z]| {
+                format!("{x:+.4},{y:+.4},{z:+.4}")
+            });
+            format!("w={x:+.2},{y:+.2},{z:+.2} pole={ex:+.2},{ey:+.2},{ez:+.2} palm={palm} forward={forward}")
         },
     );
     let Some(chain) = chain else {
@@ -537,9 +550,9 @@ fn arm_side_text(
         ),
         _ => (f32::NAN, f32::NAN),
     };
-    let hand = pose.and_then(|pose| pose.hand).map_or(f32::NAN, |hand| {
-        hand.delta.angle_between(Quat::IDENTITY).to_degrees()
-    });
+    // The rig adapter can transfer forearm roll into the displayed hand.
+    // Report the composed local rotation, as for the other bones above.
+    let hand = pose.map_or(f32::NAN, |_| degrees(Some(chain.hand)));
     format!(
         "(sh={:+.1} up={:+.1} up_dot={:+.3} desc={:+.1} lo={:+.1} hand={hand:+.1} \
          w={:.2}/{:.2}/{:.2} {observation})",

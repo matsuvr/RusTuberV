@@ -21,14 +21,14 @@
 //! smoother no longer stiffens after a loss, so a second delay on the same
 //! timeline would only delay the return twice.
 
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 use vtuber_core::arm_tracking::{
     ArmBlendWeight, ArmBlendWeights, ArmControlFrame, ArmLandmarks, ArmTrackingTarget,
     ArmTrackingTargets, HandFingerPose, PoseArmFrame, PoseWorldLandmark,
 };
 use vtuber_core::{FrameSeq, MonoTimeNs};
 
-use crate::filter::damped::{DEFAULT_MAX_DT_SEC, VectorSpring, critically_damped_step};
+use crate::filter::damped::{DEFAULT_MAX_DT_SEC, RotationSpring, VectorSpring};
 use crate::filter::time::bounded_dt;
 use crate::hand_poses::{FingerSmootherState, HandPoseSelector};
 use crate::loss_blend::{LossBlend, LossBlendProfile};
@@ -223,105 +223,20 @@ fn observed_finger_pose(arm: ArmLandmarks) -> Option<HandFingerPose> {
     })
 }
 
-/// Render-clock critically damped state for one observed unit direction.
-///
-/// The direction is followed as a rotation rather than as a raw 3-vector. A
-/// palm flip sends the observation to the opposite side of the sphere, and
-/// filtering the vector would drive the state toward the origin: normalizing
-/// a nearly zero vector picks an arbitrary direction, so the palm could swing
-/// through a side the hand never showed. Here the error is the shortest
-/// rotation between the current and observed directions, so an opposed pair
-/// turns about a stable perpendicular and arrives from the side the hand
-/// actually moved through. This is the same treatment the head rotation filter
-/// applies in tangent space; only the shared step is reused, not the head's
-/// single-frame angle limit, which has no meaning for a palm normal.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct DirectionSmootherState {
-    value: Vector3<f32>,
-    /// Retained error derivative in the tangent plane, as a rotation vector.
-    velocity: Vector3<f32>,
-}
-
-impl DirectionSmootherState {
-    /// `value` must be a unit vector, so every rotation starts from a point on
-    /// the sphere.
-    fn new(value: Vector3<f32>) -> Self {
-        Self {
-            value,
-            velocity: Vector3::zeros(),
-        }
-    }
-
-    /// Advances one render tick. An unusable observation holds the direction.
-    fn step(&mut self, target: [f32; 3], dt_sec: f32, time_constant_sec: f32) {
-        let Some(target) = finite_normalized(vector(target)) else {
-            return;
-        };
-        let Some(rotation) = shortest_arc_rotation(self.value, target) else {
-            return;
-        };
-        let (correction, velocity) =
-            critically_damped_step(rotation, self.velocity, dt_sec, time_constant_sec);
-        if let Some(value) = finite_normalized(rotate(self.value, correction)) {
-            self.value = value;
-            self.velocity = velocity;
-        }
-    }
-
-    /// The smoothed direction, or `None` if it drifted off the unit sphere.
-    fn normalized(self) -> Option<[f32; 3]> {
-        finite_normalized(self.value).map(array)
-    }
-}
-
-/// Normalizes a candidate direction, returning `None` when it cannot be used.
-fn unit_direction(value: [f32; 3]) -> Option<Vector3<f32>> {
-    finite_normalized(vector(value))
-}
-
-/// Rotation vector of the shortest arc carrying one unit direction onto another.
-///
-/// Both inputs must be unit vectors. An exactly opposed pair leaves the axis
-/// free, so a stable perpendicular of `from` is used instead of leaving the
-/// rotation undefined; a `None` axis means the target is not usable.
-fn shortest_arc_rotation(from: Vector3<f32>, to: Vector3<f32>) -> Option<Vector3<f32>> {
-    let axis = from.cross(&to);
-    let sine = axis.norm();
-    let cosine = from.dot(&to);
-    if sine <= f32::EPSILON {
-        return (cosine >= 0.0)
-            .then_some(Vector3::zeros())
-            .or_else(|| stable_perpendicular(from).map(|axis| axis * std::f32::consts::PI));
-    }
-    Some(axis * (sine.atan2(cosine) / sine))
-}
-
-/// Rotates a vector by the rotation vector `rotation` (axis scaled by angle).
-///
-/// Rodrigues' formula, so a zero rotation is the identity without a degenerate
-/// division. The caller renormalizes the result, which is what the rotation
-/// about a unit axis already guarantees up to rounding.
-fn rotate(value: Vector3<f32>, rotation: Vector3<f32>) -> Vector3<f32> {
-    let angle = rotation.norm();
-    if angle <= f32::EPSILON {
-        return value;
-    }
-    let axis = rotation / angle;
-    let (sine, cosine) = angle.sin_cos();
-    value * cosine + axis.cross(&value) * sine + axis * axis.dot(&value) * (1.0 - cosine)
-}
-
-/// A unit vector perpendicular to `value`, chosen from the world axis least
-/// aligned with it so the result does not flip between ticks.
-fn stable_perpendicular(value: Vector3<f32>) -> Option<Vector3<f32>> {
-    let seed = if value.x.abs() <= value.y.abs() && value.x.abs() <= value.z.abs() {
-        Vector3::x()
-    } else if value.y.abs() <= value.z.abs() {
-        Vector3::y()
-    } else {
-        Vector3::z()
-    };
-    finite_normalized(value.cross(&seed))
+/// One rigid palm frame, with Y toward the fingers and Z along the normal.
+/// Both axes come from the same hand observation. Filtering them independently
+/// can collapse the frame during a turn and invent an axial half-turn when it
+/// is orthogonalized by the avatar solver.
+fn palm_rotation(target: ArmTrackingTarget) -> Option<UnitQuaternion<f32>> {
+    let forward = finite_normalized(vector(target.palm_forward?))?;
+    let normal = finite_normalized(vector(target.palm_normal?))?;
+    let across = finite_normalized(forward.cross(&normal))?;
+    let basis = Matrix3::from_columns(&[across, forward, across.cross(&forward)]);
+    // This basis is already orthonormal. Polar decomposition from an
+    // identity seed is ambiguous at a half-turn; convert the rotation itself.
+    Some(UnitQuaternion::from_rotation_matrix(
+        &Rotation3::from_matrix_unchecked(basis),
+    ))
 }
 
 /// Time constant of the observed wrist position, in seconds.
@@ -449,8 +364,7 @@ const ELBOW_PLANE_MAX_RATE_RAD_PER_SEC: f32 = 3.0;
 struct ArmSmootherState {
     wrist: VectorSpring,
     elbow: VectorSpring,
-    palm: Option<DirectionSmootherState>,
-    forward: Option<DirectionSmootherState>,
+    palm: Option<RotationSpring>,
     fingers: Option<FingerSmootherState>,
     /// Bend-plane direction emitted on the previous tick, used to rate-limit
     /// the next one.
@@ -463,14 +377,7 @@ impl ArmSmootherState {
         Self {
             wrist: VectorSpring::new(vector(target.wrist)),
             elbow: VectorSpring::new(vector(target.elbow_pole)),
-            palm: target
-                .palm_normal
-                .and_then(unit_direction)
-                .map(DirectionSmootherState::new),
-            forward: target
-                .palm_forward
-                .and_then(unit_direction)
-                .map(DirectionSmootherState::new),
+            palm: palm_rotation(target).map(RotationSpring::new),
             fingers: target.fingers.map(FingerSmootherState::new),
             last_plane: None,
         }
@@ -485,23 +392,10 @@ impl ArmSmootherState {
             dt_sec,
             ARM_POSITION_TIME_CONSTANT_SEC,
         );
-        if self.palm.is_none() {
-            self.palm = target
-                .palm_normal
-                .and_then(unit_direction)
-                .map(DirectionSmootherState::new);
-        }
-        if let (Some(palm), Some(normal)) = (self.palm.as_mut(), target.palm_normal) {
-            palm.step(normal, dt_sec, ARM_PALM_TIME_CONSTANT_SEC);
-        }
-        if self.forward.is_none() {
-            self.forward = target
-                .palm_forward
-                .and_then(unit_direction)
-                .map(DirectionSmootherState::new);
-        }
-        if let (Some(forward), Some(measured)) = (self.forward.as_mut(), target.palm_forward) {
-            forward.step(measured, dt_sec, ARM_PALM_TIME_CONSTANT_SEC);
+        if let Some(rotation) = palm_rotation(target) {
+            self.palm
+                .get_or_insert_with(|| RotationSpring::new(rotation))
+                .step_world(rotation, dt_sec, ARM_PALM_TIME_CONSTANT_SEC);
         }
         if self.fingers.is_none() {
             self.fingers = target.fingers.map(FingerSmootherState::new);
@@ -518,13 +412,13 @@ impl ArmSmootherState {
         self.last_plane = Some(array(plane));
         // A lost palm or finger observation holds the last smoothed orientation
         // while the blend decays, exactly like a held elbow pole.
-        let palm_normal = self.palm.and_then(DirectionSmootherState::normalized);
+        let palm_normal = self.palm.map(|palm| array(palm.value * Vector3::z()));
         let fingers = self.fingers.map(FingerSmootherState::output);
         ArmTrackingTarget {
             wrist: array(self.wrist.position),
             elbow_pole: array(plane),
             palm_normal,
-            palm_forward: self.forward.and_then(DirectionSmootherState::normalized),
+            palm_forward: self.palm.map(|palm| array(palm.value * Vector3::y())),
             fingers,
         }
     }
@@ -1089,13 +983,15 @@ impl ArmTrackingState {
 
     /// Drops temporal state on model replacement, preserving camera arm lengths.
     pub fn reset_temporal(&mut self) {
-        let left = self.left.calibration;
-        let right = self.right.calibration;
-        let thorax = self.thorax;
-        self.reset();
-        self.left.calibration = left;
-        self.right.calibration = right;
-        self.thorax = thorax.without_motion();
+        for side in [&mut self.left, &mut self.right] {
+            *side = ArmSideState {
+                calibration: side.calibration,
+                ..ArmSideState::empty()
+            };
+        }
+        self.thorax = self.thorax.without_motion();
+        self.last_consumed = None;
+        self.last_now = None;
     }
 }
 
@@ -1128,8 +1024,9 @@ pub fn step_arm_tracking(
     let Some(frame) = observation else {
         state.thorax.consume(None, profile.shoulder_visibility);
         state.thorax.advance(now, render_dt_ns, &profile.blend);
-        state.left.advance_without_observation(now, profile);
-        state.right.advance_without_observation(now, profile);
+        for side in [&mut state.left, &mut state.right] {
+            side.advance_without_observation(now, profile);
+        }
         return (state, None);
     };
 
@@ -1148,11 +1045,16 @@ pub fn step_arm_tracking(
         // In a palms-down T-pose, left points +X and the thumb points +Z:
         // index cross little is +Y (dorsal), so inward flexion is negative.
         // The right hand reverses that sign. Presentation mirroring is later.
-        state.left.consume(left, profile, -1.0);
-        state.right.consume(right, profile, 1.0);
+        for (side, arm, flexion_sign) in [
+            (&mut state.left, left, -1.0),
+            (&mut state.right, right, 1.0),
+        ] {
+            side.consume(arm, profile, flexion_sign);
+        }
     }
-    state.left.advance(now, render_dt_ns, profile);
-    state.right.advance(now, render_dt_ns, profile);
+    for side in [&mut state.left, &mut state.right] {
+        side.advance(now, render_dt_ns, profile);
+    }
     let thorax = state.thorax.advance(now, render_dt_ns, &profile.blend);
 
     let Some((source_seq, captured_at)) = state.last_consumed else {
@@ -1232,6 +1134,14 @@ mod tests {
             palm_normal: None,
             palm_forward: None,
             fingers: None,
+        }
+    }
+
+    fn palm_target(normal: [f32; 3]) -> ArmTrackingTarget {
+        ArmTrackingTarget {
+            palm_normal: Some(normal),
+            palm_forward: Some([0.0, 1.0, 0.0]),
+            ..target(0.0)
         }
     }
 
@@ -1470,6 +1380,49 @@ mod tests {
     }
 
     #[test]
+    fn palm_axes_remain_rigid_through_a_turn_loss_and_reacquisition() {
+        let initial = ArmTrackingTarget {
+            palm_normal: Some([0.0, 0.0, 1.0]),
+            palm_forward: Some([0.0, 1.0, 0.0]),
+            ..target(0.0)
+        };
+        // A rigid half-turn swaps Y/Z. Filtering these two unit vectors
+        // separately takes opposite arcs and collapses the palm frame.
+        let turned = ArmTrackingTarget {
+            palm_normal: initial.palm_forward,
+            palm_forward: initial.palm_normal,
+            ..initial
+        };
+        for dt in [1.0 / 30.0, 1.0 / 60.0, 1.0 / 120.0] {
+            let mut smoother = ArmSmootherState::new(initial);
+            for (goal, ticks) in [
+                (turned, 3),
+                (
+                    ArmTrackingTarget {
+                        palm_normal: None,
+                        palm_forward: None,
+                        ..turned
+                    },
+                    20,
+                ),
+                (initial, 120),
+            ] {
+                for _ in 0..ticks {
+                    let output = smoother.advance(goal, dt);
+                    let normal = vector(output.palm_normal.unwrap());
+                    let forward = vector(output.palm_forward.unwrap());
+                    assert!(
+                        normal.dot(&forward).abs() < 2.0e-6,
+                        "a palm must stay orthogonal: {normal:?}, {forward:?}"
+                    );
+                    assert!((normal.norm() - 1.0).abs() < 2.0e-6);
+                    assert!((forward.norm() - 1.0).abs() < 2.0e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn constant_input_converges_without_bias_at_render_rates() {
         for step_sec in [1.0 / 30.0, RENDER_STEP_SEC] {
             let target = target(0.3);
@@ -1679,6 +1632,138 @@ mod tests {
             wrist: low_visibility(base.wrist),
             hand: None,
         }
+    }
+
+    #[test]
+    fn tracking_commutes_with_side_exchange_through_loss_recovery_and_reset() {
+        let reflect_arm = |mut arm: ArmLandmarks| {
+            for point in [&mut arm.shoulder, &mut arm.elbow, &mut arm.wrist] {
+                point.meters[0] = -point.meters[0];
+            }
+            if let Some(hand) = &mut arm.hand {
+                for point in &mut hand.landmarks {
+                    point.meters[0] = -point.meters[0];
+                }
+            }
+            arm
+        };
+        let check_target = |actual: Option<ArmTrackingTarget>,
+                            expected: Option<ArmTrackingTarget>| {
+            assert_eq!(actual.is_some(), expected.is_some());
+            let (Some(actual), Some(expected)) = (actual, expected) else {
+                return;
+            };
+            near(actual.wrist, expected.wrist);
+            near(actual.elbow_pole, expected.elbow_pole);
+            for (actual, expected) in [
+                (actual.palm_normal, expected.palm_normal),
+                (actual.palm_forward, expected.palm_forward),
+            ] {
+                assert_eq!(actual.is_some(), expected.is_some());
+                if let (Some(actual), Some(expected)) = (actual, expected) {
+                    near(actual, expected);
+                }
+            }
+            assert_eq!(actual.fingers.is_some(), expected.fingers.is_some());
+            if let (Some(actual), Some(expected)) = (actual.fingers, expected.fingers) {
+                let channels = |pose: HandFingerPose| {
+                    pose.fingers
+                        .into_iter()
+                        .flatten()
+                        .chain(pose.spread)
+                        .chain(pose.thumb)
+                        .chain([pose.thumb_spread])
+                        .chain(pose.thumb_cmc)
+                };
+                for (actual, expected) in channels(actual).zip(channels(expected)) {
+                    assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+                }
+            }
+        };
+        let profile = ArmTrackingProfile::default();
+        let mut original = ArmTrackingState::new();
+        let mut reflected = ArmTrackingState::new();
+        let mut tracked_ticks = 0;
+        for seq in 0..360 {
+            if seq == 270 {
+                original.reset_temporal();
+                reflected.reset_temporal();
+            }
+            let t = seq as f32 * 0.04;
+            let curl = if seq < 80 { 0.0 } else { -0.7 };
+            let mut left = ArmLandmarks {
+                hand: Some(flat_hand([[curl; 3]; 4], [curl; 2])),
+                ..arm()
+            };
+            let turn = Rotation3::from_euler_angles(t.sin(), 1.5 * t.cos(), 0.3 * t.sin());
+            for point in &mut left.hand.as_mut().unwrap().landmarks {
+                point.meters = array(turn * vector(point.meters));
+            }
+            left.wrist.meters[2] = 0.1 * t.sin();
+            // Different per-side lengths, poses and loss histories must remain
+            // independent even though every update uses the same algorithm.
+            let mut right = reflect_arm(ArmLandmarks {
+                elbow: point([0.35, 0.0, 0.0]),
+                wrist: point([0.35, -0.45, 0.0]),
+                hand: Some(flat_hand([[0.0; 3]; 4], [0.0; 2])),
+                ..arm()
+            });
+            if (100..155).contains(&seq) {
+                left.hand = None;
+            }
+            if (190..225).contains(&seq) {
+                right = hidden_arm(right);
+            }
+            let now = seq * OBSERVATION_STEP_NS;
+            let (frame, reflected_frame) = if (250..260).contains(&seq) {
+                (pose_frame(seq, now, None), pose_frame(seq, now, None))
+            } else {
+                (
+                    pose_frame(seq, now, Some(observation(left, right))),
+                    pose_frame(
+                        seq,
+                        now,
+                        Some(observation(reflect_arm(right), reflect_arm(left))),
+                    ),
+                )
+            };
+            for tick in 0..2 {
+                let now = MonoTimeNs(now + tick * (OBSERVATION_STEP_NS / 2));
+                let absent = (240..250).contains(&seq);
+                let (next, control) =
+                    step_arm_tracking(&original, (!absent).then_some(&frame), now, &profile);
+                let (next_reflected, reflected_control) = step_arm_tracking(
+                    &reflected,
+                    (!absent).then_some(&reflected_frame),
+                    now,
+                    &profile,
+                );
+                original = next;
+                reflected = next_reflected;
+                assert_eq!(control.is_some(), reflected_control.is_some());
+                if let (Some(control), Some(reflected_control)) = (control, reflected_control) {
+                    let expected = control.targets.mirrored();
+                    check_target(reflected_control.targets.left, expected.left);
+                    check_target(reflected_control.targets.right, expected.right);
+                    assert_eq!(reflected_control.weights, control.weights.mirrored());
+                    if control.weights.left.fingers > 0.9 && control.weights.right.fingers > 0.9 {
+                        tracked_ticks += 1;
+                    }
+                }
+                for (actual, expected) in [
+                    (&reflected.left, &original.right),
+                    (&reflected.right, &original.left),
+                ] {
+                    assert_eq!(actual.calibration, expected.calibration);
+                    assert_eq!(actual.weights(), expected.weights());
+                }
+            }
+        }
+        assert!(
+            tracked_ticks > 100,
+            "exercise actual tracked fingers, not only missing output"
+        );
+        assert_ne!(original.left.calibration, original.right.calibration);
     }
 
     #[test]
@@ -2459,19 +2544,19 @@ mod tests {
 
     #[test]
     fn an_exactly_opposed_palm_turns_through_a_stable_side() {
-        // Turning the hand over leaves the two palm planes exactly opposed, so
-        // the shortest arc has no preferred axis. The state must still turn
-        // continuously and land on the observation; filtering the raw vector
-        // instead would pass through a near-zero vector, whose normalization
-        // picks an arbitrary side the hand never showed.
+        // Turning the palm over keeps its forward axis. The pair defines the
+        // rotation axis even when the normal is exactly opposed.
         let dt = 1.0 / 60.0;
         let start = vector([0.0, 0.0, 1.0]);
-        let mut palm = DirectionSmootherState::new(start);
+        let mut palm = ArmSmootherState::new(palm_target(array(start)));
         let mut previous = start;
         let mut axis = Vector3::zeros();
         for _ in 0..300 {
-            palm.step(array(-start), dt, ARM_PALM_TIME_CONSTANT_SEC);
-            let current = vector(palm.normalized().expect("the palm stays on the sphere"));
+            let current = vector(
+                palm.advance(palm_target(array(-start)), dt)
+                    .palm_normal
+                    .unwrap(),
+            );
             assert!(
                 (current.norm() - 1.0).abs() < 1.0e-5,
                 "the smoothed palm must stay a unit vector: {current:?}"
@@ -2502,10 +2587,13 @@ mod tests {
         let dt = 1.0 / 60.0;
         let from = vector([0.0, 0.0, 1.0]);
         let to = vector([1.0, 0.0, 0.0]);
-        let mut palm = DirectionSmootherState::new(from);
+        let mut palm = ArmSmootherState::new(palm_target(array(from)));
         for _ in 0..300 {
-            palm.step(array(to), dt, ARM_PALM_TIME_CONSTANT_SEC);
-            let current = vector(palm.normalized().expect("the palm stays on the sphere"));
+            let current = vector(
+                palm.advance(palm_target(array(to)), dt)
+                    .palm_normal
+                    .unwrap(),
+            );
             assert!(
                 current.y.abs() < 1.0e-4,
                 "the turn must stay in the observation's plane: {current:?}"
@@ -2514,15 +2602,64 @@ mod tests {
     }
 
     #[test]
-    fn a_degenerate_palm_observation_holds_the_last_direction() {
-        let mut palm = DirectionSmootherState::new(vector([0.0, 0.0, 1.0]));
-        palm.step([0.0, 0.0, 0.0], RENDER_STEP_SEC, ARM_PALM_TIME_CONSTANT_SEC);
-        palm.step(
-            [f32::NAN, 0.0, 0.0],
-            RENDER_STEP_SEC,
-            ARM_PALM_TIME_CONSTANT_SEC,
-        );
-        near(palm.normalized().unwrap(), [0.0, 0.0, 1.0]);
+    fn an_incomplete_or_degenerate_palm_holds_both_axes() {
+        let initial = palm_target([0.0, 0.0, 1.0]);
+        let mut palm = ArmSmootherState::new(initial);
+        for (normal, forward) in [
+            (None, Some([1.0, 0.0, 0.0])),
+            (Some([1.0, 0.0, 0.0]), None),
+            (Some([0.0; 3]), initial.palm_forward),
+            (Some([f32::NAN, 0.0, 0.0]), initial.palm_forward),
+            (initial.palm_forward, initial.palm_forward),
+        ] {
+            let output = palm.advance(
+                ArmTrackingTarget {
+                    palm_normal: normal,
+                    palm_forward: forward,
+                    ..initial
+                },
+                RENDER_STEP_SEC,
+            );
+            near(output.palm_normal.unwrap(), initial.palm_normal.unwrap());
+            near(output.palm_forward.unwrap(), initial.palm_forward.unwrap());
+        }
+    }
+
+    #[test]
+    fn palm_smoothing_commutes_with_avatar_mirroring() {
+        let mirror = |target| {
+            vtuber_core::mirror::MotionMirror::new(true)
+                .arms(
+                    ArmTrackingTargets {
+                        left: Some(target),
+                        right: None,
+                    },
+                    ArmBlendWeights::default(),
+                )
+                .0
+                .right
+                .unwrap()
+        };
+        let initial = palm_target([0.0, 0.0, 1.0]);
+        let mut left = ArmSmootherState::new(initial);
+        let mut right = ArmSmootherState::new(mirror(initial));
+        for tick in 0..240 {
+            let t = tick as f32 / 60.0;
+            let turn = UnitQuaternion::from_scaled_axis(Vector3::new(
+                1.2 * t.sin(),
+                1.8 * (0.7 * t).sin(),
+                0.6 * (1.3 * t).sin(),
+            ));
+            let target = ArmTrackingTarget {
+                palm_normal: Some(array(turn * Vector3::z())),
+                palm_forward: Some(array(turn * Vector3::y())),
+                ..initial
+            };
+            let expected = mirror(left.advance(target, RENDER_STEP_SEC));
+            let actual = right.advance(mirror(target), RENDER_STEP_SEC);
+            near(actual.palm_normal.unwrap(), expected.palm_normal.unwrap());
+            near(actual.palm_forward.unwrap(), expected.palm_forward.unwrap());
+        }
     }
 
     #[test]
@@ -2530,13 +2667,16 @@ mod tests {
         // The palm constant is deliberately only a multiple of the wrist one, so
         // turning the hand over reaches the observation in about a second of
         // render ticks instead of trailing the wrist position for several.
-        let mut palm = DirectionSmootherState::new(vector([0.0, 0.0, 1.0]));
+        let mut palm = ArmSmootherState::new(palm_target([0.0, 0.0, 1.0]));
         let target = array(-vector([0.0, 0.0, 1.0]));
         let mut ticks = 0u32;
         loop {
-            palm.step(target, RENDER_STEP_SEC, ARM_PALM_TIME_CONSTANT_SEC);
+            let current = vector(
+                palm.advance(palm_target(target), RENDER_STEP_SEC)
+                    .palm_normal
+                    .unwrap(),
+            );
             ticks += 1;
-            let current = vector(palm.normalized().expect("the palm stays on the sphere"));
             if current.dot(&-vector([0.0, 0.0, 1.0])) > 1.0 - 1.0e-3 {
                 break;
             }
@@ -2562,7 +2702,10 @@ mod tests {
         for seq in 0..FULL_RETURN_FRAMES {
             let now = SETTLED_NS + seq * OBSERVATION_STEP_NS;
             let control = feed(&mut state, base, 100 + seq, now, &profile).unwrap();
-            assert!(control.targets.left.unwrap().palm_normal.is_some());
+            let output = control.targets.left.unwrap();
+            let normal = vector(output.palm_normal.unwrap());
+            let forward = vector(output.palm_forward.unwrap());
+            assert!(normal.dot(&forward).abs() < 2.0e-6);
         }
         assert_eq!(state.left.weights().palm, 0.0);
         assert_eq!(state.left.weights().wrist, 1.0);

@@ -99,24 +99,17 @@ fn track_direct_look_at(
                 let (Some(left_eye), Some(right_eye)) = (left_eye, right_eye) else {
                     continue;
                 };
-                apply_direct_eye(
-                    &mut commands,
-                    &eyes,
-                    left_eye.0,
-                    properties,
-                    yaw * weight,
-                    pitch * weight,
-                    true,
-                );
-                apply_direct_eye(
-                    &mut commands,
-                    &eyes,
-                    right_eye.0,
-                    properties,
-                    yaw * weight,
-                    pitch * weight,
-                    false,
-                );
+                for (entity, is_left) in [(left_eye.0, true), (right_eye.0, false)] {
+                    apply_direct_eye(
+                        &mut commands,
+                        &eyes,
+                        entity,
+                        properties,
+                        yaw * weight,
+                        pitch * weight,
+                        is_left,
+                    );
+                }
             }
             LookAtType::Expression => {
                 commands
@@ -155,17 +148,10 @@ fn apply_direct_eye(
     let Ok((transform, rest, rest_global, applied)) = eyes.get(entity) else {
         return;
     };
-    let target = if is_left {
-        apply_left_eye_bone(transform, rest, rest_global, properties, yaw, pitch)
-    } else {
-        apply_right_eye_bone(transform, rest, rest_global, properties, yaw, pitch)
-    };
-    let Some((output, state)) = compose_direct_eye_rotation(
-        transform.rotation,
-        rest.rotation,
-        target.rotation,
-        applied.copied(),
-    ) else {
+    let target = eye_rotation(rest, rest_global, properties, yaw, pitch, is_left);
+    let Some((output, state)) =
+        compose_direct_eye_rotation(transform.rotation, rest.rotation, target, applied.copied())
+    else {
         return;
     };
     commands
@@ -239,67 +225,32 @@ fn map_range(input: f32, range: RangeMap) -> f32 {
     (input.min(range.input_max_value) / range.input_max_value * range.output_scale).clamp(0.0, 1.0)
 }
 
-fn apply_left_eye_bone(
-    left_eye: &Transform,
+fn eye_rotation(
     rest_tf: &RestTransform,
     rest_gtf: &RestGlobalTransform,
     properties: &LookAtProperties,
     yaw_degrees: f32,
     pitch_degrees: f32,
-) -> Transform {
-    let range_map_horizontal_outer = properties.range_map_horizontal_outer;
-    let range_map_horizontal_inner = properties.range_map_horizontal_inner;
-    let range_map_vertical_down = properties.range_map_vertical_down;
-    let range_map_vertical_up = properties.range_map_vertical_up;
-    let yaw = if yaw_degrees > 0.0 {
-        map_range_output(yaw_degrees, range_map_horizontal_outer)
-    } else {
-        -map_range_output(yaw_degrees.abs(), range_map_horizontal_inner)
-    };
-
-    let pitch = if pitch_degrees > 0.0 {
-        map_range_output(pitch_degrees, range_map_vertical_down)
-    } else {
-        -map_range_output(pitch_degrees.abs(), range_map_vertical_up)
-    };
-    left_eye.with_rotation(to_eye_rotation(yaw, pitch, rest_tf, rest_gtf))
-}
-
-fn apply_right_eye_bone(
-    right_eye: &Transform,
-    rest_tf: &RestTransform,
-    rest_gtf: &RestGlobalTransform,
-    properties: &LookAtProperties,
-    yaw_degrees: f32,
-    pitch_degrees: f32,
-) -> Transform {
-    let range_map_horizontal_outer = properties.range_map_horizontal_outer;
-    let range_map_horizontal_inner = properties.range_map_horizontal_inner;
-    let range_map_vertical_down = properties.range_map_vertical_down;
-    let range_map_vertical_up = properties.range_map_vertical_up;
-
-    let yaw = if yaw_degrees > 0.0 {
-        map_range_output(yaw_degrees, range_map_horizontal_inner)
-    } else {
-        -map_range_output(yaw_degrees.abs(), range_map_horizontal_outer)
-    };
-
-    let pitch = if pitch_degrees > 0.0 {
-        map_range_output(pitch_degrees, range_map_vertical_down)
-    } else {
-        -map_range_output(pitch_degrees.abs(), range_map_vertical_up)
-    };
-
-    right_eye.with_rotation(to_eye_rotation(yaw, pitch, rest_tf, rest_gtf))
-}
-
-#[inline]
-fn to_eye_rotation(
-    yaw: f32,
-    pitch: f32,
-    rest_tf: &RestTransform,
-    rest_gtf: &RestGlobalTransform,
+    is_left: bool,
 ) -> Quat {
+    // Inner/outer are anatomical directions; the same signed yaw is outward
+    // for one eye and inward for the other. Both use the same range mapping.
+    let horizontal = if (yaw_degrees > 0.0) == is_left {
+        properties.range_map_horizontal_outer
+    } else {
+        properties.range_map_horizontal_inner
+    };
+    let yaw = if yaw_degrees > 0.0 {
+        map_range_output(yaw_degrees, horizontal)
+    } else {
+        -map_range_output(yaw_degrees.abs(), horizontal)
+    };
+
+    let pitch = if pitch_degrees > 0.0 {
+        map_range_output(pitch_degrees, properties.range_map_vertical_down)
+    } else {
+        -map_range_output(pitch_degrees.abs(), properties.range_map_vertical_up)
+    };
     rest_tf.rotation
         * crate::skeleton::rest_delta(
             Quat::from_euler(EulerRot::YXZ, yaw.to_radians(), pitch.to_radians(), 0.0),
@@ -323,4 +274,48 @@ fn map_range_output(input: f32, range: RangeMap) -> f32 {
         };
     }
     input.min(range.input_max_value) / range.input_max_value * range.output_scale.max(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eye_rotation_reflects_both_sides_and_preserves_inner_outer_ranges() {
+        let range = |output_scale| RangeMap {
+            input_max_value: 30.0,
+            output_scale,
+        };
+        let properties = LookAtProperties {
+            offset_from_head_bone: [0.0; 3],
+            range_map_horizontal_inner: range(10.0),
+            range_map_horizontal_outer: range(20.0),
+            range_map_vertical_down: range(12.0),
+            range_map_vertical_up: range(18.0),
+            r#type: LookAtType::Bone,
+        };
+        let rest = RestTransform(Transform::IDENTITY);
+        let global = RestGlobalTransform(GlobalTransform::IDENTITY);
+        for yaw in [-60.0, -30.0, -15.0, 0.0, 15.0, 30.0, 60.0] {
+            for pitch in [-30.0, 0.0, 30.0] {
+                let left = eye_rotation(&rest, &global, &properties, yaw, pitch, true);
+                let right = eye_rotation(&rest, &global, &properties, -yaw, pitch, false);
+                let reflected = Quat::from_xyzw(left.x, -left.y, -left.z, left.w);
+                assert!(same_rotation(right, reflected, 1.0e-6));
+            }
+        }
+        for (is_left, input, expected) in [
+            (true, 30.0, 20.0_f32),
+            (true, -30.0, -10.0),
+            (false, 30.0, 10.0),
+            (false, -30.0, -20.0),
+        ] {
+            let actual = eye_rotation(&rest, &global, &properties, input, 0.0, is_left);
+            assert!(same_rotation(
+                actual,
+                Quat::from_rotation_y(expected.to_radians()),
+                1.0e-6
+            ));
+        }
+    }
 }

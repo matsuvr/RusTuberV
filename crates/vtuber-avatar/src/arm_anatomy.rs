@@ -19,22 +19,8 @@ fn source_mapping(upper: Vec3, side: ArmSide) -> Option<(Mat3, Vec3)> {
     let h = u.cross(Vec3::Z).try_normalize()?;
     let destination = Mat3::from_cols(u, h, u.cross(h));
     // Source coordinates: +X anterior, +Y proximal, +Z right-lateral.
-    let polar = |v: Vec3| {
-        let v = Vec3::new(-v.z, v.y, v.x);
-        if side == ArmSide::Left {
-            Vec3::new(-v.x, v.y, v.z)
-        } else {
-            v
-        }
-    };
-    let axial = |v: Vec3| {
-        let v = Vec3::new(-v.z, v.y, v.x);
-        if side == ArmSide::Left {
-            Vec3::new(v.x, -v.y, -v.z)
-        } else {
-            v
-        }
-    };
+    let polar = |v: Vec3| side.reflect_polar(Vec3::new(-v.z, v.y, v.x));
+    let axial = |v: Vec3| side.reflect_axial(Vec3::new(-v.z, v.y, v.x));
     let source_u = polar(Vec3::new(0.0061, -0.2904, -0.0123)).normalize();
     let source_h = axial(Vec3::new(0.0494004, 0.0366003, 0.998108)).normalize();
     let perpendicular = (source_h - source_u * source_u.dot(source_h)).normalize();

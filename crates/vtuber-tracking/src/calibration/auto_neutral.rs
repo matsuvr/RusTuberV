@@ -57,20 +57,20 @@ struct GazeNeutralCandidate {
 
 impl GazeNeutralCandidate {
     fn from_observation(observation: BinocularGazeObservation) -> Self {
-        Self {
-            left: (observation.left.weight >= GAZE_NEUTRAL_MIN_WEIGHT)
-                .then_some([observation.left.horizontal, observation.left.vertical]),
-            right: (observation.right.weight >= GAZE_NEUTRAL_MIN_WEIGHT)
-                .then_some([observation.right.horizontal, observation.right.vertical]),
-        }
+        let [left, right] = [observation.left, observation.right].map(|eye| {
+            (eye.weight >= GAZE_NEUTRAL_MIN_WEIGHT).then_some([eye.horizontal, eye.vertical])
+        });
+        Self { left, right }
     }
 
     fn merge_missing(&mut self, candidate: Self) {
-        if self.left.is_none() {
-            self.left = candidate.left;
-        }
-        if self.right.is_none() {
-            self.right = candidate.right;
+        for (current, observed) in [
+            (&mut self.left, candidate.left),
+            (&mut self.right, candidate.right),
+        ] {
+            if current.is_none() {
+                *current = observed;
+            }
         }
     }
 
@@ -366,26 +366,15 @@ fn aggregate_gaze_baseline(
 ) -> Option<GazeNeutralBaseline> {
     let has_fallback = fallback.is_some();
     let fallback = fallback.unwrap_or_default();
-    let left_horizontal = median_nonempty(
-        candidates
-            .iter()
-            .filter_map(|candidate| candidate.gaze.left.map(|value| value[0])),
-    );
-    let left_vertical = median_nonempty(
-        candidates
-            .iter()
-            .filter_map(|candidate| candidate.gaze.left.map(|value| value[1])),
-    );
-    let right_horizontal = median_nonempty(
-        candidates
-            .iter()
-            .filter_map(|candidate| candidate.gaze.right.map(|value| value[0])),
-    );
-    let right_vertical = median_nonempty(
-        candidates
-            .iter()
-            .filter_map(|candidate| candidate.gaze.right.map(|value| value[1])),
-    );
+    let eye_medians = |select: fn(&Candidate) -> Option<[f32; 2]>| {
+        [0, 1].map(|axis| {
+            median_nonempty(candidates.iter().filter_map(|candidate| {
+                select(candidate).and_then(|value| value.get(axis).copied())
+            }))
+        })
+    };
+    let [left_horizontal, left_vertical] = eye_medians(|candidate| candidate.gaze.left);
+    let [right_horizontal, right_vertical] = eye_medians(|candidate| candidate.gaze.right);
     let has_any = left_horizontal.is_some()
         || left_vertical.is_some()
         || right_horizontal.is_some()

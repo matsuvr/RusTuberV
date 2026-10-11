@@ -15,6 +15,27 @@ pub enum ArmSide {
     Right,
 }
 
+impl ArmSide {
+    /// Anatomical reflection between the right-side reference and this side.
+    /// This is independent of the user's presentation-mirror setting.
+    pub(crate) const fn reflection(self) -> vtuber_core::mirror::MotionMirror {
+        vtuber_core::mirror::MotionMirror::new(matches!(self, Self::Left))
+    }
+
+    /// Outward X direction in the avatar's canonical front-view basis.
+    pub(crate) fn outward_sign(self) -> f32 {
+        -self.reflection().horizontal(1.0)
+    }
+
+    pub(crate) fn reflect_polar(self, value: Vec3) -> Vec3 {
+        Vec3::from_array(self.reflection().polar(value.to_array()))
+    }
+
+    pub(crate) fn reflect_axial(self, value: Vec3) -> Vec3 {
+        Vec3::from_array(self.reflection().axial(value.to_array()))
+    }
+}
+
 /// Elbow flexion range in the selected Holzbaur upper-extremity model
 /// (2005, p. 831): full extension to 130 degrees, without hyperextension.
 pub(crate) const ELBOW_FLEXION_LIMIT_RAD: f32 = 130.0_f32.to_radians();
@@ -489,10 +510,7 @@ pub fn default_arm_target(
     if !profile.is_valid() {
         return Err(ArmIkError::InvalidProfile);
     }
-    let side_sign = match chain.side {
-        ArmSide::Left => 1.0,
-        ArmSide::Right => -1.0,
-    };
+    let side_sign = chain.side.outward_sign();
     let (down, lateral) = profile.arm_drop_radians.sin_cos();
     let dropped_direction = Vec3::new(side_sign * lateral, -down, 0.0);
     let total = chain.rest.total_arm_length;

@@ -434,10 +434,12 @@ pub fn decide_geometry_pair(
 ) -> EyeClosureState {
     let [left_observed, right_observed] = observed;
     let [left_threshold, right_threshold] = thresholds;
-    EyeClosureState {
-        left: decide_geometry_eye(previous.left, left_observed, left_threshold),
-        right: decide_geometry_eye(previous.right, right_observed, right_threshold),
-    }
+    let [left, right] = [
+        (previous.left, left_observed, left_threshold),
+        (previous.right, right_observed, right_threshold),
+    ]
+    .map(|(previous, observed, threshold)| decide_geometry_eye(previous, observed, threshold));
+    EyeClosureState { left, right }
 }
 
 /// Stateful v1 hysteresis tracker used by the offline R baseline.
@@ -502,16 +504,20 @@ impl EyeClosureTracker {
             }
         }
         self.last = Some((seq, captured_at));
-        self.state.left = decide_openness_side(
-            self.thresholds.left(),
-            self.state.left,
-            observation.left_openness,
-        );
-        self.state.right = decide_openness_side(
-            self.thresholds.right(),
-            self.state.right,
-            observation.right_openness,
-        );
+        for (state, thresholds, openness) in [
+            (
+                &mut self.state.left,
+                self.thresholds.left(),
+                observation.left_openness,
+            ),
+            (
+                &mut self.state.right,
+                self.thresholds.right(),
+                observation.right_openness,
+            ),
+        ] {
+            *state = decide_openness_side(thresholds, *state, openness);
+        }
         self.state
     }
 }

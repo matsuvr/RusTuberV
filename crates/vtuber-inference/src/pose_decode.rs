@@ -119,12 +119,7 @@ pub fn decode_pose_result(result: &PoseLandmarkerResult) -> Result<DecodedPose, 
     let wrist_xy = result
         .pose_landmarks
         .first()
-        .map(|normalized| {
-            [
-                normalized_wrist_xy(normalized, 15),
-                normalized_wrist_xy(normalized, 16),
-            ]
-        })
+        .map(|normalized| [15, 16].map(|index| normalized_wrist_xy(normalized, index)))
         .unwrap_or([None, None]);
     Ok(DecodedPose {
         observation: Some(observation),
@@ -167,20 +162,18 @@ pub fn decode_pose_arms(
         }
         Ok(value)
     };
+    let arm = |[shoulder, elbow, wrist]: [usize; 3]| -> Result<ArmLandmarks, PoseDecodeError> {
+        Ok(ArmLandmarks {
+            shoulder: point(shoulder)?,
+            elbow: point(elbow)?,
+            wrist: point(wrist)?,
+            hand: None,
+        })
+    };
     Ok(PoseArmObservation {
         hips: Some([point(23)?, point(24)?]),
-        left: ArmLandmarks {
-            shoulder: point(11)?,
-            elbow: point(13)?,
-            wrist: point(15)?,
-            hand: None,
-        },
-        right: ArmLandmarks {
-            shoulder: point(12)?,
-            elbow: point(14)?,
-            wrist: point(16)?,
-            hand: None,
-        },
+        left: arm([11, 13, 15])?,
+        right: arm([12, 14, 16])?,
     })
 }
 
@@ -238,7 +231,7 @@ pub fn decode_hand_world(
     })
 }
 
-/// Pairs every detected hand with the Pose wrist nearest to it and returns one
+/// Pairs detected hands with Pose wrists jointly and returns one unambiguous
 /// hand observation per anatomical side.
 ///
 /// Pairing uses the normalized image positions of the Pose wrists and the
@@ -317,28 +310,54 @@ pub fn decode_hand_result(
     Ok(assign_hands(candidates, HAND_WRIST_PAIR_DISTANCE))
 }
 
-/// Gives each detected hand its nearest free side, in the reported order.
+/// Match as many wrists as possible within range, then minimize total distance.
+/// Neither detection order nor anatomical side breaks a tie: only assignments
+/// shared by all optimal pairings are observed. Existing tracking loss handling
+/// owns the ambiguous side until a later observation resolves it.
 fn assign_hands(
     candidates: Vec<HandCandidate>,
     max_distance: f32,
 ) -> [Option<HandWorldLandmarks>; 2] {
-    let mut hands: [Option<HandWorldLandmarks>; 2] = [None, None];
-    for candidate in candidates {
-        let best = candidate
-            .distances
-            .iter()
-            .enumerate()
-            .filter(|(side, _)| hands.get(*side).is_some_and(|slot| slot.is_none()))
-            .filter_map(|(side, distance)| distance.map(|distance| (side, distance)))
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((side, distance)) = best
-            && distance <= max_distance
-            && let Some(slot) = hands.get_mut(side)
-        {
-            *slot = Some(candidate.hand);
+    let choices = |side| {
+        std::iter::once(None).chain(candidates.iter().enumerate().filter_map(
+            move |(index, candidate)| {
+                let distance = candidate.distances.get(side).copied().flatten()?;
+                (distance <= max_distance).then_some(Some((index, distance)))
+            },
+        ))
+    };
+    let mut best_count = 0;
+    let mut best_distance = f32::INFINITY;
+    let mut agreed = [None, None];
+    for left in choices(0) {
+        for right in choices(1) {
+            if let (Some((a, _)), Some((b, _))) = (left, right)
+                && a == b
+            {
+                continue;
+            }
+            let pairing = [left, right];
+            let count = pairing.iter().flatten().count();
+            let distance: f32 = pairing.iter().flatten().map(|(_, distance)| distance).sum();
+            let indices = pairing.map(|entry| entry.map(|(index, _)| index));
+            if count > best_count || (count == best_count && distance < best_distance) {
+                best_count = count;
+                best_distance = distance;
+                agreed = indices;
+            } else if count == best_count && distance == best_distance {
+                for (slot, index) in agreed.iter_mut().zip(indices) {
+                    if *slot != index {
+                        *slot = None;
+                    }
+                }
+            }
         }
     }
-    hands
+    agreed.map(|index| {
+        index
+            .and_then(|index| candidates.get(index))
+            .map(|candidate| candidate.hand)
+    })
 }
 
 struct HandCandidate {
@@ -552,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn pairing_claims_the_nearest_free_side_and_ignores_far_hands() {
+    fn pairing_minimizes_distance_for_both_wrists_and_ignores_far_hands() {
         let hands = assign_hands(
             vec![
                 candidate([Some(0.02), Some(0.40)], 0.9),
@@ -562,8 +581,8 @@ mod tests {
         );
         assert!(hands[0].is_some());
         assert!(hands[1].is_some());
-        // The first hand takes the left side (closest); the second then takes
-        // the remaining right side even though its left distance is smaller.
+        // The minimum total distance assigns the second hand to the right,
+        // even though that hand alone is closer to the left wrist.
         assert_eq!(hands[0].unwrap().handedness_score, Some(0.9));
         assert_eq!(hands[1].unwrap().handedness_score, Some(0.8));
 
@@ -578,12 +597,78 @@ mod tests {
         // not hand the side to the farther one.
         let hands = assign_hands(
             vec![
-                candidate([Some(0.05), None], 0.4),
-                candidate([Some(0.02), None], 0.9),
+                candidate([Some(0.05), None], 0.9),
+                candidate([Some(0.02), None], 0.4),
             ],
             0.15,
         );
         assert_eq!(hands[0].unwrap().handedness_score, Some(0.4));
         assert_eq!(hands[1], None);
+    }
+
+    #[test]
+    fn pairing_is_independent_of_detection_order_and_side_order() {
+        let cases = [
+            // A greedy first-hand assignment steals the only wrist that the
+            // second hand can reach, despite both hands being pairable.
+            (
+                vec![[Some(0.03), Some(0.05)], [Some(0.02), None]],
+                [Some(0.2), Some(0.1)],
+            ),
+            // Both assignments are possible, but only one minimizes distance.
+            (
+                vec![[Some(0.04), Some(0.05)], [Some(0.02), Some(0.10)]],
+                [Some(0.2), Some(0.1)],
+            ),
+            (
+                vec![[Some(0.05), None], [Some(0.02), None]],
+                [Some(0.2), None],
+            ),
+            // A tie must not silently prefer the left side or first detector.
+            (vec![[Some(0.02), Some(0.02)]], [None, None]),
+            (
+                vec![[Some(0.02), Some(0.04)], [Some(0.02), Some(0.04)]],
+                [None, None],
+            ),
+            // Retain the unambiguous side even if the other side is tied.
+            (
+                vec![[Some(0.01), None], [None, Some(0.02)], [None, Some(0.02)]],
+                [Some(0.1), None],
+            ),
+            (vec![[Some(0.60), Some(0.70)]], [None, None]),
+            (vec![], [None, None]),
+        ];
+        for (distances, expected) in cases {
+            for swap_sides in [false, true] {
+                for reverse_detections in [false, true] {
+                    let mut candidates: Vec<_> = distances
+                        .iter()
+                        .enumerate()
+                        .map(|(i, distances)| {
+                            let [left, right] = *distances;
+                            candidate(
+                                if swap_sides {
+                                    [right, left]
+                                } else {
+                                    [left, right]
+                                },
+                                (i + 1) as f32 / 10.0,
+                            )
+                        })
+                        .collect();
+                    if reverse_detections {
+                        candidates.reverse();
+                    }
+                    let actual = assign_hands(candidates, 0.15)
+                        .map(|hand| hand.and_then(|hand| hand.handedness_score));
+                    let [left, right] = expected;
+                    assert_eq!(
+                        actual,
+                        if swap_sides { [right, left] } else { expected },
+                        "distances={distances:?}, swap_sides={swap_sides}, reverse_detections={reverse_detections}"
+                    );
+                }
+            }
+        }
     }
 }
