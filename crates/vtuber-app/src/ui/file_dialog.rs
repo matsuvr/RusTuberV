@@ -30,15 +30,6 @@ impl FileDialogState {
     /// Start a new dialog. Called by the shell's side-effect boundary, not by
     /// the snapshot-rendering functions. Native dialog buttons follow the OS.
     pub fn start(&mut self, lang: UiLanguage) {
-        self.start_kind(lang, false);
-    }
-
-    /// Pick the raw calibration belonging to a physical Looking Glass.
-    pub fn start_calibration(&mut self, lang: UiLanguage) {
-        self.start_kind(lang, true);
-    }
-
-    fn start_kind(&mut self, lang: UiLanguage, calibration: bool) {
         let mut inner = self
             .inner
             .lock()
@@ -53,24 +44,14 @@ impl FileDialogState {
             let result = std::panic::catch_unwind(|| {
                 let rt = tokio::runtime::Runtime::new().ok()?;
                 rt.block_on(async {
-                    let dialog = rfd::AsyncFileDialog::new();
-                    let dialog = if calibration {
-                        dialog
-                            .add_filter("Looking Glass calibration", &["json"])
-                            .set_title(lang.pick(
-                                "実機の visual.json を選択",
-                                "Select this display's visual.json",
-                                "选择此显示器的 visual.json",
-                                "이 디스플레이의 visual.json 선택",
-                            ))
-                    } else {
-                        dialog.add_filter("VRM", &["vrm"]).set_title(lang.pick(
+                    let dialog = rfd::AsyncFileDialog::new()
+                        .add_filter("VRM", &["vrm"])
+                        .set_title(lang.pick(
                             "VRM モデルを選択 (0.x / 1.0)",
                             "Select VRM model (0.x or 1.0)",
                             "选择VRM模型 (0.x / 1.0)",
                             "VRM 모델 선택 (0.x / 1.0)",
-                        ))
-                    };
+                        ));
                     let handle = dialog.pick_file().await;
                     handle.map(|handle| handle.path().to_path_buf())
                 })
@@ -100,13 +81,7 @@ pub fn poll_file_dialog(
     ui_state: &mut super::UiState,
 ) {
     if let Some(Some(path)) = state.take_result() {
-        if ui_state.dialog_for_calibration {
-            if let Some(selection) = &mut ui_state.looking_glass_selection {
-                selection.calibration_path = path;
-            }
-        } else {
-            ui_state.emit(actions, UiAction::RequestAvatarImportReview { path });
-        }
+        ui_state.emit(actions, UiAction::RequestAvatarImportReview { path });
     }
 }
 

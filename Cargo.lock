@@ -1291,12 +1291,13 @@ dependencies = [
 [[package]]
 name = "bevy_looking_glass"
 version = "0.1.0"
-source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=e1ed67e61b2a5df127d996f7b18a1d3c3d140f9a#e1ed67e61b2a5df127d996f7b18a1d3c3d140f9a"
+source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=c7eb5eec90d3b565634e0dc3c16eb0ed18f10896#c7eb5eec90d3b565634e0dc3c16eb0ed18f10896"
 dependencies = [
  "bevy",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]
@@ -4409,6 +4410,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d3a9855747c17eaf4383823f135220716ab49bea5fbea7dd42cc9a92f8aa31"
 dependencies = [
  "logos-codegen",
+]
+
+[[package]]
+name = "looking-glass-device"
+version = "0.1.0"
+dependencies = [
+ "bevy_looking_glass",
 ]
 
 [[package]]

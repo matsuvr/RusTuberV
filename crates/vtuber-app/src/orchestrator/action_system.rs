@@ -141,6 +141,11 @@ pub fn process_ui_actions_system(
                     control.start(preferences.clone());
                 }
             }
+            UiAction::RefreshLookingGlass => {
+                if let Some(control) = looking_glass.as_deref_mut() {
+                    control.refresh_devices();
+                }
+            }
             UiAction::StopLookingGlass => {
                 if let Some(control) = looking_glass.as_deref_mut() {
                     control.stop();

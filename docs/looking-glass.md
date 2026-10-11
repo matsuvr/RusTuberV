@@ -1,16 +1,20 @@
 # Looking Glass output
 
 Rust/Bevy 0.20 plus an embedded WESL interlacer. No Bridge DLL, C/C++, JavaScript,
-texture-sharing API or CPU image readback is added. This is a direct-display
-experiment, not an implementation of the Bridge SDK API. The Windows GPU path
-has been measured; optical output on a physical panel remains unverified.
+texture-sharing API or CPU image readback is added. The application queries
+Bridge's local HTTP API for device data and renders directly to the display.
+The Windows GPU path
+has been measured. Physical Portrait output and natural left/right viewpoint
+changes were confirmed by its owner on 2026-10-11; other panels remain unverified.
 
 ## Independent plugin (2026-10-11)
 
-The renderer, calibration parser, optics, device catalog and embedded WESL now
+The renderer, calibration parser, optics, device catalog and embedded WESL
 live in [bevy-looking-glass-rs](https://github.com/matsuvr/bevy-looking-glass-rs),
 crate `bevy_looking_glass` for Bevy 0.20. RusTuberV consumes a pinned Git revision.
-There is no second renderer copy in this workspace.
+The public `bridge::discover()` API was added on 2026-10-12; RusTuberV uses its
+device data and typed errors. There is no second renderer or Bridge client copy
+in this workspace.
 
 `crates/vtuber-app/src/looking_glass/mod.rs` keeps application settings and file
 I/O, the avatar-to-`ViewPose` adapter, UI status, shortcuts, and the existing
@@ -55,27 +59,93 @@ The measurements are OS presentation events on a desktop, not optical validation
 Raw CSVs, logs, hashes and summaries are in `target/looking-glass-extraction/`
 (local, ignored). Pre-extraction binary SHA256: `d700c54e5342cd3dc1601741d2ab0f206299962b5a73650c4f309d0e24a7ec15`;
 final binary SHA256: `dc5039ab47e218a84e3795448008de2e32a3091eeb0e46bdb538adf2ed48246f`.
-Physical Looking Glass optics, macOS execution of the extracted crate, live
-camera/inference acceptance and simultaneous NDI output remain unrun.
+Physical optics were not checked during extraction; the later Portrait check is
+recorded below. macOS execution of the extracted crate, live camera/inference
+acceptance and simultaneous NDI output remain unrun.
 
 ## Settings UI and device presets (2026-10-11)
 
 Open **Settings → Looking Glass出力**, directly below NDI出力 at the same
-navigation level. Select the model, choose that physical unit's raw calibration
-JSON (`LKG_calibration/visual.json` on supported USB-storage devices), and click
-**出力開始**. Looking Glass Portrait is the initial selection. On Portrait, use
-Desktop Mode with the manufacturer's video and USB/power connections.
+navigation level. With Looking Glass Bridge installed and running on Windows or
+macOS, the page automatically queries connected light-field displays. Select the
+physical unit from the list and click **出力開始**. One connected unit is selected
+automatically. No calibration filename, export command or file picker is needed.
+On Portrait, use Desktop Mode with the manufacturer's video and USB/power
+connections. **再検出** refreshes the list after changing connections.
 Move the output window onto the panel and press F11. Use an extended desktop
-at the preset's native resolution; a scaled window is only a preview.
+at the reported native resolution; a scaled window is only a preview.
 F10 previews the quilt for light field displays. **出力停止**, Escape, or the
 window close button releases the output; it can be started again immediately.
 
-The model and calibration path are saved in the existing application settings
-on successful start. Output does not start automatically next launch.
-Missing/malformed calibration and a screen size inconsistent with the selected
-model/orientation are reported without substituting lens values. Legacy
-hardware without USB storage needs raw calibration exported via the
-manufacturer's tooling; this application does not retrieve it over USB.
+Only the physical unit's serial (or the HLD model identifier) is saved in the
+application settings on successful start. Output does not start automatically next launch. Legacy
+saved calibration paths are ignored and removed on the next successful save.
+Start queries Bridge again, so the current unit's calibration is always used.
+An unreachable Bridge displays **Bridgeが見つかりません**. A reachable Bridge with
+no light-field unit displays **Looking Glassが見つかりません**. Acquisition runs on
+a worker; it does not block the UI or rendering. Stop cancels a pending start.
+
+The application uses Bridge's raw optical calibration, native screen size and
+`defaultQuilt` geometry. Model names are not an allowlist: a model absent from
+the bundled catalog uses the same validated data path. Optical cell tables are
+retained. Unknown optical modes, missing calibration/quilt or invalid geometry
+are reported without inventing another unit's lens values or a quilt preset.
+Existing single-view HLD presets remain selectable; they need no lenticular
+calibration and do not use the multiview Bridge acquisition path.
+
+### Factory calibration and optional diagnostic export
+
+Looking Glass Portrait accepts HDMI as a monitor, but its light field optics
+need the unit's factory calibration to interlace the views correctly. This is
+**not user-performed calibration**. The official
+[Bridge SDK](https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge-sdk)
+describes optical parameters as unique to each display. The
+[Core SDK header](https://github.com/Looking-Glass/LookingGlassCoreSDK/blob/master/HoloPlayCore/include/HoloPlayCore.h)
+also documents that calibration is transmitted over USB.
+
+`device.json` is this project's chosen export filename, not a mandatory official
+SDK filename. Its contents are the raw `visual.json` object. The embedded
+`devices.json` catalog is separate and contains model presets, not factory lens
+values for a physical unit.
+
+Connect the manufacturer's video and data-capable USB connections, install and
+start [Looking Glass Bridge](https://lookingglassfactory.com/software/looking-glass-bridge)
+2.2 or newer, and confirm it detects the unit. On Portrait, a USB power adapter
+alone cannot supply calibration to the PC; follow the manufacturer's
+[Portrait setup](https://lfdocs.lookingglassfactory.com/getting-started/portrait/get-started-with-looking-glass-portrait).
+
+The application and optional diagnostic exporter call the public pure Rust API
+`bevy_looking_glass::bridge::discover()` from `bevy-looking-glass-rs`. Discovery
+returns a device list, or `bridge::Error::Unavailable` when Bridge cannot be
+reached; RusTuberV supplies the Japanese UI message. The protocol implementation
+lives entirely in that independent crate. It follows the official Bridge.js protocol:
+HTTP PUT to `http://localhost:33334/`, `enter_orchestration`,
+`available_output_devices`, then `exit_orchestration`. It retains the returned
+`calibration.value` JSON string unchanged, preserving the raw `{ "value": ... }`
+fields and `subpixelCells`/`CellPatternMode`. It does not use Bridge.js's flattened
+calibration or the native SDK's normalized shader uniforms. The renderer receives
+parsed values in memory and calls no Bridge DLL. The HTTP protocol and worker
+are the same on Windows and macOS. See the official
+[client](https://github.com/Looking-Glass/Bridge.js/blob/main/src/library/client/BridgeClient.ts),
+[HTTP endpoints](https://github.com/Looking-Glass/Bridge.js/blob/main/src/library/components/endpoints.ts)
+and [calibration parser](https://github.com/Looking-Glass/Bridge.js/blob/main/src/library/components/displays.ts).
+The normal UI creates no calibration file. Developers can optionally export one
+for diagnostics or the advanced CLI below:
+
+```sh
+cargo run -p looking-glass-device --
+cargo run -p looking-glass-device -- /path/to/device.json --serial YOUR_DEVICE_SERIAL
+```
+
+The default diagnostic path is `run/looking-glass/device.json` (local, ignored).
+No file is written if Bridge or the selected calibration is unavailable. USB
+`LKG_calibration/visual.json`, where exposed by the unit, can also be inspected
+for diagnostics. These files are not part of the normal settings workflow.
+
+Initial export validation on 2026-10-11: local tests exercise the official HTTP envelopes,
+byte-preserving export, serial selection, and session exit with no device found.
+The no-Bridge path was checked on this PC while Portrait was disconnected. The
+later connected-unit export and optical check are recorded below.
 
 The plugin's [`src/devices.json`](https://github.com/matsuvr/bevy-looking-glass-rs/blob/main/src/devices.json) is the embedded catalog. It
 records panel size/aspect, output format, recommended quilt geometry, HLD safe
@@ -101,7 +171,7 @@ Catalog coverage:
 The current store lineup was checked separately from the documentation's
 historical device list. These presets implement specifications; they are
 **not evidence of optical validation on every model**. No physical panel or
-its calibration was available during this implementation.
+its calibration was available during the initial preset implementation.
 
 Official sources (checked 2026-10-11):
 
@@ -134,11 +204,117 @@ Local validation passed: `cargo build --release -p vtuber-desktop -j 1`,
 formatting and whitespace checks. Clippy still reports pre-existing
 `chunks_exact` suggestions outside this change.
 
-This checks application behavior, not physical optics. Actual Portrait/other
-panel output, macOS, and frame-rate performance for these presets remain
-unverified. Synthetic lens values must not be used on a real display.
+This initial check covered application behavior with synthetic data. The later
+Portrait check below used the actual unit's factory calibration. Other panels
+and macOS execution of these presets remain unverified. Synthetic lens values
+must not be used on a real display.
 
-## CLI custom layout
+### Physical Portrait check (2026-10-11)
+
+The connected unit was `LKG-PORT-01742` (display/storage name `LKG-P01742`).
+`cargo run -p looking-glass-device --` successfully acquired its raw factory
+calibration from the installed, running Bridge and wrote
+`run/looking-glass/device.json`. Its eleven checked lens/display fields matched
+`F:\LKG_calibration\visual.json` exactly. Bridge's JSON formatting differed from
+the USB file; its optical values did not. The user did not perform calibration.
+
+The existing final Git-dependency release executable above rendered Sapphy on
+the physical Portrait. The output window was confirmed at desktop origin
+`(5760, 0)` with a native `1536 x 2048` framebuffer and no window decorations.
+The UI preset and Bridge both reported an 8 x 6 quilt: 48 views, `3360 x 3360`.
+The CLI trial used 420 x 560 source views and the same grid. The owner confirmed
+that the image was stereoscopic and that left/right viewpoint changes were
+natural. This is owner-reported optical evidence, separate from screenshots.
+
+F10 displayed the 48-view quilt and returned to interlaced output. Escape closed
+only the auxiliary window. Choosing the Bridge-exported `device.json` in the
+settings UI and starting again succeeded, saved the Portrait selection and path,
+and returned to native fullscreen. The output was left running. No panic or
+shader error was logged; the existing gilrs mapping warning and late Bevy window
+events during auxiliary closure remained.
+
+A 30-second PresentMon capture at native output resolution with process affinity
+`0x15` measured the two swapchains at 55.50 and 55.56 display fps, both with a
+33.34 ms p95 display interval. Mean process CPU use was 1.62 cores and working
+set was 1.34 GiB. Other desktop applications remained open. Camera/inference and
+NDI were off. This short measurement does not establish a 60fps guarantee.
+Looking Glass output is optional and exempt from that target.
+
+Local, ignored evidence is in `run/looking-glass/verification.json`,
+`usb-bridge-comparison.json`, `bridge-devices.json`, the application logs and
+`portrait-native-measurement/`. The tested executable predates the export tool
+and calibration-label wording changes; it already contains the renderer and
+settings behavior exercised here.
+
+### Automatic Bridge acquisition validation (2026-10-11)
+
+The new Windows release was launched with Sapphy and no `--looking-glass`
+argument. The previous `run/looking-glass/device.json` was temporarily renamed;
+the old saved path therefore pointed to a missing file. Opening the settings
+page automatically detected `LKG-PORT-01742`, selected it, and displayed its
+native 1536 x 2048 size and Bridge's 3360-square, 8 x 6 quilt.
+
+Start acquired calibration from Bridge and rendered successfully while the JSON
+file remained absent. F10 showed all 48 views and returned to interlaced output.
+UI stop left the main avatar preview working; refresh retained the selected
+unit; start again succeeded through a fresh acquisition. The restarted output
+was left in native 1536 x 2048 fullscreen on Portrait at desktop `(5760, 0)`.
+The saved settings contained only its serial in `[looking_glass]`; all other
+preferences were preserved. The optional diagnostic JSON was restored afterward.
+No panic or shader error appeared. Logs contain the existing gilrs mapping and
+force-feedback warnings and a late Bevy window event during stop.
+
+- Shared Bridge client: four tests passed, covering the official HTTP envelopes,
+  session release on parse failure, raw optical-cell preservation, unknown model
+  names, multiple serials and the exact unavailable-Bridge message.
+- Application: seven focused tests passed, including uncatalogued models,
+  landscape/portrait calibration, cell modes 1–4, unused quilt edge pixels,
+  serial selection after reconnect, cancellation during acquisition and legacy
+  settings migration. These synthetic tests establish data handling, not optics
+  on those other models.
+- Shared client/exporter all-target Clippy with warnings denied, app/desktop
+  all-target Clippy, formatting, whitespace checks and the Windows release build
+  passed. The existing unrelated Clippy suggestions remain.
+- The original shared client/exporter passed an `aarch64-apple-darwin` compile
+  check from Windows before the client was moved into the public plugin crate.
+  This checked common acquisition code for Apple Silicon; full Mac app linking
+  and Mac hardware execution were not performed. Other physical Looking Glass models, live
+  inference/camera and simultaneous NDI were not exercised in this trial.
+
+Local evidence and the preserved settings are in
+`run/looking-glass/bridge-automatic/`. Tested executable SHA256:
+`3096ab8e5cbb97c43a1215b9bbc334bf5250592c450878fb53601b50645ff8ed`.
+The earlier optical confirmation and performance capture above belong to the
+earlier release; there was no new owner optical report or presentation timing
+capture for this build.
+
+### Public Bridge API migration validation (2026-10-12)
+
+Bridge detection, HTTP sessions and device parsing now live in
+`bevy_looking_glass::bridge`, at pinned commit
+`c7eb5eec90d3b565634e0dc3c16eb0ed18f10896`. The former application-local
+client crate was removed. RusTuberV and its optional exporter consume the public
+API; background scheduling, UI messages and saved selections stay in the app.
+
+- The independent crate passed all 25 library tests and all-target Clippy with
+  warnings denied. Formatting, whitespace and package-content checks passed.
+- RusTuberV passed eight focused release tests against the relocated source,
+  including consumption of `bridge::Error::Unavailable` and the required
+  `Bridgeが見つかりません` message. App, desktop and exporter all-target Clippy
+  then passed against the published Git commit, with existing unrelated warnings.
+- The exact upstream HTTP module retrieved the connected Portrait's serial,
+  raw 410-byte factory calibration and 3360-square, 8 x 6 quilt. It also passed
+  an isolated `aarch64-apple-darwin` compile check.
+- The app library and diagnostic exporter release build passed using the pinned
+  Git dependency. That exporter acquired `LKG-PORT-01742`'s 1536 x 2048
+  calibration from Bridge; its factory data matched the previous working export.
+  No new desktop executable or fullscreen optical test was run for this refactor.
+- A full-crate cross-check from Windows stopped at Bevy's `blake3` build script
+  because the Mac C compiler is unavailable. Mac execution and other physical
+  models remain unverified. The renderer was unchanged; the fullscreen UI and
+  optical evidence above belong to their recorded builds.
+
+## CLI custom layout (advanced, optional)
 
 Copy the **actual device's** `LKG_calibration/visual.json` to your PC. The file
 is exposed on supported devices' USB storage; the manufacturer's calibration
@@ -201,8 +377,9 @@ connector supported by that particular device; no HDMI-specific API is needed.
 **F10** toggles the raw quilt for inspection. **Escape** closes this output while
 it has focus. These keys act only on the auxiliary window. Closing it also
 removes every associated camera and render target; closing the main window
-closes the auxiliary window too. There is no automatic device detection,
-hot-plug restart or calibration download.
+closes the auxiliary window too. The normal settings UI discovers devices and
+retrieves calibration through Bridge. There is no automatic hot-plug restart;
+refresh the list and start output again after changing devices.
 
 ## Rendering and scope
 
@@ -414,9 +591,9 @@ view zero must be bottom-left, and a foreground/background object must move in
 opposite directions around the focus plane. Then disable quilt preview and
 check left/right parallax, upright image, color-channel registration and native
 pixel alignment. Test VRM replacement/unload, main-window controls, NDI running
-at the same time, and auxiliary-window closure. Looking Glass hardware, NDI
-simultaneous output and macOS performance remain pending; the Windows timing
-measurements above concern the specified desktop workload.
+at the same time, and auxiliary-window closure. Other Looking Glass hardware,
+NDI simultaneous output and macOS performance remain pending; the earlier
+Windows timing measurements above concern their specified desktop workloads.
 
 ## References (not bundled SDK code)
 

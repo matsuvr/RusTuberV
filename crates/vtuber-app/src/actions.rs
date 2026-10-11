@@ -123,6 +123,8 @@ pub enum UiAction {
     StopNdiOutput,
     /// Start the selected Looking Glass output.
     StartLookingGlass(crate::looking_glass::OutputPreferences),
+    /// Query connected Looking Glass devices from the local Bridge.
+    RefreshLookingGlass,
     /// Close the Looking Glass output window.
     StopLookingGlass,
 

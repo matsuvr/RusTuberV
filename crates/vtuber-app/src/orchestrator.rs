@@ -307,6 +307,7 @@ impl Orchestrator {
             | UiAction::ResetAvatarCamera
             | UiAction::StartNdiOutput
             | UiAction::StartLookingGlass(_)
+            | UiAction::RefreshLookingGlass
             | UiAction::StopLookingGlass
             | UiAction::StopNdiOutput
             | UiAction::ToggleMirror

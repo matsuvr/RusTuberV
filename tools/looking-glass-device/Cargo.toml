@@ -1,0 +1,16 @@
+[package]
+name = "looking-glass-device"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Export a connected Looking Glass unit's factory calibration from Bridge."
+
+[dependencies]
+bevy_looking_glass.workspace = true
+
+[lints]
+workspace = true
