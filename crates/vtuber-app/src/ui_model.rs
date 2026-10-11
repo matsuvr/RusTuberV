@@ -22,6 +22,8 @@ pub enum Pane {
     ExpressionKeys,
     /// Clean avatar output, including optional NDI.
     NdiOutput,
+    /// Optional calibrated holographic display output.
+    LookingGlassOutput,
     /// Tracking health and technical diagnostics.
     Diagnostics,
     /// Licenses of the built application and the packages it uses.
@@ -294,6 +296,8 @@ pub struct UiViewModel {
     pub tracking: TrackingViewModel,
     /// NDI state.
     pub ndi_output: NdiOutputViewModel,
+    /// Looking Glass device catalog, saved selection, and status.
+    pub looking_glass: crate::looking_glass::LookingGlassViewModel,
     /// License review sheet state.
     pub avatar_import_review: AvatarImportReviewViewModel,
     /// Camera-preview mirroring.

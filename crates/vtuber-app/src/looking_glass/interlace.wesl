@@ -43,6 +43,11 @@ fn quilt_preview(uv: vec2<f32>) -> vec4<f32> {
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let flags = calibration.flags.w;
+    if (flags & 16u) != 0u {
+        let uv = (mesh.uv - vec2<f32>(0.5)) / calibration.screen.zw + vec2<f32>(0.5);
+        if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { return vec4<f32>(1.0); }
+        return vec4<f32>(textureSampleLevel(view_textures, view_sampler, view_uv(uv), 0, 0.0).rgb, 1.0);
+    }
     if (flags & 8u) != 0u {
         return quilt_preview(mesh.uv);
     }

@@ -26,12 +26,15 @@ fn calibration(value: serde_json::Value) -> Result<Calibration, LookingGlassErro
 }
 
 #[test]
-fn absent_option_leaves_the_app_untouched() {
-    let mut app = App::new();
-    let entities_before = app.world().entities().len();
-    configure(&mut app, ["--model", "モデル.vrm"].map(OsString::from)).unwrap();
-    assert!(!app.world().contains_resource::<OutputConfig>());
-    assert_eq!(app.world().entities().len(), entities_before);
+fn absent_option_does_not_request_output() {
+    assert!(
+        config_argument(["--model", "モデル.vrm"].map(OsString::from))
+            .unwrap()
+            .is_none()
+    );
+    let control = LookingGlassControl::default();
+    assert!(control.pending.is_none());
+    assert!(control.startup.is_none());
 }
 
 #[test]
@@ -195,4 +198,114 @@ fn off_axis_frustum_corners_and_tile_aspect_agree_with_the_projection() {
         assert!(((clip.x / clip.w).abs() - 1.0).abs() < 1e-5);
         assert!(((clip.y / clip.w).abs() - 1.0).abs() < 1e-5);
     }
+}
+
+#[test]
+fn every_light_field_preset_uses_its_reference_grid_and_physical_aspect() {
+    let devices = devices::catalog().unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    for device in &devices {
+        assert!(ids.insert(&device.id));
+        assert!(!device.sources.is_empty());
+        let [width, height] = device.screen;
+        assert!((device.aspect - width as f32 / height as f32).abs() < 1e-6);
+        if device.format != DisplayFormat::LightField {
+            continue;
+        }
+        let mut value = raw();
+        value["screenW"]["value"] = width.into();
+        value["screenH"]["value"] = height.into();
+        let config = device
+            .light_field_config(serde_json::from_value(value).unwrap())
+            .unwrap();
+        let quilt = device.quilt.as_ref().unwrap();
+        assert_eq!(config.layout.count(), quilt.columns * quilt.rows);
+        assert_eq!(config.layout.view_width, quilt.width / quilt.columns);
+        assert_eq!(config.layout.view_height, quilt.height / quilt.rows);
+        assert_eq!(
+            (config.calibration.width, config.calibration.height),
+            (width, height)
+        );
+    }
+    let portrait = devices
+        .iter()
+        .find(|d| d.id == "portrait")
+        .unwrap()
+        .quilt
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        (
+            portrait.columns,
+            portrait.rows,
+            portrait.width,
+            portrait.height
+        ),
+        (8, 6, 3360, 3360)
+    );
+    assert!(devices.iter().any(|d| d.id == "original-8-9"));
+}
+
+#[test]
+fn selected_model_never_substitutes_a_different_devices_lens() {
+    let devices = devices::catalog().unwrap();
+    let portrait = devices.iter().find(|d| d.id == "portrait").unwrap();
+    // Synthetic Go-sized calibration cannot drive a Portrait preset.
+    assert!(
+        portrait
+            .light_field_config(serde_json::from_value(raw()).unwrap())
+            .is_err()
+    );
+    assert!(selected_output(portrait, &OutputPreferences::default()).is_err());
+}
+
+#[test]
+fn hld_has_one_view_and_standalone_has_no_live_output() {
+    let center = Transform::from_xyz(0.0, 1.0, 4.0);
+    let (view, projection) = view_pose(
+        center,
+        4.0,
+        PerspectiveProjection::default(),
+        0,
+        1,
+        0.0,
+        0.0,
+    );
+    assert_eq!(view, center);
+    assert!(projection.get_clip_from_view().is_finite());
+    for device in devices::catalog().unwrap() {
+        match device.format {
+            DisplayFormat::Hld => {
+                let output = selected_output(&device, &OutputPreferences::default()).unwrap();
+                assert_eq!(output.layout().count(), 1);
+                assert_eq!(output.screen().to_array(), device.screen);
+                let safe = device.safe_area.unwrap();
+                assert!(safe.into_iter().all(|value| value > 0.0 && value < 1.0));
+            }
+            DisplayFormat::Standalone => {
+                assert!(selected_output(&device, &OutputPreferences::default()).is_err())
+            }
+            DisplayFormat::LightField => {}
+        }
+    }
+}
+
+#[test]
+fn output_selection_round_trips_without_overwriting_other_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings.toml");
+    let mut settings = crate::settings::AppSettings::empty_at(&path);
+    settings
+        .set_language(crate::settings::UiLanguage::En)
+        .unwrap();
+    let selection = OutputPreferences {
+        device_id: "portrait".into(),
+        calibration_path: directory.path().join("実機/visual.json"),
+    };
+    settings.save_looking_glass(selection.clone()).unwrap();
+    let restored = crate::settings::AppSettings::load(path).unwrap();
+    assert_eq!(restored.looking_glass(), &selection);
+    assert_eq!(restored.language(), crate::settings::UiLanguage::En);
+    // Only selection is persisted, never an enabled flag.
+    assert!(LookingGlassControl::default().pending.is_none());
 }

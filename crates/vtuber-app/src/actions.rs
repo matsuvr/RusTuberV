@@ -121,6 +121,10 @@ pub enum UiAction {
     StartNdiOutput,
     /// Stop the optional transparent avatar NDI output.
     StopNdiOutput,
+    /// Start the selected Looking Glass output.
+    StartLookingGlass(crate::looking_glass::OutputPreferences),
+    /// Close the Looking Glass output window.
+    StopLookingGlass,
 
     // --- Calibration actions ---
     /// Begin calibration sequence.

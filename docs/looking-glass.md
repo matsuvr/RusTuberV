@@ -1,11 +1,91 @@
-# Looking Glass output prototype
+# Looking Glass output
 
 Rust/Bevy 0.20 plus an embedded WESL interlacer. No Bridge DLL, C/C++, JavaScript,
 texture-sharing API or CPU image readback is added. This is a direct-display
 experiment, not an implementation of the Bridge SDK API. The Windows GPU path
 has been measured; optical output on a physical panel remains unverified.
 
-## Run
+## Settings UI and device presets (2026-10-11)
+
+Open **Settings → Looking Glass出力**, directly below NDI出力 at the same
+navigation level. Select the model, choose that physical unit's raw calibration
+JSON (`LKG_calibration/visual.json` on supported USB-storage devices), and click
+**出力開始**. Looking Glass Portrait is the initial selection. On Portrait, use
+Desktop Mode with the manufacturer's video and USB/power connections.
+Move the output window onto the panel and press F11. Use an extended desktop
+at the preset's native resolution; a scaled window is only a preview.
+F10 previews the quilt for light field displays. **出力停止**, Escape, or the
+window close button releases the output; it can be started again immediately.
+
+The model and calibration path are saved in the existing application settings
+on successful start. Output does not start automatically next launch.
+Missing/malformed calibration and a screen size inconsistent with the selected
+model/orientation are reported without substituting lens values. Legacy
+hardware without USB storage needs raw calibration exported via the
+manufacturer's tooling; this application does not retrieve it over USB.
+
+`crates/vtuber-app/src/looking_glass/devices.json` is the embedded catalog. It
+records panel size/aspect, output format, recommended quilt geometry, HLD safe
+area, legacy status, research date and source URLs. All light field presets
+share the view-array/off-axis/interlacing code. Projection uses the physical
+display aspect, not the stretched tile aspect. The 65-inch reference quilt
+has unused edge pixels: tiles are 1024 × 910, using 8192 × 8190 pixels.
+
+Catalog coverage:
+
+- Current light field lineup: Go, 16-inch landscape/portrait and 27-inch
+  landscape/portrait.
+- Existing-owner presets: Portrait, original 8.9-inch, 15.6-inch/Pro, legacy 16-inch,
+  32-inch light field landscape/portrait, legacy 32-inch/8K and 65-inch.
+- HLD 16/27/86-inch: a single portrait view with a white matte and documented
+  safe margins. No lenticular calibration or quilt is applied. The same
+  renderer uses one array layer. Frame the avatar inside the physical alcove;
+  this app does not render the alcove or add a shadow-catcher scene.
+  The store lists 86-inch for October shipping.
+- musubi is listed with live output disabled: the manufacturer explicitly
+  says it cannot serve as a secondary screen.
+
+The current store lineup was checked separately from the documentation's
+historical device list. These presets implement specifications; they are
+**not evidence of optical validation on every model**. No physical panel or
+its calibration was available during this implementation.
+
+Official sources (checked 2026-10-11):
+
+- [Current lineup](https://lookingglassfactory.com/) and
+  [shipping / Portrait discontinued](https://looking-glass.helpscoutdocs.com/article/236-when-do-looking-glass-displays-ship).
+- [Quilt specifications](https://lfdocs.lookingglassfactory.com/keyconcepts/quilts).
+- [Official WebXR 15.6-inch quilt preset](https://github.com/Looking-Glass/looking-glass-webxr/blob/main/src/LookingGlassConfig.ts)
+  uses 5 × 9 at 4096 square (4095 square used by integer-sized tiles).
+- [Native resolutions and orientation](https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows).
+- [Portrait setup](https://lfdocs.lookingglassfactory.com/getting-started/portrait/get-started-with-looking-glass-portrait).
+- [HLD desktop output](https://hlddocs.lookingglassfactory.com/content-pipelines/creating-real-time-apps)
+  and [safe areas](https://hlddocs.lookingglassfactory.com/resources/media-specs-and-encoding).
+- [musubi input limitation](https://checkout.lookingglassfactory.com/products/musubi).
+
+### Windows settings smoke check (2026-10-11)
+
+The release application was exercised with Sapphy.vrm and synthetic Portrait
+calibration on an ordinary Windows monitor. The sidebar placement, model
+dropdown, native JSON picker, 48-view quilt, interlaced output, settings stop,
+restart without moving the camera, F11 fullscreen and Escape stop worked.
+Switching to HLD 16 produced one portrait view with a white matte; closing the
+main application also closed its output window. No shader error or panic was
+logged. Bevy logged late window events during close, and gilrs logged its
+existing controller-mapping warning. The original user settings were restored
+byte-for-byte after this check.
+
+Local validation passed: `cargo build --release -p vtuber-desktop -j 1`,
+`cargo test --release -p vtuber-app --lib -j 1 -- --test-threads=1`
+(323 tests), `cargo clippy -p vtuber-app -p vtuber-desktop --all-targets -j 1`,
+formatting and whitespace checks. Clippy still reports pre-existing
+`chunks_exact` suggestions outside this change.
+
+This checks application behavior, not physical optics. Actual Portrait/other
+panel output, macOS, and frame-rate performance for these presets remain
+unverified. Synthetic lens values must not be used on a real display.
+
+## CLI custom layout
 
 Copy the **actual device's** `LKG_calibration/visual.json` to your PC. The file
 is exposed on supported devices' USB storage; the manufacturer's calibration
@@ -31,7 +111,8 @@ The resulting quilt is 2046 x 2046. A Portrait-shaped starting point is 8 column
 a device-name heuristic. Calibration paths are relative to the configuration
 file; absolute paths also work. `depth_scale` multiplies the view-cone baseline:
 0 removes parallax, 1 uses the calibrated view cone. Changing settings requires
-restarting this prototype.
+restarting for CLI custom layouts. The settings UI can switch to a catalog
+preset during the same session.
 
 ```sh
 cargo run --release -p vtuber-desktop -- --looking-glass /path/to/looking-glass.json
@@ -50,7 +131,8 @@ For the Windows executable (PowerShell, after a normal Windows release build):
 ```
 
 The existing `--model /path/to/avatar.vrm` argument can be combined with this.
-Without `--looking-glass`, no output systems, cameras or textures are installed.
+Without `--looking-glass`, dormant output systems are installed for the settings
+UI, but no output cameras, windows or textures are allocated.
 
 Complete the device manufacturer's normal desktop/video-input setup, including
 its Bridge runtime where required by the device. This application does not link
@@ -67,7 +149,7 @@ connector supported by that particular device; no HDMI-specific API is needed.
 it has focus. These keys act only on the auxiliary window. Closing it also
 removes every associated camera and render target; closing the main window
 closes the auxiliary window too. There is no automatic device detection,
-hot-plug restart, calibration download, settings UI or fallback display mode.
+hot-plug restart or calibration download.
 
 ## Rendering and scope
 
@@ -97,10 +179,11 @@ direct batched draws (`NoIndirectDrawing`). CPU visibility culling still runs;
 per-view GPU indirect-argument construction is unnecessary for these small
 scenes. Bevy's material, skinning, morph, transparency-sorting and MToon outline
 paths remain in use. No cross-view instancing or view synthesis is introduced.
-When Looking Glass is enabled, `Core3d` runs on the render thread using
+When light field output is enabled, `Core3d` runs on the render thread using
 `SingleThreadedExecutor`, avoiding repeated dispatch to the desktop's single
 compute worker for every view. The ordinary path with the option absent is
-unchanged. Closing the output drops its image/material handles; unloading an
+unchanged; stopping restores the normal executor. Closing the output drops
+its image/material handles; unloading an
 avatar hides the interlacer mesh, leaving the output black until the rig is ready.
 
 Array layer zero is view zero, bottom-left in the virtual quilt. Lens coordinates

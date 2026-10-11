@@ -1,0 +1,362 @@
+{
+  "checked_on": "2026-10-11",
+  "lineup_sources": [
+    "https://lookingglassfactory.com/",
+    "https://looking-glass.helpscoutdocs.com/article/236-when-do-looking-glass-displays-ship"
+  ],
+  "notes": "Current light field lineup: Go, 16 and 27. Other light field presets retained for existing owners. HLD 86 listed for October shipping. musubi has no live video input. Calibration is per physical unit; no lens constants are stored here.",
+  "devices": [
+    {
+      "id": "go",
+      "name": "Looking Glass Go",
+      "format": "light_field",
+      "screen": [
+        1440,
+        2560
+      ],
+      "aspect": 0.5625,
+      "quilt": {
+        "columns": 11,
+        "rows": 6,
+        "width": 4092,
+        "height": 4092
+      },
+      "legacy": false,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "lf16-landscape",
+      "name": "Looking Glass 16″ Light Field (Landscape)",
+      "format": "light_field",
+      "screen": [
+        3840,
+        2160
+      ],
+      "aspect": 1.7777777777777777,
+      "quilt": {
+        "columns": 7,
+        "rows": 7,
+        "width": 5999,
+        "height": 5999
+      },
+      "legacy": false,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "lf16-portrait",
+      "name": "Looking Glass 16″ Light Field (Portrait)",
+      "format": "light_field",
+      "screen": [
+        2160,
+        3840
+      ],
+      "aspect": 0.5625,
+      "quilt": {
+        "columns": 11,
+        "rows": 6,
+        "width": 5995,
+        "height": 6000
+      },
+      "legacy": false,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "lf27-landscape",
+      "name": "Looking Glass 27″ Light Field (Landscape)",
+      "format": "light_field",
+      "screen": [
+        5120,
+        2880
+      ],
+      "aspect": 1.7777777777777777,
+      "quilt": {
+        "columns": 8,
+        "rows": 6,
+        "width": 7680,
+        "height": 4320
+      },
+      "legacy": false,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "lf27-portrait",
+      "name": "Looking Glass 27″ Light Field (Portrait)",
+      "format": "light_field",
+      "screen": [
+        2880,
+        5120
+      ],
+      "aspect": 0.5625,
+      "quilt": {
+        "columns": 12,
+        "rows": 4,
+        "width": 7680,
+        "height": 4320
+      },
+      "legacy": false,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "portrait",
+      "name": "Looking Glass Portrait",
+      "format": "light_field",
+      "screen": [
+        1536,
+        2048
+      ],
+      "aspect": 0.75,
+      "quilt": {
+        "columns": 8,
+        "rows": 6,
+        "width": 3360,
+        "height": 3360
+      },
+      "legacy": true,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "original-8-9",
+      "name": "Looking Glass 8.9″ (Original)",
+      "format": "light_field",
+      "screen": [
+        2560,
+        1600
+      ],
+      "aspect": 1.6,
+      "quilt": {
+        "columns": 4,
+        "rows": 8,
+        "width": 2048,
+        "height": 2048
+      },
+      "legacy": true,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://www.klub-solitaer.de/wp-content/uploads/Looking-Glass-8.9-15.6-Sell-Sheet.pdf",
+        "https://lfdocs.lookingglassfactory.com/legacy/legacy-hardware/8-9",
+        "https://www.rbvi.ucsf.edu/chimerax/data/lookingglass-july2020/"
+      ]
+    },
+    {
+      "id": "legacy-15-6",
+      "name": "Looking Glass 15.6″ / Pro (Gen 1)",
+      "format": "light_field",
+      "screen": [
+        3840,
+        2160
+      ],
+      "aspect": 1.7777777777777777,
+      "quilt": {
+        "columns": 5,
+        "rows": 9,
+        "width": 4096,
+        "height": 4096
+      },
+      "legacy": true,
+      "sources": [
+        "https://raw.githubusercontent.com/Looking-Glass/looking-glass-webxr/main/src/LookingGlassConfig.ts",
+        "https://lfdocs.lookingglassfactory.com/legacy/legacy-hardware/15-6",
+        "https://lfdocs.lookingglassfactory.com/legacy/legacy-software/corejs/api/hops-related"
+      ]
+    },
+    {
+      "id": "legacy-16",
+      "name": "Looking Glass 16″ (Legacy)",
+      "format": "light_field",
+      "screen": [
+        3840,
+        2160
+      ],
+      "aspect": 1.7777777777777777,
+      "quilt": {
+        "columns": 5,
+        "rows": 9,
+        "width": 4095,
+        "height": 4095
+      },
+      "legacy": true,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "lf32-landscape",
+      "name": "Looking Glass 32″ Light Field (Landscape)",
+      "format": "light_field",
+      "screen": [
+        7680,
+        4320
+      ],
+      "aspect": 1.7777777777777777,
+      "quilt": {
+        "columns": 7,
+        "rows": 7,
+        "width": 8190,
+        "height": 8190
+      },
+      "legacy": true,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "lf32-portrait",
+      "name": "Looking Glass 32″ Light Field (Portrait)",
+      "format": "light_field",
+      "screen": [
+        4320,
+        7680
+      ],
+      "aspect": 0.5625,
+      "quilt": {
+        "columns": 11,
+        "rows": 6,
+        "width": 8184,
+        "height": 8184
+      },
+      "legacy": true,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "legacy-32",
+      "name": "Looking Glass 32″ (Legacy / 8K)",
+      "format": "light_field",
+      "screen": [
+        7680,
+        4320
+      ],
+      "aspect": 1.7777777777777777,
+      "quilt": {
+        "columns": 5,
+        "rows": 9,
+        "width": 8190,
+        "height": 8190
+      },
+      "legacy": true,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "lf65",
+      "name": "Looking Glass 65″ Light Field",
+      "format": "light_field",
+      "screen": [
+        7680,
+        4320
+      ],
+      "aspect": 1.7777777777777777,
+      "quilt": {
+        "columns": 8,
+        "rows": 9,
+        "width": 8192,
+        "height": 8192
+      },
+      "legacy": true,
+      "sources": [
+        "https://lfdocs.lookingglassfactory.com/keyconcepts/quilts",
+        "https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-windows"
+      ]
+    },
+    {
+      "id": "hld16",
+      "name": "Looking Glass HLD 16″",
+      "format": "hld",
+      "screen": [
+        1080,
+        1920
+      ],
+      "aspect": 0.5625,
+      "quilt": null,
+      "legacy": false,
+      "sources": [
+        "https://hlddocs.lookingglassfactory.com/content-pipelines/creating-real-time-apps",
+        "https://hlddocs.lookingglassfactory.com/resources/media-specs-and-encoding"
+      ],
+      "safe_area": [
+        0.9,
+        0.9479166666666666
+      ]
+    },
+    {
+      "id": "hld27",
+      "name": "Looking Glass HLD 27″",
+      "format": "hld",
+      "screen": [
+        2160,
+        3840
+      ],
+      "aspect": 0.5625,
+      "quilt": null,
+      "legacy": false,
+      "sources": [
+        "https://hlddocs.lookingglassfactory.com/content-pipelines/creating-real-time-apps",
+        "https://hlddocs.lookingglassfactory.com/resources/media-specs-and-encoding"
+      ],
+      "safe_area": [
+        0.9,
+        0.9479166666666666
+      ]
+    },
+    {
+      "id": "hld86",
+      "name": "Looking Glass HLD 86″",
+      "format": "hld",
+      "screen": [
+        2160,
+        3840
+      ],
+      "aspect": 0.5625,
+      "quilt": null,
+      "legacy": false,
+      "sources": [
+        "https://hlddocs.lookingglassfactory.com/content-pipelines/creating-real-time-apps",
+        "https://hlddocs.lookingglassfactory.com/resources/media-specs-and-encoding"
+      ],
+      "safe_area": [
+        0.9,
+        0.9479166666666666
+      ]
+    },
+    {
+      "id": "musubi",
+      "name": "Looking Glass musubi",
+      "format": "standalone",
+      "screen": [
+        576,
+        1024
+      ],
+      "aspect": 0.5625,
+      "quilt": null,
+      "legacy": false,
+      "sources": [
+        "https://checkout.lookingglassfactory.com/products/musubi",
+        "https://hlddocs.lookingglassfactory.com/resources/hardware-specs"
+      ]
+    }
+  ]
+}

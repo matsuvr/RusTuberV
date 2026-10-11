@@ -60,6 +60,7 @@ pub struct AppSettings {
     restored_expression_bindings: ExpressionBindingStore,
     language: UiLanguage,
     arm_tracking_enabled: bool,
+    looking_glass: crate::looking_glass::OutputPreferences,
 }
 
 impl Default for AppSettings {
@@ -70,6 +71,7 @@ impl Default for AppSettings {
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
             arm_tracking_enabled: false,
+            looking_glass: Default::default(),
         }
     }
 }
@@ -124,6 +126,7 @@ impl AppSettings {
             restored_expression_bindings: ExpressionBindingStore::default(),
             language: UiLanguage::default(),
             arm_tracking_enabled: false,
+            looking_glass: Default::default(),
         }
     }
 
@@ -221,6 +224,28 @@ impl AppSettings {
             .ok_or(SettingsError::NoConfigDirectory)?;
         save_language(path, language)?;
         self.language = language;
+        Ok(())
+    }
+
+    /// Saved Looking Glass model and physical calibration path.
+    pub fn looking_glass(&self) -> &crate::looking_glass::OutputPreferences {
+        &self.looking_glass
+    }
+
+    /// Save an output selection while preserving the other settings sections.
+    pub fn save_looking_glass(
+        &mut self,
+        selection: crate::looking_glass::OutputPreferences,
+    ) -> Result<(), SettingsError> {
+        let path = self
+            .path
+            .as_deref()
+            .ok_or(SettingsError::NoConfigDirectory)?;
+        let mut document = read_settings_document(path)?;
+        document.looking_glass = selection.clone();
+        crate::file_io::replace_file(path, toml::to_string_pretty(&document)?.as_bytes())
+            .map_err(SettingsError::Io)?;
+        self.looking_glass = selection;
         Ok(())
     }
 
@@ -481,6 +506,7 @@ fn restore_settings_document(
         restored_expression_bindings,
         language,
         arm_tracking_enabled,
+        looking_glass: document.looking_glass,
     })
 }
 
@@ -494,6 +520,7 @@ fn empty_settings_document() -> SettingsDocument {
         dynamic_arm_profiles: BTreeMap::new(),
         expression_bindings: BTreeMap::new(),
         rich_look: BTreeMap::new(),
+        looking_glass: Default::default(),
     }
 }
 
@@ -584,6 +611,8 @@ struct SettingsDocument {
     /// model starts OFF at full strength.
     #[serde(default)]
     rich_look: BTreeMap<String, RichLookSettings>,
+    #[serde(default)]
+    looking_glass: crate::looking_glass::OutputPreferences,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

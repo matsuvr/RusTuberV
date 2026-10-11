@@ -281,8 +281,11 @@ pub(super) fn view_pose(
     view_cone: f32,
     depth_scale: f32,
 ) -> (Transform, OffAxisProjection) {
-    let ratio =
-        (2.0 * index as f32 / (count - 1) as f32 - 1.0) * (view_cone * 0.5).tan() * depth_scale;
+    let ratio = if count > 1 {
+        (2.0 * index as f32 / (count - 1) as f32 - 1.0) * (view_cone * 0.5).tan() * depth_scale
+    } else {
+        0.0 // HLD uses one centered camera without angular parallax.
+    };
     let mut transform = center;
     transform.translation += center.rotation * Vec3::X * (ratio * focus_distance);
     (

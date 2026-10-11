@@ -49,6 +49,7 @@ pub fn process_ui_actions_system(
     mut manual_requests: Option<MessageWriter<ManualExpressionRequest>>,
     mut pose_runtime: Option<ResMut<crate::pose_runtime::PoseRuntime>>,
     mut look: LookSystemParams,
+    mut looking_glass: Option<ResMut<crate::looking_glass::LookingGlassControl>>,
 ) {
     let actions = action_queue.take_actions();
     for action in &actions {
@@ -133,6 +134,16 @@ pub fn process_ui_actions_system(
             UiAction::StopNdiOutput => {
                 if let Some(intent) = ndi_intent.as_deref_mut() {
                     intent.request_stop();
+                }
+            }
+            UiAction::StartLookingGlass(preferences) => {
+                if let Some(control) = looking_glass.as_deref_mut() {
+                    control.start(preferences.clone());
+                }
+            }
+            UiAction::StopLookingGlass => {
+                if let Some(control) = looking_glass.as_deref_mut() {
+                    control.stop();
                 }
             }
             UiAction::SetLanguage(language) => {

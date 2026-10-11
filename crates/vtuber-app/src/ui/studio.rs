@@ -19,6 +19,7 @@ use vtuber_avatar::{ArmPoseProfileOverride, AvatarMotionMirror};
 mod camera;
 mod expression_keys;
 mod import_review;
+mod looking_glass;
 
 use camera::{camera_select_page, camera_status_page};
 pub(crate) use expression_keys::expression_key_input;
@@ -27,11 +28,12 @@ use import_review::render_avatar_import_review;
 
 /// Sidebar destinations in display order. There is no hierarchy: every
 /// destination shows all of its sections in the right pane at once.
-const DESTINATIONS: [Pane; 6] = [
+const DESTINATIONS: [Pane; 7] = [
     Pane::VrmCamera,
     Pane::PoseCamera,
     Pane::ExpressionKeys,
     Pane::NdiOutput,
+    Pane::LookingGlassOutput,
     Pane::Diagnostics,
     Pane::OssLicenses,
 ];
@@ -57,6 +59,12 @@ fn page_title(pane: Pane, lang: UiLanguage) -> &'static str {
         ),
         Pane::ExpressionKeys => lang.pick("表情設定", "Expressions", "表情设置", "표정 설정"),
         Pane::NdiOutput => lang.pick("NDI出力", "NDI output", "NDI输出", "NDI 출력"),
+        Pane::LookingGlassOutput => lang.pick(
+            "Looking Glass出力",
+            "Looking Glass output",
+            "Looking Glass输出",
+            "Looking Glass 출력",
+        ),
         Pane::Diagnostics => lang.pick("診断", "Diagnostics", "诊断", "진단"),
         Pane::OssLicenses => lang.pick(
             "OSSライセンス",
@@ -722,6 +730,9 @@ pub(crate) fn render_studio(
                                     expression_keys_page(actions, ui, vm, state, lang)
                                 }
                                 Pane::NdiOutput => output_page(actions, ui, vm, state, lang),
+                                Pane::LookingGlassOutput => {
+                                    looking_glass::page(actions, ui, vm, state, dialog_active, lang)
+                                }
                                 Pane::Diagnostics => diagnostics_page(ui, vm, diagnostics, lang),
                                 Pane::OssLicenses => oss_licenses_page(ui, lang),
                             }
@@ -1497,7 +1508,12 @@ mod tests {
         assert!(!use_sidebar(720.0));
         assert!(use_sidebar(1600.0));
         let destinations: Vec<Pane> = destinations().collect();
-        assert_eq!(destinations.len(), 6);
+        assert_eq!(destinations.len(), 7);
+        assert!(
+            destinations
+                .windows(2)
+                .any(|pair| pair == [Pane::NdiOutput, Pane::LookingGlassOutput])
+        );
         assert_eq!(destinations.first(), Some(&Pane::VrmCamera));
         assert!(destinations.contains(&Pane::PoseCamera));
         assert!(destinations.contains(&Pane::ExpressionKeys));

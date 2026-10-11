@@ -38,6 +38,9 @@ pub struct UiState {
     pub(crate) camera_consent: CameraPreviewConsent,
     last_pane: Option<Pane>,
     pub(crate) import_requested: bool,
+    pub(crate) looking_glass_selection: Option<crate::looking_glass::OutputPreferences>,
+    pub(crate) calibration_requested: bool,
+    pub(crate) dialog_for_calibration: bool,
 }
 
 impl Default for UiState {
@@ -51,6 +54,9 @@ impl Default for UiState {
             camera_consent: CameraPreviewConsent::Hidden,
             last_pane: None,
             import_requested: false,
+            looking_glass_selection: None,
+            calibration_requested: false,
+            dialog_for_calibration: false,
         }
     }
 }
@@ -257,7 +263,12 @@ fn ui_render_system(
     }
     // The UI requests a dialog; this boundary owns filesystem/dialog effects.
     if std::mem::take(&mut state.import_requested) {
+        state.dialog_for_calibration = false;
         file_dialog.start(settings.language());
+    }
+    if std::mem::take(&mut state.calibration_requested) && !file_dialog.is_active() {
+        state.dialog_for_calibration = true;
+        file_dialog.start_calibration(settings.language());
     }
     super::file_dialog::handle_dropped_files(&mut actions, ctx, &mut state);
     Ok(())

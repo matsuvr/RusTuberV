@@ -21,8 +21,9 @@ use vtuber_avatar::{
 };
 
 use super::{
-    OutputConfig,
+    ActiveOutput, LookingGlassControl,
     optics::{InterlaceUniforms, view_pose},
+    selected_output,
     view_array::{self, VIEW_FORMAT, ViewCamera},
 };
 
@@ -52,40 +53,139 @@ impl Material2d for InterlaceMaterial {
     }
 }
 
-pub(super) fn install(app: &mut App, config: OutputConfig) {
-    // With the desktop's three-thread budget, dispatching Core3d to its one
-    // compute worker for every view costs more than running on the render thread.
-    if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
-        render_app.edit_schedule(bevy::core_pipeline::Core3d, |schedule| {
-            schedule.set_executor(SingleThreadedExecutor::new());
-        });
-    }
+pub(super) fn install(app: &mut App) {
     embedded_asset!(app, "interlace.wesl");
     view_array::install(app);
-    app.insert_resource(config)
-        .add_plugins(Material2dPlugin::<InterlaceMaterial>::default())
-        .add_systems(Startup, setup.run_if(array_supported))
-        .add_systems(Update, window_keys)
+    app.add_plugins(Material2dPlugin::<InterlaceMaterial>::default())
+        .add_systems(
+            Update,
+            (apply_request, window_keys)
+                .chain()
+                .after(crate::orchestrator::process_ui_actions_system),
+        )
         .add_systems(
             PostUpdate,
             sync_views
+                .run_if(resource_exists::<ActiveOutput>)
                 .after(TransformSystems::Propagate)
                 .before(CameraUpdateSystems)
                 .before(VisibilitySystems::VisibilityPropagate),
         )
         .add_systems(Last, close_with_main);
+    if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render_app.add_systems(bevy::render::ExtractSchedule, sync_executor);
+    }
 }
 
-fn array_supported(config: Res<OutputConfig>, device: Res<RenderDevice>) -> bool {
-    let layout = config.layout;
-    let limits = device.limits();
-    let supported = layout.count() <= limits.max_texture_array_layers
-        && layout.view_width <= limits.max_texture_dimension_2d
-        && layout.view_height <= limits.max_texture_dimension_2d;
-    if !supported {
-        error!("Looking Glass view array exceeds this GPU's texture limits");
+fn sync_executor(
+    mut commands: Commands,
+    config: bevy::render::Extract<Option<Res<ActiveOutput>>>,
+    mut enabled: Local<bool>,
+) {
+    let multiview = matches!(config.as_deref(), Some(ActiveOutput::LightField(_)));
+    if *enabled != multiview {
+        *enabled = multiview;
+        commands.queue(move |world: &mut World| {
+            if let Some(mut schedules) = world.get_resource_mut::<bevy::ecs::schedule::Schedules>()
+                && let Some(schedule) = schedules.get_mut(bevy::core_pipeline::Core3d)
+            {
+                if multiview {
+                    schedule.set_executor(SingleThreadedExecutor::new());
+                } else {
+                    schedule.set_executor(bevy::ecs::schedule::MultiThreadedExecutor::new());
+                }
+            }
+        });
     }
-    supported
+}
+
+fn apply_request(world: &mut World) {
+    let Some(mut control) = world.get_resource_mut::<LookingGlassControl>() else {
+        return;
+    };
+    let pending = control.pending.take();
+    let startup = control.startup.take();
+    let windows: Vec<Entity> = world
+        .query_filtered::<Entity, With<OutputWindow>>()
+        .iter(world)
+        .collect();
+    if pending.is_none() && startup.is_none() {
+        if windows.is_empty() {
+            world.remove_resource::<ActiveOutput>();
+        }
+        world
+            .resource_mut::<crate::ui_model::UiViewModel>()
+            .looking_glass
+            .running = !windows.is_empty();
+        return;
+    }
+    if matches!(pending, Some(None)) {
+        for window in windows {
+            world.despawn(window);
+        }
+        world.remove_resource::<ActiveOutput>();
+        let mut vm = world.resource_mut::<crate::ui_model::UiViewModel>();
+        vm.looking_glass.running = false;
+        vm.looking_glass.error = None;
+        return;
+    }
+    let selection = pending.flatten();
+    let result = if let Some(selection) = &selection {
+        world
+            .resource::<crate::ui_model::UiViewModel>()
+            .looking_glass
+            .devices
+            .iter()
+            .find(|preset| preset.id == selection.device_id)
+            .ok_or(super::LookingGlassError::Invalid(
+                "unknown Looking Glass model",
+            ))
+            .and_then(|preset| selected_output(preset, selection))
+            .map_err(|error| error.to_string())
+    } else {
+        startup.ok_or_else(|| "missing Looking Glass startup configuration".to_string())
+    };
+    let result = result.and_then(|config| {
+        let layout = config.layout();
+        let device = world
+            .get_resource::<RenderDevice>()
+            .ok_or("render device is unavailable")?;
+        let limits = device.limits();
+        if layout.count() > limits.max_texture_array_layers
+            || layout.view_width > limits.max_texture_dimension_2d
+            || layout.view_height > limits.max_texture_dimension_2d
+        {
+            return Err("Looking Glass views exceed this GPU's texture limits".into());
+        }
+        if let Some(selection) = &selection {
+            world
+                .resource_mut::<crate::settings::AppSettings>()
+                .save_looking_glass(selection.clone())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(config)
+    });
+    match result {
+        Ok(config) => {
+            for window in windows {
+                world.despawn(window);
+            }
+            world.insert_resource(config);
+            let setup_result = world.run_system_cached(setup);
+            let mut vm = world.resource_mut::<crate::ui_model::UiViewModel>();
+            vm.looking_glass.running = setup_result.is_ok();
+            vm.looking_glass.error = setup_result.err().map(|error| error.to_string());
+            if let Some(selection) = selection {
+                vm.looking_glass.preferences = selection;
+            }
+        }
+        Err(error) => {
+            world
+                .resource_mut::<crate::ui_model::UiViewModel>()
+                .looking_glass
+                .error = Some(error);
+        }
+    }
 }
 
 fn flat_projection(width: f32, height: f32) -> Projection {
@@ -117,14 +217,30 @@ fn view_camera(index: u32, count: u32) -> Camera {
 
 fn setup(
     mut commands: Commands,
-    config: Res<OutputConfig>,
+    config: Res<ActiveOutput>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<InterlaceMaterial>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
-    let layout = config.layout;
-    let calibration = &config.calibration;
+    let layout = config.layout();
+    let screen = config.screen();
+    let (uniforms, cells) = match &*config {
+        ActiveOutput::LightField(config) => (
+            config.calibration.uniforms(layout),
+            config.calibration.cells.clone(),
+        ),
+        ActiveOutput::Hld { safe_area, .. } => (
+            InterlaceUniforms {
+                optics: Vec4::ZERO,
+                // HLD safe area: 108px sides, 100px top/bottom at 2160x3840.
+                screen: Vec4::new(screen.x as f32, screen.y as f32, safe_area.x, safe_area.y),
+                grid: UVec4::new(1, 1, layout.view_width, layout.view_height),
+                flags: UVec4::new(0, 0, 0, 16),
+            },
+            vec![Vec4::ZERO],
+        ),
+    };
     let views = images.add(view_array::image(layout));
     // One logical target makes Bevy share its small main/depth textures across
     // views. The first camera writes it to keep the target attachment available;
@@ -136,20 +252,17 @@ fn setup(
         None,
     ));
     let material = materials.add(InterlaceMaterial {
-        uniforms: calibration.uniforms(layout),
+        uniforms,
         views: views.clone(),
-        cells: buffers.add(ShaderBuffer::from(calibration.cells.clone())),
+        cells: buffers.add(ShaderBuffer::from(cells)),
     });
     let window = commands
         .spawn((
             Window {
                 title: "RusTuberV — Looking Glass (F11: fullscreen / F10: quilt / Esc: close)"
                     .into(),
-                resolution: WindowResolution::new(
-                    calibration.width.div_ceil(2),
-                    calibration.height.div_ceil(2),
-                )
-                .with_scale_factor_override(1.0),
+                resolution: WindowResolution::new(screen.x.div_ceil(2), screen.y.div_ceil(2))
+                    .with_scale_factor_override(1.0),
                 ..default()
             },
             OutputWindow(material.clone()),
@@ -161,7 +274,16 @@ fn setup(
     for index in 0..layout.count() {
         commands.spawn((
             Camera3d::default(),
-            view_camera(index, layout.count()),
+            Camera {
+                clear_color: ClearColorConfig::Custom(
+                    if matches!(*config, ActiveOutput::Hld { .. }) {
+                        Color::WHITE
+                    } else {
+                        Color::BLACK
+                    },
+                ),
+                ..view_camera(index, layout.count())
+            },
             RenderTarget::Image(scratch.clone().into()),
             Msaa::Off,
             Exposure::BLENDER,
@@ -212,7 +334,7 @@ fn setup(
 }
 
 fn sync_views(
-    config: Res<OutputConfig>,
+    config: Res<ActiveOutput>,
     lifecycle: Res<AvatarLifecycle>,
     control: Res<AvatarCameraControl>,
     mut cameras: Query<(
@@ -229,7 +351,7 @@ fn sync_views(
     // mesh when framing is unavailable: disabled cameras do not overwrite the
     // array, and a previous avatar must not remain visible on the display.
     let pose = control.current_for(lifecycle.current_generation());
-    if *last_pose == pose {
+    if *last_pose == pose && !config.is_changed() {
         return;
     }
     *last_pose = pose;
@@ -245,17 +367,30 @@ fn sync_views(
         let focus_distance = (pose.target() - center.translation).dot(*center.forward());
         let perspective = PerspectiveProjection {
             fov: FIXED_VERTICAL_FOV,
-            aspect_ratio: config.calibration.width as f32 / config.calibration.height as f32,
+            aspect_ratio: match &*config {
+                ActiveOutput::LightField(_) => config.screen().x as f32 / config.screen().y as f32,
+                ActiveOutput::Hld { screen, safe_area } => {
+                    (screen.x as f32 * safe_area.x) / (screen.y as f32 * safe_area.y)
+                }
+            },
             ..default()
+        };
+        let (count, cone, depth_scale) = match &*config {
+            ActiveOutput::LightField(config) => (
+                config.layout.count(),
+                config.calibration.view_cone,
+                config.depth_scale,
+            ),
+            ActiveOutput::Hld { .. } => (1, 0.0, 0.0),
         };
         let (next, lens) = view_pose(
             center,
             focus_distance,
             perspective,
             view.index,
-            config.layout.count(),
-            config.calibration.view_cone,
-            config.depth_scale,
+            count,
+            cone,
+            depth_scale,
         );
         *transform = next;
         // This system runs after propagation. All output entities are direct
@@ -296,6 +431,7 @@ fn window_keys(
         }
         if keys.just_pressed(KeyCode::F10)
             && let Some(mut material) = materials.get_mut(&output.0)
+            && material.uniforms.flags.w & 16 == 0
         {
             material.uniforms.flags.w ^= 8;
         }
@@ -316,7 +452,31 @@ fn close_with_main(
 
 #[cfg(test)]
 mod tests {
+    use super::super::OutputConfig;
     use super::*;
+
+    #[test]
+    fn stopping_from_settings_releases_the_window_and_its_views() {
+        let mut app = App::new();
+        app.init_resource::<LookingGlassControl>()
+            .init_resource::<crate::ui_model::UiViewModel>();
+        let window = app.world_mut().spawn(OutputWindow(Handle::default())).id();
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), ChildOf(window)))
+            .id();
+        app.world_mut().resource_mut::<LookingGlassControl>().stop();
+        apply_request(app.world_mut());
+        assert!(app.world().get_entity(window).is_err());
+        assert!(app.world().get_entity(camera).is_err());
+        assert!(
+            !app.world()
+                .resource::<crate::ui_model::UiViewModel>()
+                .looking_glass
+                .running
+        );
+        assert!(!app.world().contains_resource::<ActiveOutput>());
+    }
 
     #[test]
     fn closing_output_despawns_all_its_cameras_but_not_the_main_window() {
@@ -350,7 +510,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<InterlaceMaterial>>()
             .init_resource::<Assets<ShaderBuffer>>()
-            .insert_resource(OutputConfig {
+            .insert_resource(ActiveOutput::LightField(OutputConfig {
                 layout: Layout {
                     columns: 11,
                     rows: 6,
@@ -367,7 +527,7 @@ mod tests {
                     cells: vec![Vec4::ZERO],
                 },
                 depth_scale: 1.0,
-            })
+            }))
             .add_systems(Startup, setup);
         app.update();
         let world = app.world_mut();
