@@ -1289,6 +1289,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_looking_glass"
+version = "0.1.0"
+source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=e1ed67e61b2a5df127d996f7b18a1d3c3d140f9a#e1ed67e61b2a5df127d996f7b18a1d3c3d140f9a"
+dependencies = [
+ "bevy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bevy_macro_utils"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7213,6 +7224,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "bevy_looking_glass",
  "bevy_vrm1",
  "directories",
  "gltf",
