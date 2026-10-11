@@ -5,6 +5,7 @@
 
 mod optics;
 mod render;
+mod view_array;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

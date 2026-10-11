@@ -53,18 +53,6 @@ impl Layout {
     pub fn height(self) -> u32 {
         self.rows * self.view_height
     }
-
-    // Looking Glass view zero occupies the bottom-left tile. Bevy's 2D world
-    // has +Y up; the interlacer converts the texture's top-left UV convention.
-    pub fn tile_center(self, index: u32) -> Vec3 {
-        Vec3::new(
-            (index % self.columns) as f32 * self.view_width as f32 + self.view_width as f32 * 0.5
-                - self.width() as f32 * 0.5,
-            (index / self.columns) as f32 * self.view_height as f32 + self.view_height as f32 * 0.5
-                - self.height() as f32 * 0.5,
-            0.0,
-        )
-    }
 }
 
 #[derive(Deserialize)]

@@ -2,8 +2,8 @@
 
 Rust/Bevy 0.20 plus an embedded WESL interlacer. No Bridge DLL, C/C++, JavaScript,
 texture-sharing API or CPU image readback is added. This is a direct-display
-experiment, not an implementation of the Bridge SDK API. Hardware output and
-frame rate have not yet been verified.
+experiment, not an implementation of the Bridge SDK API. The Windows GPU path
+has been measured; optical output on a physical panel remains unverified.
 
 ## Run
 
@@ -76,25 +76,49 @@ cameras. An asymmetric perspective projection cancels disparity at the camera
 control's focus plane. Orbit/pan/dolly in the existing preview also move the
 multiview rig; the avatar, tracking and animation are not duplicated.
 
-Each view uses a small render-target image with MSAA off. A 2D camera assembles
-the images into one quilt, and another applies calibrated RGB-subpixel selection
-to the output window. All image work stays on the GPU. Output excludes the floor
+The cameras share one small logical image target and Bevy's main/depth work
+textures, with MSAA off. At the end of each view's Core3d schedule, its finished
+main texture is copied into the corresponding layer of a 2D texture array.
+Distinct camera orders ensure the copy finishes before the next view reuses
+the work textures. `CameraOutputMode::Skip` removes the final raster blit for
+all but the first view. Bevy 0.20 omits the target attachment when every camera
+skips output, so the first view keeps one blit to establish the shared target.
+The capture runs after post-processing, upscaling and the MToon
+outline passes. The interlacer selects array layers for the RGB subpixels directly.
+There is no quilt image, quilt assembly camera, or tile sprite draw. F10 displays
+a virtual quilt from the same array. All image work stays on the GPU. Output excludes the floor
 and egui and does not change the preview or NDI paths. No custom changes to the
 avatar's MToon/Standard/unlit materials or scene lighting are made.
 The multiview cameras use the same fixed SDR exposure, disabled tonemapping and
 disabled dithering as the existing avatar preview and NDI camera.
 
-View zero is bottom-left in the quilt. Lens coordinates are bottom-left while
-Bevy image UVs are top-left. Tile sampling stays half a texel inside the selected
-tile to avoid borrowing a neighboring view. The shader handles classic RGB
+The view cameras use one lighting cluster for the avatar's small light rig and
+direct batched draws (`NoIndirectDrawing`). CPU visibility culling still runs;
+per-view GPU indirect-argument construction is unnecessary for these small
+scenes. Bevy's material, skinning, morph, transparency-sorting and MToon outline
+paths remain in use. No cross-view instancing or view synthesis is introduced.
+When Looking Glass is enabled, `Core3d` runs on the render thread using
+`SingleThreadedExecutor`, avoiding repeated dispatch to the desktop's single
+compute worker for every view. The ordinary path with the option absent is
+unchanged. Closing the output drops its image/material handles; unloading an
+avatar hides the interlacer mesh, leaving the output black until the rig is ready.
+
+Array layer zero is view zero, bottom-left in the virtual quilt. Lens coordinates
+are bottom-left while Bevy image UVs are top-left. Clamp-to-edge filtering within
+each array layer prevents borrowing pixels from a neighboring view. The shader handles classic RGB
 stripes and calibration cell patterns 0–4, including per-cell RGB offsets.
 This does **not** constitute tested support for every Looking Glass model.
 Nearest-view selection is used; no view interpolation or depth-based view
 synthesis is implemented. Optical transforms are separate from image orientation.
 
-The Go example shades 4,186,116 source pixels, plus the quilt-assembly pass and
-one native-resolution interlace pass. Low pixel count does not remove the
-66-view draw-call, vertex/skinning, culling or shadow cost. Measure with the actual
+The Go example shades 4,186,116 source pixels and one native-resolution interlace
+pass. The old quilt assembly additionally read and wrote the 4,186,116-pixel
+quilt and required 66 sprite draws; those operations have been removed.
+Of the 66 per-view output raster blits, 65 are removed; finished views are
+transferred by 66 GPU texture copies. This still transfers pixels; it is not a
+zero-copy path or cross-view scene instancing.
+Low pixel count does not remove the
+66-view draw-call, vertex/skinning or culling cost. Measure with the actual
 VRM and GPU before drawing a frame-rate conclusion. The base application's
 single-view performance target is not a measured guarantee for this experiment.
 Looking Glass is optional and exempt from the 60fps rendering requirement;
@@ -102,6 +126,121 @@ the normal application still targets rendering at 60fps and inference at 30Hz
 on three CPU cores with this output disabled.
 
 ## Verification
+
+### Initial Windows optimization measurement (2026-10-11)
+
+Release build, Bevy 0.20, Windows, Core i9-13900, RTX 4090 / NVIDIA 617.14 /
+Vulkan. Process affinity `0x15` selects logical CPUs 0/2/4; the Bevy pool budget
+is also three threads. Sapphy, 66 views at 186 x 341, 720 x 1280 auxiliary
+window, VSync on, camera and NDI off. Synthetic calibration was used for this
+GPU workload, not for optical validation. The model's existing idle animation
+and spring/skin rendering remained active. Each interval below is 30 seconds,
+after loading and shader warmup, with no build running during capture.
+
+PresentMon 2.6 records both windows separately; they have essentially the same
+cadence. Intermediate rows use one release executable with temporary startup
+switches. Those switches are removed from the final implementation.
+
+| Change (cumulative only where stated) | OS display fps |
+|---|---:|
+| Original, two measurements | 19.50 / 20.15 |
+| Texture array; no quilt assembly | 20.30 |
+| Array + serial Core3d scheduling | 23.58 |
+| Array + direct draws | 35.35 |
+| Array + direct draws + serial scheduling | 44.30 |
+| Array + direct draws + serial scheduling + one light cluster | 59.80 |
+| Direct-to-array-layer implementation, two measurements | 60.00 / 60.00 |
+
+The array alone did not resolve the frame-rate bottleneck. The useful gains
+came from reducing work repeated for each of the 66 views. GPU ETW attribution
+is retained in the raw data, but is not an isolated measurement of each pass.
+The final build reaches the display's 60Hz VSync ceiling, about three times the
+original cadence. The worst of the two windows' p95 display intervals was
+16.68ms in both final captures, versus 83.36ms / 66.68ms originally. Resident
+working set was about 1.58GiB versus 1.82GiB. Mean CPU use increased from
+1.30–1.33 to 1.50–1.52 cores while delivering about three times as many frames.
+This does not establish 60fps on a native-resolution physical panel, with live
+inference/NDI, on macOS, or on other GPUs.
+
+A separate size stress test requested a 1440 x 2560 auxiliary window, keeping
+the same 66 source views. It measured 20.97fps originally and 60.00fps with the
+final build (30 seconds each). For this test only, the synthetic calibration
+used `screenW=2880`, `screenH=5120`, `DPI=600`, because the prototype initially
+requests a half-size window. The window extended below the desktop's visible
+area. This verifies the enlarged desktop workload, not a correctly calibrated
+native-panel presentation.
+
+The final Windows release build and the 12 focused Looking Glass tests passed.
+`cargo fmt --all -- --check`, `git diff --check` and release Clippy for
+`vtuber-app` / `vtuber-desktop` with all targets passed; existing unrelated
+`chunks_exact` warnings remain. On this GPU the final build rendered the
+interlaced output and F10 virtual quilt, completed the F11 fullscreen round
+trip, and closed only the auxiliary window on Escape. The remaining preview
+was measured at 60.00fps for 15 seconds. Rich lighting could be enabled and
+disabled, and unloading the avatar turned the auxiliary output black.
+Closing the main window also closed the auxiliary window. These are desktop
+rendering checks using synthetic calibration, not physical-panel verification.
+
+Reproduce with the same release executable, model, calibration, window sizes
+and affinity. After the avatar is visible and shaders have warmed up:
+
+```powershell
+.\tools\measure-looking-glass.ps1 -ProcessId <RusTuberV-process-id> `
+  -PresentMon <path-to-PresentMon-2.6.0-x64.exe> `
+  -Output data/performance/<new-run-directory> -Seconds 30
+```
+
+The script writes raw per-swapchain events, executable SHA256, process affinity,
+CPU usage, working set, FPS and frame-interval percentiles. Local artifacts for
+this run are in `data/performance/20261011-looking-glass/` (ignored by Git).
+
+### PR #271 integration (2026-10-11)
+
+The shared-scratch capture from
+[PR #271](https://github.com/matsuvr/RusTuberV/pull/271), commit
+`647986da8bf0cf5bfcb232a9b35eb089a4cf92da`, is incorporated with the measured
+direct-draw, single-cluster and serial-schedule settings above. Image assets
+now own the array and scratch target, removing the bespoke raw-texture
+material bindings and manual texture-view registration/cleanup.
+
+Two issues in the unvalidated PR were corrected locally:
+
+- The Bevy 0.20 `ExtractComponent` derive requires `#[extract_app(RenderApp)]`.
+- All views using `CameraOutputMode::Skip` produced a black window. Runtime
+  diagnosis found 66 extracted cameras but zero `ViewTarget`s: Bevy omits
+  attachments for skip-only targets and then omits clearing view targets
+  without an attachment. Keeping the first camera's output blit fixes this;
+  the other 65 blits are skipped. The camera-order regression test covers this
+  requirement. No engine patch or extra attachment-management path is added.
+
+With the same 66-view desktop workload, a fresh 30-second comparison measured:
+
+| Metric | Before PR integration | Integrated build |
+|---|---:|---:|
+| OS display fps (slower window) | 59.93 | 59.97 |
+| Display interval p95 (slower window), ms | 16.6772 | 16.6775 |
+| Process working set, GiB | 1.650 | 1.560 |
+| Mean CPU cores | 1.473 | 1.447 |
+| Process dedicated GPU memory, MiB | 968.86 | 962.80 |
+
+Both builds remain at approximately the 60Hz VSync limit; this is not evidence
+of additional uncapped frame-rate improvement. These are one comparison pair
+and process totals, not isolated allocation/pass measurements. GPU memory is
+the Windows `GPU Process Memory` counter, summed over the process's adapter
+instances and sampled five times after each presentation capture. No build
+was running during these captures. Rich mode, camera input and NDI were off.
+
+The integrated release build, all 16 Looking Glass tests, formatting, whitespace
+checks and release Clippy for app/desktop with all targets passed (existing
+unrelated Clippy warnings remain). Desktop
+checks covered the interlacer, all 66 distinct quilt views, F11 round trip,
+Rich materials/outline display, unload-to-black and Escape closing only the
+auxiliary output. Pixel-for-pixel image equivalence and physical-panel optics
+remain unverified. The local raw captures, hashes, provenance and report are
+in `data/performance/20261011-pr271/` (ignored by Git). The earlier measurements
+above refer to the direct-to-array-layer implementation before this integration.
+
+### Earlier prototype checks
 
 Review verification on 2026-10-10 (Bevy 0.19, before the 0.20 migration;
 these results do not verify the migrated build):
@@ -139,10 +278,9 @@ view zero must be bottom-left, and a foreground/background object must move in
 opposite directions around the focus plane. Then disable quilt preview and
 check left/right parallax, upright image, color-channel registration and native
 pixel alignment. Test VRM replacement/unload, main-window controls, NDI running
-at the same time, and auxiliary-window closure. Measure the same scene with the
-option absent and present. Looking Glass hardware, Windows execution, model
-replacement/unload, NDI simultaneous output and comparative frame rates remain
-pending.
+at the same time, and auxiliary-window closure. Looking Glass hardware, NDI
+simultaneous output and macOS performance remain pending; the Windows timing
+measurements above concern the specified desktop workload.
 
 ## References (not bundled SDK code)
 
