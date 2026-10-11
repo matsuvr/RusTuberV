@@ -1,0 +1,5 @@
+[toolchain]
+# Track the latest installed stable release; refresh with `rustup update stable`.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "default"

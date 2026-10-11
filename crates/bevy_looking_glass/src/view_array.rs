@@ -3,7 +3,7 @@
 //! All view cameras share one small logical render target. Bevy consequently
 //! shares their main/depth allocations, but gives each camera its own clear
 //! operation. The camera driver runs each view's complete schedule in order:
-//! clear, draw (including both MToon outline paths), then copy one array layer.
+//! clear, draw, then copy one array layer.
 //! Do not defer the copies until after the camera loop: the scratch image has
 //! already been overwritten by the next view at that point.
 
@@ -21,7 +21,7 @@ use bevy::render::renderer::{RenderContext, ViewQuery};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewTarget;
 
-use super::optics::Layout;
+use crate::{LookingGlassRenderSet, ViewLayout as Layout};
 
 // Use the same explicit SDR format for the scratch target and array. An image
 // target (unlike a window) is not subject to Bevy's BGRA swapchain conversion.
@@ -41,6 +41,7 @@ pub(super) fn install(app: &mut App) {
         render_app.add_systems(
             Core3d,
             copy_view_to_array
+                .in_set(LookingGlassRenderSet::Capture)
                 .after(Core3dSystems::PostProcess)
                 .after(upscaling),
         );

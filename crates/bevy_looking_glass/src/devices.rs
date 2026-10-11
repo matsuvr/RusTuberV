@@ -1,26 +1,8 @@
 //! Manufacturer presets. Lens calibration is always supplied by the actual unit.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use super::{LookingGlassError, OutputConfig, optics};
-
-/// Saved selection, without automatically starting an output at application launch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputPreferences {
-    /// Stable identifier in the bundled device catalog.
-    pub device_id: String,
-    /// Raw calibration JSON belonging to this physical display.
-    pub calibration_path: std::path::PathBuf,
-}
-
-impl Default for OutputPreferences {
-    fn default() -> Self {
-        Self {
-            device_id: "portrait".into(),
-            calibration_path: Default::default(),
-        }
-    }
-}
+use crate::{Calibration, LookingGlassError, LookingGlassOutput, ViewLayout};
 
 /// Display transport, independent of device branding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -75,22 +57,18 @@ struct Catalog {
     devices: Vec<DevicePreset>,
 }
 
-pub(super) fn catalog() -> Result<Vec<DevicePreset>, LookingGlassError> {
-    let catalog: Catalog =
-        serde_json::from_str(include_str!("devices.json")).map_err(|source| {
-            LookingGlassError::Json {
-                path: "embedded:looking_glass/devices.json".into(),
-                source,
-            }
-        })?;
+/// Read the bundled specification catalog; inclusion does not imply hardware validation.
+pub fn device_presets() -> Result<Vec<DevicePreset>, LookingGlassError> {
+    let catalog: Catalog = serde_json::from_str(include_str!("devices.json"))?;
     Ok(catalog.devices)
 }
 
 impl DevicePreset {
-    pub(super) fn light_field_config(
+    /// Combine a reference quilt layout with the calibration for this physical unit.
+    pub fn light_field_output(
         &self,
-        raw: optics::RawCalibration,
-    ) -> Result<OutputConfig, LookingGlassError> {
+        calibration: Calibration,
+    ) -> Result<LookingGlassOutput, LookingGlassError> {
         let quilt = self.quilt.as_ref().ok_or(LookingGlassError::Invalid(
             "this device does not use quilts",
         ))?;
@@ -99,22 +77,37 @@ impl DevicePreset {
         }
         // Some manufacturer presets (65 inch) have unused edge pixels.
         // Views occupy floor(total / tiles) pixels, as in the official quilt.
-        let layout = optics::Layout::new(
+        let layout = ViewLayout::new(
             quilt.columns,
             quilt.rows,
             quilt.width / quilt.columns,
             quilt.height / quilt.rows,
         )?;
-        let calibration = optics::Calibration::new(raw)?;
         if [calibration.width, calibration.height] != self.screen {
             return Err(LookingGlassError::Invalid(
                 "visual.json screen size does not match the selected model/orientation",
             ));
         }
-        Ok(OutputConfig {
+        Ok(LookingGlassOutput::LightField {
             layout,
             calibration,
             depth_scale: 1.0,
+        })
+    }
+}
+
+impl DevicePreset {
+    /// Select a single-view HLD output, which does not use lens calibration.
+    pub fn hld_output(&self) -> Result<LookingGlassOutput, LookingGlassError> {
+        if self.format != DisplayFormat::Hld {
+            return Err(LookingGlassError::Invalid("this device is not an HLD"));
+        }
+        Ok(LookingGlassOutput::Hld {
+            screen: bevy::prelude::UVec2::from_array(self.screen),
+            safe_area: bevy::prelude::Vec2::from_array(
+                self.safe_area
+                    .ok_or(LookingGlassError::Invalid("missing HLD safe area"))?,
+            ),
         })
     }
 }

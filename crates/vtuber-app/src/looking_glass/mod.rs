@@ -1,24 +1,31 @@
-//! Optional, GPU-only Looking Glass output. No Bridge library is linked.
-//!
-//! Raw calibration I/O is confined here; optics contains pure calculations and
-//! render owns Bevy entities. See `docs/looking-glass.md` for setup and scope.
-
-mod devices;
-mod optics;
-mod render;
-mod view_array;
-
-pub use devices::{DevicePreset, DisplayFormat, OutputPreferences, QuiltPreset};
-
+//! RusTuberV integration for the independent bevy_looking_glass plugin.
+//! Settings, files, avatar framing, shortcuts and executor policy belong here.
+use bevy::camera::{ClearColorConfig, Exposure, visibility::RenderLayers};
+use bevy::ecs::schedule::SingleThreadedExecutor;
+use bevy::light::cluster::ClusterConfig;
+use bevy::prelude::*;
+use bevy::render::view::{DebandDither, Tonemapping};
+use bevy::window::{MonitorSelection, PrimaryWindow, WindowMode, WindowResolution};
+use bevy_looking_glass::LookingGlassControl as PluginControl;
+pub use bevy_looking_glass::{DevicePreset, DisplayFormat, QuiltPreset};
+use bevy_looking_glass::{
+    LookingGlassConfig, LookingGlassOutput, LookingGlassPlugin, LookingGlassStatus,
+    LookingGlassSystems, LookingGlassView, ViewLayout, ViewPose, ViewRenderSettings,
+    device_presets, parse_calibration,
+};
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-
-use bevy::prelude::*;
-use serde::Deserialize;
+use vtuber_avatar::{
+    AVATAR_RENDER_LAYER, AvatarCameraControl, AvatarLifecycle, FIXED_VERTICAL_FOV,
+};
 
 /// Failure to load the explicitly requested Looking Glass configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum LookingGlassError {
+    /// Calibration or output rejected by the independent plugin.
+    #[error(transparent)]
+    Plugin(#[from] bevy_looking_glass::LookingGlassError),
     /// The command-line option needs a configuration path.
     #[error("--looking-glass requires a configuration file path")]
     MissingPath,
@@ -43,48 +50,20 @@ pub enum LookingGlassError {
     Invalid(&'static str),
 }
 
-#[derive(Deserialize)]
-struct SettingsFile {
-    calibration: PathBuf,
-    columns: u32,
-    rows: u32,
-    view_width: u32,
-    view_height: u32,
-    depth_scale: f32,
+/// Saved selection, without automatically starting an output at application launch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputPreferences {
+    /// Stable identifier in the bundled device catalog.
+    pub device_id: String,
+    /// Raw calibration JSON belonging to this physical display.
+    pub calibration_path: std::path::PathBuf,
 }
 
-#[derive(Resource, Clone)]
-struct OutputConfig {
-    layout: optics::Layout,
-    calibration: optics::Calibration,
-    depth_scale: f32,
-}
-
-#[derive(Resource, Clone)]
-enum ActiveOutput {
-    LightField(OutputConfig),
-    Hld { screen: UVec2, safe_area: Vec2 },
-}
-
-impl ActiveOutput {
-    fn screen(&self) -> UVec2 {
-        match self {
-            Self::LightField(config) => {
-                UVec2::new(config.calibration.width, config.calibration.height)
-            }
-            Self::Hld { screen, .. } => *screen,
-        }
-    }
-
-    fn layout(&self) -> optics::Layout {
-        match self {
-            Self::LightField(config) => config.layout,
-            Self::Hld { screen, .. } => optics::Layout {
-                columns: 1,
-                rows: 1,
-                view_width: screen.x,
-                view_height: screen.y,
-            },
+impl Default for OutputPreferences {
+    fn default() -> Self {
+        Self {
+            device_id: "portrait".into(),
+            calibration_path: Default::default(),
         }
     }
 }
@@ -102,42 +81,65 @@ pub struct LookingGlassViewModel {
     pub error: Option<String>,
 }
 
-/// Pending output command dispatched by the application.
+#[derive(Deserialize)]
+struct SettingsFile {
+    calibration: PathBuf,
+    columns: u32,
+    rows: u32,
+    view_width: u32,
+    view_height: u32,
+    depth_scale: f32,
+}
+
+/// Application requests use persisted selections; the plugin only sees parsed values.
 #[derive(Resource, Default)]
 pub struct LookingGlassControl {
     pending: Option<Option<OutputPreferences>>,
-    startup: Option<ActiveOutput>,
+    startup: Option<LookingGlassConfig>,
+    saving: Option<OutputPreferences>,
+    error: Option<String>,
 }
 
 impl LookingGlassControl {
-    /// Start with an explicitly selected device and its own calibration.
+    /// Load the selected unit's calibration and request output.
     pub fn start(&mut self, preferences: OutputPreferences) {
         self.pending = Some(Some(preferences));
     }
-    /// Release every output camera and target.
+    /// Stop output.
     pub fn stop(&mut self) {
         self.pending = Some(None);
     }
 }
 
-/// Install the settings-controlled output, with optional CLI startup configuration.
-///
-/// Call after the desktop's Bevy and avatar plugins, before `App::run`.
-/// Without the option no output cameras, windows or images are allocated.
+/// Install optional output after Bevy and avatar plugins; CLI errors fail startup.
 pub fn configure(
     app: &mut App,
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<(), LookingGlassError> {
-    let startup = if let Some(path) = config_argument(args)? {
-        let settings: SettingsFile = read_json(&path)?;
-        let mut calibration_path = path.clone();
-        calibration_path.pop();
-        calibration_path.push(&settings.calibration);
-        let raw: optics::RawCalibration = read_json(&calibration_path)?;
-        Some(ActiveOutput::LightField(output_config(settings, raw)?))
-    } else {
-        None
-    };
+    let startup = config_argument(args)?
+        .map(|path| {
+            let settings: SettingsFile = read_json(&path)?;
+            let calibration_path = path
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join(&settings.calibration);
+            if !settings.depth_scale.is_finite() || settings.depth_scale < 0.0 {
+                return Err(LookingGlassError::Invalid(
+                    "depth_scale must be finite and nonnegative",
+                ));
+            }
+            Ok(application_config(LookingGlassOutput::LightField {
+                layout: ViewLayout::new(
+                    settings.columns,
+                    settings.rows,
+                    settings.view_width,
+                    settings.view_height,
+                )?,
+                calibration: read_calibration(&calibration_path)?,
+                depth_scale: settings.depth_scale,
+            }))
+        })
+        .transpose()?;
     let preferences = app
         .world()
         .get_resource::<crate::settings::AppSettings>()
@@ -147,38 +149,215 @@ pub fn configure(
     app.world_mut()
         .resource_mut::<crate::ui_model::UiViewModel>()
         .looking_glass = LookingGlassViewModel {
-        devices: devices::catalog()?,
+        devices: device_presets()?,
         preferences,
         ..default()
     };
     app.insert_resource(LookingGlassControl {
         startup,
         ..default()
-    });
-    render::install(app);
+    })
+    .add_plugins(LookingGlassPlugin)
+    .add_systems(
+        Update,
+        (apply_request, window_keys)
+            .chain()
+            .after(crate::orchestrator::process_ui_actions_system)
+            .before(LookingGlassSystems::Control),
+    )
+    .add_systems(Update, sync_status.after(LookingGlassSystems::Control))
+    .add_systems(
+        PostUpdate,
+        sync_avatar_pose
+            .after(TransformSystems::Propagate)
+            .before(LookingGlassSystems::SyncViews),
+    )
+    .add_systems(Last, close_with_main);
+    if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render_app.add_systems(bevy::render::ExtractSchedule, sync_executor);
+    }
     Ok(())
+}
+
+fn read_calibration(path: &Path) -> Result<bevy_looking_glass::Calibration, LookingGlassError> {
+    let bytes = std::fs::read(path).map_err(|source| LookingGlassError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    Ok(parse_calibration(&bytes)?)
 }
 
 fn selected_output(
     preset: &DevicePreset,
     preferences: &OutputPreferences,
-) -> Result<ActiveOutput, LookingGlassError> {
+) -> Result<LookingGlassOutput, LookingGlassError> {
     match preset.format {
-        DisplayFormat::LightField => preset
-            .light_field_config(read_json(&preferences.calibration_path)?)
-            .map(ActiveOutput::LightField),
-        DisplayFormat::Hld => {
-            let safe_area = preset
-                .safe_area
-                .ok_or(LookingGlassError::Invalid("missing HLD safe area"))?;
-            Ok(ActiveOutput::Hld {
-                screen: UVec2::from_array(preset.screen),
-                safe_area: Vec2::from_array(safe_area),
-            })
+        DisplayFormat::LightField => {
+            Ok(preset.light_field_output(read_calibration(&preferences.calibration_path)?)?)
         }
+        DisplayFormat::Hld => Ok(preset.hld_output()?),
         DisplayFormat::Standalone => Err(LookingGlassError::Invalid(
             "musubi has no live desktop video input",
         )),
+    }
+}
+
+fn application_config(output: LookingGlassOutput) -> LookingGlassConfig {
+    let screen = output.screen_size();
+    let mut config = LookingGlassConfig::new(output, RenderLayers::layer(AVATAR_RENDER_LAYER), 3);
+    config.window.title =
+        "RusTuberV — Looking Glass (F11: fullscreen / F10: quilt / Esc: close)".into();
+    config.window.resolution = WindowResolution::new(screen.x.div_ceil(2), screen.y.div_ceil(2))
+        .with_scale_factor_override(1.0);
+    config.view_render = ViewRenderSettings {
+        exposure: Exposure::BLENDER,
+        tonemapping: Tonemapping::None,
+        deband_dither: DebandDither::Disabled,
+        cluster_config: ClusterConfig::Single,
+        no_indirect_drawing: true,
+        clear_color: ClearColorConfig::Custom(Color::BLACK),
+    };
+    config
+}
+
+fn apply_request(
+    mut control: ResMut<LookingGlassControl>,
+    mut plugin: ResMut<PluginControl>,
+    vm: Res<crate::ui_model::UiViewModel>,
+) {
+    let pending = control.pending.take();
+    let startup = control.startup.take();
+    if let Some(request) = pending {
+        control.error = None;
+        control.saving = None;
+        if let Some(selection) = request {
+            let result = vm
+                .looking_glass
+                .devices
+                .iter()
+                .find(|p| p.id == selection.device_id)
+                .ok_or(LookingGlassError::Invalid("unknown Looking Glass model"))
+                .and_then(|preset| selected_output(preset, &selection));
+            match result {
+                Ok(output) => {
+                    plugin.set_quilt_preview(false);
+                    plugin.start(application_config(output));
+                    control.saving = Some(selection);
+                }
+                Err(error) => control.error = Some(error.to_string()),
+            }
+        } else {
+            plugin.stop();
+        }
+    } else if let Some(config) = startup {
+        plugin.start(config);
+    }
+}
+
+fn sync_status(
+    mut control: ResMut<LookingGlassControl>,
+    status: Res<LookingGlassStatus>,
+    mut vm: ResMut<crate::ui_model::UiViewModel>,
+    mut settings: ResMut<crate::settings::AppSettings>,
+) {
+    if let Some(selection) = control.saving.take()
+        && status.error.is_none()
+        && status.window.is_some()
+    {
+        match settings.save_looking_glass(selection.clone()) {
+            Ok(()) => vm.looking_glass.preferences = selection,
+            Err(error) => control.error = Some(error.to_string()),
+        }
+    }
+    vm.looking_glass.running = status.window.is_some();
+    vm.looking_glass.error = control.error.clone().or_else(|| status.error.clone());
+}
+
+fn avatar_view_pose(
+    control: &AvatarCameraControl,
+    lifecycle: &AvatarLifecycle,
+) -> Option<ViewPose> {
+    let pose = control.current_for(lifecycle.current_generation())?;
+    let transform = pose.transform();
+    let perspective = PerspectiveProjection::default();
+    Some(ViewPose {
+        transform,
+        focus_distance: (pose.target() - transform.translation).dot(*transform.forward()),
+        fov_y: FIXED_VERTICAL_FOV,
+        near: perspective.near,
+        far: perspective.far,
+    })
+}
+
+fn sync_avatar_pose(
+    control: Res<AvatarCameraControl>,
+    lifecycle: Res<AvatarLifecycle>,
+    mut view: ResMut<LookingGlassView>,
+) {
+    view.pose = avatar_view_pose(&control, &lifecycle);
+}
+
+fn window_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    status: Res<LookingGlassStatus>,
+    mut control: ResMut<PluginControl>,
+    mut windows: Query<&mut Window>,
+) {
+    let Some(entity) = status.window else {
+        return;
+    };
+    let Ok(mut window) = windows.get_mut(entity) else {
+        return;
+    };
+    if !window.focused {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        control.stop();
+    }
+    if keys.just_pressed(KeyCode::F11) {
+        window.mode = match window.mode {
+            WindowMode::Windowed => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+            _ => WindowMode::Windowed,
+        };
+    }
+    if keys.just_pressed(KeyCode::F10) {
+        control.set_quilt_preview(!status.quilt_preview);
+    }
+}
+
+fn close_with_main(
+    mut commands: Commands,
+    main: Query<(), With<PrimaryWindow>>,
+    status: Res<LookingGlassStatus>,
+) {
+    if main.is_empty()
+        && let Some(window) = status.window
+        && let Ok(mut entity) = commands.get_entity(window)
+    {
+        entity.despawn();
+    }
+}
+
+fn sync_executor(
+    mut commands: Commands,
+    status: bevy::render::Extract<Res<LookingGlassStatus>>,
+    mut enabled: Local<bool>,
+) {
+    let multiview = status.light_field;
+    if *enabled != multiview {
+        *enabled = multiview;
+        commands.queue(move |world: &mut World| {
+            if let Some(mut schedules) = world.get_resource_mut::<bevy::ecs::schedule::Schedules>()
+                && let Some(schedule) = schedules.get_mut(bevy::core_pipeline::Core3d)
+            {
+                if multiview {
+                    schedule.set_executor(SingleThreadedExecutor::new());
+                } else {
+                    schedule.set_executor(bevy::ecs::schedule::MultiThreadedExecutor::new());
+                }
+            }
+        });
     }
 }
 
@@ -206,27 +385,6 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, LookingGl
     serde_json::from_slice(&bytes).map_err(|source| LookingGlassError::Json {
         path: path.to_owned(),
         source,
-    })
-}
-
-fn output_config(
-    settings: SettingsFile,
-    raw: optics::RawCalibration,
-) -> Result<OutputConfig, LookingGlassError> {
-    if !settings.depth_scale.is_finite() || settings.depth_scale < 0.0 {
-        return Err(LookingGlassError::Invalid(
-            "depth_scale must be finite and nonnegative",
-        ));
-    }
-    Ok(OutputConfig {
-        layout: optics::Layout::new(
-            settings.columns,
-            settings.rows,
-            settings.view_width,
-            settings.view_height,
-        )?,
-        calibration: optics::Calibration::new(raw)?,
-        depth_scale: settings.depth_scale,
     })
 }
 
