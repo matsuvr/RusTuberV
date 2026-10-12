@@ -26,7 +26,7 @@ repository = "https://github.com/matsuvr/RusTuberV"
 
 [workspace.dependencies]
 bevy = "=0.20.0"
-bevy_looking_glass = { git = "https://github.com/matsuvr/bevy-looking-glass-rs", rev = "8e0c8bcdabb47416af546e146bbdfc3dba2b4a87" }
+bevy_looking_glass = { git = "https://github.com/matsuvr/bevy-looking-glass-rs", rev = "76f5b3717280fe26927b99ff11412938e4e6466e" }
 bevy_vrm1 = { git = "https://github.com/not-elm/bevy_vrm1", tag = "v0.10.0" }
 mediapipe = { git = "https://github.com/nikicat/mediapipe-rs", rev = "527037fa0fe1339750140283930bbb9560460e9e", version = "=0.1.0" }
 bevy_egui = { version = "=0.43.1", default-features = false, features = ["default_fonts", "render", "open_url"] }

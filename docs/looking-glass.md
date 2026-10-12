@@ -17,13 +17,16 @@ device data and typed errors. There is no second renderer or Bridge client copy
 in this workspace.
 
 Automatic fullscreen placement uses the plugin's `LookingGlassConfig::display`
-API at Git revision `8e0c8bcdabb47416af546e146bbdfc3dba2b4a87`. The selected
+API at Git revision `76f5b3717280fe26927b99ff11412938e4e6466e`. The selected
 unit's fresh Bridge data, including its physical desktop coordinates, is passed
 to the plugin on every UI start. The plugin matches those coordinates and the
 calibrated native resolution to a Bevy monitor and opens borderless fullscreen
 on that monitor with scale factor 1. Bridge's device index is not treated as an
 OS monitor index. A missing or ambiguous native monitor match reports an output
-error. Scene rendering continues to use the full set of views.
+error. The output starts windowed and requests fullscreen on the selected
+monitor after native window creation, without rewriting the OS-reported
+position during the transition. Scene rendering continues to use the full
+set of views.
 
 Fullscreen integration validation (2026-10-12): all 9 Looking Glass application
 tests passed, including selected-unit placement with two same-size displays at
