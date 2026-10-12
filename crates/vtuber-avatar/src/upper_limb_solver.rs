@@ -802,12 +802,11 @@ impl PreparedProblem<'_> {
             )
         };
         let jt = j.transpose();
-        // Live observation tasks can be nearly singular even at an admissible
-        // pose. The old 1e-4 term permitted a 50x free inverse-Jacobian gain, so
-        // small camera errors became alternating degree-sized joint steps.
-        // Bound that free gain to 5x for each live continuation, without a biased
-        // pose prior. Startup and contact restoration retain their precision;
-        // repeated steps toward a held target still converge to that target.
+        // For admitted poses, regularize the next task step more strongly to
+        // attenuate changes along weakly observed directions. Startup and contact
+        // restoration keep the smaller term. The penalty applies to this step,
+        // not displacement from a fixed pose; feasibility and the numerical
+        // stopping threshold still determine the result.
         let damping = if !restoring
             && self
                 .goals
