@@ -1291,7 +1291,7 @@ dependencies = [
 [[package]]
 name = "bevy_looking_glass"
 version = "0.1.0"
-source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=8e0c8bcdabb47416af546e146bbdfc3dba2b4a87#8e0c8bcdabb47416af546e146bbdfc3dba2b4a87"
+source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=76f5b3717280fe26927b99ff11412938e4e6466e#76f5b3717280fe26927b99ff11412938e4e6466e"
 dependencies = [
  "bevy",
  "png",
