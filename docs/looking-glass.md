@@ -16,6 +16,30 @@ The public `bridge::discover()` API was added on 2026-10-12; RusTuberV uses its
 device data and typed errors. There is no second renderer or Bridge client copy
 in this workspace.
 
+Automatic fullscreen placement uses the plugin's `LookingGlassConfig::display`
+API at Git revision `8e0c8bcdabb47416af546e146bbdfc3dba2b4a87`. The selected
+unit's fresh Bridge data, including its physical desktop coordinates, is passed
+to the plugin on every UI start. The plugin matches those coordinates and the
+calibrated native resolution to a Bevy monitor and opens borderless fullscreen
+on that monitor with scale factor 1. Bridge's device index is not treated as an
+OS monitor index. A missing or ambiguous native monitor match reports an output
+error. Scene rendering continues to use the full set of views.
+
+Fullscreen integration validation (2026-10-12): all 9 Looking Glass application
+tests passed, including selected-unit placement with two same-size displays at
+negative coordinates. All-target application, desktop and diagnostic-exporter
+Clippy passed with existing unrelated warnings. The default-feature Windows
+desktop release build, formatting and whitespace checks also passed.
+A temporary Bevy/Winit probe
+used the production application control and fresh Bridge discovery against
+Portrait `LKG-PORT-01742`: its output opened on `DISPLAY3` at physical desktop
+position `(5760, 0)`, with a 1536 x 2048 framebuffer, scale factor 1 and
+borderless fullscreen. Stop, fresh discovery, fullscreen restart and cleanup
+passed; the process exited with code 0. Probe source and logs are in
+`target/looking-glass-fullscreen/` (local, ignored). This checked actual window
+placement with no scene pose; avatar optics, simultaneous NDI/camera output and
+macOS execution were not checked in this run.
+
 `crates/vtuber-app/src/looking_glass/mod.rs` keeps application settings and file
 I/O, the avatar-to-`ViewPose` adapter, UI status, shortcuts, and the existing
 Core3d executor policy. The independent plugin never changes the shared executor
@@ -72,8 +96,10 @@ physical unit from the list and click **出力開始**. One connected unit is se
 automatically. No calibration filename, export command or file picker is needed.
 On Portrait, use Desktop Mode with the manufacturer's video and USB/power
 connections. **再検出** refreshes the list after changing connections.
-Move the output window onto the panel and press F11. Use an extended desktop
-at the reported native resolution; a scaled window is only a preview.
+**出力開始** automatically opens the output fullscreen on the selected panel.
+Use an extended desktop at the reported native resolution. F11 toggles fullscreen;
+a scaled window is only a preview. Single-view HLD catalog presets do not have
+Bridge monitor coordinates; move their output window to the panel and press F11.
 F10 previews the quilt for light field displays. **出力停止**, Escape, or the
 window close button releases the output; it can be started again immediately.
 

@@ -121,6 +121,7 @@ struct BridgeTask {
 struct ConnectedDisplay {
     preset: DevicePreset,
     calibration: bevy_looking_glass::Calibration,
+    bridge: Display,
 }
 
 impl LookingGlassControl {
@@ -217,10 +218,10 @@ fn read_calibration(path: &Path) -> Result<bevy_looking_glass::Calibration, Look
     Ok(parse_calibration(&bytes)?)
 }
 
-fn selected_output(
+fn selected_config(
     preset: &DevicePreset,
     connected: &[ConnectedDisplay],
-) -> Result<LookingGlassOutput, LookingGlassError> {
+) -> Result<LookingGlassConfig, LookingGlassError> {
     match preset.format {
         DisplayFormat::LightField => {
             let display = connected
@@ -229,9 +230,12 @@ fn selected_output(
                 .ok_or(LookingGlassError::Invalid(
                     "selected Looking Glass is no longer connected",
                 ))?;
-            Ok(preset.light_field_output(display.calibration.clone())?)
+            let mut config =
+                application_config(preset.light_field_output(display.calibration.clone())?);
+            config.display = Some(display.bridge.clone());
+            Ok(config)
         }
-        DisplayFormat::Hld => Ok(preset.hld_output()?),
+        DisplayFormat::Hld => Ok(application_config(preset.hld_output()?)),
         DisplayFormat::Standalone => Err(LookingGlassError::Invalid(
             "musubi has no live desktop video input",
         )),
@@ -241,7 +245,7 @@ fn selected_output(
 fn connected_display(display: Display) -> Result<ConnectedDisplay, LookingGlassError> {
     let calibration = parse_calibration(display.calibration.as_bytes())?;
     let screen = calibration.screen_size();
-    let quilt = display.quilt.ok_or(LookingGlassError::Invalid(
+    let quilt = display.quilt.as_ref().ok_or(LookingGlassError::Invalid(
         "Bridge returned no default quilt",
     ))?;
     let preset = DevicePreset {
@@ -268,6 +272,7 @@ fn connected_display(display: Display) -> Result<ConnectedDisplay, LookingGlassE
     Ok(ConnectedDisplay {
         preset,
         calibration,
+        bridge: display,
     })
 }
 
@@ -279,6 +284,7 @@ fn application_config(output: LookingGlassOutput) -> LookingGlassConfig {
     config.window.resolution = WindowResolution::new(screen.x.div_ceil(2), screen.y.div_ceil(2))
         .with_scale_factor_override(1.0);
     config.view_render = ViewRenderSettings {
+        hdr: false,
         exposure: Exposure::BLENDER,
         tonemapping: Tonemapping::None,
         deband_dither: DebandDither::Disabled,
@@ -311,7 +317,7 @@ fn apply_request(
             if preset.is_some_and(|preset| preset.format == DisplayFormat::Hld) {
                 let result = preset
                     .ok_or(LookingGlassError::Invalid("unknown HLD model"))
-                    .and_then(|preset| selected_output(preset, &control.connected));
+                    .and_then(|preset| selected_config(preset, &control.connected));
                 start_output(&mut control, &mut plugin, selection, result);
             } else {
                 begin_discovery(&mut control, &mut vm.looking_glass, Some(selection));
@@ -368,7 +374,7 @@ fn apply_request(
                         .ok_or(LookingGlassError::Invalid(
                             "selected Looking Glass is no longer connected",
                         ))
-                        .and_then(|preset| selected_output(preset, &control.connected));
+                        .and_then(|preset| selected_config(preset, &control.connected));
                     start_output(&mut control, &mut plugin, selection, result);
                 } else if control.connected.is_empty() {
                     control.error = Some("Looking Glassが見つかりません".into());
@@ -407,12 +413,12 @@ fn start_output(
     control: &mut LookingGlassControl,
     plugin: &mut PluginControl,
     selection: OutputPreferences,
-    result: Result<LookingGlassOutput, LookingGlassError>,
+    result: Result<LookingGlassConfig, LookingGlassError>,
 ) {
     match result {
-        Ok(output) => {
+        Ok(config) => {
             plugin.set_quilt_preview(false);
-            plugin.start(application_config(output));
+            plugin.start(config);
             control.saving = Some(selection);
         }
         Err(error) => control.error = Some(error.to_string()),

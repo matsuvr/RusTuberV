@@ -61,6 +61,8 @@ fn bridge_display(serial: &str, width: u32, height: u32, mode: u32) -> Display {
         "subpixelCells": [{"ROffsetX": 0.0, "ROffsetY": 0.0, "GOffsetX": 0.5, "GOffsetY": 0.0, "BOffsetX": 1.0, "BOffsetY": 0.0}]
     });
     Display {
+        index: 77,
+        window_position: IVec2::new(-3840, 120),
         serial: serial.into(),
         name: "TEST DISPLAY".into(),
         hardware_version: "MODEL-NOT-IN-CATALOG".into(),
@@ -89,7 +91,9 @@ fn bridge_drives_uncatalogued_models_orientations_cells_and_quilt_edge_pixels() 
             layout,
             calibration,
             ..
-        } = selected_output(&display.preset, std::slice::from_ref(&display)).unwrap()
+        } = selected_config(&display.preset, std::slice::from_ref(&display))
+            .unwrap()
+            .output
         else {
             panic!("expected light field")
         };
@@ -107,6 +111,48 @@ fn bridge_drives_uncatalogued_models_orientations_cells_and_quilt_edge_pixels() 
     let mut missing = bridge_display("TEST-ONLY", 1536, 2048, 0);
     missing.quilt = None;
     assert!(connected_display(missing).is_err());
+}
+
+#[test]
+fn selected_unit_retains_bridge_placement_and_opens_on_its_native_monitor() {
+    use bevy_looking_glass::{MonitorInfo, plan_output_window};
+
+    let first = connected_display(bridge_display("TEST-A", 3840, 2160, 1)).unwrap();
+    let mut raw = bridge_display("TEST-B", 3840, 2160, 1);
+    raw.window_position = IVec2::new(-7680, 120);
+    let selected = connected_display(raw).unwrap();
+    let connected = [first, selected];
+    let mut config = selected_config(&connected[1].preset, &connected).unwrap();
+    let display = config.display.as_ref().unwrap();
+    assert_eq!(display.serial, "TEST-B");
+    assert_eq!(display.index, 77);
+    assert_eq!(display.window_position, IVec2::new(-7680, 120));
+    assert_eq!(config.output.screen_size(), UVec2::new(3840, 2160));
+    assert!(matches!(
+        config.view_generation,
+        bevy_looking_glass::ViewGeneration::Full
+    ));
+
+    let other = MonitorInfo {
+        entity: Entity::from_bits(20),
+        position: connected[0].bridge.window_position,
+        size: UVec2::new(3840, 2160),
+    };
+    let target = MonitorInfo {
+        entity: Entity::from_bits(21),
+        position: display.window_position,
+        size: UVec2::new(3840, 2160),
+    };
+    assert!(plan_output_window(display, &[other]).is_err());
+    let plan = plan_output_window(display, &[other, target]).unwrap();
+    plan.apply(&mut config.window);
+    assert!(matches!(
+        config.window.mode,
+        WindowMode::BorderlessFullscreen(MonitorSelection::Entity(entity)) if entity == target.entity
+    ));
+    assert_eq!(config.window.physical_width(), 3840);
+    assert_eq!(config.window.physical_height(), 2160);
+    assert_eq!(config.window.resolution.scale_factor_override(), Some(1.0));
 }
 
 #[test]

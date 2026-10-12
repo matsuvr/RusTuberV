@@ -1291,9 +1291,10 @@ dependencies = [
 [[package]]
 name = "bevy_looking_glass"
 version = "0.1.0"
-source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=c7eb5eec90d3b565634e0dc3c16eb0ed18f10896#c7eb5eec90d3b565634e0dc3c16eb0ed18f10896"
+source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=8e0c8bcdabb47416af546e146bbdfc3dba2b4a87#8e0c8bcdabb47416af546e146bbdfc3dba2b4a87"
 dependencies = [
  "bevy",
+ "png",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
