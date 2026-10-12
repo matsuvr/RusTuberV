@@ -77,7 +77,7 @@ fn bridge_display(serial: &str, width: u32, height: u32, mode: u32) -> Display {
 }
 
 #[test]
-fn bridge_drives_uncatalogued_models_orientations_cells_and_quilt_edge_pixels() {
+fn bridge_drives_uncatalogued_panel_dimensions_and_quilt_layout() {
     for (width, height, mode) in [
         (7680, 4320, 1),
         (4320, 7680, 2),
