@@ -249,6 +249,12 @@ fn palm_rotation(target: ArmTrackingTarget) -> Option<UnitQuaternion<f32>> {
 /// by the shared loss blend.
 const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.05;
 
+/// Elbow motion relative to the shoulder-wrist midpoint is a separate, noisier
+/// observation. Carry the midpoint with the wrist's response and damp only
+/// this residual more slowly to attenuate elbow-only noise while a moving
+/// hand still carries the arm promptly.
+const ARM_ELBOW_TIME_CONSTANT_SEC: f32 = 0.15;
+
 /// Time constant of the observed palm plane, in seconds.
 ///
 /// The palm normal comes from a cross product of two hand keypoints and is the
@@ -363,7 +369,7 @@ const ELBOW_PLANE_MAX_RATE_RAD_PER_SEC: f32 = 3.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ArmSmootherState {
     wrist: VectorSpring,
-    elbow: VectorSpring,
+    elbow_offset: VectorSpring,
     palm: Option<RotationSpring>,
     fingers: Option<FingerSmootherState>,
     /// Bend-plane direction emitted on the previous tick, used to rate-limit
@@ -376,7 +382,7 @@ impl ArmSmootherState {
     fn new(target: ArmTrackingTarget) -> Self {
         Self {
             wrist: VectorSpring::new(vector(target.wrist)),
-            elbow: VectorSpring::new(vector(target.elbow_pole)),
+            elbow_offset: VectorSpring::new(vector(target.elbow_pole) - vector(target.wrist) * 0.5),
             palm: palm_rotation(target).map(RotationSpring::new),
             fingers: target.fingers.map(FingerSmootherState::new),
             last_plane: None,
@@ -387,10 +393,10 @@ impl ArmSmootherState {
         let dt_sec = bounded_dt(dt_sec, DEFAULT_MAX_DT_SEC);
         self.wrist
             .step(vector(target.wrist), dt_sec, ARM_POSITION_TIME_CONSTANT_SEC);
-        self.elbow.step(
-            vector(target.elbow_pole),
+        self.elbow_offset.step(
+            vector(target.elbow_pole) - vector(target.wrist) * 0.5,
             dt_sec,
-            ARM_POSITION_TIME_CONSTANT_SEC,
+            ARM_ELBOW_TIME_CONSTANT_SEC,
         );
         if let Some(rotation) = palm_rotation(target) {
             self.palm
@@ -405,7 +411,7 @@ impl ArmSmootherState {
         }
         let plane = limit_plane_rotation(
             self.last_plane,
-            self.elbow.position,
+            self.elbow_offset.position + self.wrist.position * 0.5,
             self.wrist.position,
             dt_sec,
         );
@@ -1460,6 +1466,64 @@ mod tests {
             squared += value.wrist[0].powi(2);
         }
         assert!((squared / 240.0).sqrt() < 0.005);
+    }
+
+    #[test]
+    fn stationary_endpoints_damp_elbow_noise_at_camera_and_render_rates() {
+        let initial = ArmTrackingTarget {
+            wrist: [0.0, 0.0, 0.8],
+            elbow_pole: [0.3, -0.2, 0.4],
+            palm_normal: None,
+            palm_forward: None,
+            fingers: None,
+        };
+        for fps in [30, 60, 120] {
+            let mut smoother = ArmSmootherState::new(initial);
+            let mut squared = 0.0;
+            for tick in 0..fps * 4 {
+                let sample = tick / (fps / 30);
+                let phase = sample as f32 * std::f32::consts::TAU * 3.0 / 30.0;
+                let mut observed = initial;
+                observed.elbow_pole[1] += 0.03 * phase.sin();
+                let output = smoother.advance(observed, 1.0 / fps as f32);
+                assert_eq!(output.wrist, initial.wrist);
+                if tick >= fps {
+                    squared += (output.elbow_pole[1] - initial.elbow_pole[1]).powi(2);
+                }
+            }
+            let rms = (squared / (fps * 3) as f32).sqrt();
+            assert!(rms < 0.003, "{fps} Hz: elbow jitter RMS {rms}");
+            let mut output = initial;
+            for _ in 0..fps * 4 {
+                output = smoother.advance(initial, 1.0 / fps as f32);
+            }
+            near(output.elbow_pole, initial.elbow_pole);
+        }
+    }
+
+    #[test]
+    fn wrist_motion_carries_the_elbow_without_a_second_position_delay() {
+        let initial = ArmTrackingTarget {
+            wrist: [0.0, 0.0, 0.8],
+            elbow_pole: [0.3, -0.2, 0.4],
+            palm_normal: None,
+            palm_forward: None,
+            fingers: None,
+        };
+        let offset = vector(initial.elbow_pole) - vector(initial.wrist) * 0.5;
+        let mut smoother = ArmSmootherState::new(initial);
+        let mut moved = initial;
+        moved.wrist[0] += 0.4;
+        moved.elbow_pole[0] += 0.2;
+        for _ in 0..60 {
+            let output = smoother.advance(moved, 1.0 / 60.0);
+            assert!(
+                (vector(output.elbow_pole) - vector(output.wrist) * 0.5 - offset).norm() < 2.0e-6
+            );
+        }
+        let output = smoother.advance(moved, 1.0 / 60.0);
+        near(output.wrist, moved.wrist);
+        near(output.elbow_pole, moved.elbow_pole);
     }
 
     #[test]

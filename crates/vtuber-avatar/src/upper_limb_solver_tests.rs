@@ -10,6 +10,102 @@ use crate::arm::ArmSide;
 use crate::upper_limb::tests::{chain, state};
 
 #[test]
+fn stationary_arm_does_not_amplify_elbow_observation_noise() {
+    use vtuber_tracking::filter::damped::VectorSpring;
+    for side in [ArmSide::Left, ArmSide::Right] {
+        let chain = chain(side);
+        let initial = state(1.3, 1.1, -0.3, 1.0);
+        let original = initial.forward(&chain).unwrap();
+        let geometry = CollisionGeometry::default();
+        let body = HashMap::new();
+        let mut target = goal(initial, &chain);
+        target.neutral_girdle = Some(Vec2::new(initial.angles[7], initial.angles[8]));
+        let mut elbow = VectorSpring::new(nalgebra::Vector3::from(original.elbow.to_array()));
+        let mut current = [Some(initial), None];
+        let mut previous = original.elbow;
+        let mut largest_step = 0.0_f32;
+        let mut largest_angle_step = 0.0_f32;
+        for tick in 0..360 {
+            // A 30 Hz camera observation retained over two 60 Hz render ticks.
+            // Only the elbow observation jitters; shoulder, wrist and palm hold.
+            let phase = (tick / 2) as f32 * std::f32::consts::TAU * 3.0 / 30.0;
+            let noise =
+                Vec3::new(0.0, phase.sin(), phase.cos()) * (chain.rest.total_arm_length * 0.03);
+            elbow.step(
+                nalgebra::Vector3::from((original.elbow + noise).to_array()),
+                1.0 / 60.0,
+                0.15,
+            );
+            if tick % 2 != 0 {
+                continue;
+            }
+            target.elbow = Some(Vec3::from_array(elbow.position.into()));
+            let problem = Problem {
+                chains: [Some(&chain), None],
+                goals: [Some(target), None],
+                geometry: &geometry,
+                body: &body,
+                body_curve: None,
+                tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+            };
+            let (next, status) = problem.solve(current, 1);
+            assert!(matches!(status, SolveStatus::Feasible { .. }));
+            let arm = next[0].unwrap().forward(&chain).unwrap();
+            if tick > 120 {
+                largest_step = largest_step.max(arm.elbow.distance(previous));
+                for (a, b) in current[0]
+                    .unwrap()
+                    .angles
+                    .into_iter()
+                    .zip(next[0].unwrap().angles)
+                {
+                    largest_angle_step = largest_angle_step.max((b - a).abs());
+                }
+            }
+            previous = arm.elbow;
+            current = next;
+        }
+        eprintln!(
+            "{side:?}: elbow_step={largest_step}, joint_step_deg={}",
+            largest_angle_step.to_degrees()
+        );
+        assert!(largest_step < chain.rest.total_arm_length * 0.002);
+        assert!(largest_angle_step < 0.3_f32.to_radians());
+
+        // Once the observations hold, continued solves must also hold: no
+        // residual joint motion or solver-induced oscillation after settling.
+        target.elbow = Some(original.elbow);
+        let problem = Problem {
+            chains: [Some(&chain), None],
+            goals: [Some(target), None],
+            geometry: &geometry,
+            body: &body,
+            body_curve: None,
+            tolerance: 64.0 * f32::EPSILON * chain.rest.total_arm_length,
+        };
+        let (settled, status) = problem.solve(current, 96);
+        assert!(matches!(
+            status,
+            SolveStatus::Feasible {
+                converged: true,
+                ..
+            }
+        ));
+        for _ in 0..60 {
+            let (next, status) = problem.solve(settled, 1);
+            assert!(matches!(
+                status,
+                SolveStatus::Feasible {
+                    converged: true,
+                    ..
+                }
+            ));
+            assert_eq!(next, settled);
+        }
+    }
+}
+
+#[test]
 fn near_opposed_contacts_keep_the_feasible_tangent_independent_of_row_order() {
     let mut a = [0.0; 18];
     a[0] = 1.0;

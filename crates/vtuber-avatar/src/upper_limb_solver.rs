@@ -802,7 +802,24 @@ impl PreparedProblem<'_> {
             )
         };
         let jt = j.transpose();
-        let hessian = &jt * &j + DMatrix::identity(18, 18) * 1.0e-4;
+        // Live observation tasks can be nearly singular even at an admissible
+        // pose. The old 1e-4 term permitted a 50x free inverse-Jacobian gain, so
+        // small camera errors became alternating degree-sized joint steps.
+        // Bound that free gain to 5x for each live continuation, without a biased
+        // pose prior. Startup and contact restoration retain their precision;
+        // repeated steps toward a held target still converge to that target.
+        let damping = if !restoring
+            && self
+                .goals
+                .iter()
+                .flatten()
+                .any(|g| g.neutral_girdle.is_some())
+        {
+            1.0e-2
+        } else {
+            1.0e-4
+        };
+        let hessian = &jt * &j + DMatrix::identity(18, 18) * damping;
         let linear = jt * r;
         let mut rows = Vec::<[f64; 18]>::new();
         let mut margins = Vec::new();
