@@ -88,7 +88,7 @@ mediapipe_wheel_url=$wheelUrl
 mediapipe_wheel_sha256=$wheelHash
 "@ | Set-Content -LiteralPath "$package/BUILD-INFO.txt" -Encoding UTF8
 
-Get-ChildItem -LiteralPath $package -File -Recurse | Sort-Object FullName | ForEach-Object {
+Get-ChildItem -LiteralPath $package -File -Recurse -Exclude SHA256SUMS.txt | Sort-Object FullName | ForEach-Object {
     $relative = $_.FullName.Substring($package.Length + 1).Replace('\', '/')
     "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
 } | Set-Content -LiteralPath "$package/SHA256SUMS.txt" -Encoding ASCII
