@@ -104,7 +104,7 @@ cargo build --release --locked -p vtuber-desktop -j 1
 `VC\Redist\MSVC\<バージョン>\x64\Microsoft.VC145.CRT\vcruntime140.dll`を指定します。
 
 ```powershell
-.\tools\package-windows.ps1 -Version 0.1.0 -VcRuntime "<Visual Studioの再配布用vcruntime140.dllのパス>"
+.\tools\package-windows.ps1 -Version 0.1.1 -VcRuntime "<Visual Studioの再配布用vcruntime140.dllのパス>"
 ```
 
 `release/`にZIPとSHA-256ファイルが生成されます。パッケージにはライセンス文書、設定、利用マニュアルも含まれます。

@@ -1,6 +1,6 @@
 # Build and package the default-feature Windows x64 executable in one invocation.
 param(
-    [string]$Version = '0.1.0',
+    [string]$Version = '0.1.1',
     [string]$NdiSdk = 'C:\Program Files\NDI\NDI 6 SDK',
     [Parameter(Mandatory = $true)][string]$VcRuntime
 )

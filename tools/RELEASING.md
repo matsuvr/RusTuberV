@@ -9,7 +9,7 @@ SDKを変更しない。公開時にはコミット済みのソースを使い�
 Visual Studioの再配布用CRTにある vcruntime140.dll を指定する。
 
 ```powershell
-.\tools\package-windows.ps1 -Version 0.1.0 -VcRuntime "<Visual Studioの再配布用vcruntime140.dllのパス>"
+.\tools\package-windows.ps1 -Version 0.1.1 -VcRuntime "<Visual Studioの再配布用vcruntime140.dllのパス>"
 ```
 
 この処理は指定NDI SDKで x86_64-pc-windows-msvc 向けの既定機能をビルドし、
@@ -43,7 +43,7 @@ export NDI_SDK_LICENSE="/path/to/NDI SDK License Agreement.pdf"
 export NDI_RUNTIME_NOTICES="/path/to/libndi_licenses.txt"
 test -f "$NDI_SDK_LICENSE"
 test -f "$NDI_RUNTIME_NOTICES"
-version=0.1.0
+version=0.1.1
 package="$PWD/release/RusTuberV-$version-macos-arm64"
 test ! -e "$package"
 test ! -e "$package.zip"
