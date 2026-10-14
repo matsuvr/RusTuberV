@@ -117,6 +117,10 @@
 
 ## 在OBS中显示
 
+NDI® 用于将虚拟形象视频发送到 OBS。另请参阅 [NDI 官方网站](https://ndi.video/)。
+
+NDI® is a registered trademark of Vizrt NDI AB.
+
 ### 首次使用时准备一次
 
 安装 **DistroAV**，让 OBS 接收虚拟形象视频。如果 OBS 中已经有 **“NDI 来源”**，可直接进行下一步。
@@ -169,6 +173,16 @@ NDI 传送的是虚拟形象视频，不包含设置栏，也不包含为确认�
 “停止NDI发送”用于停止向 OBS 传送视频。直播或录制需要在 OBS 中停止。
 
 ## 遇到问题时
+
+### 应用无法启动时
+
+请完整解压 ZIP，并将所有附带文件放在一起。在 Windows 上，启动错误对话框会显示原因，以及相关配置文件或应用管理文件夹的路径。
+
+如果错误涉及 `settings.toml` 或 `tracking_profile.toml`，请先备份所显示的文件，再检查内容。应用不会自动重置格式错误的 TOML 或不支持的配置版本。如果配置由较新版本保存，请使用兼容的应用版本。访问失败时，请检查所示路径的读写权限。反馈问题时，请附上应用版本及完整错误文本。
+
+如果没有出现对话框，或是在 Mac 上首次启动，请查阅[发行说明](https://github.com/matsuvr/RusTuberV/releases/latest)中的环境要求和启动步骤。
+
+### 启动后的问题
 
 ![在诊断的跟踪栏中查看是否检测到脸部](images/13-diagnostics.png)
 

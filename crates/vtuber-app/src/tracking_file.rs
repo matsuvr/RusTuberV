@@ -135,6 +135,10 @@ mod tests {
             load_tracking_profile(&path),
             Err(TrackingProfileFileError::Decode(_))
         ));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[body.small_yaw\nhead = 0.5"
+        );
     }
 
     #[test]
@@ -147,5 +151,6 @@ mod tests {
             load_tracking_profile(&path),
             Err(TrackingProfileFileError::UnsupportedSchema { version: 2 })
         ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "schema_version = 2\n");
     }
 }

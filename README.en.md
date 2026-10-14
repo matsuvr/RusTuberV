@@ -1,13 +1,14 @@
 # RusTuberV
 
-Download the Windows x64 ZIP from [GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest),
-extract the entire archive, and double-click `RusTuberV.exe`. Load your own VRM avatar and select your webcam.
-Inference models, MediaPipe, and the NDI runtime are included; no first-run download or SDK installation is required.
-Keep all bundled files together. Windows releases are built locally and uploaded to GitHub Releases.
-
 [日本語](README.md) · **English** · [简体中文](README.zh-CN.md) · [한국어](README.ko.md)
 
 RusTuberV is a webcam-driven VRM avatar application built with Rust and Bevy. It applies MediaPipe face, pose, and hand inference to an avatar and provides a preview, transparent video output over NDI®, and Looking Glass output.
+
+## Download
+
+To use the app, download the Windows x64 release or the Apple Silicon Mac test build from [GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest). Distribution packages include the inference models and required runtimes. The development setup below is needed only when building from source.
+
+On Windows, extract the entire ZIP and double-click `RusTuberV.exe`. Keep all bundled files together. The Mac build requires macOS 14 or later and is intended for users who can diagnose and resolve technical problems themselves. See the [release notes](https://github.com/matsuvr/RusTuberV/releases/latest) for Mac limitations, tested environments, and first-launch instructions.
 
 ## User guide
 
@@ -79,7 +80,7 @@ curl -fL -o assets/models/hand_landmarker.task https://storage.googleapis.com/me
 
 Approved SHA-256 hashes and download sources are recorded in the [model manifest](assets/models/manifest.toml). The application checks each model's hash when loading it. If an upstream `latest` download changes and its hash no longer matches, obtain the version corresponding to the manifest.
 
-The MediaPipe native library is downloaded from the official PyPI wheel and cached when inference starts for the first time. This initial download requires a network connection. To supply the library yourself, set `MEDIAPIPE_LIB` to the path of a compatible MediaPipe 0.10.35 native library. See the [mediapipe-rs README](vendor/mediapipe-rs/README.md) for details.
+For source builds without a bundled native library, the MediaPipe native library is downloaded from the official PyPI wheel and cached when inference starts for the first time. This initial download requires a network connection. To supply the library yourself, set `MEDIAPIPE_LIB` to the path of a compatible MediaPipe 0.10.35 native library. See the [mediapipe-rs README](vendor/mediapipe-rs/README.md) for details.
 
 ## Build on Windows
 
@@ -166,6 +167,10 @@ If omitted, load a model with **Choose VRM…** or by dropping a file into the a
 | `manual/ja` | Default Japanese user guide |
 
 Application Rust code uses `#![forbid(unsafe_code)]`. Required native operations are isolated at binding boundaries. See [AGENTS.md](AGENTS.md) for development constraints.
+
+## Packaging
+
+See the [packaging instructions](tools/RELEASING.md) (Japanese) for the Windows build-and-package workflow and the Mac runtime bundling, signing, ZIP creation, and verification steps.
 
 ## License
 

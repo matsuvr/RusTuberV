@@ -4,21 +4,17 @@
 
 RustとBevyで実装したWebカメラ入力のVRMアバターアプリケーションです。MediaPipeによる顔・姿勢・手の推論結果をアバターへ適用し、プレビュー、NDI®による背景透過映像の送信、Looking Glassへの出力を行います。
 
+## ダウンロード
+
+利用するだけなら、[GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest)からWindows x64版またはApple Silicon Mac向けテスト版をダウンロードしてください。配布版には推論モデルと必要なランタイムを同梱しています。ソースからビルドする場合のみ、後述の開発環境の準備が必要です。
+
+WindowsではZIPを「すべて展開」し、`RusTuberV.exe`をダブルクリックします。同梱ファイルはまとめて置いてください。Mac版はmacOS 14以降で、技術的な問題を自分で対処できる方向けのテスト版です。制限・確認済み環境・初回起動手順は[リリース説明](https://github.com/matsuvr/RusTuberV/releases/latest)を参照してください。
+
 ## 利用マニュアル
 
 **[日本語の利用マニュアル](manual/ja/README.md)**
 
 アバターの読み込み、カメラ設定、画角・表情の調整、OBSへの出力をスクリーンショット付きで説明しています。
-
-## Windows版のダウンロード
-
-[GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest)から
-`RusTuberV-<バージョン>-windows-x64.zip`をダウンロードし、「すべて展開」して
-`RusTuberV.exe`をダブルクリックします。推論モデル、MediaPipe、NDIランタイムを同梱しているため、
-追加インストールや初回ダウンロードは不要です。同梱ファイルは実行ファイルと一緒に置いてください。
-ご自身のVRMファイルを読み込み、入力カメラを選択すると使い始められます。
-
-配布ZIPはローカルでビルドし、GitHub Releaseへアップロードしています。
 
 ## 主な機能
 
@@ -104,7 +100,7 @@ cargo build --release --locked -p vtuber-desktop -j 1
 
 ビルドスクリプトは、SDKのインポートライブラリに対応するNDIランタイムDLLを実行ファイルの隣へコピーします。DLLをSDK外に置く場合は、ビルド前に`NDI_RUNTIME_DLL`へそのファイルのパスを指定します。
 
-配布ZIPは、ビルド後に次のコマンドで作成します。`-VcRuntime`には使用したVisual Studioの
+配布ZIPは、次のコマンドでビルドから梱包まで続けて作成します。`-VcRuntime`には使用したVisual Studioの
 `VC\Redist\MSVC\<バージョン>\x64\Microsoft.VC145.CRT\vcruntime140.dll`を指定します。
 
 ```powershell
@@ -181,6 +177,10 @@ cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
 | `manual/ja` | 日本語の利用マニュアル |
 
 アプリケーションのRustコードは`#![forbid(unsafe_code)]`を使用し、必要なネイティブ処理はバインディング境界に隔離しています。開発時の制約は[AGENTS.md](AGENTS.md)を参照してください。
+
+## 配布物の作成
+
+配布ZIPの作成と確認は[配布手順](tools/RELEASING.md)を参照してください。Windowsのビルドと梱包、Macのランタイム同梱・署名・ZIP化の手順を記載しています。
 
 ## ライセンス
 

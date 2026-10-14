@@ -127,19 +127,6 @@ MediaPipe Tasks 0.10.35 `libmediapipe.dll`, extracted from the SHA-256-verified
 PyPI wheel, with the wheel's license in `licenses/MediaPipe-LICENSE.txt`.
 Source builds without a packaged library retain the upstream download behavior.
 
-## Google Neural Mesh (GNM) sparse landmark data
-
-`crates/vtuber-gnm/assets/head_sparse_68.txt` is copied from the Google GNM
-repository at revision
-`f76519f4c0340e5333146c0a8f011c56879ae5e3`, matching the model and schema
-revision, and is distributed under the upstream Apache-2.0 license.
-`assets/models/gnm_head.npz` is the official GNM Head v3 archive from the same
-revision. It is 53,305,389 bytes with SHA-256
-`1DFF6A319C2FA28377D7669C30AA533CC0799B45E6049AF18E709B0CB8F122DB` and is
-redistributed under the upstream Apache-2.0 terms with this notice retained.
-The exact source URL, schema path, and redistribution record are maintained in
-`assets/models/manifest.toml`.
-
 ## MyoHub MyoArm anatomical parameters
 
 The CMC, MCP and IP joint axes, ranges and hand offsets in `vtuber-avatar/src/thumb.rs`,

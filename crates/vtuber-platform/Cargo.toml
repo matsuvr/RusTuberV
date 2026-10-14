@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Native system sleep notification boundary for RusTuberV."
+description = "Native system notification and error dialog boundary for RusTuberV."
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "=0.6.4"

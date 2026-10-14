@@ -4,8 +4,38 @@ use windows_sys::Win32::System::Power::{
     PowerUnregisterSuspendResumeNotification,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DEVICE_NOTIFY_CALLBACK, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+    DEVICE_NOTIFY_CALLBACK, MB_ICONERROR, MB_OK, MessageBoxW, PBT_APMRESUMEAUTOMATIC,
+    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
 };
+
+/// Shows a blocking native error dialog before an application window exists.
+/// Returns the OS error if Windows could not create the dialog.
+pub fn show_error_dialog(title: &str, message: &str) -> std::io::Result<()> {
+    // Embedded NULs in diagnostic text must not truncate the remaining message.
+    let wide = |text: &str| -> Vec<u16> {
+        text.encode_utf16()
+            .map(|unit| if unit == 0 { 0xfffd } else { unit })
+            .chain([0])
+            .collect()
+    };
+    let title = wide(title);
+    let message = wide(message);
+    // SAFETY: both buffers are NUL-terminated and live until this synchronous
+    // call returns. A null owner is valid before the application creates a window.
+    let result = unsafe {
+        MessageBoxW(
+            null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 
 /// Owns suspend/resume notifications without depending on window focus or HWND.
 pub struct PowerNotifications {

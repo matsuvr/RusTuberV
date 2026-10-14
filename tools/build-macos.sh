@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --locked --release -p vtuber-desktop
+export MACOSX_DEPLOYMENT_TARGET=14.0
+cargo build --locked --release -p vtuber-desktop -j 1 --target-dir target
 
 app="target/release/RusTuberV.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/assets/models"

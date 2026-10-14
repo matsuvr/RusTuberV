@@ -1,4 +1,4 @@
-//! Native sleep notifications shared by camera, rendering and network output.
+//! Native OS boundary for sleep notifications and startup error dialogs.
 //! Callbacks only update atomics; they never wait for workers or call drivers.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +11,8 @@ pub use macos::PowerNotifications;
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::PowerNotifications;
+#[cfg(target_os = "windows")]
+pub use windows::show_error_dialog;
 
 /// One coherent snapshot of system sleep state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

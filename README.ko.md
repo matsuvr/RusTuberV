@@ -4,6 +4,12 @@
 
 RusTuberV는 Rust와 Bevy로 구현한 웹캠 기반 VRM 아바타 애플리케이션입니다. MediaPipe의 얼굴·자세·손 추론 결과를 아바타에 적용하며 미리 보기, NDI®를 통한 투명 배경 영상 전송, Looking Glass 출력을 제공합니다.
 
+## 다운로드
+
+앱을 사용하기만 하려면 [GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest)에서 Windows x64 버전 또는 Apple Silicon Mac 테스트 버전을 다운로드하세요. 배포판에는 추론 모델과 필요한 런타임이 포함되어 있습니다. 아래 개발 환경은 소스에서 직접 빌드할 때만 필요합니다.
+
+Windows에서는 ZIP 전체를 압축 해제한 뒤 `RusTuberV.exe`를 더블 클릭하세요. 동봉된 파일은 함께 보관하세요. Mac 버전은 macOS 14 이상이 필요하며 기술적인 문제를 직접 진단하고 해결할 수 있는 사용자를 위한 테스트 버전입니다. 제한 사항, 확인된 환경과 최초 실행 방법은 [릴리스 설명](https://github.com/matsuvr/RusTuberV/releases/latest)을 참조하세요.
+
 ## 사용 설명서
 
 **[한국어 사용 설명서](manual/ko/README.md)**
@@ -74,7 +80,7 @@ curl -fL -o assets/models/hand_landmarker.task https://storage.googleapis.com/me
 
 승인된 SHA-256과 다운로드 출처는 [모델 매니페스트](assets/models/manifest.toml)에 기록되어 있습니다. 앱은 모델을 불러올 때 해시를 확인합니다. 상위 프로젝트의 `latest` 파일이 바뀌어 해시가 일치하지 않으면 매니페스트에 해당하는 모델 버전이 필요합니다.
 
-MediaPipe 네이티브 라이브러리는 처음 추론을 시작할 때 공식 PyPI wheel에서 다운로드하여 캐시합니다. 최초 다운로드에는 네트워크 연결이 필요합니다. 라이브러리를 직접 준비한다면 `MEDIAPIPE_LIB`에 해당 플랫폼의 MediaPipe 0.10.35 라이브러리 경로를 지정합니다. 자세한 내용은 [mediapipe-rs README](vendor/mediapipe-rs/README.md)를 참조하세요.
+네이티브 라이브러리가 포함되지 않은 소스 빌드에서는 MediaPipe 네이티브 라이브러리를 처음 추론을 시작할 때 공식 PyPI wheel에서 다운로드하여 캐시합니다. 최초 다운로드에는 네트워크 연결이 필요합니다. 라이브러리를 직접 준비한다면 `MEDIAPIPE_LIB`에 해당 플랫폼의 MediaPipe 0.10.35 라이브러리 경로를 지정합니다. 자세한 내용은 [mediapipe-rs README](vendor/mediapipe-rs/README.md)를 참조하세요.
 
 ## Windows 빌드
 
@@ -161,6 +167,10 @@ cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
 | `manual/ja` | 기본 일본어 사용 설명서 |
 
 애플리케이션 Rust 코드는 `#![forbid(unsafe_code)]`를 사용하며 필요한 네이티브 처리는 바인딩 경계에 격리합니다. 개발 제약은 [AGENTS.md](AGENTS.md)를 참조하세요.
+
+## 배포판 만들기
+
+배포 ZIP 생성과 확인은 [패키징 절차](tools/RELEASING.md)(일본어)를 참조하세요. Windows 빌드·패키징과 Mac 런타임 포함, 서명, ZIP 생성 절차를 설명합니다.
 
 ## 라이선스
 

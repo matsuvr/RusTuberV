@@ -4,6 +4,12 @@
 
 RusTuberV 是使用 Rust 和 Bevy 开发的摄像头驱动 VRM 虚拟形象应用。它将 MediaPipe 的脸部、姿势和手部推理结果应用于虚拟形象，提供预览、通过 NDI® 发送透明背景视频以及 Looking Glass 输出。
 
+## 下载
+
+如果只想使用应用，请从 [GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest) 下载 Windows x64 版或 Apple Silicon Mac 测试版。发行包已包含推理模型和所需运行时。只有从源码构建时，才需要准备下文的开发环境。
+
+Windows 用户请完整解压 ZIP 后双击 `RusTuberV.exe`，并将所有附带文件放在一起。Mac 版要求 macOS 14 或更高版本，面向能够自行排查和解决技术问题的用户。Mac 版的限制、已验证环境和首次启动步骤请参阅[发行说明](https://github.com/matsuvr/RusTuberV/releases/latest)。
+
 ## 使用手册
 
 **[简体中文使用手册](manual/zh-CN/README.md)**
@@ -74,7 +80,7 @@ curl -fL -o assets/models/hand_landmarker.task https://storage.googleapis.com/me
 
 认可的 SHA-256 和下载来源记录在[模型清单](assets/models/manifest.toml)中。应用加载模型时会校验哈希。如果上游 `latest` 文件更新后哈希不再匹配，请使用与清单对应的模型版本。
 
-首次启动推理时，MediaPipe 原生库会从官方 PyPI wheel 下载并缓存。首次下载需要网络连接。如自行准备原生库，请将 `MEDIAPIPE_LIB` 设置为对应平台的 MediaPipe 0.10.35 库文件路径。详情见 [mediapipe-rs README](vendor/mediapipe-rs/README.md)。
+仅在未附带原生库的源码构建中，首次启动推理时，MediaPipe 原生库会从官方 PyPI wheel 下载并缓存。首次下载需要网络连接。如自行准备原生库，请将 `MEDIAPIPE_LIB` 设置为对应平台的 MediaPipe 0.10.35 库文件路径。详情见 [mediapipe-rs README](vendor/mediapipe-rs/README.md)。
 
 ## 在 Windows 上构建
 
@@ -161,6 +167,10 @@ cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
 | `manual/ja` | 默认的日语使用手册 |
 
 应用 Rust 代码使用 `#![forbid(unsafe_code)]`，必要的原生操作隔离在绑定边界内。开发约束请参阅 [AGENTS.md](AGENTS.md)。
+
+## 发行包制作
+
+发行 ZIP 的构建与验证请参阅[打包步骤](tools/RELEASING.md)（日语），其中包括 Windows 构建与打包，以及 Mac 运行时打包、签名和 ZIP 创建步骤。
 
 ## 许可证
 

@@ -1,4 +1,4 @@
-# Package the locally built default-feature Windows x64 executable.
+# Build and package the default-feature Windows x64 executable in one invocation.
 param(
     [string]$Version = '0.1.0',
     [string]$NdiSdk = 'C:\Program Files\NDI\NDI 6 SDK',
@@ -10,9 +10,24 @@ $root = (Get-Location).Path
 $package = Join-Path $root "release/RusTuberV-$Version-windows-x64"
 $inputs = Join-Path $root 'release/inputs'
 if (Test-Path -LiteralPath $package) { throw "Package already exists: $package" }
+
+# Capture provenance for the build we actually package, never a pre-existing exe.
+$sourceCommit = git rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read source commit' }
+$sourceStatus = git status --porcelain --untracked-files=normal
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read source status' }
+$sourceDirty = [bool]$sourceStatus
+$compiler = rustc -V
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read compiler version' }
+$env:NDI_SDK_DIR = $NdiSdk
+$env:NDI_RUNTIME_DLL = Join-Path $NdiSdk 'Bin/x64/Processing.NDI.Lib.x64.dll'
+cargo build --release --locked -p vtuber-desktop -j 1 --target x86_64-pc-windows-msvc --target-dir "$root/target"
+if ($LASTEXITCODE -ne 0) { throw 'Desktop release build failed; package was not created' }
+$builtAt = [DateTime]::UtcNow.ToString('o')
+$executable = Join-Path $root 'target/x86_64-pc-windows-msvc/release/RusTuberV.exe'
 New-Item -ItemType Directory -Path "$package/assets/models", "$package/licenses", $inputs -Force | Out-Null
 
-Copy-Item -LiteralPath 'target/release/RusTuberV.exe', 'tracking_profile.toml', 'LICENSE', 'THIRD_PARTY_NOTICES.md' -Destination $package
+Copy-Item -LiteralPath $executable, 'tracking_profile.toml', 'LICENSE', 'THIRD_PARTY_NOTICES.md' -Destination $package
 Copy-Item -LiteralPath 'assets/models/manifest.toml', 'assets/models/LICENSE.mediapipe.txt' -Destination "$package/assets/models"
 Copy-Item -LiteralPath 'assets/fonts/LICENSE-LINESeed.txt', 'assets/fonts/LICENSE-NotoSansCJK.txt', 'vendor/mediapipe-rs/NOTICE' -Destination "$package/licenses"
 Copy-Item -LiteralPath 'manual' -Destination $package -Recurse
@@ -72,13 +87,14 @@ and licenses/. NDI SDK terms: NDI_SDK_LICENSE_AGREEMENT.pdf.
 NDI® is a registered trademark of Vizrt NDI AB. https://ndi.video
 '@ | Set-Content -LiteralPath "$package/README.txt" -Encoding UTF8
 
-$sourceCommit = git rev-parse HEAD
-if ($LASTEXITCODE -ne 0) { throw 'Cannot read source commit' }
-$compiler = rustc -V
+$executableHash = (Get-FileHash -LiteralPath "$package/RusTuberV.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 $ndiVersion = (Get-Item -LiteralPath "$package/Processing.NDI.Lib.x64.dll").VersionInfo.FileVersion
 @"
 version=$Version
 source_commit=$sourceCommit
+source_dirty=$sourceDirty
+built_at_utc=$builtAt
+executable_sha256=$executableHash
 target=x86_64-pc-windows-msvc
 features=ndi-output
 compiler=$compiler

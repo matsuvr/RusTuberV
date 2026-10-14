@@ -117,6 +117,10 @@ Bindings are saved for each avatar. Scroll to the bottom for **Clear Expression*
 
 ## Show your avatar in OBS
 
+NDI® sends your avatar video to OBS. See the [official NDI website](https://ndi.video/).
+
+NDI® is a registered trademark of Vizrt NDI AB.
+
 ### One-time setup
 
 Install **DistroAV** so OBS can receive your avatar video. If OBS already offers **NDI Source**, continue to the next step.
@@ -169,6 +173,16 @@ Once your streaming destination is configured, click **Start Streaming** in OBS.
 **Stop NDI** stops passing video to OBS. Stop the stream or recording in OBS itself.
 
 ## Troubleshooting
+
+### If the app does not start
+
+Extract the entire ZIP and keep all bundled files together. On Windows, a startup error dialog shows the cause and the affected configuration file or managed folder path.
+
+For a `settings.toml` or `tracking_profile.toml` error, back up the indicated file before inspecting it. Malformed TOML and unsupported schemas are not automatically reset. If a newer app version saved the settings, use a compatible version. For access errors, check read/write permissions at the displayed path. Include the app version and the complete error text when reporting a problem.
+
+If no dialog appears, or for the first launch on Mac, check the requirements and startup instructions in the [release notes](https://github.com/matsuvr/RusTuberV/releases/latest).
+
+### Problems after startup
 
 ![Check the face detection state in Diagnostics](images/13-diagnostics.png)
 

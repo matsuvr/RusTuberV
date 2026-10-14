@@ -112,6 +112,17 @@ static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
         ],
     },
     LicenseGroup {
+        expression: "Apache-2.0",
+        items: &[LicensedItem {
+            name: "nokhwa (vendor/nokhwa)",
+            version: "0.10.11",
+        }],
+        texts: &[LicenseText {
+            file_name: "vendor/nokhwa/LICENSE",
+            body: include_str!("../../../vendor/nokhwa/LICENSE"),
+        }],
+    },
+    LicenseGroup {
         expression: "MIT OR Apache-2.0",
         items: &[LicensedItem {
             name: "bevy_window (vendor/bevy_window)",
@@ -219,6 +230,7 @@ mod tests {
         assert!(names.contains(&"NotoSansCJKsc-VF.otf"));
         assert!(names.contains(&"mediapipe (vendor/mediapipe-rs)"));
         assert!(names.contains(&"bevy_window (vendor/bevy_window)"));
+        assert!(names.contains(&"nokhwa (vendor/nokhwa)"));
         assert!(names.contains(&"assets/models (MediaPipe models)"));
     }
 }

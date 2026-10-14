@@ -18,7 +18,7 @@ use bevy_egui::EguiPlugin;
 use vtuber_app::import;
 use vtuber_app::inference_runtime::InferenceProjectRoot;
 use vtuber_app::orchestrator::Orchestrator;
-use vtuber_app::settings::AppSettings;
+use vtuber_app::settings::{AppSettings, default_settings_path};
 use vtuber_app::tracking_file::{TRACKING_PROFILE_FILE_NAME, load_tracking_profile};
 use vtuber_app::ui::UiShellPlugin;
 use vtuber_app::{AppRuntimePlugin, configure_execution_schedules};
@@ -29,6 +29,15 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Failed to start RusTuberV: {error}");
+            #[cfg(target_os = "windows")]
+            if let Err(dialog_error) = vtuber_platform::show_error_dialog(
+                "RusTuberV — Startup error / 起動エラー",
+                &format!(
+                    "RusTuberV could not start. / RusTuberVを起動できませんでした。\n\n{error}\n\nSee the user guide: Troubleshooting.\n利用マニュアルの「起動しない場合」を参照してください。"
+                ),
+            ) {
+                eprintln!("Could not display startup error: {dialog_error}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -40,10 +49,22 @@ enum StartupError {
     PowerNotifications(std::io::Error),
     MissingModelPath,
     NonUnicodeAssetRoot(PathBuf),
-    CreateManagedRoot(std::io::Error),
-    Tracking(vtuber_app::tracking_file::TrackingProfileFileError),
-    Settings(vtuber_app::settings::SettingsError),
-    Import(import::ModelImportError),
+    CreateManagedRoot {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Tracking {
+        path: PathBuf,
+        source: vtuber_app::tracking_file::TrackingProfileFileError,
+    },
+    Settings {
+        path: PathBuf,
+        source: vtuber_app::settings::SettingsError,
+    },
+    Import {
+        path: PathBuf,
+        source: import::ModelImportError,
+    },
     LookingGlass(vtuber_app::looking_glass::LookingGlassError),
 }
 
@@ -58,12 +79,24 @@ impl fmt::Display for StartupError {
             Self::NonUnicodeAssetRoot(path) => {
                 write!(f, "asset source root is not valid UTF-8: {path:?}")
             }
-            Self::CreateManagedRoot(error) => {
-                write!(f, "could not create managed asset directory: {error}")
+            Self::CreateManagedRoot { path, source } => {
+                write!(
+                    f,
+                    "could not create managed asset directory {}: {source}",
+                    path.display()
+                )
             }
-            Self::Tracking(error) => write!(f, "could not load tracking profile: {error}"),
-            Self::Settings(error) => write!(f, "could not load settings: {error}"),
-            Self::Import(error) => write!(f, "could not import CLI model: {error}"),
+            Self::Tracking { path, source } => write!(
+                f,
+                "could not load tracking profile {}: {source}",
+                path.display()
+            ),
+            Self::Settings { path, source } => {
+                write!(f, "could not load settings {}: {source}", path.display())
+            }
+            Self::Import { path, source } => {
+                write!(f, "could not import CLI model {}: {source}", path.display())
+            }
             Self::LookingGlass(error) => {
                 write!(f, "could not configure Looking Glass output: {error}")
             }
@@ -74,10 +107,10 @@ impl fmt::Display for StartupError {
 impl std::error::Error for StartupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::CreateManagedRoot(error) => Some(error),
-            Self::Tracking(error) => Some(error),
-            Self::Settings(error) => Some(error),
-            Self::Import(error) => Some(error),
+            Self::CreateManagedRoot { source, .. } => Some(source),
+            Self::Tracking { source, .. } => Some(source),
+            Self::Settings { source, .. } => Some(source),
+            Self::Import { source, .. } => Some(source),
             Self::LookingGlass(error) => Some(error),
             Self::MissingModelPath | Self::NonUnicodeAssetRoot(_) => None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -92,23 +125,37 @@ fn run() -> Result<(), StartupError> {
         vtuber_platform::PowerNotifications::new().map_err(StartupError::PowerNotifications)?;
     let model_path = parse_model_arg(std::env::args_os().skip(1))?;
     let managed_root = managed_asset_root();
-    std::fs::create_dir_all(&managed_root).map_err(StartupError::CreateManagedRoot)?;
+    std::fs::create_dir_all(&managed_root).map_err(|source| StartupError::CreateManagedRoot {
+        path: managed_root.clone(),
+        source,
+    })?;
 
     // User-tunable tracking distribution: a missing file is seeded with the
     // generated template so every knob is visible for editing.
-    let tracking = load_tracking_profile(&resource_root().join(TRACKING_PROFILE_FILE_NAME))
-        .map_err(StartupError::Tracking)?;
+    let tracking_path = resource_root().join(TRACKING_PROFILE_FILE_NAME);
+    let tracking =
+        load_tracking_profile(&tracking_path).map_err(|source| StartupError::Tracking {
+            path: tracking_path,
+            source,
+        })?;
 
     // An unreadable, malformed, or newer settings document is reported instead
     // of being replaced with the current defaults.
-    let settings = AppSettings::load_default().map_err(StartupError::Settings)?;
+    let settings = match default_settings_path() {
+        Some(path) => {
+            AppSettings::load(&path).map_err(|source| StartupError::Settings { path, source })?
+        }
+        None => AppSettings::default(),
+    };
 
     // Import CLI model through the managed asset source so that the same
     // `user://avatars/<sha256>/model.vrm` path invariant is used.
     let startup_model = model_path
-        .map(|path| import::import_vrm(path, &managed_root, import::DEFAULT_SIZE_LIMIT))
-        .transpose()
-        .map_err(StartupError::Import)?;
+        .map(|path| {
+            import::import_vrm(&path, &managed_root, import::DEFAULT_SIZE_LIMIT)
+                .map_err(|source| StartupError::Import { path, source })
+        })
+        .transpose()?;
 
     // Register the `user` asset source BEFORE DefaultPlugins so that
     // `user://avatars/<sha256>/model.vrm` resolves to
@@ -269,9 +316,11 @@ mod tests {
 
     #[test]
     fn startup_error_preserves_the_io_cause() {
-        let error = StartupError::CreateManagedRoot(std::io::Error::from(
-            std::io::ErrorKind::PermissionDenied,
-        ));
+        let error = StartupError::CreateManagedRoot {
+            path: PathBuf::from("C:/利用者/RusTuberV"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        assert!(error.to_string().contains("C:/利用者/RusTuberV"));
         assert!(
             error
                 .source()
@@ -279,6 +328,29 @@ mod tests {
                 .downcast_ref::<std::io::Error>()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn configuration_errors_identify_the_file_and_schema() {
+        let settings = StartupError::Settings {
+            path: PathBuf::from("C:/利用者/RusTuberV/settings.toml"),
+            source: vtuber_app::settings::SettingsError::UnsupportedSchema { version: 999 },
+        };
+        let tracking = StartupError::Tracking {
+            path: PathBuf::from("C:/アプリ/tracking_profile.toml"),
+            source: vtuber_app::tracking_file::TrackingProfileFileError::UnsupportedSchema {
+                version: 999,
+            },
+        };
+        for (error, path) in [
+            (settings, "C:/利用者/RusTuberV/settings.toml"),
+            (tracking, "C:/アプリ/tracking_profile.toml"),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains(path));
+            assert!(message.contains("999"));
+            assert!(error.source().is_some());
+        }
     }
 
     #[cfg(unix)]
