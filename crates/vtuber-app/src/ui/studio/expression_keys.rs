@@ -1,4 +1,4 @@
-//! Expression assignment, status and keyboard input.
+//! Expression assignment and keyboard input.
 use crate::actions::ActionQueue;
 
 use super::section;
@@ -18,7 +18,6 @@ pub(super) fn expression_keys_page(
     lang: UiLanguage,
 ) {
     expression_settings_section(actions, ui, vm, state, lang);
-    expression_status_section(actions, ui, vm, state, lang);
 }
 
 /// Translates standard presets and keeps the exact runtime ID visible.
@@ -265,88 +264,14 @@ fn expression_settings_section(
             });
             ui.label(
                 RichText::new(lang.pick(
-                    "キーを押すと表情を選択し、同じキーをもう一度押すと解除します。文字入力中やダイアログ表示中は反応しません。",
-                    "Press a key to select an expression. Press the same key again to clear it. Expression keys are inactive while typing or using dialogs.",
-                    "按键可选择表情，再次按下同一按键可取消。输入文字或使用对话框时，表情按键不会生效。",
-                    "키를 눌러 표정을 선택하고 같은 키를 다시 누르면 해제합니다. 텍스트 입력 중이거나 대화상자를 사용하는 동안에는 표정 키가 작동하지 않습니다.",
+                    "キーを押すと表情を選択し、同じキーをもう一度押すと解除します。",
+                    "Press a key to select an expression. Press the same key again to clear it.",
+                    "按键可选择表情，再次按下同一按键可取消。",
+                    "키를 눌러 표정을 선택하고 같은 키를 다시 누르면 해제합니다.",
                 ))
                 .small()
                 .weak(),
             );
-        },
-    );
-}
-
-/// Studio list of assigned expressions. Clicking runs the same toggle action
-/// as the physical key.
-fn expression_status_section(
-    actions: &mut ActionQueue,
-    ui: &mut Ui,
-    vm: &UiViewModel,
-    state: &mut UiState,
-    lang: UiLanguage,
-) {
-    if !vm.expression.has_catalog {
-        return;
-    }
-    let Some(generation) = vm
-        .expression
-        .target
-        .as_ref()
-        .map(|target| target.generation)
-    else {
-        return;
-    };
-    section(
-        ui,
-        lang.pick("表情キー", "Expression keys", "表情按键", "표정 키"),
-        |ui| {
-            let mut any = false;
-            for row in &vm.expression.bindings {
-                let Some(id) = &row.expression else {
-                    continue;
-                };
-                any = true;
-                let name = vm
-                    .expression
-                    .entries
-                    .iter()
-                    .find(|entry| &entry.id == id)
-                    .map_or_else(|| id.clone(), |entry| expression_entry_name(entry, lang));
-                let text = if row.selected {
-                    format!(
-                        "● {}  {} ({})",
-                        row.key.label(),
-                        name,
-                        lang.pick("選択中", "Selected", "已选中", "선택됨")
-                    )
-                } else {
-                    format!("{}  {name}", row.key.label())
-                };
-                if ui
-                    .add(egui::Button::selectable(row.selected, text))
-                    .clicked()
-                {
-                    state.emit(
-                        actions,
-                        UiAction::ToggleExpressionKey {
-                            generation,
-                            key: row.key,
-                        },
-                    );
-                }
-            }
-            if !any {
-                ui.label(
-                    RichText::new(lang.pick(
-                        "割り当て済みの表情はありません。",
-                        "No expressions are assigned.",
-                        "尚未分配表情。",
-                        "할당된 표정이 없습니다.",
-                    ))
-                    .weak(),
-                );
-            }
         },
     );
 }

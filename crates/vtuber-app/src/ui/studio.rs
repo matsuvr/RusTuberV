@@ -414,20 +414,16 @@ fn compact_navigation(
         });
 }
 
-fn toolbar(
+fn compact_toolbar(
     actions: &mut ActionQueue,
     ui: &mut Ui,
     vm: &UiViewModel,
     state: &mut UiState,
-    sidebar: bool,
     lang: UiLanguage,
 ) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("RusTuberV").strong());
-        if !sidebar {
-            compact_navigation(actions, ui, vm, state, lang);
-            compact_language_buttons(actions, ui, state, lang);
-        }
+        compact_navigation(actions, ui, vm, state, lang);
+        compact_language_buttons(actions, ui, state, lang);
     });
 }
 
@@ -513,6 +509,16 @@ fn avatar_monitor(
                     state.set_controls_open(false);
                 }
                 ui.add_space(8.0);
+                ui.label(
+                    RichText::new(lang.pick(
+                        "左ドラッグで回転、右ドラッグで移動、ホイールでズームします。",
+                        "Left-drag to orbit, right-drag to pan, and scroll to zoom.",
+                        "左键拖动旋转，右键拖动平移，滚轮缩放。",
+                        "왼쪽 드래그로 회전, 오른쪽 드래그로 이동, 휠로 확대·축소합니다.",
+                    ))
+                    .small()
+                    .weak(),
+                );
                 ui.label(RichText::new(hint).small().weak());
             }
         } else if draw_preview {
@@ -521,17 +527,6 @@ fn avatar_monitor(
     } else {
         ui.label(avatar_label(vm.avatar.lifecycle, lang));
     }
-    ui.add_space(8.0);
-    ui.label(
-        RichText::new(lang.pick(
-            "NDIと同じアバター専用描画です。設定UIとカメラ映像は含みません。",
-            "The same avatar-only render used by NDI. Settings and camera pixels are excluded.",
-            "与NDI共用的虚拟形象画面，不含设置界面或摄像头影像。",
-            "NDI와 동일한 아바타 전용 화면입니다. 설정과 카메라 영상은 포함되지 않습니다.",
-        ))
-        .small()
-        .weak(),
-    );
     preview_rect
 }
 
@@ -602,10 +597,6 @@ pub(crate) fn render_studio(
     let mut draw_workspace = |ui: &mut Ui| {
         let mut workspace = ui.new_child(egui::UiBuilder::new().id(Id::new("studio_workspace")));
         let ui = &mut workspace;
-        egui::Panel::top("studio_toolbar")
-            .resizable(false)
-            .frame(panel_frame(250))
-            .show(ui, |ui| toolbar(actions, ui, vm, state, sidebar, lang));
         if sidebar {
             egui::Panel::left("studio_sidebar")
                 .exact_size(SIDEBAR_PANEL_WIDTH)
@@ -641,6 +632,10 @@ pub(crate) fn render_studio(
                     }
                 });
         } else {
+            egui::Panel::top("studio_toolbar")
+                .resizable(false)
+                .frame(panel_frame(250))
+                .show(ui, |ui| compact_toolbar(actions, ui, vm, state, lang));
             // On smaller windows keep the monitor outside the settings scroll area.
             egui::Panel::top("studio_compact_monitor")
                 .resizable(false)
@@ -1019,7 +1014,12 @@ fn calibration_page(
         ui,
         lang.pick("中立姿勢", "Neutral pose", "自然姿势", "중립 자세"),
         |ui| {
-            ui.label(lang.pick("カメラに向かい、自然な表情で開始してください。映像を表示する必要はありません。", "Face the camera with a relaxed expression. There is no need to reveal the camera image.", "面向摄像头，保持自然表情后开始。无需显示摄像头影像。", "카메라를 향해 편안한 표정으로 시작하세요. 카메라 영상을 표시할 필요는 없습니다."));
+            ui.label(lang.pick(
+                "カメラに向かい、自然な表情で開始してください。",
+                "Face the camera with a relaxed expression.",
+                "面向摄像头，保持自然表情后开始。",
+                "카메라를 향해 편안한 표정으로 시작하세요.",
+            ));
             if vm.calibration.is_calibrating {
                 ui.label(lang.pick(
                     "顔を検出したら中立姿勢を更新します。カメラに顔を映してください。",
@@ -1128,10 +1128,10 @@ fn calibration_page(
             }
             ui.label(
                 RichText::new(lang.pick(
-                    "肩・肘・手首に加えて手も画面に入れてください。手が見えない腕はPoseの推定を信頼できないため追跡せず、仮想の腕へゆっくり戻します。指の動きは対象外ですが、手のひらの向きは追跡します。",
-                    "Keep the hands in frame along with the shoulders, elbows, and wrists. An arm whose hand is not detected is not trusted from Pose alone and eases back to the virtual arm. Finger articulation is out of scope; the palm orientation is tracked.",
-                    "请将手与肩、肘、手腕一起保持在画面内。看不到手的另一侧手臂不信任Pose估计，会缓慢回到虚拟手臂。手指动作不在范围内，手掌朝向会被跟踪。",
-                    "어깨, 팔꿈치, 손목과 함께 손도 화면에 유지하세요. 손이 보이지 않는 팔은 Pose 추정을 신뢰하지 않고 가상 팔로 천천히 돌아갑니다. 손가락 동작은 범위 밖이지만 손바닥 방향은 추적합니다.",
+                    "肩・肘・手首に加えて手も画面に入れてください。",
+                    "Keep the hands in frame along with the shoulders, elbows, and wrists.",
+                    "请将手与肩、肘、手腕一起保持在画面内。",
+                    "어깨, 팔꿈치, 손목과 함께 손도 화면에 유지하세요.",
                 ))
                 .small()
                 .weak(),
@@ -1157,7 +1157,6 @@ fn output_page(
             "NDI — 아바타만",
         ),
         |ui| {
-            ui.label(lang.pick("常時プレビューと同じアバター専用描画を送信します。設定UI、カメラ映像、プレビュー枠は送信しません。", "Sends the same avatar-only render as the persistent preview. Settings, camera pixels, and preview chrome are never sent.", "发送与常驻预览相同的虚拟形象画面，不发送设置界面、摄像头影像或预览边框。", "항상 표시되는 미리 보기와 같은 아바타 전용 화면을 전송합니다. 설정, 카메라 영상, 미리 보기 테두리는 전송하지 않습니다."));
             let status = match vm.ndi_output.state {
                 NdiOutputUiState::Off => lang.pick("停止", "Off", "已停止", "중지"),
                 NdiOutputUiState::Starting => {
@@ -1196,16 +1195,17 @@ fn output_page(
                     "未找到NDI运行库。仅使用NDI时需要它。",
                     "NDI 런타임을 찾지 못했습니다. NDI를 사용할 때만 필요합니다.",
                 ));
-                ui.hyperlink_to(
-                    lang.pick(
-                        "NDI公式サイト",
-                        "NDI website",
-                        "NDI官方网站",
-                        "NDI 공식 사이트",
-                    ),
-                    "https://ndi.video",
-                );
             }
+            ui.hyperlink_to(
+                lang.pick(
+                    "NDI®公式サイト",
+                    "NDI® website",
+                    "NDI®官方网站",
+                    "NDI® 공식 사이트",
+                ),
+                "https://ndi.video",
+            );
+            ui.small("NDI® is a registered trademark of Vizrt NDI AB.");
             ui.horizontal_wrapped(|ui| {
                 if primary_button(
                     ui,
@@ -1247,29 +1247,6 @@ fn output_page(
                 .show(ui, |ui| {
                     ui.label(detail);
                 });
-            }
-        },
-    );
-    section(
-        ui,
-        lang.pick(
-            "画面キャプチャで使う",
-            "Use screen capture",
-            "使用屏幕捕获",
-            "화면 캡처 사용",
-        ),
-        |ui| {
-            ui.label(lang.pick("F1で設定を隠し、アバター表示に戻せます。ただし、デスクトップ／ウインドウキャプチャには、後から開いた設定や表示を許可したカメラ映像も映ります。アバターのみを確実に送る場合はNDIを選んでください。", "F1 hides settings and returns to the avatar. Desktop/window capture can still include settings opened later or a camera preview you explicitly reveal. Use NDI for an avatar-only feed.", "按F1隐藏设置并返回虚拟形象。桌面或窗口捕获仍会包含之后打开的设置以及您确认显示的摄像头影像。需要仅发送虚拟形象时，请使用NDI。", "F1로 설정을 숨기고 아바타 화면으로 돌아갑니다. 데스크톱이나 창 캡처에는 나중에 연 설정이나 직접 표시한 카메라 영상도 포함될 수 있습니다. 아바타만 전송하려면 NDI를 사용하세요."));
-            if ui
-                .button(lang.pick(
-                    "アバターだけを表示 (F1)",
-                    "Show avatar only (F1)",
-                    "仅显示虚拟形象 (F1)",
-                    "아바타만 표시 (F1)",
-                ))
-                .clicked()
-            {
-                state.set_controls_open(false);
             }
         },
     );
@@ -1381,7 +1358,6 @@ fn diagnostics_page(
         ui,
         lang.pick("詳細診断", "Detailed diagnostics", "详细诊断", "상세 진단"),
         |ui| {
-            ui.label(lang.pick("技術的な識別子とバックエンドのメッセージは原文で表示します。カメラ映像は表示しません。", "Technical identifiers and backend messages retain their original text. No camera image is shown.", "技术标识符和后端消息保留原文，不显示摄像头影像。", "기술 식별자와 백엔드 메시지는 원문으로 표시합니다. 카메라 영상은 표시하지 않습니다."));
             egui::CollapsingHeader::new(lang.pick(
                 "技術情報を開く",
                 "Open technical details",
@@ -1400,23 +1376,6 @@ fn diagnostics_page(
 fn oss_licenses_page(ui: &mut Ui, lang: UiLanguage) {
     section(
         ui,
-        lang.pick(
-            "表示について",
-            "About this list",
-            "关于本列表",
-            "이 목록에 대하여",
-        ),
-        |ui| {
-            ui.label(lang.pick(
-                "ライセンスの本文は配布元のファイルのまま表示し、表示言語では翻訳しません。",
-                "License bodies are shown exactly as their publisher shipped them and are never translated into the display language.",
-                "许可证正文按发布方提供的原文件显示，不随界面语言翻译。",
-                "라이선스 본문은 배포된 파일 그대로 표시하며, 표시 언어로 번역하지 않습니다.",
-            ));
-        },
-    );
-    section(
-        ui,
         lang.pick("同梱アセット", "Bundled assets", "内置资源", "번들 에셋"),
         |ui| {
             license_groups(ui, "bundled", crate::licenses::bundled_groups(), lang);
@@ -1431,12 +1390,6 @@ fn oss_licenses_page(ui: &mut Ui, lang: UiLanguage) {
             "의존 패키지",
         ),
         |ui| {
-            ui.label(lang.pick(
-                "Cargo.lock が記録している、このアプリのビルドに使ったすべてのパッケージです。",
-                "Every package Cargo.lock records as an input to this application's build.",
-                "Cargo.lock 记录的、构建本应用所用的全部软件包。",
-                "Cargo.lock에 기록된 이 애플리케이션 빌드에 사용된 모든 패키지입니다.",
-            ));
             license_groups(
                 ui,
                 "dependencies",

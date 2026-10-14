@@ -19,6 +19,8 @@ pub const MEDIAPIPE_VERSION: &str = "0.10.35";
 pub enum LibrarySource {
     /// `$MEDIAPIPE_LIB`
     Env(PathBuf),
+    /// Library shipped beside the executable.
+    Packaged(PathBuf),
     /// Previously downloaded into the user cache.
     Cache(PathBuf),
     /// Just fetched from the official PyPI wheel.
@@ -28,7 +30,10 @@ pub enum LibrarySource {
 impl LibrarySource {
     pub fn path(&self) -> &Path {
         match self {
-            LibrarySource::Env(p) | LibrarySource::Cache(p) | LibrarySource::Downloaded(p) => p,
+            LibrarySource::Env(p)
+            | LibrarySource::Packaged(p)
+            | LibrarySource::Cache(p)
+            | LibrarySource::Downloaded(p) => p,
         }
     }
 }
@@ -79,6 +84,12 @@ fn load() -> Result<Lib> {
             return Err(Error::LibraryNotFound { searched });
         }
         LibrarySource::Env(p)
+    } else if let Some(packaged) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(TARGET.lib_file_name)))
+        .filter(|path| path.is_file())
+    {
+        LibrarySource::Packaged(packaged)
     } else {
         let cached = cache_path()?;
         if cached.exists() {

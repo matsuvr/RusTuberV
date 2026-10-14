@@ -32,6 +32,7 @@ pub fn native_library_source() -> Result<&'static str> {
         .map_err(|error| InferenceError::MediaPipeLoadFailed(error.to_string()))?;
     Ok(match &library.source {
         mediapipe::loader::LibrarySource::Env(_) => "environment override",
+        mediapipe::loader::LibrarySource::Packaged(_) => "packaged library",
         mediapipe::loader::LibrarySource::Cache(_) => "verified cache",
         mediapipe::loader::LibrarySource::Downloaded(_) => "official PyPI wheel download",
     })

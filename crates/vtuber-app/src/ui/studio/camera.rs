@@ -94,12 +94,6 @@ fn camera_preview_section(
         |ui| {
             match state.camera_consent {
                 CameraPreviewConsent::Hidden => {
-                    ui.label(lang.pick(
-                        "カメラ映像は非表示です。トラッキングとは独立した表示設定です。",
-                        "Camera pixels are hidden. Preview visibility is independent of tracking.",
-                        "摄像头影像已隐藏。预览显示与跟踪功能相互独立。",
-                        "카메라 영상은 숨겨져 있습니다. 미리 보기 표시는 트래킹과 별개입니다.",
-                    ));
                     if ui
                         .button(lang.pick(
                             "カメラ映像を確認…",
@@ -223,16 +217,6 @@ fn camera_preview_section(
             {
                 state.emit(actions, UiAction::ToggleMirror);
             }
-            ui.label(
-                RichText::new(lang.pick(
-                    "別の画面への移動、設定を閉じる操作、Escで再び非表示になります。",
-                    "Changing pages, closing settings, or pressing Esc hides it again.",
-                    "切换页面、关闭设置或按Esc后，影像会再次隐藏。",
-                    "다른 화면으로 이동하거나 설정을 닫거나 Esc를 누르면 다시 숨겨집니다.",
-                ))
-                .small()
-                .weak(),
-            );
         },
     );
 }
@@ -303,7 +287,6 @@ fn display_framing_section(
             {
                 state.emit(actions, UiAction::ResetAvatarCamera);
             }
-            ui.label(lang.pick("F1でアバターのみを表示。左ドラッグで回転、右ドラッグで移動、ホイールでズームします。", "Use F1 for avatar-only view. Left-drag to orbit, right-drag to pan, and scroll to zoom.", "按F1仅显示虚拟形象。左键拖动旋转，右键拖动平移，滚轮缩放。", "F1로 아바타만 표시합니다. 왼쪽 드래그로 회전, 오른쪽 드래그로 이동, 휠로 확대·축소합니다."));
         },
     );
 }

@@ -1,0 +1,33 @@
+Terms for the proprietary runtimes bundled with RusTuberV for Windows
+
+The RusTuberV application source remains licensed under the MIT License.
+These additional terms apply only to the bundled proprietary runtime files.
+By using those files, you agree to the following terms. If you do not agree,
+do not use the bundled proprietary runtimes.
+
+NDI runtime (Processing.NDI.Lib.x64.dll)
+Copyright NDI, Inc. and its licensors. All rights reserved.
+NDI® is a registered trademark of Vizrt NDI AB. https://ndi.video
+The NDI runtime is licensed for use with this application, subject to the
+included NDI_SDK_LICENSE_AGREEMENT.pdf and Processing.NDI.Lib.Licenses.txt.
+You must not modify, reverse engineer, disassemble, decompile, recompile,
+derive the source of, or circumvent technical limitations of the NDI SDK,
+runtime, products or protocols, or attempt to do so. You must not remove,
+obscure or alter proprietary notices or labels. These restrictions apply
+only to the extent permitted by applicable mandatory law.
+NDI and its licensors provide no warranties of any kind, including implied
+warranties of merchantability, fitness for purpose or non-infringement.
+To the extent permitted by applicable law, NDI and its licensors disclaim
+liability for all damages, whether direct, indirect, incidental or
+consequential, arising from the use of this application or the NDI runtime.
+You must comply with relevant US export laws and regulations and must not
+export or re-export these components in violation of those laws.
+Third-party developers using this application to develop products that use
+NDI must comply with the NDI SDK license, maintain current and complete NDI
+compatibility, and include these NDI terms in their end-user agreements.
+Redistribution with this application must retain these terms and notices.
+
+Microsoft Visual C++ runtime (vcruntime140.dll)
+Copyright Microsoft Corporation. All rights reserved.
+Use of this runtime is subject to licenses/Visual-C-Runtime-LICENSE.txt.
+Its proprietary license is separate from the application's MIT License.

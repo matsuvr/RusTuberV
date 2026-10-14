@@ -1,5 +1,10 @@
 # RusTuberV
 
+Download the Windows x64 ZIP from [GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest),
+extract the entire archive, and double-click `RusTuberV.exe`. Load your own VRM avatar and select your webcam.
+Inference models, MediaPipe, and the NDI runtime are included; no first-run download or SDK installation is required.
+Keep all bundled files together. Windows releases are built locally and uploaded to GitHub Releases.
+
 [日本語](README.md) · **English** · [简体中文](README.zh-CN.md) · [한국어](README.ko.md)
 
 RusTuberV is a webcam-driven VRM avatar application built with Rust and Bevy. It applies MediaPipe face, pose, and hand inference to an avatar and provides a preview, transparent video output over NDI®, and Looking Glass output.

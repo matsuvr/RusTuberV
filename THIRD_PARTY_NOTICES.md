@@ -84,6 +84,14 @@ audio codecs, SDK headers, import libraries, or build artifacts. The runtime
 is loaded application-locally; the package process does not install anything
 into a system directory or edit PATH.
 
+## Microsoft Visual C++ runtime (Windows release ZIP)
+
+Windows release ZIPs include the unmodified `vcruntime140.dll` from the release
+CRT directory of the Visual Studio installation used for the build. This is a
+separate proprietary component; see `licenses/Visual-C-Runtime-LICENSE.txt`
+and `RUNTIME-TERMS.txt` in the ZIP. It is not covered by the application's MIT
+license and is loaded from the application folder without a system install.
+
 ## grafton-ndi
 
 The Rust sender boundary uses
@@ -113,9 +121,11 @@ reopened after system sleep; see `vendor/nokhwa/PATCHES.md`.
 `527037fa0fe1339750140283930bbb9560460e9e`, licensed under Apache-2.0. Its
 `LICENSE` and `NOTICE` files are retained in the vendored directory. The copy
 adds the MediaPipe Pose Landmarker bindings alongside the existing face tasks;
-the upstream face API and loader are unchanged. The native
-`libmediapipe` library that binds to is the official MediaPipe Tasks 0.10.35
-build and is fetched, not redistributed, by this repository.
+the upstream face API is unchanged. The loader also supports a native library
+shipped beside the executable. Windows release ZIPs include the official
+MediaPipe Tasks 0.10.35 `libmediapipe.dll`, extracted from the SHA-256-verified
+PyPI wheel, with the wheel's license in `licenses/MediaPipe-LICENSE.txt`.
+Source builds without a packaged library retain the upstream download behavior.
 
 ## Google Neural Mesh (GNM) sparse landmark data
 

@@ -1290,8 +1290,9 @@ dependencies = [
 
 [[package]]
 name = "bevy_looking_glass"
-version = "0.1.0"
-source = "git+https://github.com/matsuvr/bevy-looking-glass-rs?rev=76f5b3717280fe26927b99ff11412938e4e6466e#76f5b3717280fe26927b99ff11412938e4e6466e"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b58338f2946eee831be2f9dec002beb6679d8d1f8d3eaa8f4df92db0243b1468"
 dependencies = [
  "bevy",
  "png",

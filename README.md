@@ -10,6 +10,16 @@ RustとBevyで実装したWebカメラ入力のVRMアバターアプリケーシ
 
 アバターの読み込み、カメラ設定、画角・表情の調整、OBSへの出力をスクリーンショット付きで説明しています。
 
+## Windows版のダウンロード
+
+[GitHub Releases](https://github.com/matsuvr/RusTuberV/releases/latest)から
+`RusTuberV-<バージョン>-windows-x64.zip`をダウンロードし、「すべて展開」して
+`RusTuberV.exe`をダブルクリックします。推論モデル、MediaPipe、NDIランタイムを同梱しているため、
+追加インストールや初回ダウンロードは不要です。同梱ファイルは実行ファイルと一緒に置いてください。
+ご自身のVRMファイルを読み込み、入力カメラを選択すると使い始められます。
+
+配布ZIPはローカルでビルドし、GitHub Releaseへアップロードしています。
+
 ## 主な機能
 
 - VRM 0.x / 1.0の読み込み
@@ -75,7 +85,7 @@ curl -fL -o assets/models/hand_landmarker.task https://storage.googleapis.com/me
 
 承認済みのSHA-256と取得元は[モデルマニフェスト](assets/models/manifest.toml)に記載しています。アプリはモデル読み込み時にハッシュを照合します。取得先の`latest`が更新されてハッシュが一致しなくなった場合は、マニフェストに対応するモデルが必要です。
 
-MediaPipeのネイティブライブラリは、初回の推論開始時に公式PyPI wheelから取得してキャッシュします。この初回取得にはネットワーク接続が必要です。ライブラリを別途用意する場合は、`MEDIAPIPE_LIB`にMediaPipe 0.10.35の対応ライブラリへのパスを指定します。詳細は[mediapipe-rsのREADME](vendor/mediapipe-rs/README.md)を参照してください。
+MediaPipeのネイティブライブラリは、実行ファイルの隣にあるものを読み込みます。同梱されていないソースビルドでは、初回の推論開始時に公式PyPI wheelから取得してキャッシュするため、ネットワーク接続が必要です。ライブラリを別途指定する場合は、`MEDIAPIPE_LIB`にMediaPipe 0.10.35の対応ライブラリへのパスを設定します。
 
 ## Windowsでのビルド
 
@@ -93,6 +103,15 @@ cargo build --release --locked -p vtuber-desktop -j 1
 ```
 
 ビルドスクリプトは、SDKのインポートライブラリに対応するNDIランタイムDLLを実行ファイルの隣へコピーします。DLLをSDK外に置く場合は、ビルド前に`NDI_RUNTIME_DLL`へそのファイルのパスを指定します。
+
+配布ZIPは、ビルド後に次のコマンドで作成します。`-VcRuntime`には使用したVisual Studioの
+`VC\Redist\MSVC\<バージョン>\x64\Microsoft.VC145.CRT\vcruntime140.dll`を指定します。
+
+```powershell
+.\tools\package-windows.ps1 -Version 0.1.0 -VcRuntime "<Visual Studioの再配布用vcruntime140.dllのパス>"
+```
+
+`release/`にZIPとSHA-256ファイルが生成されます。パッケージにはライセンス文書、設定、利用マニュアルも含まれます。
 
 ### NDI出力なしのビルド
 

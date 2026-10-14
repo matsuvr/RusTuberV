@@ -35,6 +35,10 @@ for face in detector.detect(&image)? {
 
 ## Nothing to install
 
+RusTuberV's local loader change uses a native library beside the executable
+before the upstream download/cache path. `MEDIAPIPE_LIB` still takes priority.
+Windows release ZIPs include the verified official library and its license.
+
 The native library is **not linked** — it is `dlopen`ed on first use, so the crate
 builds on any machine (docs.rs included) without MediaPipe present. On first run
 it fetches `libmediapipe` (~34 MB) from the official PyPI wheel, verifies a

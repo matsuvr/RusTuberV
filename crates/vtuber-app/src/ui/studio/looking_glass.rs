@@ -148,24 +148,6 @@ pub(super) fn page(
                     )
                     .clicked();
             });
-            if output.devices.iter().any(|device| {
-                device.id == selection.device_id && device.format == DisplayFormat::LightField
-            }) {
-                ui.label(lang.pick(
-                    "出力開始で選択したLooking Glassに自動で全画面表示します。OSは拡張表示・実機の解像度に設定してください。F11：全画面切替、F10：Quilt確認、Esc：出力停止。",
-                    "Start output automatically opens fullscreen on the selected Looking Glass. Use extended desktop at its native resolution. F11: toggle fullscreen; F10: quilt preview; Esc: stop.",
-                    "开始输出后将在所选Looking Glass上自动全屏显示。系统设为扩展显示及设备原生分辨率。F11：切换全屏，F10：Quilt预览，Esc：停止。",
-                    "출력을 시작하면 선택한 Looking Glass에 자동으로 전체 화면을 표시합니다. 기기의 기본 해상도로 확장 화면을 사용하세요. F11: 전체 화면 전환, F10: Quilt, Esc: 중지.",
-                ));
-            } else {
-                ui.label(lang.pick("出力ウィンドウを対象ディスプレイへ移動し、F11で全画面表示。OSは拡張表示・実機の解像度に設定してください。Esc：出力停止。", "Move the output window to the display and press F11. Use extended desktop at its native resolution. Esc: stop.", "将输出窗口移到显示器并按F11。系统设为扩展显示及设备原生分辨率。Esc：停止。", "출력 창을 디스플레이로 옮기고 F11을 누르세요. 기기의 기본 해상도로 확장 화면을 사용하세요. Esc: 중지."));
-            }
-            ui.small(lang.pick(
-                "Looking Glass出力は通常描画60fpsの保証対象外です。",
-                "Looking Glass output is outside the normal 60 fps rendering target.",
-                "Looking Glass输出不在通常60fps渲染目标内。",
-                "Looking Glass 출력은 일반 60fps 렌더링 목표에서 제외됩니다.",
-            ));
             if let Some(error) = &output.error {
                 ui.colored_label(Color32::DARK_RED, error);
             }
