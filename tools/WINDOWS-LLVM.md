@@ -1,6 +1,6 @@
 # WindowsのLLVMビルドと切り戻し
 
-WindowsではMSYS2 CLANG64のRust、Clang、LLD、MinGW-w64ヘッダーを使う。
+Windowsの標準ビルドではMSYS2 CLANG64のRust、Clang、LLD、MinGW-w64ヘッダーを使う。
 アプリだけでなくCargoのビルドスクリプトとproc-macroも
 `x86_64-pc-windows-gnullvm`でビルドする。
 Visual Studio Build ToolsとWindows SDKをコンパイル・リンクに使わない。
@@ -62,9 +62,9 @@ cargo +stable-x86_64-pc-windows-msvc build --locked -p vtuber-desktop -j 1
 ```
 
 上のlibclangはこの環境で確認した既存の配置先。他の環境では既存LLVMの場所を指定する。
-今回の変更前は`main`の`11d9c57`。切り替えの変更は
-`codex/windows-llvm-build`ブランチに隔離する。
-未コミットの変更がない状態で`git switch main`を実行すると元のソースへ戻せる。
+LLVM移行前のソースはコミット`11d9c57`に残っている。
+ソース全体を移行前へ戻して確認する場合は、未コミットの変更を保存してから
+`git switch --detach 11d9c57`を実行する。確認後は`git switch main`でLLVM標準のソースへ戻る。
 MSYS2に追加したパッケージはMSVCのビルドに影響しないため、切り戻し時の削除は不要。
 今回のセットアップで行ったMSYS2本体の更新も、そのまま残してよい。
 
@@ -87,7 +87,11 @@ MSYS2 Rust 1.99.0 Rev2、Clang / LLD 23.1.3、NDI SDK 6.3.2.0を使用。
 NDIの既存スモークでは`stop_source_absent=false`、`transparent_rgb_zero=false`も
 出力された。MSVC版でも同じ値であり、これらを達成済みとは扱わない。
 カメラ追従、VRM表示の目視、OBS受信、Looking Glass、CPU 3コアでの60fps/30Hz、
-macOSの動作は今回未確認。
+macOSの動作は上記の自動・ローカル検証では未確認。
+
+その後、ユーザーから実動作で問題なさそうとの報告があり、LLVMを標準とすることと
+`main`へのマージが承認された。個別の確認項目や性能測定値の報告はないため、
+上記の未確認項目をすべて合格したという意味ではない。
 
 検証用ZIPは`release/RusTuberV-0.1.1-llvm-validation-windows-x64.zip`。
 SHA-256は`93567e7dc7251758b0fe64967e554124b43ff376578c347cdbc70fc2551aab45`。

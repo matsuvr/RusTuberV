@@ -6,3 +6,4 @@
 - プロダクションコードはpanic禁止。失敗は `Result`・`Option` 等で伝え、`unwrap`・`expect`・パニックする添字アクセス等で代用しない。
 - 要件を満たす最も単純な実装を選ぶ。不要な経路は削除し、依頼のないガード・フォールバック・汎用化・検証基盤を追加しない。
 - サブエージェントの利用禁止。
+- Windowsの標準ビルドはMSYS2 CLANG64（LLVM）とし、build・check・test・runは `tools/cargo-windows.ps1` 経由で実行する。配布ZIPは `tools/package-windows.ps1` を使う。MSVCは明示的な切り戻し時のみ使用し、手順は `tools/WINDOWS-LLVM.md` に従う。
