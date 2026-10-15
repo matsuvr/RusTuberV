@@ -6,14 +6,16 @@ SDKを変更しない。公開時にはコミット済みのソースを使い�
 
 ## Windows x64
 
-Visual Studioの再配布用CRTにある vcruntime140.dll を指定する。
+[MSYS2 CLANG64環境](WINDOWS-LLVM.md)を準備する。
 
 ```powershell
-.\tools\package-windows.ps1 -Version 0.1.1 -VcRuntime "<Visual Studioの再配布用vcruntime140.dllのパス>"
+.\tools\package-windows.ps1 -Version 0.1.1
 ```
 
-この処理は指定NDI SDKで x86_64-pc-windows-msvc 向けの既定機能をビルドし、
-その実行ファイルを梱包する。以前の target/release の実行ファイルは使わない。
+この処理は指定NDI SDKとMSYS2 CLANG64で x86_64-pc-windows-gnullvm 向けの既定機能をビルドし、
+`target/llvm/x86_64-pc-windows-gnullvm/release`の実行ファイルを梱包する。
+LLVMの`libunwind.dll`とそのライセンス、MinGW-w64 CRTの通知も同梱する。
+MSYS2が標準パス以外にある場合は`-MsysRoot`を指定する。
 BUILD-INFO.txtにはビルド時のコミット、未コミット変更の有無、rustc、
 ビルド完了時刻と同梱実行ファイルのSHA-256を記録する。
 同名の出力フォルダーがある場合は停止するため、既存配布物を上書きしない。

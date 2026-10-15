@@ -33,7 +33,7 @@ Windows에서는 ZIP 전체를 압축 해제한 뒤 `RusTuberV.exe`를 더블 �
 | 항목 | 요구 사항 |
 | --- | --- |
 | Rust | 1.99 이상. `rust-toolchain.toml`은 stable 지정 |
-| Windows | x86_64 MSVC 타깃, Visual Studio Build Tools의 C++ 빌드 도구와 Windows SDK |
+| Windows | MSYS2 CLANG64 Rust / Clang / LLD, x86_64-pc-windows-gnullvm 타깃 |
 | macOS | Apple Silicon과 Xcode Command Line Tools |
 | NDI 출력을 포함하는 빌드 | NDI Standard SDK와 Clang / libclang |
 | 렌더링 | Bevy 렌더링 백엔드를 지원하는 GPU와 드라이버 |
@@ -84,17 +84,20 @@ curl -fL -o assets/models/hand_landmarker.task https://storage.googleapis.com/me
 
 ## Windows 빌드
 
+[LLVM 설치 및 MSVC 복귀 안내](tools/WINDOWS-LLVM.md)에 따라 도구를 설치합니다.
+Windows에서는 `tools/cargo-windows.ps1`을 통해 MSYS2 Rust를 사용하며 Visual Studio Build Tools는 필요 없습니다.
+일반 `cargo` 명령은 기존 rustup 환경을 유지합니다.
+
 ### NDI 출력을 포함하는 기본 빌드
 
 [NDI SDK 공식 다운로드 페이지](https://ndi.video/for-developers/ndi-sdk/)에서 Windows용 Standard SDK를 설치합니다. NDI 바인딩 생성에는 Clang / libclang을 사용합니다.
 
-다음 예시는 SDK와 LLVM의 기본 설치 경로를 사용합니다. 다른 위치에 설치했다면 경로를 바꾸세요.
+다음 예시는 NDI SDK의 기본 설치 경로와 `C:\msys64`의 MSYS2를 사용합니다.
 
 ```powershell
 $env:NDI_SDK_DIR = "C:\Program Files\NDI\NDI 6 SDK"
-$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
-cargo build --release --locked -p vtuber-desktop -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop -j 1
 ```
 
 빌드 스크립트는 SDK의 임포트 라이브러리와 일치하는 NDI 런타임 DLL을 실행 파일 옆에 복사합니다. DLL이 SDK 밖에 있다면 빌드 전에 `NDI_RUNTIME_DLL`에 파일 경로를 지정합니다.
@@ -102,8 +105,8 @@ cargo build --release --locked -p vtuber-desktop -j 1
 ### NDI 출력 없는 빌드
 
 ```powershell
-cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop --no-default-features -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop --no-default-features -j 1
 ```
 
 이 구성에서는 NDI SDK와 NDI 바인딩용 libclang이 필요 없습니다. 추론 모델과 MediaPipe 네이티브 라이브러리는 필요합니다.
