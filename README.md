@@ -34,7 +34,7 @@ WindowsではZIPを「すべて展開」し、`RusTuberV.exe`をダブルクリ�
 | 項目 | 要件 |
 | --- | --- |
 | Rust | 1.99以上。`rust-toolchain.toml`はstableを指定 |
-| Windows | x86_64 MSVCターゲット、Visual Studio Build ToolsのC++ビルドツールとWindows SDK |
+| Windows | MSYS2 CLANG64のRust / Clang / LLD、x86_64-pc-windows-gnullvmターゲット |
 | macOS | Apple Silicon、Xcode Command Line Tools |
 | NDI出力を含むビルド | NDI Standard SDKとClang / libclang |
 | 描画 | Bevyの描画バックエンドに対応するGPUとドライバー |
@@ -85,26 +85,29 @@ MediaPipeのネイティブライブラリは、実行ファイルの隣にあ�
 
 ## Windowsでのビルド
 
+[LLVMビルド環境の準備とMSVCへの切り戻し](tools/WINDOWS-LLVM.md)を参照してください。
+Windowsでは`tools/cargo-windows.ps1`を通してMSYS2のRustを使用します。
+Visual Studio Build Toolsは不要です。通常の`cargo`は従来のrustup環境を使用します。
+
 ### NDI出力を含む通常のビルド
 
 [NDI SDKの公式配布ページ](https://ndi.video/for-developers/ndi-sdk/)からWindows用のStandard SDKをインストールします。NDIバインディングの生成にClang / libclangを使用します。
 
-SDKとLLVMを標準の場所にインストールした場合の例です。異なる場所に置いた場合は、各パスを変更してください。
+NDI SDKを標準の場所、MSYS2を`C:\msys64`にインストールした場合の例です。
 
 ```powershell
 $env:NDI_SDK_DIR = "C:\Program Files\NDI\NDI 6 SDK"
-$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
-cargo build --release --locked -p vtuber-desktop -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop -j 1
 ```
 
 ビルドスクリプトは、SDKのインポートライブラリに対応するNDIランタイムDLLを実行ファイルの隣へコピーします。DLLをSDK外に置く場合は、ビルド前に`NDI_RUNTIME_DLL`へそのファイルのパスを指定します。
 
-配布ZIPは、次のコマンドでビルドから梱包まで続けて作成します。`-VcRuntime`には使用したVisual Studioの
-`VC\Redist\MSVC\<バージョン>\x64\Microsoft.VC145.CRT\vcruntime140.dll`を指定します。
+配布ZIPは、次のコマンドでLLVMビルドから梱包まで続けて作成します。
+LLVMの`libunwind.dll`とライセンスも同梱します。
 
 ```powershell
-.\tools\package-windows.ps1 -Version 0.1.1 -VcRuntime "<Visual Studioの再配布用vcruntime140.dllのパス>"
+.\tools\package-windows.ps1 -Version 0.1.1
 ```
 
 `release/`にZIPとSHA-256ファイルが生成されます。パッケージにはライセンス文書、設定、利用マニュアルも含まれます。
@@ -112,8 +115,8 @@ cargo build --release --locked -p vtuber-desktop -j 1
 ### NDI出力なしのビルド
 
 ```powershell
-cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop --no-default-features -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop --no-default-features -j 1
 ```
 
 この構成ではNDI SDKとNDIバインディング用のlibclangは不要です。推論モデルの準備とMediaPipeネイティブライブラリは必要です。

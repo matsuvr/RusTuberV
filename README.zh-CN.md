@@ -33,7 +33,7 @@ Windows 用户请完整解压 ZIP 后双击 `RusTuberV.exe`，并将所有附带
 | 项目 | 要求 |
 | --- | --- |
 | Rust | 1.99 或更高版本；`rust-toolchain.toml` 指定 stable |
-| Windows | x86_64 MSVC 目标、Visual Studio Build Tools 的 C++ 构建工具及 Windows SDK |
+| Windows | MSYS2 CLANG64 Rust / Clang / LLD、x86_64-pc-windows-gnullvm 目标 |
 | macOS | Apple Silicon 和 Xcode Command Line Tools |
 | 包含 NDI 输出的构建 | NDI Standard SDK 和 Clang / libclang |
 | 渲染 | 支持 Bevy 渲染后端的 GPU 和驱动程序 |
@@ -84,17 +84,20 @@ curl -fL -o assets/models/hand_landmarker.task https://storage.googleapis.com/me
 
 ## 在 Windows 上构建
 
+请按 [LLVM 环境配置及 MSVC 回退指南](tools/WINDOWS-LLVM.md)安装工具。
+Windows 构建通过 `tools/cargo-windows.ps1` 使用 MSYS2 Rust，无需 Visual Studio Build Tools。
+直接运行 `cargo` 仍使用原有的 rustup 环境。
+
 ### 包含 NDI 输出的默认构建
 
 从 [NDI SDK 官方下载页面](https://ndi.video/for-developers/ndi-sdk/)安装 Windows Standard SDK。生成 NDI 绑定需要 Clang / libclang。
 
-以下示例使用 SDK 和 LLVM 的标准安装路径。若安装在其他位置，请修改路径。
+以下示例使用 NDI SDK 的标准安装路径，MSYS2 位于 `C:\msys64`。
 
 ```powershell
 $env:NDI_SDK_DIR = "C:\Program Files\NDI\NDI 6 SDK"
-$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
-cargo build --release --locked -p vtuber-desktop -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop -j 1
 ```
 
 构建脚本会将与 SDK 导入库匹配的 NDI 运行时 DLL 复制到可执行文件旁。若 DLL 位于 SDK 目录之外，请在构建前将 `NDI_RUNTIME_DLL` 设置为该文件的路径。
@@ -102,8 +105,8 @@ cargo build --release --locked -p vtuber-desktop -j 1
 ### 不包含 NDI 输出的构建
 
 ```powershell
-cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop --no-default-features -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop --no-default-features -j 1
 ```
 
 此配置无需 NDI SDK 或用于生成 NDI 绑定的 libclang。仍须准备推理模型及 MediaPipe 原生库。

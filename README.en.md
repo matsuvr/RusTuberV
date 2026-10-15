@@ -33,7 +33,7 @@ The illustrated guide covers loading an avatar, selecting a camera, adjusting fr
 | Component | Requirement |
 | --- | --- |
 | Rust | 1.99 or later; `rust-toolchain.toml` selects stable |
-| Windows | x86_64 MSVC target, Visual Studio Build Tools with C++ tools and the Windows SDK |
+| Windows | MSYS2 CLANG64 Rust / Clang / LLD, x86_64-pc-windows-gnullvm target |
 | macOS | Apple Silicon and Xcode Command Line Tools |
 | Builds with NDI output | NDI Standard SDK and Clang / libclang |
 | Rendering | GPU and drivers compatible with Bevy's rendering backend |
@@ -84,17 +84,20 @@ For source builds without a bundled native library, the MediaPipe native library
 
 ## Build on Windows
 
+Install the packages listed in the [LLVM setup and MSVC rollback guide](tools/WINDOWS-LLVM.md).
+Use `tools/cargo-windows.ps1` for Windows builds. It uses MSYS2 Rust without
+Visual Studio Build Tools; plain `cargo` retains the existing rustup environment.
+
 ### Default build with NDI output
 
 Install the Windows Standard SDK from the [official NDI SDK download page](https://ndi.video/for-developers/ndi-sdk/). NDI binding generation uses Clang / libclang.
 
-This example assumes the standard SDK and LLVM installation paths. Adjust them if you installed either elsewhere.
+This example assumes the standard NDI SDK location and MSYS2 at `C:\msys64`.
 
 ```powershell
 $env:NDI_SDK_DIR = "C:\Program Files\NDI\NDI 6 SDK"
-$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
-cargo build --release --locked -p vtuber-desktop -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop -j 1
 ```
 
 The build script copies the NDI runtime DLL matching the SDK import library beside the executable. If the DLL is stored outside the SDK, set `NDI_RUNTIME_DLL` to its path before building.
@@ -102,8 +105,8 @@ The build script copies the NDI runtime DLL matching the SDK import library besi
 ### Build without NDI output
 
 ```powershell
-cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
-.\target\release\RusTuberV.exe
+.\tools\cargo-windows.ps1 build --release --locked --package vtuber-desktop --no-default-features -j 1
+.\tools\cargo-windows.ps1 run --release --locked --package vtuber-desktop --no-default-features -j 1
 ```
 
 This configuration does not require the NDI SDK or libclang for NDI bindings. The inference models and MediaPipe native library are still required.

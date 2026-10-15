@@ -84,13 +84,13 @@ audio codecs, SDK headers, import libraries, or build artifacts. The runtime
 is loaded application-locally; the package process does not install anything
 into a system directory or edit PATH.
 
-## Microsoft Visual C++ runtime (Windows release ZIP)
+## LLVM libunwind and MinGW-w64 CRT (Windows release ZIP)
 
-Windows release ZIPs include the unmodified `vcruntime140.dll` from the release
-CRT directory of the Visual Studio installation used for the build. This is a
-separate proprietary component; see `licenses/Visual-C-Runtime-LICENSE.txt`
-and `RUNTIME-TERMS.txt` in the ZIP. It is not covered by the application's MIT
-license and is loaded from the application folder without a system install.
+CLANG64 Windows release ZIPs include MSYS2's unmodified `libunwind.dll` and
+its license at `licenses/LLVM-libunwind-LICENSE.txt`. The executable also links
+MinGW-w64 CRT code; its notices are included under `licenses/MinGW-w64-CRT/`.
+These components retain their own licenses. Windows system libraries are
+provided by the operating system and are not bundled.
 
 ## grafton-ndi
 

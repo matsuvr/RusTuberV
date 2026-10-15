@@ -1,7 +1,4 @@
 #![allow(missing_docs)]
-// Build scripts report configuration errors by panicking; Cargo turns the
-// panic into a build failure message. This is not production runtime code.
-#![allow(clippy::panic)]
 
 use std::env;
 use std::fs;
@@ -16,8 +13,8 @@ use std::path::{Path, PathBuf};
 mod runtime_identity;
 use runtime_identity::runtime_name_in_binary;
 
-fn main() {
-    embed_app_icon();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    embed_app_icon()?;
 
     println!("cargo:rerun-if-changed=../../crates/vtuber-ndi/src/runtime_identity.rs");
     println!("cargo:rerun-if-env-changed=NDI_SDK_DIR");
@@ -40,41 +37,44 @@ fn main() {
     if env::var_os("CARGO_FEATURE_NDI_OUTPUT").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
     {
-        return;
+        return Ok(());
     }
 
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
-        panic!("ndi-output requires the supported Windows x86_64 target");
+        return Err("ndi-output requires the supported Windows x86_64 target".into());
     }
 
-    if let Err(error) = stage_runtime_dll() {
-        panic!("cannot prepare the NDI-enabled desktop artifact: {error}");
-    }
+    stage_runtime_dll()?;
+    Ok(())
 }
 
-fn embed_app_icon() {
-    let manifest_dir =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
+fn embed_app_icon() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let icon_path = manifest_dir.join("../../assets/icons/rustuberv-app.ico");
     println!("cargo:rerun-if-changed={}", icon_path.display());
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
+        return Ok(());
     }
 
     if !icon_path.is_file() {
-        panic!("app icon not found: {}", icon_path.display());
+        return Err(format!("app icon not found: {}", icon_path.display()).into());
     }
 
-    let icon_str = icon_path.to_str().unwrap_or_else(|| {
-        panic!("app icon path is not valid UTF-8: {}", icon_path.display());
-    });
+    let icon_str = icon_path
+        .to_str()
+        .ok_or_else(|| format!("app icon path is not valid UTF-8: {}", icon_path.display()))?;
 
     let mut resource = winres::WindowsResource::new();
     resource.set_icon(icon_str);
-    if let Err(error) = resource.compile() {
-        panic!("failed to embed app icon {}: {error}", icon_path.display());
+    resource.compile()?;
+    if env::var("CARGO_CFG_TARGET_ABI").as_deref() == Ok("llvm") {
+        // LLD does not extract the symbol-free resource object from winres's
+        // archive. Link it directly so the icon and version data survive.
+        let object = PathBuf::from(env::var("OUT_DIR")?).join("resource.o");
+        println!("cargo:rustc-link-arg={}", object.display());
     }
+    Ok(())
 }
 
 fn stage_runtime_dll() -> Result<(), String> {

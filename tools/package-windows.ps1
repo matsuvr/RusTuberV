@@ -2,7 +2,7 @@
 param(
     [string]$Version = '0.1.1',
     [string]$NdiSdk = 'C:\Program Files\NDI\NDI 6 SDK',
-    [Parameter(Mandatory = $true)][string]$VcRuntime
+    [string]$MsysRoot = 'C:\msys64'
 )
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
@@ -17,14 +17,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Cannot read source commit' }
 $sourceStatus = git status --porcelain --untracked-files=normal
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read source status' }
 $sourceDirty = [bool]$sourceStatus
-$compiler = rustc -V
+$compiler = & (Join-Path $MsysRoot 'clang64/bin/rustc.exe') -V
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read compiler version' }
 $env:NDI_SDK_DIR = $NdiSdk
 $env:NDI_RUNTIME_DLL = Join-Path $NdiSdk 'Bin/x64/Processing.NDI.Lib.x64.dll'
-cargo build --release --locked -p vtuber-desktop -j 1 --target x86_64-pc-windows-msvc --target-dir "$root/target"
-if ($LASTEXITCODE -ne 0) { throw 'Desktop release build failed; package was not created' }
+& "$PSScriptRoot/cargo-windows.ps1" -MsysRoot $MsysRoot -CargoArguments @('build', '--release', '--locked', '-p', 'vtuber-desktop', '-j', '1')
 $builtAt = [DateTime]::UtcNow.ToString('o')
-$executable = Join-Path $root 'target/x86_64-pc-windows-msvc/release/RusTuberV.exe'
+$executable = Join-Path $root 'target/llvm/x86_64-pc-windows-gnullvm/release/RusTuberV.exe'
 New-Item -ItemType Directory -Path "$package/assets/models", "$package/licenses", $inputs -Force | Out-Null
 
 Copy-Item -LiteralPath $executable, 'tracking_profile.toml', 'LICENSE', 'THIRD_PARTY_NOTICES.md' -Destination $package
@@ -33,7 +32,9 @@ Copy-Item -LiteralPath 'assets/fonts/LICENSE-LINESeed.txt', 'assets/fonts/LICENS
 Copy-Item -LiteralPath 'manual' -Destination $package -Recurse
 Copy-Item -LiteralPath "$NdiSdk/Bin/x64/Processing.NDI.Lib.x64.dll", "$NdiSdk/Bin/x64/Processing.NDI.Lib.Licenses.txt" -Destination $package
 Copy-Item -LiteralPath "$NdiSdk/NDI SDK License Agreement.pdf" -Destination "$package/NDI_SDK_LICENSE_AGREEMENT.pdf"
-Copy-Item -LiteralPath $VcRuntime -Destination "$package/vcruntime140.dll"
+Copy-Item -LiteralPath "$MsysRoot/clang64/bin/libunwind.dll" -Destination $package
+Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/libunwind/LICENSE" -Destination "$package/licenses/LLVM-libunwind-LICENSE.txt"
+Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/crt" -Destination "$package/licenses/MinGW-w64-CRT" -Recurse
 Copy-Item -LiteralPath 'tools/windows-runtime-terms.txt' -Destination "$package/RUNTIME-TERMS.txt"
 
 # Pin the official wheel rather than repackaging an unverified local cache.
@@ -47,18 +48,6 @@ $archive = [System.IO.Compression.ZipFile]::OpenRead($wheel)
 try {
     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($archive.GetEntry('mediapipe/tasks/c/libmediapipe.dll'), "$package/libmediapipe.dll")
     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($archive.GetEntry('mediapipe-0.10.35.dist-info/licenses/LICENSE'), "$package/licenses/MediaPipe-LICENSE.txt")
-} finally { $archive.Dispose() }
-
-$vcLicense = Join-Path $inputs 'Visual-C-V14-License-Redistributable_and_Runtime_ENU.docx'
-Invoke-WebRequest -Uri 'https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual-C-V14-License-Redistributable_and_Runtime_ENU.docx' -OutFile $vcLicense
-$archive = [System.IO.Compression.ZipFile]::OpenRead($vcLicense)
-try {
-    $reader = [System.IO.StreamReader]::new($archive.GetEntry('word/document.xml').Open())
-    try { [xml]$document = $reader.ReadToEnd() } finally { $reader.Dispose() }
-    $namespaces = [System.Xml.XmlNamespaceManager]::new($document.NameTable)
-    $namespaces.AddNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-    $text = $document.SelectNodes('//w:p', $namespaces) | ForEach-Object { $_.InnerText }
-    $text | Set-Content -LiteralPath "$package/licenses/Visual-C-Runtime-LICENSE.txt" -Encoding UTF8
 } finally { $archive.Dispose() }
 
 @'
@@ -95,7 +84,7 @@ source_commit=$sourceCommit
 source_dirty=$sourceDirty
 built_at_utc=$builtAt
 executable_sha256=$executableHash
-target=x86_64-pc-windows-msvc
+target=x86_64-pc-windows-gnullvm
 features=ndi-output
 compiler=$compiler
 ndi_version=$ndiVersion
