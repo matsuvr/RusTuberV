@@ -12,7 +12,7 @@ Windowsは`win-RusTuberV-<version>-x64.zip`、Macは`mac-RusTuberV-<version>-arm
 [MSYS2 CLANG64環境](WINDOWS-LLVM.md)を準備する。
 
 ```powershell
-.\tools\package-windows.ps1 -Version 0.1.1
+.\tools\package-windows.ps1 -Version 0.1.2
 ```
 
 この処理は指定NDI SDKとMSYS2 CLANG64で x86_64-pc-windows-gnullvm 向けの既定機能をビルドし、
@@ -48,7 +48,7 @@ export NDI_SDK_LICENSE="/path/to/NDI SDK License Agreement.pdf"
 export NDI_RUNTIME_NOTICES="/path/to/libndi_licenses.txt"
 test -f "$NDI_SDK_LICENSE"
 test -f "$NDI_RUNTIME_NOTICES"
-version=0.1.1
+version=0.1.2
 package="$PWD/release/mac-RusTuberV-$version-arm64"
 test ! -e "$package"
 test ! -e "$package.zip"

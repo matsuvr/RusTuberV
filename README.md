@@ -107,10 +107,10 @@ $env:NDI_SDK_DIR = "C:\Program Files\NDI\NDI 6 SDK"
 LLVMの`libunwind.dll`とライセンスも同梱します。
 
 ```powershell
-.\tools\package-windows.ps1 -Version 0.1.1
+.\tools\package-windows.ps1 -Version 0.1.2
 ```
 
-`release/`に`win-RusTuberV-0.1.1-x64.zip`と同名の`.zip.sha256`ファイルが生成されます。パッケージにはライセンス文書、設定、利用マニュアルも含まれます。Macの配布ZIPは`mac-RusTuberV-<バージョン>-arm64.zip`形式です。
+`release/`に`win-RusTuberV-0.1.2-x64.zip`と同名の`.zip.sha256`ファイルが生成されます。パッケージにはライセンス文書、設定、利用マニュアルも含まれます。Macの配布ZIPは`mac-RusTuberV-<バージョン>-arm64.zip`形式です。
 
 ### NDI出力なしのビルド
 
