@@ -146,7 +146,7 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
                     ..default()
                 })
                 .disable::<PipelinedRenderingPlugin>()
-                .disable::<bevy::log::LogPlugin>()
+                // Keep shader/pipeline diagnostics visible when a render fails.
                 .disable::<bevy::winit::WinitPlugin>(),
         )
         .add_plugins(VtuberAvatarPlugin)

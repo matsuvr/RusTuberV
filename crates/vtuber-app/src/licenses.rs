@@ -18,6 +18,34 @@ pub use generated::{LicenseGroup, LicenseText, LicensedItem};
 /// Items this repository ships itself, which `Cargo.lock` does not describe.
 static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
     LicenseGroup {
+        expression: "MIT OR Apache-2.0",
+        items: &[LicensedItem {
+            name: "bevy_vrm1",
+            version: "0.10.0 (96678a0 + outline extraction fix)",
+        }],
+        texts: &[
+            LicenseText {
+                file_name: "vendor/bevy_vrm1/LICENSE-MIT",
+                body: include_str!("../../../vendor/bevy_vrm1/LICENSE-MIT"),
+            },
+            LicenseText {
+                file_name: "vendor/bevy_vrm1/LICENSE-APACHE2",
+                body: include_str!("../../../vendor/bevy_vrm1/LICENSE-APACHE2"),
+            },
+        ],
+    },
+    LicenseGroup {
+        expression: "MIT",
+        items: &[LicensedItem {
+            name: "NiloToon public shader example (adapted lighting)",
+            version: "fbe276e",
+        }],
+        texts: &[LicenseText {
+            file_name: "crates/vtuber-avatar/src/look/LICENSE-NiloToon.txt",
+            body: include_str!("../../vtuber-avatar/src/look/LICENSE-NiloToon.txt"),
+        }],
+    },
+    LicenseGroup {
         expression: "Apache-2.0",
         items: &[LicensedItem {
             name: "MyoArm anatomical parameters (adapted)",
@@ -211,7 +239,6 @@ mod tests {
             .flat_map(|group| group.items.iter().map(|item| item.name))
             .collect();
         assert!(names.contains(&"bevy"));
-        assert!(names.contains(&"bevy_vrm1"));
         assert!(
             !names.contains(&"vtuber-app"),
             "this repository is not third-party"
@@ -225,6 +252,7 @@ mod tests {
             .flat_map(|group| group.items.iter().map(|item| item.name))
             .collect();
         assert!(names.contains(&"RusTuberV"));
+        assert!(names.contains(&"bevy_vrm1"));
         assert!(names.contains(&"LINESeedJP_A_OTF_Rg.otf"));
         assert!(names.contains(&"LINESeedKR-Rg.otf"));
         assert!(names.contains(&"NotoSansCJKsc-VF.otf"));

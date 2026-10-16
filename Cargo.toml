@@ -12,7 +12,7 @@ members = [
   "tools/xtask",
   "tools/looking-glass-device",
 ]
-exclude = ["vendor/mediapipe-rs", "vendor/nokhwa", "vendor/nokhwa-bindings-windows", "vendor/bevy_window"]
+exclude = ["vendor/mediapipe-rs", "vendor/nokhwa", "vendor/nokhwa-bindings-windows", "vendor/bevy_window", "vendor/bevy_vrm1"]
 resolver = "2"
 
 [workspace.package]
@@ -45,10 +45,10 @@ nokhwa = { path = "vendor/nokhwa" }
 nokhwa-bindings-windows = { path = "vendor/nokhwa-bindings-windows" }
 bevy_window = { path = "vendor/bevy_window" }
 
-# Bevy 0.20/WESL runtime port of upstream v0.10.0. The transparency fix and
-# effective expression weights are now upstream; only the engine port is local.
+# Bevy 0.20/WESL port plus the outline extraction fix required when switching
+# to an ExtendedMaterial with additional bindings. See vendor/bevy_vrm1/NOTICE.
 [patch."https://github.com/not-elm/bevy_vrm1"]
-bevy_vrm1 = { git = "https://github.com/matsuvr/bevy_vrm1", rev = "96678a0c761c2839ccbf6a0d9a92421339fdbafc" }
+bevy_vrm1 = { path = "vendor/bevy_vrm1" }
 
 # Keep dev and test artifacts small. The test profile inherits dev settings.
 # This removes debugger symbols and incremental build caches;

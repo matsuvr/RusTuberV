@@ -1,7 +1,7 @@
 //! Additional Look lights: the fixed camera-relative key and rim spots.
 //!
 //! The Native standard light (`StandardAvatarLight`) is never touched here:
-//! the look only adds output on top of it. OFF or 0% strength despawns both
+//! Rich MToon uses it alongside bounded cel spot lighting. OFF or 0% despawns both
 //! spots, so the rendered result returns to the Native baseline. The rig is
 //! anchored to the model's upper-body center/size and only its direction turns
 //! with the camera, so head rotation never changes the lighting. Upstream

@@ -1,0 +1,13 @@
+Source: https://github.com/matsuvr/bevy_vrm1
+Revision: 96678a0c761c2839ccbf6a0d9a92421339fdbafc
+Upstream: https://github.com/not-elm/bevy_vrm1 (v0.10.0)
+License: MIT OR Apache-2.0 (LICENSE-MIT and LICENSE-APACHE2)
+
+This source-only copy carries one application-required correction:
+src/vrm/mtoon/outline_pass.rs clears MToonMaterialInstances on extraction.
+Otherwise removed native material components remain queued for native outlines
+after a switch to RichMtoonMaterial, whose extra uniform binding is incompatible
+with the native pipeline. Asset ownership and shader behavior are unchanged.
+One trailing-space-only doc comment cleanup is in mtoon/material/outline.rs.
+
+Examples, documentation, test assets, and repository metadata are not vendored.
