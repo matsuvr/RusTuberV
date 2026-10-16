@@ -982,6 +982,103 @@ fn camera_refresh_preserves_selected_identity_across_reordering() {
 }
 
 #[test]
+fn successful_refresh_retries_failed_camera_after_stop() {
+    let camera = CameraDescriptor {
+        id: "test:0".into(),
+        label: "Test camera".into(),
+    };
+    let mut orch = Orchestrator {
+        imported_model: Some(stub_imported_model()),
+        lifecycle_state: AvatarLifecycleState::Ready,
+        cameras: vec![camera.clone()],
+        selected_camera: Some(0),
+        pipeline_state: PipelineState::Failed,
+        capture_desired: true,
+        last_error: Some(OrchestratorError::CameraFailed("open failed".into())),
+        ..Default::default()
+    };
+    orch.process_action(&UiAction::RefreshCameras);
+    orch.set_camera_list(vec![camera]);
+    assert_eq!(orch.pipeline_state(), PipelineState::Stopping);
+    assert!(!orch.capture_desired());
+    assert!(!orch.capture_ack());
+    assert!(orch.last_error().is_none());
+    orch.complete_capture_stop();
+    orch.maybe_auto_start_tracking();
+    assert_eq!(orch.pipeline_state(), PipelineState::Starting);
+    assert!(orch.capture_desired());
+    assert!(!orch.capture_ack());
+}
+
+#[test]
+fn capture_bridge_keeps_failure_detail_and_allows_dismissal() {
+    use crate::capture_runtime::{CameraBackendKind, CaptureRuntime, capture_bridge_system};
+    use vtuber_camera::{CameraRequest, CaptureServiceState};
+    let backend = vtuber_camera::mock::MockBackend {
+        formats: vec![],
+        ..Default::default()
+    };
+    let camera = backend.descriptors[0].clone();
+    let mut capture = CaptureRuntime::with_backend(CameraBackendKind::Mock);
+    capture.controller_mut().start_worker(backend).unwrap();
+    capture
+        .controller_mut()
+        .select_and_start(camera.clone(), CameraRequest::default())
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while capture.state() != CaptureServiceState::BackOff {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let orch = Orchestrator {
+        cameras: vec![camera],
+        selected_camera: Some(0),
+        pipeline_state: PipelineState::Starting,
+        capture_desired: true,
+        capture_ack: true,
+        ..Default::default()
+    };
+    let mut app = App::new();
+    app.insert_resource(capture)
+        .insert_resource(orch)
+        .add_systems(Update, capture_bridge_system);
+    app.update();
+    let orch = app.world().resource::<Orchestrator>();
+    assert_eq!(orch.pipeline_state(), PipelineState::Failed);
+    assert!(
+        matches!(orch.last_error(), Some(OrchestratorError::CameraFailed(detail)) if detail.contains("NoSuitableFormat"))
+    );
+    app.world_mut()
+        .resource_mut::<Orchestrator>()
+        .process_action(&UiAction::DismissError);
+    app.update();
+    assert!(
+        app.world()
+            .resource::<Orchestrator>()
+            .last_error()
+            .is_none()
+    );
+    app.world_mut()
+        .resource_mut::<CaptureRuntime>()
+        .shutdown()
+        .unwrap();
+}
+
+#[test]
+fn successful_refresh_clears_enumeration_error_without_restarting_running_camera() {
+    let mut orch = Orchestrator {
+        pipeline_state: PipelineState::Running,
+        capture_desired: true,
+        last_error: Some(OrchestratorError::CameraFailed("enumeration failed".into())),
+        ..Default::default()
+    };
+    orch.set_camera_list(vec![]);
+    assert_eq!(orch.pipeline_state(), PipelineState::Running);
+    assert!(orch.capture_desired());
+    assert!(orch.last_error().is_none());
+}
+
+#[test]
 fn orchestrator_unload_avatar() {
     let mut orch = Orchestrator {
         imported_model: Some(ImportedModel {

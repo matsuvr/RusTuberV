@@ -510,10 +510,17 @@ pub(crate) fn capture_bridge_system(
         && capture.state() == CaptureServiceState::Running
     {
         orchestrator.set_pipeline_state(PipelineState::Running);
-    } else if orchestrator.capture_desired() && capture.state() == CaptureServiceState::BackOff {
+    } else if orchestrator.capture_desired()
+        && orchestrator.pipeline_state() != PipelineState::Failed
+        && capture.state() == CaptureServiceState::BackOff
+    {
         orchestrator.set_pipeline_state(PipelineState::Failed);
         orchestrator.set_last_error(Some(crate::orchestrator::OrchestratorError::CameraFailed(
-            "camera entered back-off".to_string(),
+            capture
+                .controller()
+                .metrics()
+                .last_error
+                .unwrap_or_else(|| "camera entered back-off".to_string()),
         )));
     }
 

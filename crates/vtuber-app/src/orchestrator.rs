@@ -337,6 +337,14 @@ impl Orchestrator {
         self.selected_camera = selected_id
             .as_ref()
             .and_then(|id| self.cameras.iter().position(|camera| camera.id == *id));
+        if matches!(self.last_error, Some(OrchestratorError::CameraFailed(_))) {
+            self.last_error = None;
+            if self.pipeline_state == PipelineState::Failed {
+                // Refresh is offered as camera recovery. Finish the previous
+                // session before auto-starting the same stable device again.
+                self.stop_pipeline();
+            }
+        }
     }
 
     /// Select a camera, stopping the previous session before automatic startup.

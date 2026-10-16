@@ -12,7 +12,7 @@ members = [
   "tools/xtask",
   "tools/looking-glass-device",
 ]
-exclude = ["vendor/mediapipe-rs", "vendor/nokhwa", "vendor/bevy_window"]
+exclude = ["vendor/mediapipe-rs", "vendor/nokhwa", "vendor/nokhwa-bindings-windows", "vendor/bevy_window"]
 resolver = "2"
 
 [workspace.package]
@@ -42,6 +42,7 @@ mediapipe = { path = "vendor/mediapipe-rs" }
 # Local fixes for camera and window lifetime across sleep transitions.
 [patch.crates-io]
 nokhwa = { path = "vendor/nokhwa" }
+nokhwa-bindings-windows = { path = "vendor/nokhwa-bindings-windows" }
 bevy_window = { path = "vendor/bevy_window" }
 
 # Bevy 0.20/WESL runtime port of upstream v0.10.0. The transparency fix and

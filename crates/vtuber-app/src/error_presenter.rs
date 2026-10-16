@@ -120,13 +120,16 @@ pub fn present_error(
             ),
             suggested_actions: vec![UiAction::DismissError],
         },
-        OrchestratorError::CameraFailed(_) => ErrorPresentation {
+        OrchestratorError::CameraFailed(detail) => ErrorPresentation {
             code: "CAMERA_FAILED",
-            user_message: message(
-                "カメラを開始できなかったか、切断されました。",
-                "The camera could not be started or was disconnected.",
-                "无法启动摄像头，或摄像头已断开连接。",
-                "카메라를 시작하지 못했거나 연결이 끊겼습니다.",
+            user_message: format!(
+                "{}\n{detail}",
+                message(
+                    "カメラを開始できなかったか、切断されました。",
+                    "The camera could not be started or was disconnected.",
+                    "无法启动摄像头，或摄像头已断开连接。",
+                    "카메라를 시작하지 못했거나 연결이 끊겼습니다.",
+                )
             ),
             suggested_actions: vec![UiAction::RefreshCameras, UiAction::DismissError],
         },
@@ -295,6 +298,23 @@ mod tests {
                 .user_message
                 .starts_with("Please select a camera")
         );
+    }
+
+    #[test]
+    fn camera_error_preserves_backend_detail_in_every_language() {
+        let error = OrchestratorError::CameraFailed("OpenFailed: 0x80070005".into());
+        for language in [
+            UiLanguage::Ja,
+            UiLanguage::En,
+            UiLanguage::Zh,
+            UiLanguage::Ko,
+        ] {
+            assert!(
+                present_error(&error, language)
+                    .user_message
+                    .contains("OpenFailed: 0x80070005")
+            );
+        }
     }
     #[test]
     fn present_error_pose_failure_names_arm_tracking_in_every_language() {

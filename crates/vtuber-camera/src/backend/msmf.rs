@@ -59,17 +59,12 @@ impl CameraBackend for MsmfBackend {
     ) -> Result<Box<dyn CameraStream>, CameraError> {
         let cam_index = parse_msmf_device_id(&descriptor.id)?;
 
-        // Create camera with a default format to query capabilities.
-        let default_fmt = NokhwaFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30);
-        let mut camera = Camera::with_backend(
-            cam_index,
-            nokhwa::utils::RequestedFormat::with_formats(
-                nokhwa::utils::RequestedFormatType::Closest(default_fmt),
-                &[FrameFormat::MJPEG, FrameFormat::YUYV],
-            ),
-            ApiBackend::MediaFoundation,
-        )
-        .map_err(|e| map_nokhwa_error(CameraOperation::Open, e))?;
+        // Bootstrap from a reported, decodable format before negotiating below.
+        // nokhwa's Closest(MJPEG 640x480) rejects YUYV-only cameras and cameras
+        // without that exact resolution, even if another supported mode exists.
+        let mut camera =
+            Camera::with_backend(cam_index, bootstrap_format(), ApiBackend::MediaFoundation)
+                .map_err(|e| map_nokhwa_error(CameraOperation::Open, e))?;
 
         // Enumerate available formats and pick the best match.
         let candidates = enumerate_format_candidates(&mut camera)?;
@@ -98,6 +93,13 @@ impl CameraBackend for MsmfBackend {
             source_format,
         }))
     }
+}
+
+fn bootstrap_format() -> nokhwa::utils::RequestedFormat<'static> {
+    nokhwa::utils::RequestedFormat::with_formats(
+        nokhwa::utils::RequestedFormatType::None,
+        &[FrameFormat::MJPEG, FrameFormat::YUYV],
+    )
 }
 
 /// Builds a descriptor whose identity is the MSMF symbolic device link.
@@ -394,6 +396,23 @@ mod tests {
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
     use super::*;
+
+    #[test]
+    fn bootstrap_accepts_yuyv_only_and_non_vga_cameras() {
+        for format in [FrameFormat::MJPEG, FrameFormat::YUYV] {
+            let available = [NokhwaFormat::new(Resolution::new(1280, 720), format, 30)];
+            assert_eq!(
+                bootstrap_format().fulfill(&available),
+                available.first().copied()
+            );
+        }
+        let unsupported = [NokhwaFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::NV12,
+            30,
+        )];
+        assert!(bootstrap_format().fulfill(&unsupported).is_none());
+    }
 
     #[test]
     fn descriptor_identity_uses_symbolic_link_not_enumeration_index() {

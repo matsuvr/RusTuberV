@@ -114,6 +114,11 @@ Apache-2.0. Its `LICENSE` is retained. The AVFoundation frame reads have a
 two-second receive timeout so an interrupted camera can be stopped and
 reopened after system sleep; see `vendor/nokhwa/PATCHES.md`.
 
+`vendor/nokhwa-bindings-windows` contains nokhwa-bindings-windows 0.4.6 from
+crates.io (Apache-2.0), with local fixes for COM/Media Foundation initialization,
+camera identity during hot-plugging, and native resource release. The license
+text and provenance are included; see its `PATCHES.md` for changes and limits.
+
 ## mediapipe-rs (vendored)
 
 `vendor/mediapipe-rs` is a copy of

@@ -503,8 +503,27 @@ where
                         }
                         Err(err) => {
                             metrics.last_error = Some(format!("{err:?}"));
+                            // Opening a device immediately after release or hot-plug
+                            // can fail before the first frame. Use the same bounded
+                            // reconnect policy as a read failure during capture.
+                            if matches!(
+                                err,
+                                CameraError::OpenFailed(_)
+                                    | CameraError::Disconnected
+                                    | CameraError::FrameReadFailed(_)
+                            ) {
+                                reconnect_plan = Some(ReconnectPlan {
+                                    attempts: 0,
+                                    next_attempt_at: Instant::now() + reconnect_delay(1),
+                                });
+                            }
+                            capture_requested = reconnect_plan.is_some();
                             update_state(&state, |s| {
-                                s.state = CaptureServiceState::BackOff;
+                                s.state = if reconnect_plan.is_some() {
+                                    CaptureServiceState::Reconnecting
+                                } else {
+                                    CaptureServiceState::BackOff
+                                };
                                 s.metrics.last_error.clone_from(&metrics.last_error);
                             });
                             active_stream = None;
@@ -667,6 +686,7 @@ where
                 ReconnectDecision::Wait => std::thread::sleep(Duration::from_millis(10)),
                 ReconnectDecision::Exhausted => {
                     reconnect_plan = None;
+                    capture_requested = false;
                     update_state(&state, |s| {
                         s.state = CaptureServiceState::BackOff;
                         s.metrics.last_error.clone_from(&metrics.last_error);
@@ -806,7 +826,9 @@ where
                 s.metrics.frames_captured = metrics.frames_captured;
                 s.metrics.publish_rejected_frames = metrics.publish_rejected_frames;
                 s.metrics.format = metrics.format;
+                s.metrics.last_error = None;
             });
+            metrics.last_error = None;
             Ok(stream)
         }
         Err(err) => {
@@ -869,12 +891,14 @@ mod tests {
         opens: std::sync::Mutex<std::collections::VecDeque<Result<bool, &'static str>>>,
         opened: std::sync::mpsc::Sender<()>,
         read_failure: bool,
+        fail_first_read: bool,
     }
 
     struct ScriptedStream {
         disconnect: bool,
         frames: u64,
         read_failure: bool,
+        fail_first_read: bool,
     }
 
     impl crate::device::CameraBackend for ScriptedReconnectBackend {
@@ -899,6 +923,7 @@ mod tests {
                 disconnect,
                 frames: 0,
                 read_failure: self.read_failure,
+                fail_first_read: self.fail_first_read,
             }))
         }
     }
@@ -918,7 +943,7 @@ mod tests {
             if stop.is_stopped() {
                 return Err(CameraError::Disconnected);
             }
-            if self.disconnect && self.frames > 0 {
+            if self.disconnect && (self.frames > 0 || self.fail_first_read) {
                 return Err(if self.read_failure {
                     CameraError::FrameReadFailed("device read failed".into())
                 } else {
@@ -1158,6 +1183,7 @@ mod tests {
                 opens: std::sync::Mutex::new(opens.into()),
                 opened: tx,
                 read_failure: false,
+                fail_first_read: false,
             })
             .unwrap();
         controller
@@ -1235,6 +1261,33 @@ mod tests {
     }
 
     #[test]
+    fn failed_start_is_not_reopened_by_a_later_sleep_cycle() {
+        let (opened, rx) = std::sync::mpsc::channel();
+        let power = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut controller = CaptureController::new();
+        controller
+            .start_worker(SleepBackend {
+                inner: ControllableBackend {
+                    outcome: StreamOutcome::FirstFrameFails,
+                    stop_fails: false,
+                    probe: Arc::new(StopProbe::default()),
+                    opened,
+                },
+                power: Arc::clone(&power),
+            })
+            .unwrap();
+        controller
+            .select_and_start(test_device(), CameraRequest::default())
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::BackOff);
+        power.store(2, std::sync::atomic::Ordering::Release);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+        assert_eq!(controller.state(), CaptureServiceState::BackOff);
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
     fn sleep_releases_camera_and_wake_reopens_with_monotonic_sequence() {
         use std::sync::atomic::Ordering;
         let (controller, opened, probe, power) = sleep_controller(0);
@@ -1307,23 +1360,27 @@ mod tests {
 
     #[test]
     fn read_failure_reopens_the_camera() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut controller = CaptureController::new();
-        controller
-            .start_worker(ScriptedReconnectBackend {
-                opens: std::sync::Mutex::new(vec![Ok(true), Ok(false)].into()),
-                opened: tx,
-                read_failure: true,
-            })
-            .unwrap();
-        controller
-            .select_and_start(test_device(), CameraRequest::default())
-            .unwrap();
-        rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("read failure must reopen the device");
-        wait_for_state(&controller, CaptureServiceState::Running);
-        controller.shutdown().unwrap();
+        for fail_first_read in [false, true] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut controller = CaptureController::new();
+            controller
+                .start_worker(ScriptedReconnectBackend {
+                    opens: std::sync::Mutex::new(vec![Ok(true), Ok(false)].into()),
+                    opened: tx,
+                    read_failure: true,
+                    fail_first_read,
+                })
+                .unwrap();
+            controller
+                .select_and_start(test_device(), CameraRequest::default())
+                .unwrap();
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("read failure must reopen the device");
+            wait_for_state(&controller, CaptureServiceState::Running);
+            assert_eq!(controller.metrics().last_error, None);
+            controller.shutdown().unwrap();
+        }
     }
 
     /// The device descriptor the shared [`MockBackend`] actually opens.
@@ -1390,8 +1447,33 @@ mod tests {
         }
         wait_for_state(&controller, CaptureServiceState::Running);
         assert_eq!(controller.metrics().reconnect_attempts, 3);
+        assert_eq!(controller.metrics().last_error, None);
         assert!(!controller.worker_finished());
         let _ = controller.shutdown();
+    }
+
+    #[test]
+    fn transient_initial_open_failure_retries_and_clears_error() {
+        let (controller, opened) = scripted_controller(vec![Err("device releasing"), Ok(false)]);
+        for _ in 0..2 {
+            opened.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        wait_for_state(&controller, CaptureServiceState::Running);
+        assert_eq!(controller.metrics().reconnect_attempts, 1);
+        assert_eq!(controller.metrics().last_error, None);
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn stop_cancels_retry_after_initial_open_failure() {
+        let (mut controller, opened) = scripted_controller(vec![Err("device not ready")]);
+        opened.recv_timeout(Duration::from_secs(3)).unwrap();
+        wait_for_state(&controller, CaptureServiceState::Reconnecting);
+        controller.stop().unwrap();
+        wait_for_state(&controller, CaptureServiceState::Selected);
+        assert!(opened.recv_timeout(Duration::from_millis(300)).is_err());
+        assert!(!controller.worker_finished());
+        controller.shutdown().unwrap();
     }
 
     #[test]
