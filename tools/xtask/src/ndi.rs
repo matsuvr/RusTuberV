@@ -636,7 +636,7 @@ fn zip_package(package_dir: &Path, zip_path: Option<PathBuf>) -> Result<(), Stri
         package_dir
             .parent()
             .unwrap_or(package_dir)
-            .join("RusTuberV-ndi-windows-x64.zip")
+            .join("win-RusTuberV-ndi-x64.zip")
     });
     if zip_path.exists() {
         fs::remove_file(&zip_path)

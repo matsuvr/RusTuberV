@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 $root = (Get-Location).Path
-$package = Join-Path $root "release/RusTuberV-$Version-windows-x64"
+$package = Join-Path $root "release/win-RusTuberV-$Version-x64"
 $inputs = Join-Path $root 'release/inputs'
 if (Test-Path -LiteralPath $package) { throw "Package already exists: $package" }
 

@@ -3,6 +3,9 @@
 配布は各OSのローカル環境で作成する。開発環境・推論モデルの準備は
 [README](../README.md)を参照。ビルド中からZIP作成終了まではソース、コンパイラ、
 SDKを変更しない。公開時にはコミット済みのソースを使い、ZIPとSHA-256を一組で扱う。
+GitHub ReleasesとBOOTHで使う配布ZIPは、プラットフォーム名を先頭に付ける。
+Windowsは`win-RusTuberV-<version>-x64.zip`、Macは`mac-RusTuberV-<version>-arm64.zip`とし、
+対応するハッシュファイルはそれぞれのZIP名に`.sha256`を付ける。公開時もこの名前を維持する。
 
 ## Windows x64
 
@@ -46,7 +49,7 @@ export NDI_RUNTIME_NOTICES="/path/to/libndi_licenses.txt"
 test -f "$NDI_SDK_LICENSE"
 test -f "$NDI_RUNTIME_NOTICES"
 version=0.1.1
-package="$PWD/release/RusTuberV-$version-macos-arm64"
+package="$PWD/release/mac-RusTuberV-$version-arm64"
 test ! -e "$package"
 test ! -e "$package.zip"
 source_commit=$(git rev-parse HEAD)
@@ -140,7 +143,7 @@ EOF
 ditto -c -k --keepParent "$package" "$package.zip"
 (
     cd release
-    shasum -a 256 "RusTuberV-$version-macos-arm64.zip" > "RusTuberV-$version-macos-arm64.zip.sha256"
+    shasum -a 256 "mac-RusTuberV-$version-arm64.zip" > "mac-RusTuberV-$version-arm64.zip.sha256"
 )
 ```
 

@@ -110,7 +110,7 @@ LLVMの`libunwind.dll`とライセンスも同梱します。
 .\tools\package-windows.ps1 -Version 0.1.1
 ```
 
-`release/`にZIPとSHA-256ファイルが生成されます。パッケージにはライセンス文書、設定、利用マニュアルも含まれます。
+`release/`に`win-RusTuberV-0.1.1-x64.zip`と同名の`.zip.sha256`ファイルが生成されます。パッケージにはライセンス文書、設定、利用マニュアルも含まれます。Macの配布ZIPは`mac-RusTuberV-<バージョン>-arm64.zip`形式です。
 
 ### NDI出力なしのビルド
 
