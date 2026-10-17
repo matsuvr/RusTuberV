@@ -98,10 +98,10 @@ half-closed hand, grip, click shape, and three-finger gun configurations.
 On Windows, use the repository's CLANG64 wrapper:
 
 ```powershell
-./tools/cargo-windows.ps1 test -p vtuber-inference hand_gesture::tests --lib
-./tools/cargo-windows.ps1 test -p vtuber-inference pose_decode::tests --lib
-./tools/cargo-windows.ps1 test -p vtuber-tracking --lib
-./tools/cargo-windows.ps1 test -p vtuber-avatar tracked_arm::tests --lib
+./tools/cargo-windows.ps1 test --locked --package vtuber-inference hand_gesture::tests --lib -j 1
+./tools/cargo-windows.ps1 test --locked --package vtuber-inference pose_decode::tests --lib -j 1
+./tools/cargo-windows.ps1 test --locked --package vtuber-tracking --lib -j 1
+./tools/cargo-windows.ps1 test --locked --package vtuber-avatar tracked_arm::tests --lib -j 1
 ```
 
 The tests cover RGB/BGR stride handling and bilinear normalization, the real
