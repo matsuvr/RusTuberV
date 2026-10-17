@@ -32,6 +32,8 @@ pub mod descriptor;
 pub mod detector;
 /// Typed errors for the inference subsystem.
 pub mod error;
+/// Embedded HaGRID hand-image classification and pure crop preprocessing.
+mod hand_gesture;
 /// Fixed-size inference timing and drop metrics.
 pub mod metrics;
 /// Face inference pipeline orchestration.

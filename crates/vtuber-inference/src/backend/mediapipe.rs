@@ -19,6 +19,7 @@ use vtuber_core::{
 };
 
 use crate::error::{InferenceError, Result};
+use crate::hand_gesture::HandGestureClassifier;
 use crate::pose_decode::{decode_hand_result, decode_pose_result};
 use crate::runtime::FaceTrackingInference;
 
@@ -40,7 +41,7 @@ pub fn native_library_source() -> Result<&'static str> {
 
 const MATRIX_AFFINE_EPSILON: f32 = 0.1;
 
-/// MediaPipe Pose plus Hand Landmarker runtimes owned by one inference worker.
+/// MediaPipe Pose/Hand landmarkers and the HaGRID classifier in one worker.
 ///
 /// Both tasks run on the same camera frame in the same worker: the Pose wrists
 /// side-pair the hands, so splitting them across workers would need frame
@@ -48,6 +49,7 @@ const MATRIX_AFFINE_EPSILON: f32 = 0.1;
 pub struct MediaPipePoseRuntime {
     landmarker: PoseLandmarkerVideo,
     hand_landmarker: HandLandmarkerVideo,
+    hand_gestures: HandGestureClassifier,
     staging: Vec<u8>,
     last_timestamp_ms: Option<i64>,
     last_hand_timestamp_ms: Option<i64>,
@@ -88,6 +90,7 @@ impl MediaPipePoseRuntime {
         Ok(Self {
             landmarker,
             hand_landmarker,
+            hand_gestures: HandGestureClassifier::new()?,
             staging: Vec::new(),
             last_timestamp_ms: None,
             last_hand_timestamp_ms: None,
@@ -124,7 +127,19 @@ impl MediaPipePoseRuntime {
                 .hand_landmarker
                 .detect_for_video(&image, Timestamp::from_millis(hand_timestamp_ms))
                 .map_err(|error| InferenceError::MediaPipeFrameInference(error.to_string()))?;
-            let [left, right] = decode_hand_result(&hand_result, &decoded.wrist_xy)
+            let pixels = frame.pixels()?;
+            let gestures = hand_result
+                .hand_landmarks
+                .iter()
+                .map(|landmarks| {
+                    let xy: Vec<_> = landmarks
+                        .iter()
+                        .map(|point| [point.point.x(), point.point.y()])
+                        .collect();
+                    self.hand_gestures.classify(pixels, &xy)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let [left, right] = decode_hand_result(&hand_result, &decoded.wrist_xy, &gestures)
                 .map_err(|error| InferenceError::MediaPipeOutputContract(error.to_string()))?;
             observation.left.hand = left;
             observation.right.hand = right;

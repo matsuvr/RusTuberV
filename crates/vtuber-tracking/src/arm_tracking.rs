@@ -24,7 +24,7 @@
 use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 use vtuber_core::arm_tracking::{
     ArmBlendWeight, ArmBlendWeights, ArmControlFrame, ArmLandmarks, ArmTrackingTarget,
-    ArmTrackingTargets, HandFingerPose, PoseArmFrame, PoseWorldLandmark,
+    ArmTrackingTargets, PoseArmFrame, PoseWorldLandmark,
 };
 use vtuber_core::{FrameSeq, MonoTimeNs};
 
@@ -62,7 +62,8 @@ pub fn measure_arm_reference(arm: ArmLandmarks) -> Option<ArmReferenceLength> {
 /// Inputs are validated world observations, not normalized image coordinates.
 /// The +Y/+Z sign change converts Pose's basis to ArmTrackingTarget's canonical
 /// front view. No torso rotation, mirror, avatar scale, confidence policy, or
-/// bone-length stretching is applied here.
+/// bone-length stretching is applied here. Gesture confirmation fills the
+/// finger target separately in the tracking state.
 #[must_use]
 pub fn retarget_arm_landmarks(
     arm: ArmLandmarks,
@@ -78,7 +79,7 @@ pub fn retarget_arm_landmarks(
         elbow_pole: offset(arm.elbow.meters),
         palm_normal: observed_palm_normal(arm),
         palm_forward: observed_palm_forward(arm),
-        fingers: observed_finger_pose(arm),
+        fingers: None,
     }
 }
 
@@ -111,117 +112,6 @@ fn observed_palm_normal(arm: ArmLandmarks) -> Option<[f32; 3]> {
 const HAND_WRIST: usize = 0;
 const HAND_INDEX_MCP: usize = 5;
 const HAND_PINKY_MCP: usize = 17;
-
-/// Hand Landmarker landmark triples for one four-finger chain, as
-/// `[mcp, pip, dip, tip]`.
-const FINGER_CHAINS: [[usize; 4]; 4] = [
-    [5, 6, 7, 8],
-    [9, 10, 11, 12],
-    [13, 14, 15, 16],
-    [17, 18, 19, 20],
-];
-
-/// Hand Landmarker landmarks of the thumb chain, as `[mcp, ip, tip]`.
-///
-/// The CMC (landmark 1) is deliberately absent. The Hand Landmarker places it
-/// with the hand model rather than detecting it, and it moves as a rigid part
-/// of the whole thumb, so a ray measured from it swings whenever the thumb
-/// moves at all. That made the avatar's thumb base travel with the thumb and
-/// drove the tip past straight. The two landmarks below are the real detected
-/// joints, and they are the only thumb measurements this pipeline needs.
-const THUMB_CHAIN: [usize; 3] = [2, 3, 4];
-
-/// Flexion limit of each four-finger joint, in radians.
-///
-/// These are the anatomical ranges a real finger reaches (knuckle about 100
-/// degrees, middle joint about 110, last about 60). A landmark triple beyond
-/// them is not a finger pose this rig can show, and applying it would fold the
-/// bone back through itself.
-const FINGER_FLEXION_LIMIT_RAD: [f32; 3] = [1.75, 1.92, 1.05];
-
-/// Flexion limit of the thumb's interphalangeal joint, in radians.
-///
-/// The metacarpophalangeal channel now measures the same elevation of a
-/// knuckle ray from the palm plane that the four fingers measure, so it
-/// reuses their knuckle limit. The thumb is far more oblique to the palm than
-/// a finger, and a smaller limit there would clip ordinary motion. The
-/// interphalangeal joint is the one joint of this chain that is not a finger
-/// joint, and a real thumb stops well short of a finger's middle joint.
-const THUMB_IP_FLEXION_LIMIT_RAD: f32 = 1.22;
-
-/// Extract signed bends and spread as features for the pose selector.
-/// These raw measurements are not sent to the avatar. A rigid hand rotation
-/// cannot change the hand-local features used to choose an authored pose.
-fn observed_finger_pose(arm: ArmLandmarks) -> Option<HandFingerPose> {
-    let landmarks = arm.hand?.landmarks;
-    let point = |index: usize| landmarks.get(index).map(|value| vector(value.meters));
-    let wrist = point(HAND_WRIST)?;
-    let index = finite_normalized(point(HAND_INDEX_MCP)? - wrist)?;
-    let little = finite_normalized(point(HAND_PINKY_MCP)? - wrist)?;
-    let normal = finite_normalized(index.cross(&little))?;
-    let forward = finite_normalized(index + little)?;
-    let across = forward.cross(&normal);
-    let local = |ray: Vector3<f32>| [ray.dot(&across), ray.dot(&forward), ray.dot(&normal)];
-    let bend = |incoming: Vector3<f32>, outgoing: Vector3<f32>, axis: Vector3<f32>, limit: f32| {
-        let incoming = finite_normalized(incoming)?;
-        let outgoing = finite_normalized(outgoing)?;
-        let angle = axis
-            .dot(&incoming.cross(&outgoing))
-            .atan2(incoming.dot(&outgoing));
-        angle.is_finite().then(|| angle.clamp(-limit, limit))
-    };
-    let mut fingers = [[0.0; 3]; 4];
-    let mut spread = [0.0; 4];
-    for ((angles, opening), &[mcp, pip, dip, tip]) in
-        fingers.iter_mut().zip(&mut spread).zip(&FINGER_CHAINS)
-    {
-        let proximal = finite_normalized(point(pip)? - point(mcp)?)?;
-        let [x, y, z] = local(proximal);
-        let [mcp_limit, pip_limit, dip_limit] = FINGER_FLEXION_LIMIT_RAD;
-        // A knuckle can flex past 90 degrees. Keep its in-plane opening in
-        // the forward half-plane; a backward projection then means flexion
-        // past 90, not a 180-degree change in spread or a reversed PIP axis.
-        let facing = if y < 0.0 { -1.0 } else { 1.0 };
-        let axis = finite_normalized((proximal * facing).cross(&normal))?;
-        *opening = (facing * x).atan2(facing * y);
-        *angles = [
-            z.atan2(facing * x.hypot(y)).clamp(-mcp_limit, mcp_limit),
-            bend(proximal, point(dip)? - point(pip)?, axis, pip_limit)?,
-            bend(
-                point(dip)? - point(pip)?,
-                point(tip)? - point(dip)?,
-                axis,
-                dip_limit,
-            )?,
-        ];
-    }
-    // The thumb is measured exactly like a finger, from its two real detected
-    // joints: the MCP-to-IP segment gives the knuckle elevation and the
-    // in-plane opening, and the IP joint gives its own bend. Nothing is
-    // measured from the CMC, so the thumb's base is not rotated by the
-    // ray's swing and the tip is not bent by a second, full-length angle.
-    let [mcp, ip, tip] = THUMB_CHAIN;
-    let proximal = finite_normalized(point(ip)? - point(mcp)?)?;
-    let [x, y, z] = local(proximal);
-    let facing = if y < 0.0 { -1.0 } else { 1.0 };
-    let axis = finite_normalized((proximal * facing).cross(&normal))?;
-    Some(HandFingerPose {
-        fingers,
-        spread,
-        thumb: [
-            z.atan2(facing * x.hypot(y))
-                .clamp(-FINGER_FLEXION_LIMIT_RAD[0], FINGER_FLEXION_LIMIT_RAD[0]),
-            bend(
-                proximal,
-                point(tip)? - point(ip)?,
-                axis,
-                THUMB_IP_FLEXION_LIMIT_RAD,
-            )?,
-        ],
-        thumb_spread: (facing * x).atan2(facing * y),
-        thumb_cmc: [0.0; 2],
-    })
-}
 
 /// One rigid palm frame, with Y toward the fingers and Z along the normal.
 /// Both axes come from the same hand observation. Filtering them independently
@@ -850,9 +740,8 @@ impl ArmSideState {
         let wrist_usable = self.adoption.update(adoption_score, hand_detected);
         let elbow_usable = wrist_usable && quality.is_some_and(|value| value.elbow);
         // The palm and the fingers come from the same hand detection, so they
-        // share one gate. What each channel then observes is decided by the
-        // landmarks, not by the gate: a hand whose palm plane is degenerate can
-        // still have perfectly readable finger joints.
+        // share one gate. The image-classified gesture remains usable even
+        // when the landmark geometry cannot define the palm plane.
         let hand_usable = wrist_usable && hand_detected;
 
         let sample = arm
@@ -892,9 +781,10 @@ impl ArmSideState {
             target.palm_forward = None;
             target.fingers = None;
         }
-        // Only a confirmed authored pose reaches the render-clock filter.
-        // The raw angles above are classification features, never bone targets.
-        target.fingers = self.finger_poses.observe(target.fingers, flexion_sign);
+        // Confirmation consumes one image classification per new camera frame.
+        // The avatar receives the selected authored angles, not landmark bends.
+        let gesture = arm.hand.filter(|_| hand_usable).map(|hand| hand.gesture);
+        target.fingers = self.finger_poses.observe(gesture, flexion_sign);
         let fingers_observed = target.fingers.is_some();
         let mut elbow_tracked = false;
         if elbow_usable && let Some(pole) = stabilize_elbow_pole(self.last_pole, target) {
@@ -1104,7 +994,9 @@ mod tests {
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
     use super::*;
-    use vtuber_core::arm_tracking::{HandWorldLandmarks, PoseWorldLandmark};
+    use vtuber_core::arm_tracking::{
+        HandFingerPose, HandGesture, HandWorldLandmarks, PoseWorldLandmark,
+    };
 
     fn point(meters: [f32; 3]) -> PoseWorldLandmark {
         PoseWorldLandmark {
@@ -1121,6 +1013,7 @@ mod tests {
         HandWorldLandmarks {
             landmarks: [point([0.0, 0.0, 0.0]); 21],
             handedness_score: Some(handedness),
+            gesture: HandGesture::Palm,
         }
     }
 
@@ -1199,6 +1092,7 @@ mod tests {
         HandWorldLandmarks {
             landmarks,
             handedness_score: Some(1.0),
+            gesture: HandGesture::Palm,
         }
     }
 
@@ -1255,6 +1149,7 @@ mod tests {
             HandWorldLandmarks {
                 landmarks,
                 handedness_score: hand.handedness_score,
+                gesture: hand.gesture,
             }
         });
         let translated = ArmLandmarks {
@@ -1754,9 +1649,13 @@ mod tests {
                 reflected.reset_temporal();
             }
             let t = seq as f32 * 0.04;
-            let curl = if seq < 80 { 0.0 } else { -0.7 };
+            let gesture = if seq < 80 {
+                HandGesture::Palm
+            } else {
+                HandGesture::Fist
+            };
             let mut left = ArmLandmarks {
-                hand: Some(flat_hand([[curl; 3]; 4], [curl; 2])),
+                hand: Some(classified_hand(gesture)),
                 ..arm()
             };
             let turn = Rotation3::from_euler_angles(t.sin(), 1.5 * t.cos(), 0.3 * t.sin());
@@ -1769,7 +1668,7 @@ mod tests {
             let mut right = reflect_arm(ArmLandmarks {
                 elbow: point([0.35, 0.0, 0.0]),
                 wrist: point([0.35, -0.45, 0.0]),
-                hand: Some(flat_hand([[0.0; 3]; 4], [0.0; 2])),
+                hand: Some(classified_hand(HandGesture::Palm)),
                 ..arm()
             });
             if (100..155).contains(&seq) {
@@ -2172,340 +2071,33 @@ mod tests {
         assert!(previous[2] < -0.99);
     }
 
-    /// 21 hand world landmarks built from a caller-supplied position per index.
-    fn hand_from(points: [PoseWorldLandmark; 21]) -> HandWorldLandmarks {
+    /// Same palm geometry for any image-classified sign. Finger joints can
+    /// coincide without changing the classification carried by the detection.
+    fn classified_hand(gesture: HandGesture) -> HandWorldLandmarks {
         HandWorldLandmarks {
-            landmarks: points,
-            handedness_score: Some(1.0),
-        }
-    }
-
-    /// The ray the fixture's `finger` leaves the wrist along. Splayed so the
-    /// palm plane between the index and little roots is well defined, and so a
-    /// straight chain is collinear with the wrist and reports no knuckle
-    /// flexion.
-    fn splayed_ray(finger: usize) -> Vector3<f32> {
-        finite_normalized(Vector3::new(1.0, 0.0, (1.5 - finger as f32) * 0.12))
-            .expect("a splayed ray is normalizable")
-    }
-
-    /// A hand in the Hand Landmarker basis whose four fingers splay from the
-    /// wrist along their own ray and fold toward +Y, so every joint's interior
-    /// angle is exactly the flexion the fixture asked for.
-    fn flat_hand(curl: [[f32; 3]; 4], thumb_curl: [f32; 2]) -> HandWorldLandmarks {
-        let mut points = [point([0.0, 0.0, 0.0]); 21];
-        let mut place = |slot: usize, value: Vector3<f32>| points[slot] = point(array(value));
-        for (finger, chain) in FINGER_CHAINS.iter().enumerate() {
-            let ray = splayed_ray(finger);
-            let curl = curl.get(finger).copied().unwrap_or([0.0; 3]);
-            let mut previous = Vector3::zeros();
-            let mut heading = 0.0;
-            for step in 0..4 {
-                let Some(slot) = chain.get(step) else {
-                    break;
-                };
-                // Each phalanx turns the running heading by its own joint's
-                // flexion, so the last segment carries the last curl and the
-                // tip is where the last joint becomes readable.
-                if step > 0 {
-                    heading += curl.get(step - 1).copied().unwrap_or(0.0);
-                }
-                let segment = ray * (0.02 * heading.cos()) + Vector3::y() * (0.02 * heading.sin());
-                place(*slot, previous + segment);
-                previous += segment;
-            }
-        }
-        // The thumb is a two-joint chain like a finger: the MCP-to-IP segment
-        // carries the knuckle elevation and the IP joint carries its own bend.
-        let (Some(mcp), Some(ip), Some(tip)) = (
-            THUMB_CHAIN.first().copied(),
-            THUMB_CHAIN.get(1).copied(),
-            THUMB_CHAIN.get(2).copied(),
-        ) else {
-            return hand_from(points);
-        };
-        let ray = finite_normalized(Vector3::new(0.5, 0.0, 0.8)).expect("thumb ray");
-        let segment = |angle: f32| ray * (0.02 * angle.cos()) + Vector3::y() * (0.02 * angle.sin());
-        let knuckle = thumb_curl.first().copied().unwrap_or(0.0);
-        place(mcp, ray * 0.02);
-        let ip_point = ray * 0.02 + segment(knuckle);
-        place(ip, ip_point);
-        let ip_heading = knuckle + thumb_curl.get(1).copied().unwrap_or(0.0);
-        place(tip, ip_point + segment(ip_heading));
-        hand_from(points)
-    }
-
-    /// A hand whose only readable landmarks are the two knuckles the palm plane
-    /// is derived from, so the palm channel works and the fingers do not.
-    fn palm_only_hand() -> HandWorldLandmarks {
-        let mut points = [point([0.0, 0.0, 0.0]); 21];
-        if let Some(slot) = points.get_mut(HAND_INDEX_MCP) {
-            *slot = point(array(splayed_ray(0) * 0.02));
-        }
-        if let Some(slot) = points.get_mut(HAND_PINKY_MCP) {
-            *slot = point(array(splayed_ray(3) * 0.02));
-        }
-        hand_from(points)
-    }
-
-    #[test]
-    fn a_flat_hand_reports_no_finger_flexion() {
-        let reference = measure_arm_reference(arm()).unwrap();
-        let arm = ArmLandmarks {
-            hand: Some(flat_hand([[0.0; 3]; 4], [0.0; 2])),
-            ..arm()
-        };
-        let pose = retarget_arm_landmarks(arm, reference)
-            .fingers
-            .expect("a flat hand defines its joints");
-        for finger in pose.fingers {
-            for angle in finger {
-                assert!(
-                    angle.abs() < 1.0e-4,
-                    "a straight chain must report no flexion: {finger:?}"
-                );
-            }
-        }
-        for angle in pose.thumb {
-            assert!(angle.abs() < 1.0e-4, "{:?}", pose.thumb);
+            gesture,
+            ..hand_with([0.0; 3], [0.02, 0.0, 0.004], [0.02, 0.0, -0.004])
         }
     }
 
     #[test]
-    fn each_finger_reports_its_own_curl() {
-        let reference = measure_arm_reference(arm()).unwrap();
-        // A peace sign: the index and middle stay flat while the ring and little
-        // fold, which a single shared curl amount could not produce.
-        let arm = ArmLandmarks {
-            hand: Some(flat_hand(
-                [[0.0; 3], [0.0; 3], [1.0, 1.2, 0.6], [0.8, 0.9, 0.5]],
-                [0.4, 0.5],
-            )),
+    fn image_classification_does_not_depend_on_readable_finger_joints() {
+        let profile = ArmTrackingProfile::default();
+        let observed = ArmLandmarks {
+            hand: Some(classified_hand(HandGesture::Ok)),
             ..arm()
         };
-        let pose = retarget_arm_landmarks(arm, reference)
-            .fingers
-            .expect("a curled hand defines its joints");
-        for (finger, curls) in pose.fingers.iter().enumerate() {
-            for (joint, angle) in curls.iter().enumerate() {
-                if finger < 2 {
-                    assert!(
-                        angle.abs() < 1.0e-4,
-                        "finger {finger} joint {joint} must stay flat: {angle}"
-                    );
-                } else {
-                    assert!(
-                        *angle > 0.1,
-                        "finger {finger} joint {joint} must report its curl: {angle}"
-                    );
-                }
-            }
-        }
-        // The two folded fingers differ from each other, so the articulation is
-        // per finger rather than one shared amount.
-        let (ring, little) = (pose.fingers[2][0], pose.fingers[3][0]);
-        assert!(
-            (ring - little).abs() > 0.05,
-            "each finger must keep its own knuckle curl: {ring} vs {little}"
-        );
-        assert!(pose.thumb[0] > 0.1 && pose.thumb[1] > 0.1);
-    }
+        let state = tracked_state(observed, &profile);
+        assert!(state.left.source.unwrap().palm_normal.is_some());
+        assert!(state.left.source.unwrap().fingers.is_some());
+        assert!(state.left.weights().fingers > 0.99);
 
-    #[test]
-    fn a_finger_flexion_is_clamped_to_the_anatomical_range() {
-        let reference = measure_arm_reference(arm()).unwrap();
-        // A curl far past anything a finger reaches must stop at the joint's
-        // limit rather than folding the bone back through itself.
-        let arm = ArmLandmarks {
-            hand: Some(flat_hand([[9.0; 3]; 4], [9.0; 2])),
-            ..arm()
-        };
-        let pose = retarget_arm_landmarks(arm, reference)
-            .fingers
-            .expect("a curled hand defines its joints");
-        for finger in pose.fingers {
-            for (joint, angle) in finger.iter().enumerate() {
-                let limit = FINGER_FLEXION_LIMIT_RAD.get(joint).copied().unwrap_or(0.0);
-                assert!(
-                    angle.abs() <= limit + 1.0e-4,
-                    "joint {joint} must stop at its limit: {angle} > {limit}"
-                );
-            }
-        }
-        assert!(
-            pose.thumb[0].abs() <= FINGER_FLEXION_LIMIT_RAD[0] + 1.0e-4,
-            "{} > {}",
-            pose.thumb[0],
-            FINGER_FLEXION_LIMIT_RAD[0]
-        );
-        assert!(
-            pose.thumb[1].abs() <= THUMB_IP_FLEXION_LIMIT_RAD + 1.0e-4,
-            "{} > {}",
-            pose.thumb[1],
-            THUMB_IP_FLEXION_LIMIT_RAD
-        );
-    }
-
-    #[test]
-    fn the_thumb_ignores_the_model_placed_cmc_landmark() {
-        // The Hand Landmarker places landmark 1 with the hand model rather
-        // than detecting it, and it rides along with the whole thumb. A ray
-        // measured from it therefore swung the avatar's thumb base whenever
-        // the thumb moved at all, and the extra full-length angle drove the
-        // tip past straight. Only the two detected joints may be read.
-        let baseline = observed_finger_pose(ArmLandmarks {
-            hand: Some(flat_hand([[0.0; 3]; 4], [0.4, 0.3])),
-            ..arm()
-        })
-        .expect("the hand defines a thumb");
-        let mut moved = flat_hand([[0.0; 3]; 4], [0.4, 0.3]);
-        moved.landmarks[1] = point([0.09, -0.06, 0.11]);
-        let displaced = observed_finger_pose(ArmLandmarks {
-            hand: Some(moved),
-            ..arm()
-        })
-        .expect("the hand still defines a thumb");
-        assert_eq!(displaced, baseline);
-
-        // The two detected joints do carry the articulation.
-        assert!(baseline.thumb[0] > 0.1, "{:?}", baseline.thumb);
-        assert!(baseline.thumb[1] > 0.1, "{:?}", baseline.thumb);
-    }
-
-    #[test]
-    fn a_thumb_straight_leg_reports_no_flexion() {
-        let pose = observed_finger_pose(ArmLandmarks {
-            hand: Some(flat_hand([[0.0; 3]; 4], [0.0, 0.0])),
-            ..arm()
-        })
-        .expect("the hand defines a thumb");
-        for angle in pose.thumb {
-            assert!(angle.abs() < 1.0e-4, "{:?}", pose.thumb);
-        }
-    }
-
-    #[test]
-    fn non_radial_extended_finger_separates_spread_from_flexion() {
-        let mut hand = flat_hand([[0.0; 3]; 4], [0.0; 2]);
-        hand.landmarks[5] = point([0.02, 0.05, 0.0]);
-        hand.landmarks[17] = point([-0.02, 0.05, 0.0]);
-        let observe = |spread: f32, curl: f32| {
-            let mut posed = hand;
-            // Palm normal +Z; spread goes toward +X, curl toward +Z.
-            let ray = Vector3::new(
-                spread.sin() * curl.cos(),
-                spread.cos() * curl.cos(),
-                curl.sin(),
-            );
-            for (step, slot) in [6, 7, 8].into_iter().enumerate() {
-                posed.landmarks[slot] = point(array(
-                    Vector3::new(0.02, 0.05, 0.0) + ray * (0.03 * (step + 1) as f32),
-                ));
-            }
-            observed_finger_pose(ArmLandmarks {
-                hand: Some(posed),
-                ..arm()
-            })
-            .unwrap()
-        };
-        for (spread, curl) in [(0.0, 0.0), (0.4, 0.0), (0.0, 0.6), (0.4, 0.6), (0.4, 1.6)] {
-            let pose = observe(spread, curl);
-            assert!((pose.fingers[0][0] - curl).abs() < 1.0e-5);
-            assert!((pose.spread[0] - spread).abs() < 1.0e-5);
-            assert!(pose.fingers[0][1].abs() < 1.0e-5);
-            assert!(pose.fingers[0][2].abs() < 1.0e-5);
-        }
-    }
-
-    #[test]
-    fn local_finger_shape_and_smoothing_ignore_rigid_hand_motion() {
-        let hand = flat_hand([[0.3, 0.5, 0.2]; 4], [0.2, 0.4]);
-        let pose = observed_finger_pose(ArmLandmarks {
-            hand: Some(hand),
-            ..arm()
-        })
-        .unwrap();
-        let mut mirrored_hand = hand;
-        for point in &mut mirrored_hand.landmarks {
-            point.meters[0] = -point.meters[0];
-        }
-        let original_arm = ArmLandmarks {
-            hand: Some(hand),
-            ..arm()
-        };
-        let reflected_arm = ArmLandmarks {
-            hand: Some(mirrored_hand),
-            ..arm()
-        };
-        let reference = measure_arm_reference(original_arm).unwrap();
-        assert_eq!(
-            retarget_arm_landmarks(original_arm, reference)
-                .mirrored()
-                .fingers,
-            retarget_arm_landmarks(reflected_arm, reference).fingers,
-        );
-        let mut smoother = FingerSmootherState::new(pose);
-        for angle in [0.4, 1.2, -0.8] {
-            let rotation = nalgebra::Rotation3::from_euler_angles(angle, angle * 0.7, -angle * 0.3);
-            let mut moved = hand;
-            for point in &mut moved.landmarks {
-                point.meters =
-                    array(rotation * vector(point.meters) + Vector3::new(0.1, -0.2, 0.4));
-            }
-            let moved_pose = observed_finger_pose(ArmLandmarks {
-                hand: Some(moved),
-                ..arm()
-            })
-            .unwrap();
-            smoother.step(moved_pose, 1.0 / 60.0);
-            for result in [moved_pose, smoother.output()] {
-                for (a, b) in result
-                    .fingers
-                    .into_iter()
-                    .flatten()
-                    .chain(result.spread)
-                    .chain(result.thumb)
-                    .chain([result.thumb_spread])
-                    .zip(
-                        pose.fingers
-                            .into_iter()
-                            .flatten()
-                            .chain(pose.spread)
-                            .chain(pose.thumb)
-                            .chain([pose.thumb_spread]),
-                    )
-                {
-                    assert!((a - b).abs() < 1.0e-4, "{a} != {b}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_hand_without_usable_joints_reports_no_fingers() {
-        let reference = measure_arm_reference(arm()).unwrap();
-        // Every landmark collapsed onto the wrist spans no joint, so the finger
-        // channel stays absent rather than reporting fabricated zero curls.
-        let arm = ArmLandmarks {
-            hand: Some(detected_hand(1.0)),
-            ..arm()
-        };
-        assert_eq!(retarget_arm_landmarks(arm, reference).fingers, None);
-    }
-
-    #[test]
-    fn a_usable_palm_does_not_imply_usable_fingers() {
-        let reference = measure_arm_reference(arm()).unwrap();
-        // A hand whose only readable landmarks are the two knuckles still gives
-        // the palm plane, but no finger joint spans anything, so the two
-        // channels are decided separately rather than by one flag.
-        let arm = ArmLandmarks {
-            hand: Some(palm_only_hand()),
-            ..arm()
-        };
-        let target = retarget_arm_landmarks(arm, reference);
-        assert!(target.palm_normal.is_some(), "the palm plane is readable");
-        assert_eq!(target.fingers, None, "the finger joints are not");
+        let mut degenerate = observed;
+        degenerate.hand.as_mut().unwrap().landmarks = [point([0.0; 3]); 21];
+        let state = tracked_state(degenerate, &profile);
+        assert!(state.left.source.unwrap().palm_normal.is_none());
+        assert!(state.left.source.unwrap().fingers.is_some());
+        assert!(state.left.weights().fingers > 0.99);
     }
 
     #[test]
@@ -2513,7 +2105,7 @@ mod tests {
         let profile = ArmTrackingProfile::default();
         let base = arm();
         let open = ArmLandmarks {
-            hand: Some(flat_hand([[0.0; 3]; 4], [0.0; 2])),
+            hand: Some(classified_hand(HandGesture::Palm)),
             ..base
         };
         let mut state = tracked_state(open, &profile);
@@ -2524,7 +2116,7 @@ mod tests {
         );
         assert!(
             state.left.source.unwrap().fingers.is_some(),
-            "an open hand still reports its joints"
+            "an open hand reports its classified pose"
         );
 
         // Losing the hand detection returns the whole arm, and the last
@@ -2547,11 +2139,11 @@ mod tests {
     fn finger_pose_switches_count_camera_frames_and_leave_the_other_hand_alone() {
         let profile = ArmTrackingProfile::default();
         let open = ArmLandmarks {
-            hand: Some(flat_hand([[0.0; 3]; 4], [0.0; 2])),
+            hand: Some(classified_hand(HandGesture::Palm)),
             ..arm()
         };
         let closed = ArmLandmarks {
-            hand: Some(flat_hand([[-1.5, -1.6, -1.0]; 4], [-0.7, -1.0])),
+            hand: Some(classified_hand(HandGesture::Fist)),
             ..arm()
         };
         let mut right = open;
@@ -2596,10 +2188,13 @@ mod tests {
                     Some(source),
                     "transition is blended"
                 );
-                assert_ne!(
+                let mut expected = HandPoseSelector::new();
+                for _ in 0..4 {
+                    expected.observe(Some(HandGesture::Fist), -1.0);
+                }
+                assert_eq!(
                     Some(source),
-                    observed_finger_pose(closed),
-                    "raw angles never pass through"
+                    expected.observe(Some(HandGesture::Fist), -1.0)
                 );
             }
             assert_eq!(state.right.source.unwrap().fingers, Some(initial_right));

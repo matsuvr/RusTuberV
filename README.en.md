@@ -62,6 +62,11 @@ Place these three files in `assets/models/`. The model binaries are excluded fro
 | `pose_landmarker_full.task` | Upper-body and arm-pose inference |
 | `hand_landmarker.task` | Hand and finger inference |
 
+The 0.4 MB HaGRID hand-image classifier is already included in the repository and
+embedded with the app. It selects authored finger poses while MediaPipe supplies
+hand locations and palm orientation. See [hand gesture recognition](tools/HAND-GESTURES.md)
+for the 45-label mapping, model provenance, and focused tests.
+
 On Windows, run the following in PowerShell from the repository root.
 
 ```powershell

@@ -28,9 +28,8 @@ pub fn tracking_to_rest_rotation(
 
 /// Converts hand-local articulation to the rig's rest-relative finger rotations.
 /// The palm frame is built from the same wrist/index/little rays as tracking.
-/// No solved arm orientation is read: arm swing, shoulder motion and the
-/// forearm rotation have already been removed by the observation's
-/// hand-local frame, before its independent smoothing.
+/// The selected catalog pose is independent of arm swing, shoulder motion,
+/// and forearm rotation. No solved arm orientation is read here.
 #[must_use]
 pub fn observed_finger_deltas(
     chain: &ArmChainBinding,
@@ -505,73 +504,38 @@ mod tests {
         observed_finger_deltas(chain, fingers, weight, 0.0).expect("finger deltas")
     }
 
-    /// Make actual tracking input from a rig. Tips continue the terminal rest
-    /// segment, and the thumb's model-placed CMC is written to a position no
-    /// joint derives from, so a test that ignores it proves the point.
-    fn rest_observation(
-        chain: &ArmChainBinding,
-        arm_rotation: Quat,
-        hand_rotation: Quat,
-    ) -> ArmTrackingTarget {
-        use vtuber_core::arm_tracking::{ArmLandmarks, HandWorldLandmarks, PoseWorldLandmark};
-        let point = |v: Vec3| PoseWorldLandmark {
-            meters: [v.x, -v.y, -v.z],
-            visibility: Some(1.0),
-            presence: Some(1.0),
-        };
+    /// An authored straight pose in this fixture's own rest palm frame.
+    /// These tests exercise the avatar adapter independently of classification.
+    fn rest_fingers(chain: &ArmChainBinding) -> HandFingerPose {
         let wrist = chain.rest.wrist.position;
-        let mut landmarks = [point(Vec3::ZERO); 21];
-        let finger =
-            |bone: Option<crate::arm::FingerJointRestBinding>| bone.unwrap().rest.position - wrist;
-        for (start, row) in [
-            (5, chain.finger_rest.index),
-            (9, chain.finger_rest.middle),
-            (13, chain.finger_rest.ring),
-            (17, chain.finger_rest.little),
-        ] {
-            let [a, b, c] = [
-                finger(row.proximal),
-                finger(row.intermediate),
-                finger(row.distal),
-            ];
-            for (i, position) in [a, b, c, c + (c - b)].into_iter().enumerate() {
-                landmarks[start + i] = point(hand_rotation * position);
-            }
+        let normal = rest_palm_normal(chain).unwrap();
+        let index = (chain.finger_rest.index.proximal.unwrap().rest.position - wrist).normalize();
+        let little = (chain.finger_rest.little.proximal.unwrap().rest.position - wrist).normalize();
+        let forward = (index + little).normalize();
+        let across = forward.cross(normal);
+        let spread = [
+            chain.finger_rest.index,
+            chain.finger_rest.middle,
+            chain.finger_rest.ring,
+            chain.finger_rest.little,
+        ]
+        .map(|finger| {
+            let ray = (finger.intermediate.unwrap().rest.position
+                - finger.proximal.unwrap().rest.position)
+                .normalize();
+            ray.dot(across).atan2(ray.dot(forward))
+        });
+        HandFingerPose {
+            fingers: [[0.0; 3]; 4],
+            spread,
+            thumb: [0.0; 2],
+            thumb_spread: 0.0,
+            thumb_cmc: [0.0; 2],
         }
-        let thumb = chain.finger_rest.thumb;
-        let [a, b, c] = [
-            finger(thumb.metacarpal),
-            finger(thumb.proximal),
-            finger(thumb.distal),
-        ];
-        for (i, position) in [a, b, c, c + (c - b)].into_iter().enumerate() {
-            landmarks[1 + i] = point(hand_rotation * position);
-        }
-        // The Hand Landmarker places the CMC with its hand model, not by
-        // detecting it. Park it away from the rig so any ray measured from it
-        // would be visibly wrong.
-        landmarks[1] = point(hand_rotation * (wrist + Vec3::new(0.09, -0.06, 0.11)));
-        let arm = ArmLandmarks {
-            shoulder: point(Vec3::ZERO),
-            elbow: point(
-                arm_rotation * (chain.rest.elbow.position - chain.rest.upper_arm.position),
-            ),
-            wrist: point(arm_rotation * (wrist - chain.rest.upper_arm.position)),
-            hand: Some(HandWorldLandmarks {
-                landmarks,
-                handedness_score: None,
-            }),
-        };
-        vtuber_tracking::arm_tracking::retarget_arm_landmarks(
-            arm,
-            vtuber_tracking::arm_tracking::measure_arm_reference(arm).unwrap(),
-        )
     }
 
     fn straight_fingers() -> HandFingerPose {
-        rest_observation(&articulated_chain(), Quat::IDENTITY, Quat::IDENTITY)
-            .fingers
-            .unwrap()
+        rest_fingers(&articulated_chain())
     }
 
     #[test]
@@ -1064,127 +1028,21 @@ mod tests {
     }
 
     #[test]
-    fn thumb_opening_is_not_reassigned_to_the_mcp_joint() {
-        // Keep base opening as a recognition feature. Its absence from the
-        // rig's allowed motion must not move the MCP sideways in its place.
+    fn authored_thumb_opening_does_not_replace_the_cmc_coordinates() {
         let chain = articulated_chain();
-        let normal = rest_palm_normal(&chain).unwrap();
-        let origin = chain.finger_rest.thumb.metacarpal.unwrap().rest.position;
-        let baseline = rest_observation(&chain, Quat::IDENTITY, Quat::IDENTITY);
-
-        for (opening, elevation) in [(0.35, 0.0), (0.0, 0.6), (0.35, 0.6), (-0.35, -0.6)] {
-            // Keep the CMC, palm, arm and four fingers fixed, and rotate the
-            // whole thumb about the CMC to separate opening from flexion.
-            let mut observed_chain = chain;
-            let segment = observed_chain
-                .finger_rest
-                .thumb
-                .proximal
-                .unwrap()
-                .rest
-                .position
-                - origin;
-            let axis = segment.normalize().cross(normal).normalize();
-            let movement =
-                Quat::from_axis_angle(normal, opening) * Quat::from_axis_angle(axis, elevation);
-            for joint in [
-                &mut observed_chain.finger_rest.thumb.proximal,
-                &mut observed_chain.finger_rest.thumb.distal,
-            ] {
-                let joint = joint.as_mut().unwrap();
-                joint.rest.position = origin + movement * (joint.rest.position - origin);
-            }
-            let target = rest_observation(&observed_chain, Quat::IDENTITY, Quat::IDENTITY);
-            let observed = target.fingers.expect("the thumb is observed");
-            near(Vec3::from(target.wrist), Vec3::from(baseline.wrist));
-            near(
-                Vec3::from(target.palm_normal.unwrap()),
-                Vec3::from(baseline.palm_normal.unwrap()),
-            );
-
-            for weight in [0.0, 0.5, 1.0] {
-                let fingers = observed_finger_deltas(&chain, observed, weight, 0.0);
-                if weight == 0.0 {
-                    assert!(fingers.is_none());
-                }
-                let fingers =
-                    fingers.unwrap_or_else(|| crate::arm_pose::resolve_finger_pose(&chain, 0.0));
-                if weight > 0.0 {
-                    // The observed path drives the two real joints only. The
-                    // virtual path is a separate pose and is not under test.
-                    assert!(
-                        fingers.thumb.metacarpal.unwrap().delta == Quat::IDENTITY,
-                        "an oblique thumb must leave its base neutral"
-                    );
-                    let moved = fingers
-                        .thumb
-                        .proximal
-                        .expect("the thumb has a knuckle")
-                        .delta
-                        .angle_between(Quat::IDENTITY);
-                    if elevation >= 0.0 {
-                        assert!(
-                            moved < 1.0e-5,
-                            "opening/outward elevation must not hyperextend the left MCP: {moved}"
-                        );
-                    } else {
-                        assert!(
-                            moved > 1.0e-3,
-                            "flexion must still reach the knuckle: {moved}"
-                        );
-                    }
-                }
-                // The four fingers are untouched by any of this.
-                for finger in [
-                    &fingers.index,
-                    &fingers.middle,
-                    &fingers.ring,
-                    &fingers.little,
-                ] {
-                    for joint in [finger.proximal, finger.intermediate, finger.distal] {
-                        assert!(joint.unwrap().delta.angle_between(Quat::IDENTITY) < 1.0e-5);
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn local_fingers_ignore_arm_swing_and_forearm_pronation() {
-        let chain = articulated_chain();
-        let neutral = observed_finger_deltas(&chain, straight_fingers(), 1.0, 0.0).unwrap();
-        for (arm_rotation, twist) in [
-            (
-                Quat::from_rotation_y(0.7) * Quat::from_rotation_z(-0.4),
-                0.0,
-            ),
-            (Quat::IDENTITY, 1.0),
-            (Quat::from_rotation_z(0.45), -0.8),
-        ] {
-            let target = rest_observation(
-                &chain,
-                arm_rotation,
-                arm_rotation * Quat::from_rotation_x(twist),
-            );
-            let fingers =
-                observed_finger_deltas(&chain, target.fingers.unwrap(), 1.0, 0.0).unwrap();
+        let mut observed = straight_fingers();
+        observed.thumb = [-0.3, -0.4];
+        observed.thumb_cmc = [-0.2, 0.3];
+        let baseline = resolved_fingers(&chain, observed, 1.0);
+        for opening in [0.0, 0.35, 0.7, 1.2] {
+            observed.thumb_spread = opening;
+            let actual = resolved_fingers(&chain, observed, 1.0);
             for (a, b) in [
-                (&fingers.thumb, &neutral.thumb),
-                (&fingers.index, &neutral.index),
-                (&fingers.middle, &neutral.middle),
-                (&fingers.ring, &neutral.ring),
-                (&fingers.little, &neutral.little),
+                (actual.thumb.metacarpal, baseline.thumb.metacarpal),
+                (actual.thumb.proximal, baseline.thumb.proximal),
+                (actual.thumb.distal, baseline.thumb.distal),
             ] {
-                for (a, b) in [a.metacarpal, a.proximal, a.intermediate, a.distal]
-                    .into_iter()
-                    .zip([b.metacarpal, b.proximal, b.intermediate, b.distal])
-                {
-                    match (a, b) {
-                        (Some(a), Some(b)) => assert!(a.delta.angle_between(b.delta) < 1.0e-3),
-                        (None, None) => (),
-                        _ => panic!("finger binding changed"),
-                    }
-                }
+                assert!(a.unwrap().delta.angle_between(b.unwrap().delta) < 1.0e-5);
             }
         }
     }
@@ -1192,7 +1050,8 @@ mod tests {
     #[test]
     fn selected_fist_curls_into_both_palms_in_a_palms_down_t_pose() {
         use vtuber_core::arm_tracking::{
-            ArmLandmarks, HandWorldLandmarks, PoseArmFrame, PoseArmObservation, PoseWorldLandmark,
+            ArmLandmarks, HandGesture, HandWorldLandmarks, PoseArmFrame, PoseArmObservation,
+            PoseWorldLandmark,
         };
         use vtuber_core::{FrameSeq, MonoTimeNs};
         use vtuber_tracking::arm_tracking::{
@@ -1250,10 +1109,11 @@ mod tests {
             ] {
                 let mut position = row.proximal.unwrap().rest.position;
                 landmarks[start] = point(position);
-                // The left hand points +X with thumb +Z in the VRM T-pose.
-                // Both palms face DOWN (-Y), regardless of the cross-product sign.
-                for (step, heading) in [1.4_f32, 2.9, 3.8].into_iter().enumerate() {
-                    position += Vec3::new(sign * heading.cos(), -heading.sin(), 0.0) * 0.02;
+                // Deliberately straight landmark fingers: the image classifier's
+                // fist label must choose the pose instead of fitting these angles.
+                // Both palms face down (-Y), regardless of the normal's sign.
+                for step in 0..3 {
+                    position += Vec3::new(sign * 0.02, 0.0, 0.0);
                     landmarks[start + step + 1] = point(position);
                 }
             }
@@ -1273,6 +1133,7 @@ mod tests {
                 hand: Some(HandWorldLandmarks {
                     landmarks,
                     handedness_score: None,
+                    gesture: HandGesture::Fist,
                 }),
             };
             state.reset();
@@ -1370,9 +1231,7 @@ mod tests {
                     }
                 }
             }
-            let mut observed = rest_observation(&chain, Quat::IDENTITY, Quat::IDENTITY)
-                .fingers
-                .unwrap();
+            let mut observed = rest_fingers(&chain);
             let normal = rest_palm_normal(&chain).unwrap();
             let curl = 0.4 * normal.dot(Vec3::Y).signum();
             observed.fingers = [[curl; 3]; 4];

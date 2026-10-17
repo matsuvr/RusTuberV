@@ -193,3 +193,18 @@ the wrist target nor skeletal translations. Joint limits and collision checks
 remain authoritative in the existing solver. Straight arms and circles with no
 clear sampled target are left to that solver; a sampled target is not a proof
 of anatomical or path feasibility. No extra contact clearance is imposed.
+
+## HaGRID hand crop classifier (dynamic_gestures)
+
+`assets/models/hagrid_crops_classifier.onnx` is an unmodified copy of
+[ai-forever/dynamic_gestures, models/crops_classifier.onnx](https://github.com/ai-forever/dynamic_gestures/blob/557a836bf82fce8d36494d0c17e95ca236f5611c/models/crops_classifier.onnx)
+at revision `557a836bf82fce8d36494d0c17e95ca236f5611c` (411,683 bytes;
+Git blob SHA-1 `d11dd4f110e4e71ff480e8d2de3195bfbc48d749`). The project's
+Apache-2.0 license is retained verbatim at
+[assets/models/LICENSE.hagrid.txt](assets/models/LICENSE.hagrid.txt).
+
+The RGB resize/normalization and 45-label output order follow that revision's
+`onnx_models.py` and `utils/enums.py`. RusTuberV implements preprocessing and
+execution in Rust, uses MediaPipe landmarks to locate the crop, and maps the
+classified sign to its authored avatar poses. No HaGRID dataset images, hand
+detector, Python runtime, or ONNX Runtime library are bundled.

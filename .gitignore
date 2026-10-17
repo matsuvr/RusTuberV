@@ -28,6 +28,7 @@ desktop.ini
 # Keep manifest.toml and LICENSE.mediapipe.txt; ignore downloaded artifacts.
 /assets/models/*.tflite
 /assets/models/*.onnx
+!/assets/models/hagrid_crops_classifier.onnx
 /assets/models/*.task
 /assets/models/*.binarypb
 

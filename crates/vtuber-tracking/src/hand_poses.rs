@@ -1,9 +1,9 @@
-//! Nearest authored hand pose, confirmed on camera frames and blended on render ticks.
+//! Image-classified hand poses, confirmed on camera frames and blended on render ticks.
 //! The catalog uses positive anatomical flexion magnitudes. In the palm frame
 //! (index cross little), inward flexion is negative on the left, positive on
 //! the right. Opening toward the thumb has the same sign on both hands.
 
-use vtuber_core::arm_tracking::HandFingerPose;
+use vtuber_core::arm_tracking::{HandFingerPose, HandGesture};
 
 use crate::filter::exponential::time_constant_alpha;
 
@@ -39,21 +39,16 @@ impl HandPoseSelector {
 
     pub(crate) fn observe(
         &mut self,
-        observation: Option<HandFingerPose>,
+        observation: Option<HandGesture>,
         flexion_sign: f32,
     ) -> Option<HandFingerPose> {
         let Some(observed) = observation else {
             self.interrupt();
             return None;
         };
-        let canonical = with_flexion_sign(observed, flexion_sign);
         let closest = catalog::POSES
             .iter()
-            .enumerate()
-            .min_by(|(_, (name_a, a)), (_, (name_b, b))| {
-                score(canonical, name_a, *a).total_cmp(&score(canonical, name_b, *b))
-            })
-            .map(|(index, _)| index);
+            .position(|(name, _)| *name == pose_name(observed));
         if closest == self.selected {
             self.interrupt();
         } else {
@@ -89,59 +84,36 @@ fn coordinates(pose: HandFingerPose) -> impl Iterator<Item = f32> {
         .chain([pose.thumb_spread])
 }
 
-/// Ranking preferences, not anatomical limits. A distinctly different shape
-/// can still win; priority must not turn every detected hand into rock/paper/V.
-fn priority_penalty(name: &str) -> f32 {
-    match name {
-        "fist" | "peace" | "open" => 0.0,
-        "thumbs_up" | "point" | "horns" | "shaka" | "finger_gun" | "finger_heart" | "ok"
-        | "crossed_fingers" | "vulcan" | "half_heart" | "i_love_you" => 0.15,
-        _ => 0.5,
+/// Orientation variants share a pose before confirmation. Palm orientation is
+/// carried by the separate landmark channel, not baked into these finger angles.
+/// Heart variants use the catalog's authored approximation of one heart half.
+fn pose_name(gesture: HandGesture) -> &'static str {
+    use HandGesture::*;
+    match gesture {
+        Palm | HandDown | HandRight | HandLeft => "open",
+        ThumbIndex => "finger_gun",
+        Like | Dislike | ThumbLeft | ThumbRight | ThumbDown => "thumbs_up",
+        HalfUp | HalfLeft | HalfRight | HalfDown => "half_closed",
+        PartHandHeart | PartHandHeart2 => "half_heart",
+        Fist | FistInverted => "fist",
+        TwoLeft | TwoRight | TwoDown | TwoUp | TwoUpInverted => "two_together",
+        Grabbing => "claw",
+        Grip => "grip",
+        Point => "point_click",
+        Call => "shaka",
+        Three3 => "i_love_you",
+        LittleFinger => "little_only",
+        MiddleFinger => "middle_only",
+        Four => "four",
+        Mute | One | OneLeft | OneRight | OneDown => "point",
+        Ok => "ok",
+        Peace | PeaceInverted => "peace",
+        Rock => "horns",
+        Stop | StopInverted => "open_together",
+        Three => "three_thumb_index_middle",
+        Three2 => "three",
+        ThreeGun => "three_gun",
     }
-}
-
-/// Total positive flexion distinguishes an extended finger from a folded one.
-/// Once folded, how the bend divides between PIP and DIP must not hide a V sign.
-fn curl(joints: impl IntoIterator<Item = f32>, folded: f32) -> f32 {
-    (joints.into_iter().map(|v| v.max(0.0)).sum::<f32>() / folded).clamp(0.0, 1.0)
-}
-
-fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
-    let curls_a = a.fingers.map(|joints| curl(joints, 2.4));
-    let curls_b = b.fingers.map(|joints| curl(joints, 2.4));
-    let mut result = priority_penalty(name);
-    for ((a, b), (curl_a, curl_b)) in a
-        .fingers
-        .into_iter()
-        .zip(b.fingers)
-        .zip(curls_a.into_iter().zip(curls_b))
-    {
-        let [knuckle_a, _, _] = a;
-        let [knuckle_b, _, _] = b;
-        // The MCP keeps a hooked/claw hand distinct from a fist.
-        result += (curl_a - curl_b).powi(2) + (knuckle_a - knuckle_b).powi(2);
-    }
-    // Every candidate with extended neighbours must explain their observed
-    // opening, even when a noisy bend estimate calls one finger folded.
-    // Otherwise a V can become crossed fingers without comparing the gap
-    // that distinguishes them. Candidate-folded ring/little gaps stay unused.
-    let extended = curls_b.into_iter().map(|curl| curl < 0.5);
-    for ((a, b), pair) in a
-        .spread
-        .windows(2)
-        .zip(b.spread.windows(2))
-        .zip(extended.clone().zip(extended.skip(1)))
-    {
-        if let ([a0, a1], [b0, b1], (true, true)) = (a, b, pair) {
-            result += 2.0 * ((a0 - a1) - (b0 - b1)).powi(2);
-        }
-    }
-    // A thumb is often occluded behind a V/fist; rank the four visible fingers
-    // first, retaining enough thumb evidence to distinguish a thumbs-up/shaka.
-    result
-        + 0.25
-            * ((curl(a.thumb, 2.1) - curl(b.thumb, 2.1)).powi(2)
-                + (a.thumb_spread - b.thumb_spread).powi(2))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -201,8 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_is_distinct_bounded_and_selection_reflects_between_hands() {
-        assert_eq!(catalog::POSES.len(), 32);
+    fn catalog_is_distinct_and_anatomically_bounded() {
         for &(name, target) in catalog::POSES {
             for finger in target.fingers {
                 for (angle, limit) in finger.into_iter().zip([1.75, 1.92, 1.05]) {
@@ -221,19 +192,6 @@ mod tests {
             assert!((0.0..=1.31).contains(&target.thumb_spread), "{name}");
             assert!((-0.78..=0.7).contains(&target.thumb_cmc[0]), "{name}");
             assert!((-0.5..=0.78).contains(&target.thumb_cmc[1]), "{name}");
-            let mut canonical_result = None;
-            for sign in [-1.0, 1.0] {
-                let input = with_flexion_sign(target, sign);
-                let mut selector = HandPoseSelector::new();
-                for _ in 1..CONFIRM_FRAMES {
-                    assert_eq!(selector.observe(Some(input), sign), None);
-                }
-                let result = with_flexion_sign(selector.observe(Some(input), sign).unwrap(), sign);
-                if let Some(previous) = canonical_result {
-                    assert_eq!(result, previous, "{name}");
-                }
-                canonical_result = Some(result);
-            }
             assert_eq!(
                 catalog::POSES
                     .iter()
@@ -245,137 +203,128 @@ mod tests {
         }
     }
 
-    fn selected_name(observed: HandFingerPose) -> &'static str {
-        let mut selector = HandPoseSelector::new();
-        for _ in 0..CONFIRM_FRAMES {
-            selector.observe(Some(observed), 1.0);
-        }
-        catalog::POSES[selector.selected.unwrap()].0
-    }
-
     #[test]
-    fn peace_survives_thumb_occlusion_and_different_folded_joint_angles() {
-        for folded in [[0.9, 1.0, 0.7], [1.3, 1.5, 0.9], [0.6, 1.4, 0.4]] {
-            for thumb in [[0.0, 0.0], [0.3, 0.1], [0.7, 1.0]] {
-                let observed = HandFingerPose {
-                    fingers: [[0.05, 0.1, 0.0], [0.1, 0.05, 0.0], folded, folded],
-                    spread: [0.15, -0.12, -0.6, 0.8],
-                    thumb,
-                    thumb_spread: 0.4,
-                    thumb_cmc: [0.0; 2],
-                };
-                assert_eq!(selected_name(observed), "peace", "{observed:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn a_v_gap_survives_the_observed_curl_threshold_on_both_hands() {
-        // Left-hand features from camera frame 1024. The middle finger's
-        // estimated MCP + PIP is just above the old "extended" threshold,
-        // while its opening still clearly separates it from the index.
-        let observed = HandFingerPose {
-            fingers: [
-                [0.408599, 0.138518, 0.632538],
-                [0.549093, 0.652508, -0.280719],
-                [1.474802, 1.382137, 0.794503],
-                [1.284847, 1.411403, 0.781327],
-            ],
-            spread: [0.217769, -0.108644, 0.239300, 0.567489],
-            thumb: [0.364734, -0.553566],
-            thumb_spread: -0.538910,
-            thumb_cmc: [0.0; 2],
-        };
-        for pip in [0.63, 0.649, 0.651, observed.fingers[1][1], 0.67] {
-            let mut observed = observed;
-            observed.fingers[1][1] = pip;
+    fn every_gesture_selects_a_catalog_pose_with_anatomical_handedness() {
+        for gesture in [
+            HandGesture::HandDown,
+            HandGesture::HandRight,
+            HandGesture::HandLeft,
+            HandGesture::ThumbIndex,
+            HandGesture::ThumbLeft,
+            HandGesture::ThumbRight,
+            HandGesture::ThumbDown,
+            HandGesture::HalfUp,
+            HandGesture::HalfLeft,
+            HandGesture::HalfRight,
+            HandGesture::HalfDown,
+            HandGesture::PartHandHeart,
+            HandGesture::PartHandHeart2,
+            HandGesture::FistInverted,
+            HandGesture::TwoLeft,
+            HandGesture::TwoRight,
+            HandGesture::TwoDown,
+            HandGesture::Grabbing,
+            HandGesture::Grip,
+            HandGesture::Point,
+            HandGesture::Call,
+            HandGesture::Three3,
+            HandGesture::LittleFinger,
+            HandGesture::MiddleFinger,
+            HandGesture::Dislike,
+            HandGesture::Fist,
+            HandGesture::Four,
+            HandGesture::Like,
+            HandGesture::Mute,
+            HandGesture::Ok,
+            HandGesture::One,
+            HandGesture::Palm,
+            HandGesture::Peace,
+            HandGesture::PeaceInverted,
+            HandGesture::Rock,
+            HandGesture::Stop,
+            HandGesture::StopInverted,
+            HandGesture::Three,
+            HandGesture::Three2,
+            HandGesture::TwoUp,
+            HandGesture::TwoUpInverted,
+            HandGesture::ThreeGun,
+            HandGesture::OneLeft,
+            HandGesture::OneRight,
+            HandGesture::OneDown,
+        ] {
+            let expected = pose(pose_name(gesture));
             for sign in [-1.0, 1.0] {
                 let mut selector = HandPoseSelector::new();
-                let input = with_flexion_sign(observed, sign);
-                for _ in 0..CONFIRM_FRAMES {
-                    selector.observe(Some(input), sign);
+                for _ in 1..CONFIRM_FRAMES {
+                    assert_eq!(selector.observe(Some(gesture), sign), None);
                 }
-                assert_eq!(
-                    catalog::POSES[selector.selected.unwrap()].0,
-                    "peace",
-                    "PIP {pip}, hand sign {sign}: an open V must not become crossed fingers"
-                );
+                let selected = selector.observe(Some(gesture), sign).unwrap();
+                assert_eq!(with_flexion_sign(selected, sign), expected, "{gesture:?}");
             }
         }
-    }
-
-    #[test]
-    fn priority_prefers_common_signs_without_hiding_distinct_emoji_or_other_shapes() {
-        for name in [
-            "fist",
-            "peace",
-            "open",
-            "thumbs_up",
-            "point",
-            "ok",
-            "crossed_fingers",
-            "vulcan",
-            "shaka",
-            "claw",
-            "ring_only",
-            "little_only",
+        for (gesture, name) in [
+            (HandGesture::Fist, "fist"),
+            (HandGesture::Peace, "peace"),
+            (HandGesture::Palm, "open"),
+            (HandGesture::Ok, "ok"),
+            (HandGesture::Like, "thumbs_up"),
+            (HandGesture::Three, "three_thumb_index_middle"),
+            (HandGesture::Three2, "three"),
+            (HandGesture::Three3, "i_love_you"),
         ] {
-            assert_eq!(selected_name(pose(name)), name);
+            assert_eq!(pose_name(gesture), name);
         }
-        let mut relaxed_fist = pose("fist");
-        relaxed_fist.fingers = [[1.2, 1.3, 0.5]; 4];
-        assert_eq!(selected_name(relaxed_fist), "fist");
     }
 
     #[test]
-    fn noise_and_missing_frames_do_not_change_the_selected_pose() {
+    fn orientation_variants_confirm_one_shape_and_noise_cannot_switch_it() {
         let mut selector = HandPoseSelector::new();
-        let open = pose("open");
-        let fist = pose("fist");
-        for _ in 0..CONFIRM_FRAMES {
-            selector.observe(Some(open), 1.0);
+        for gesture in [
+            HandGesture::Peace,
+            HandGesture::PeaceInverted,
+            HandGesture::Peace,
+        ] {
+            assert_eq!(selector.observe(Some(gesture), 1.0), None);
         }
-        for _ in 0..20 {
-            assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
-            assert_eq!(selector.observe(Some(open), 1.0), Some(open));
+        let peace = Some(pose("peace"));
+        assert_eq!(
+            selector.observe(Some(HandGesture::PeaceInverted), 1.0),
+            peace
+        );
+        for _ in 0..10 {
+            assert_eq!(selector.observe(Some(HandGesture::Fist), 1.0), peace);
+            assert_eq!(selector.observe(Some(HandGesture::Peace), 1.0), peace);
+        }
+    }
+
+    #[test]
+    fn missing_and_quarantined_observations_break_confirmation() {
+        let mut selector = HandPoseSelector::new();
+        let open = Some(pose("open"));
+        for _ in 0..CONFIRM_FRAMES {
+            selector.observe(Some(HandGesture::Palm), 1.0);
         }
         for _ in 1..CONFIRM_FRAMES {
-            assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
+            assert_eq!(selector.observe(Some(HandGesture::Fist), 1.0), open);
         }
         assert_eq!(selector.observe(None, 1.0), None);
         for _ in 1..CONFIRM_FRAMES {
-            assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
+            assert_eq!(selector.observe(Some(HandGesture::Fist), 1.0), open);
         }
-        assert_eq!(selector.observe(Some(fist), 1.0), Some(fist));
-        let mut noisy = fist;
-        noisy.fingers[0][0] += 0.03;
-        noisy.spread[2] -= 0.02;
-        for _ in 0..10 {
-            assert_eq!(selector.observe(Some(noisy), 1.0), Some(fist));
+        selector.interrupt();
+        for _ in 1..CONFIRM_FRAMES {
+            assert_eq!(selector.observe(Some(HandGesture::Fist), 1.0), open);
         }
+        assert_eq!(
+            selector.observe(Some(HandGesture::Fist), 1.0),
+            Some(pose("fist"))
+        );
     }
 
     #[test]
-    fn backward_observations_never_reach_the_display_and_transitions_stay_bounded() {
-        let mut selector = HandPoseSelector::new();
-        let mut backward = pose("open");
-        backward.fingers = [[-1.5; 3]; 4];
-        backward.thumb = [-1.0; 2];
-        for _ in 0..CONFIRM_FRAMES {
-            selector.observe(Some(backward), 1.0);
-        }
-        let result = selector.observe(Some(backward), 1.0).unwrap();
-        assert!(
-            result
-                .fingers
-                .into_iter()
-                .flatten()
-                .chain(result.thumb)
-                .all(|a| a >= 0.0)
-        );
+    fn transitions_cannot_overshoot_the_authored_joint_limits() {
         let mut smoother = FingerSmootherState::new(pose("open"));
-        // Reverse midway through a transition, when a spring could overshoot.
-        for name in ["fist", "open", "crossed_fingers", "vulcan", "fist"] {
+        for name in ["fist", "open", "ok", "middle_only", "fist"] {
             let target = pose(name);
             for _ in 0..8 {
                 let before = smoother.output();

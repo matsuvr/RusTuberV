@@ -20,6 +20,23 @@ static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
     LicenseGroup {
         expression: "Apache-2.0",
         items: &[LicensedItem {
+            name: "HaGRID crops_classifier.onnx (dynamic_gestures)",
+            version: "557a836",
+        }],
+        texts: &[
+            LicenseText {
+                file_name: "LICENSE.hagrid.txt",
+                body: include_str!("../../../assets/models/LICENSE.hagrid.txt"),
+            },
+            LicenseText {
+                file_name: "THIRD_PARTY_NOTICES.md",
+                body: include_str!("../../../THIRD_PARTY_NOTICES.md"),
+            },
+        ],
+    },
+    LicenseGroup {
+        expression: "Apache-2.0",
+        items: &[LicensedItem {
             name: "MyoArm anatomical parameters (adapted)",
             version: "93b0ca8",
         }],
@@ -232,5 +249,6 @@ mod tests {
         assert!(names.contains(&"bevy_window (vendor/bevy_window)"));
         assert!(names.contains(&"nokhwa (vendor/nokhwa)"));
         assert!(names.contains(&"assets/models (MediaPipe models)"));
+        assert!(names.contains(&"HaGRID crops_classifier.onnx (dynamic_gestures)"));
     }
 }

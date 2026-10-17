@@ -487,4 +487,79 @@ pub(super) const POSES: &[(&str, HandFingerPose)] = &[
             thumb_spread: 0.488692,
         },
     ),
+    (
+        "middle_only",
+        HandFingerPose {
+            fingers: [
+                [1.48353, 1.745329, FRAC_PI_3],
+                [0.0, 0.0, 0.0],
+                [1.48353, 1.745329, FRAC_PI_3],
+                [1.48353, 1.745329, FRAC_PI_3],
+            ],
+            spread: [0.0, 0.0, 0.0, 0.0],
+            thumb: [0.698132, FRAC_PI_3],
+            thumb_cmc: [-0.349066, 0.349066],
+            thumb_spread: 0.610865,
+        },
+    ),
+    (
+        "half_closed",
+        HandFingerPose {
+            fingers: [
+                [1.396263, 0.0, 0.0],
+                [1.396263, 0.0, 0.0],
+                [1.396263, 0.0, 0.0],
+                [1.396263, 0.0, 0.0],
+            ],
+            spread: [0.0, 0.0, 0.0, 0.0],
+            thumb: [0.087266, 0.0],
+            thumb_cmc: [0.0, 0.174533],
+            thumb_spread: 0.436332,
+        },
+    ),
+    (
+        "grip",
+        HandFingerPose {
+            fingers: [
+                [0.558505, 1.308997, 0.366519],
+                [1.48353, 1.745329, FRAC_PI_3],
+                [1.48353, 1.745329, FRAC_PI_3],
+                [1.48353, 1.745329, FRAC_PI_3],
+            ],
+            spread: [0.349066, 0.0, 0.0, 0.0],
+            thumb: [0.261799, FRAC_PI_6],
+            thumb_cmc: [-0.139626, 0.767945],
+            thumb_spread: 0.488692,
+        },
+    ),
+    (
+        "point_click",
+        HandFingerPose {
+            fingers: [
+                [1.22173, 0.261799, 0.0],
+                [1.48353, 1.745329, FRAC_PI_3],
+                [1.48353, 1.745329, FRAC_PI_3],
+                [1.48353, 1.745329, FRAC_PI_3],
+            ],
+            spread: [0.0, 0.0, 0.0, 0.0],
+            thumb: [0.087266, 0.0],
+            thumb_cmc: [-FRAC_PI_6, 0.0],
+            thumb_spread: 1.134464,
+        },
+    ),
+    (
+        "three_gun",
+        HandFingerPose {
+            fingers: [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.48353, 1.745329, FRAC_PI_3],
+                [1.48353, 1.745329, FRAC_PI_3],
+            ],
+            spread: [0.0, 0.0, 0.0, 0.0],
+            thumb: [0.0, 0.0],
+            thumb_cmc: [0.261799, -0.087266],
+            thumb_spread: 1.134464,
+        },
+    ),
 ];

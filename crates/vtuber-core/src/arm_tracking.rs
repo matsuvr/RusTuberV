@@ -22,12 +22,111 @@ pub struct PoseWorldLandmark {
 /// MediaPipe Hand Landmarker's fixed landmark count per hand.
 pub const HAND_LANDMARK_COUNT: usize = 21;
 
-/// One hand's world landmarks from the Hand Landmarker.
+/// Static hand sign classified from the camera crop.
+///
+/// These names retain the classifier's labels, including orientation variants.
+/// Tracking maps them to authored finger poses; palm orientation still comes
+/// from the hand landmarks. This classifier has no "no gesture" output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandGesture {
+    /// The classifier's `hand_down` label.
+    HandDown,
+    /// The classifier's `hand_right` label.
+    HandRight,
+    /// The classifier's `hand_left` label.
+    HandLeft,
+    /// The classifier's `thumb_index` label.
+    ThumbIndex,
+    /// The classifier's `thumb_left` label.
+    ThumbLeft,
+    /// The classifier's `thumb_right` label.
+    ThumbRight,
+    /// The classifier's `thumb_down` label.
+    ThumbDown,
+    /// The classifier's `half_up` label.
+    HalfUp,
+    /// The classifier's `half_left` label.
+    HalfLeft,
+    /// The classifier's `half_right` label.
+    HalfRight,
+    /// The classifier's `half_down` label.
+    HalfDown,
+    /// The classifier's `part_hand_heart` label.
+    PartHandHeart,
+    /// The classifier's `part_hand_heart2` label.
+    PartHandHeart2,
+    /// The classifier's `fist_inverted` label.
+    FistInverted,
+    /// The classifier's `two_left` label.
+    TwoLeft,
+    /// The classifier's `two_right` label.
+    TwoRight,
+    /// The classifier's `two_down` label.
+    TwoDown,
+    /// The classifier's `grabbing` label.
+    Grabbing,
+    /// The classifier's `grip` label.
+    Grip,
+    /// The classifier's `point` label.
+    Point,
+    /// The classifier's `call` label.
+    Call,
+    /// The classifier's `three3` label.
+    Three3,
+    /// The classifier's `little_finger` label.
+    LittleFinger,
+    /// The classifier's `middle_finger` label.
+    MiddleFinger,
+    /// The classifier's `dislike` label.
+    Dislike,
+    /// The classifier's `fist` label.
+    Fist,
+    /// The classifier's `four` label.
+    Four,
+    /// The classifier's `like` label.
+    Like,
+    /// The classifier's `mute` label.
+    Mute,
+    /// The classifier's `ok` label.
+    Ok,
+    /// The classifier's `one` label.
+    One,
+    /// The classifier's `palm` label.
+    Palm,
+    /// The classifier's `peace` label.
+    Peace,
+    /// The classifier's `peace_inverted` label.
+    PeaceInverted,
+    /// The classifier's `rock` label.
+    Rock,
+    /// The classifier's `stop` label.
+    Stop,
+    /// The classifier's `stop_inverted` label.
+    StopInverted,
+    /// The classifier's `three` label.
+    Three,
+    /// The classifier's `three2` label.
+    Three2,
+    /// The classifier's `two_up` label.
+    TwoUp,
+    /// The classifier's `two_up_inverted` label.
+    TwoUpInverted,
+    /// The classifier's `three_gun` label.
+    ThreeGun,
+    /// The classifier's `one_left` label.
+    OneLeft,
+    /// The classifier's `one_right` label.
+    OneRight,
+    /// The classifier's `one_down` label.
+    OneDown,
+}
+
+/// One hand's world landmarks and image-classified gesture.
 ///
 /// The 21 points are the wrist, finger joints, and tips in the hand task's own
 /// camera-aligned basis; only orientation is derived from them, because their
-/// origin is hand-centred rather than body-centred. The full set is retained so
-/// finger articulation can be consumed without a new inference model.
+/// origin is hand-centred rather than body-centred. Finger articulation comes
+/// from the gesture classified on the same camera image, not joint-angle fitting.
 ///
 /// The presence of this value is the only hand-quality signal available: the
 /// Hand Landmarker reports no per-landmark detection confidence, so a hand that
@@ -38,6 +137,8 @@ pub const HAND_LANDMARK_COUNT: usize = 21;
 pub struct HandWorldLandmarks {
     /// 21 world landmarks of one hand, in meters.
     pub landmarks: [PoseWorldLandmark; HAND_LANDMARK_COUNT],
+    /// Image-classified sign belonging to this detection, before side pairing.
+    pub gesture: HandGesture,
     /// MediaPipe's confidence in its Left/Right classification of this hand.
     ///
     /// This is the confidence of a *left/right label*, not of the landmark
@@ -92,13 +193,13 @@ pub struct PoseArmFrame {
     pub observation: Option<PoseArmObservation>,
 }
 
-/// Observed articulation in a hand-local palm frame, independent of arm pose.
+/// Authored articulation selected by the classified sign, independent of arm pose.
 ///
 /// Forward is the bisector of the unit wrist-to-index/little MCP rays. Normal
 /// is their normalized index cross little; across is forward cross normal.
 /// Local XYZ means (across, forward, normal). The normal is axial: reflection
 /// reverses local Z and signed flexion, but preserves spread and local XY.
-/// Only differences inside one hand are used, never the hand task's origin.
+/// The catalog supplies bounded joint angles; image landmarks do not drive them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HandFingerPose {
     /// Index, middle, ring, little `[mcp, pip, dip]` radians. MCP is signed
@@ -108,18 +209,15 @@ pub struct HandFingerPose {
     /// Each proximal segment's in-plane angle from forward toward across.
     /// Spread is independent of MCP elevation and compared to the rig's rest.
     pub spread: [f32; 4],
-    /// Thumb `[mcp, ip]` coordinates. Raw landmark features use the signed
-    /// MCP-to-IP elevation and the signed IP bend. After pose selection these
-    /// are authored flexion amounts applied relative to the rig's resting
-    /// thumb about the anatomical MCP/IP axes, with the same handed sign as
-    /// `fingers` (left negative, right positive). The Hand Landmarker CMC is
-    /// not used.
+    /// Authored thumb `[mcp, ip]` flexion relative to the rig's resting thumb,
+    /// about the anatomical MCP/IP axes, with the same handed sign as
+    /// `fingers` (left negative, right positive).
     pub thumb: [f32; 2],
-    /// The thumb's in-plane opening, from forward toward across. Used for pose
-    /// recognition only; CMC uses the selected catalog coordinates separately.
+    /// Authored thumb opening retained in the catalog's palm coordinates.
+    /// The avatar uses the CMC coordinates below for thumb-base articulation.
     pub thumb_spread: f32,
     /// Authored CMC [flexion, abduction] in the right-hand model coordinates.
-    /// Independent of raw landmark features; reflected by the avatar axes.
+    /// Reflected by the avatar axes.
     pub thumb_cmc: [f32; 2],
 }
 
@@ -146,7 +244,7 @@ pub struct ArmTrackingTarget {
     /// Palm long axis from wrist toward the index/little MCP bisector.
     /// A polar vector, unlike the axial palm normal.
     pub palm_forward: Option<[f32; 3]>,
-    /// Observed finger articulation, when the hand's landmarks defined it.
+    /// Authored finger articulation after camera-frame gesture confirmation.
     ///
     /// `None` means "no finger observation", never a fabricated rest pose; the
     /// avatar keeps its own rest fingers in that case.

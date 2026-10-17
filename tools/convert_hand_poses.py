@@ -42,13 +42,18 @@ ADDITIONAL = [
     ("open_together", [OPEN] * 4, [0, 0, 0, 0], 25),
     ("two_together", [OPEN, OPEN, FOLDED, FOLDED], [0, 0, 0, 0], 35),
     ("pinch", [[32, 75, 21], [25, 30, 15], [30, 35, 20], [35, 40, 25]], [20, 0, -5, -10], 28),
+    ("middle_only", [FOLDED, OPEN, FOLDED, FOLDED], [0, 0, 0, 0], 35),
+    ("half_closed", [[80, 0, 0]] * 4, [0, 0, 0, 0], 25),
+    ("grip", [[32, 75, 21], FOLDED, FOLDED, FOLDED], [20, 0, 0, 0], 28),
+    ("point_click", [[70, 15, 0], FOLDED, FOLDED, FOLDED], [0, 0, 0, 0], 65),
+    ("three_gun", [OPEN, OPEN, FOLDED, FOLDED], [0, 0, 0, 0], 65),
 ]
 
 # Artist-authored thumb coordinates for the anatomical VRM adapter, in degrees:
 # (MCP/IP flexion, CMC flexion/abduction). Unity's normalized thumb muscles do
 # not specify this model's oblique joint angles. In particular, a folded thumb
 # must oppose the fingers, rather than inherit positive CMC extension from a
-# VRChat clip. The spread feature remains available for pose recognition.
+# VRChat clip. Thumb spread is retained as part of the authored pose data.
 THUMBS = {
     "relaxed": ([25, 17.5], [0, 0]),
     "open": ([0, 0], [0, 7]),
@@ -82,6 +87,11 @@ THUMBS = {
     "open_together": ([5, 0], [0, 10]),
     "two_together": ([40, 55], [-20, 20]),
     "pinch": ([15, 30], [-8, 44]),
+    "middle_only": ([40, 60], [-20, 20]),
+    "half_closed": ([5, 0], [0, 10]),
+    "grip": ([15, 30], [-8, 44]),
+    "point_click": ([5, 0], [-30, 0]),
+    "three_gun": ([0, 0], [15, -5]),
 }
 
 

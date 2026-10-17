@@ -8,6 +8,7 @@ notes = [
     "MediaPipe Face Landmarker is the sole production face backend through the pinned native binding in ADR-009.",
     "MediaPipe Pose Landmarker is the sole production arm-observation backend through the same binding.",
     "MediaPipe Hand Landmarker runs beside Pose in the same worker for the observed palm plane; the Pose hand keypoints are not used.",
+    "The embedded HaGRID crop classifier selects authored finger poses from the same hand detections through tract.",
     "The task bundle is consumed as a bundle; internal models are not extracted into an application pipeline.",
     "The legacy composite artifacts below are retained only for explicit research/evaluation commands.",
 ]
@@ -41,6 +42,18 @@ notes = [
     "Palm/finger-observation backend for observed arms; the 21 landmarks are used up to the palm plane.",
     "Verified by SHA-256 before worker construction; no silent fallback to the Pose hand keypoints.",
 ]
+
+[[artifacts]]
+file = "hagrid_crops_classifier.onnx"
+sha256 = "12a02344f63a7c4f2a2ca90f8740ca10a08c17b683b5585d73c3e88323056762"
+purpose = "HaGRID static hand crop classifier: 45 labels including orientation variants"
+source = "https://raw.githubusercontent.com/ai-forever/dynamic_gestures/557a836bf82fce8d36494d0c17e95ca236f5611c/models/crops_classifier.onnx"
+upstream = "https://github.com/ai-forever/dynamic_gestures"
+license = "Apache-2.0"
+license_url = "https://github.com/ai-forever/dynamic_gestures/blob/557a836bf82fce8d36494d0c17e95ca236f5611c/license/LICENSE-2.0.txt"
+input = { shape = [1, 3, 128, 128], dtype = "float32", layout = "NCHW", mean = 127.0, scale = 128.0 }
+output = { names = ["labels"], description = "45 logits in utils/enums.py target order; no no-gesture class" }
+notes = ["The unmodified 411,683-byte model is tracked in Git and embedded at build time."]
 
 [[artifacts]]
 file = "face_landmarker.task"

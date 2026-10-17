@@ -8,7 +8,8 @@ use mediapipe::HandLandmarkerResult;
 use mediapipe::PoseLandmarkerResult;
 use mediapipe::WorldLandmark;
 use vtuber_core::arm_tracking::{
-    ArmLandmarks, HAND_LANDMARK_COUNT, HandWorldLandmarks, PoseArmObservation, PoseWorldLandmark,
+    ArmLandmarks, HAND_LANDMARK_COUNT, HandGesture, HandWorldLandmarks, PoseArmObservation,
+    PoseWorldLandmark,
 };
 
 /// MediaPipe Pose's fixed world-landmark count.
@@ -41,7 +42,7 @@ pub enum PoseDecodeError {
     },
     /// The hand result's parallel arrays disagree on how many hands were found.
     #[error(
-        "hand result arrays disagree: landmarks={landmarks}, world={world}, handedness={handedness}"
+        "hand result arrays disagree: landmarks={landmarks}, world={world}, handedness={handedness}, gestures={gestures}"
     )]
     HandParallelArrays {
         /// Number of normalized landmark sets.
@@ -50,6 +51,8 @@ pub enum PoseDecodeError {
         world: usize,
         /// Number of handedness classifications.
         handedness: usize,
+        /// Number of image-classified gestures.
+        gestures: usize,
     },
     /// A detected hand does not have the 21-landmark schema.
     #[error("expected {expected} hand landmarks for hand {hand}, received {actual}")]
@@ -188,6 +191,7 @@ pub fn decode_hand_world(
     hand: usize,
     world: &[WorldLandmark],
     handedness_score: Option<f32>,
+    gesture: HandGesture,
 ) -> Result<HandWorldLandmarks, PoseDecodeError> {
     if world.len() != HAND_LANDMARK_COUNT {
         return Err(PoseDecodeError::HandLandmarkCount {
@@ -228,6 +232,7 @@ pub fn decode_hand_world(
     Ok(HandWorldLandmarks {
         landmarks,
         handedness_score,
+        gesture,
     })
 }
 
@@ -236,13 +241,14 @@ pub fn decode_hand_world(
 ///
 /// Pairing uses the normalized image positions of the Pose wrists and the
 /// hand's own wrist, so it does not depend on MediaPipe's handedness label being
-/// computed for mirrored input. Each hand claims its nearest free side in the
-/// order the task reported it; a hand farther than [`HAND_WRIST_PAIR_DISTANCE`]
-/// from every free wrist is ignored rather than assigned to a side it does not
-/// belong to. Handedness is deliberately not consulted: it is a left/right
+/// computed for mirrored input. Joint assignment maximizes the matched wrists
+/// and then minimizes their total distance. Hands farther than
+/// [`HAND_WRIST_PAIR_DISTANCE`] from both wrists and ambiguous ties stay absent.
+/// Handedness is deliberately not consulted: it is a left/right
 /// label confidence, not a statement about coordinate accuracy, so ranking
 /// candidates by it would silently prefer an ambiguous hand over a confident one
-/// for no reason the observation supports.
+/// for no reason the observation supports. Image classifications follow detection
+/// order and travel with each candidate before this anatomical assignment.
 ///
 /// # Errors
 ///
@@ -252,28 +258,22 @@ pub fn decode_hand_world(
 pub fn decode_hand_result(
     result: &HandLandmarkerResult,
     wrist_xy: &[Option<[f32; 2]>; 2],
+    gestures: &[HandGesture],
 ) -> Result<[Option<HandWorldLandmarks>; 2], PoseDecodeError> {
-    if result.hand_landmarks.is_empty()
-        && result.hand_world_landmarks.is_empty()
-        && result.handedness.is_empty()
-    {
-        return Ok([None, None]);
-    }
     if result.hand_landmarks.len() != result.hand_world_landmarks.len()
         || result.hand_landmarks.len() != result.handedness.len()
+        || result.hand_landmarks.len() != gestures.len()
     {
         return Err(PoseDecodeError::HandParallelArrays {
             landmarks: result.hand_landmarks.len(),
             world: result.hand_world_landmarks.len(),
             handedness: result.handedness.len(),
+            gestures: gestures.len(),
         });
     }
 
     let mut candidates = Vec::with_capacity(result.hand_landmarks.len());
-    for hand in 0..result.hand_landmarks.len() {
-        let Some(normalized) = result.hand_landmarks.get(hand) else {
-            continue;
-        };
+    for (hand, (normalized, &gesture)) in result.hand_landmarks.iter().zip(gestures).enumerate() {
         let Some(world) = result.hand_world_landmarks.get(hand) else {
             continue;
         };
@@ -293,7 +293,7 @@ pub fn decode_hand_result(
             .get(hand)
             .and_then(|categories| categories.first())
             .map(|category| category.score.get());
-        let hand_observation = decode_hand_world(hand, world, handedness_score)?;
+        let hand_observation = decode_hand_world(hand, world, handedness_score, gesture)?;
         let distances = std::array::from_fn(|side| {
             wrist_xy
                 .get(side)
@@ -522,7 +522,8 @@ mod tests {
 
     #[test]
     fn empty_hand_result_attaches_nothing() {
-        let hands = decode_hand_result(&HandLandmarkerResult::default(), &[None, None]).unwrap();
+        let hands =
+            decode_hand_result(&HandLandmarkerResult::default(), &[None, None], &[]).unwrap();
         assert_eq!(hands, [None, None]);
     }
 
@@ -534,29 +535,30 @@ mod tests {
             hand_world_landmarks: vec![hand_world(0.0)],
         };
         assert!(matches!(
-            decode_hand_result(&result, &[None, None]),
+            decode_hand_result(&result, &[None, None], &[]),
             Err(PoseDecodeError::HandParallelArrays { .. })
         ));
     }
 
     #[test]
     fn hand_world_landmarks_keep_meters_and_validate_the_schema() {
-        let hand = decode_hand_world(0, &hand_world(0.5), Some(0.9)).unwrap();
+        let hand = decode_hand_world(0, &hand_world(0.5), Some(0.9), HandGesture::Palm).unwrap();
         let mcp = hand.landmarks[5].meters;
         assert!((mcp[0] - 0.05).abs() < 1.0e-6 && mcp[1] == 0.5 && mcp[2] == 0.0);
         assert_eq!(hand.handedness_score, Some(0.9));
+        assert_eq!(hand.gesture, HandGesture::Palm);
         assert_eq!(
-            decode_hand_world(0, &hand_world(0.5), None)
+            decode_hand_world(0, &hand_world(0.5), None, HandGesture::Palm)
                 .unwrap()
                 .handedness_score,
             None
         );
         assert!(matches!(
-            decode_hand_world(0, &hand_world(0.5)[..20], Some(0.9)),
+            decode_hand_world(0, &hand_world(0.5)[..20], Some(0.9), HandGesture::Palm),
             Err(PoseDecodeError::HandLandmarkCount { .. })
         ));
         assert!(matches!(
-            decode_hand_world(0, &hand_world(0.5), Some(1.5)),
+            decode_hand_world(0, &hand_world(0.5), Some(1.5), HandGesture::Palm),
             Err(PoseDecodeError::InvalidHandScore { .. })
         ));
     }
@@ -566,7 +568,13 @@ mod tests {
     fn candidate(distances: [Option<f32>; 2], handedness: f32) -> HandCandidate {
         HandCandidate {
             distances,
-            hand: decode_hand_world(0, &hand_world(handedness), Some(handedness)).unwrap(),
+            hand: decode_hand_world(
+                0,
+                &hand_world(handedness),
+                Some(handedness),
+                HandGesture::Palm,
+            )
+            .unwrap(),
         }
     }
 
@@ -588,6 +596,25 @@ mod tests {
 
         let far = assign_hands(vec![candidate([Some(0.60), Some(0.70)], 0.9)], 0.15);
         assert_eq!(far, [None, None]);
+    }
+
+    #[test]
+    fn classifications_follow_the_detection_when_wrists_exchange_order() {
+        let mut left = candidate([Some(0.01), Some(0.40)], 0.5);
+        left.hand.gesture = HandGesture::Peace;
+        let mut right = candidate([Some(0.40), Some(0.01)], 0.5);
+        right.hand.gesture = HandGesture::Fist;
+        let forward = assign_hands(vec![left, right], 0.15);
+        let mut left = candidate([Some(0.01), Some(0.40)], 0.5);
+        left.hand.gesture = HandGesture::Peace;
+        let mut right = candidate([Some(0.40), Some(0.01)], 0.5);
+        right.hand.gesture = HandGesture::Fist;
+        let reversed = assign_hands(vec![right, left], 0.15);
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward.map(|hand| hand.map(|hand| hand.gesture)),
+            [Some(HandGesture::Peace), Some(HandGesture::Fist)]
+        );
     }
 
     #[test]

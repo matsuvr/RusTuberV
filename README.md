@@ -63,6 +63,10 @@ cd RusTuberV
 | `pose_landmarker_full.task` | 上半身と腕の姿勢の推論 |
 | `hand_landmarker.task` | 手と指の推論 |
 
+手形を画像から分類する約0.4 MBのHaGRIDモデルは、リポジトリに同梱して実行ファイルへ
+埋め込みます。手の位置と掌の向きはMediaPipe、指のポーズ選択はHaGRIDが担当します。
+45ラベルの対応表・出典・確認手順は[手形認識の説明](tools/HAND-GESTURES.md)を参照してください。
+
 WindowsのPowerShellでは、リポジトリのルートで次を実行します。
 
 ```powershell
