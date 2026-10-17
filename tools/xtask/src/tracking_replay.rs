@@ -33,8 +33,12 @@ use vtuber_core::{MonoTimeNs, monotonic_now};
 const WARMUP_SECONDS: f64 = 5.0;
 
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
+    let (args, rich) = match args.split_last() {
+        Some((flag, rest)) if flag == "--rich" => (rest, true),
+        _ => (args, false),
+    };
     let Some([rgb, model, out, threads, presentation]) = args.get(..5) else {
-        return Err("usage: cargo xtask tracking-replay <640x360-30fps.rgb> <model.vrm> <new-output-directory> <logical-cpus> <vsync|uncapped> [same-input-model.vrm]".into());
+        return Err("usage: cargo xtask tracking-replay <640x360-30fps.rgb> <model.vrm> <new-output-directory> <logical-cpus> <vsync|uncapped> [same-input-model.vrm] [--rich]".into());
     };
     if args.len() > 6 {
         return Err("at most one same-input comparison model is supported".into());
@@ -160,6 +164,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             pictures: Vec::new(),
             threads,
             presentation: presentation.clone(),
+            rich,
             video_started_unix_seconds: None,
             initial_pose: None,
             initial_ready_frames: 0,
@@ -210,6 +215,7 @@ struct Measurement {
     pictures: Vec<(PathBuf, Image)>,
     threads: usize,
     presentation: String,
+    rich: bool,
     video_started_unix_seconds: Option<f64>,
     initial_pose: Option<Vec<BonePose>>,
     initial_ready_frames: usize,
@@ -483,6 +489,25 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
         && current.is_some_and(|(_, _, s)| matches!(s, UpperLimbSolveStatus::Feasible { .. }))
     {
         if m.initial_pose.is_none() {
+            if m.initial_ready_frames == 0 && m.rich {
+                let Some(target) = world
+                    .resource::<vtuber_app::ui_model::UiViewModel>()
+                    .model_target
+                    .clone()
+                else {
+                    return Ok(false);
+                };
+                // Use the same action path as the UI before pipeline warmup.
+                world.resource_scope(|world, mut ui: Mut<vtuber_app::ui::UiState>| {
+                    ui.emit(
+                        &mut world.resource_mut::<vtuber_app::actions::ActionQueue>(),
+                        UiAction::ChangeRichLook {
+                            target,
+                            change: vtuber_app::actions::RichLookChange::Enabled(true),
+                        },
+                    );
+                });
+            }
             m.initial_ready_frames += 1;
             if m.initial_ready_frames < 96 {
                 return Ok(false);
@@ -669,6 +694,12 @@ fn distribution(values: impl Iterator<Item = f64>) -> serde_json::Value {
 }
 
 fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
+    let look = world
+        .resource::<vtuber_avatar::look::AvatarLookSettings>()
+        .0;
+    if look.enabled() != m.rich || look.strength() != 1.0 {
+        return Err("measured look does not match the requested OFF/ON at strength 1".into());
+    }
     fs::write(
         m.out.join("initial-pose.json"),
         serde_json::to_vec_pretty(&m.initial_pose).map_err(|e| e.to_string())?,
@@ -731,6 +762,7 @@ fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
         "available_parallelism": std::thread::available_parallelism().ok().map(|v| v.get()),
         "task_thread_budget": m.threads,
         "presentation": m.presentation,
+        "rich_look": look,
         "video_started_unix_seconds": m.video_started_unix_seconds,
         "video_duration_seconds": m.source.duration().as_secs_f64(),
         "task_pool_threads": {

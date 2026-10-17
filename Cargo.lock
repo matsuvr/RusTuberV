@@ -1995,7 +1995,6 @@ dependencies = [
 [[package]]
 name = "bevy_vrm1"
 version = "0.10.0"
-source = "git+https://github.com/matsuvr/bevy_vrm1?rev=96678a0c761c2839ccbf6a0d9a92421339fdbafc#96678a0c761c2839ccbf6a0d9a92421339fdbafc"
 dependencies = [
  "anyhow",
  "bevy",

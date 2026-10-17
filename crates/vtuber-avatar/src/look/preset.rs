@@ -4,8 +4,8 @@
 //! The baseline MToon includes the approved transparent-BLEND discard correction.
 //! ON keeps that front light and selects application Rich MToon/Standard paths,
 //! adding key/rim lighting. Unlit materials remain unlit.
-//! Strength scales the additional contribution, not the baseline light;
-//! at zero the additional lights and effects contribute nothing. Switching OFF
+//! Strength blends MToon into bounded cel lighting and scales the additional
+//! Standard lighting. At zero the native fragment result is used. Switching OFF
 //! preserves the stored strength for the next activation.
 
 use std::fmt;

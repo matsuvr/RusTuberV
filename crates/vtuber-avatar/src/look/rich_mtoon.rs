@@ -3,8 +3,8 @@
 //! OFF uses the transparency-fixed upstream `MToonMaterial`. ON wraps the
 //! current native material in Bevy's `ExtendedMaterial`, which keeps the
 //! upstream bindings, alpha/depth behavior, and specialization while replacing
-//! the shaders with the additive Rich path. WESL imports the Native fragment
-//! helpers, so the base calculation is shared rather than copied. The native
+//! the fragment lighting with bounded cel shading. WESL imports the Native
+//! helpers for material inputs and author effects. The native
 //! asset remains the owner of current expression and UV values.
 
 use bevy::asset::{Handle, load_internal_asset, uuid_handle};
@@ -30,9 +30,12 @@ pub(crate) const RICH_MTOON_VERTEX_SHADER_HANDLE: Handle<Shader> =
 
 const MTOON_UV_SHADER_HANDLE: Handle<Shader> = uuid_handle!("1f6f4388-e204-4b0a-a6c6-157e045a6ee1");
 
-/// Shader override with no additional material bindings.
+/// Cel shading blend, separate from upstream MToon's bindings 100..116.
 #[derive(Asset, AsBindGroup, Clone, Debug, Reflect)]
-pub struct RichMtoonExtension {}
+pub struct RichMtoonExtension {
+    #[uniform(200)]
+    strength: f32,
+}
 
 impl MaterialExtension for RichMtoonExtension {
     fn vertex_shader() -> ShaderRef {
@@ -44,7 +47,7 @@ impl MaterialExtension for RichMtoonExtension {
     }
 }
 
-/// Upstream MToon data rendered by the app-side additive shader.
+/// Upstream MToon data rendered by the app-side cel shader.
 pub type RichMtoonMaterial = ExtendedMaterial<MToonMaterial, RichMtoonExtension>;
 /// Registers the Rich material, its shaders, the switch and the sync.
 pub(crate) fn register_rich_mtoon(app: &mut App) {
@@ -73,28 +76,21 @@ pub(crate) fn register_rich_mtoon(app: &mut App) {
 
 impl RichMaterialExtension for RichMtoonExtension {
     type Native = MToonMaterial;
-    fn create(_native: &MToonMaterial, _settings: RichLookSettings) -> Option<Self> {
-        Some(Self {})
+    fn create(_native: &MToonMaterial, settings: RichLookSettings) -> Option<Self> {
+        Some(Self {
+            strength: settings.strength(),
+        })
     }
     fn matches(
         current: &RichMtoonMaterial,
         native: &MToonMaterial,
-        _settings: RichLookSettings,
+        settings: RichLookSettings,
     ) -> bool {
-        current.base.base_color == native.base_color
-            && current.base.emissive == native.emissive
-            && current.base.shade.color == native.shade.color
-            && current.base.rim_lighting.color == native.rim_lighting.color
-            && current.base.outline.color == native.outline.color
-            && current.base.uv_transform == native.uv_transform
+        current.base == *native && current.extension.strength == settings.strength()
     }
-    fn sync(current: &mut RichMtoonMaterial, native: &MToonMaterial, _settings: RichLookSettings) {
-        current.base.base_color = native.base_color;
-        current.base.emissive = native.emissive;
-        current.base.shade.color = native.shade.color;
-        current.base.rim_lighting.color = native.rim_lighting.color;
-        current.base.outline.color = native.outline.color;
-        current.base.uv_transform = native.uv_transform;
+    fn sync(current: &mut RichMtoonMaterial, native: &MToonMaterial, settings: RichLookSettings) {
+        current.base.clone_from(native);
+        current.extension.strength = settings.strength();
     }
 }
 
@@ -238,10 +234,19 @@ mod tests {
         set_look(&mut app, true, 0.0);
         app.update();
 
-        // The Rich shader stays selected at 0%; the added terms are zero
-        // because #93 despawns the spot lights, so the shader's only added
-        // input is gone.
+        // The material stays selected, but the uniform selects the exact
+        // native fragment result and the preset despawns its spot lights.
         assert!(rich_handle(&mut app, mesh).is_some());
+        let rich = rich_handle(&mut app, mesh).unwrap();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<RichMtoonMaterial>>()
+                .get(rich.id())
+                .unwrap()
+                .extension
+                .strength,
+            0.0
+        );
         assert!(
             app.world()
                 .get::<RichMaterialSwap<RichMtoonExtension>>(mesh)
@@ -262,6 +267,15 @@ mod tests {
         app.update();
         let after = rich_handle(&mut app, mesh).expect("rich material");
         assert_eq!(after.id(), before.id());
+        assert_eq!(
+            app.world()
+                .resource::<Assets<RichMtoonMaterial>>()
+                .get(after.id())
+                .unwrap()
+                .extension
+                .strength,
+            0.25
+        );
         assert_eq!(
             app.world()
                 .resource::<Assets<RichMtoonMaterial>>()
@@ -325,5 +339,56 @@ mod tests {
 
         assert!(native_handle(&mut app, other).is_some());
         assert!(rich_handle(&mut app, other).is_none());
+    }
+
+    #[test]
+    fn author_settings_and_textures_sync_and_survive_round_trip() {
+        let mut app = test_app();
+        let native = native_material(&mut app);
+        let (_, mesh) = spawn_avatar_mesh(&mut app, &native);
+        set_look(&mut app, true, 0.5);
+        app.update();
+        let rich = rich_handle(&mut app, mesh).unwrap();
+
+        // Exercise material edits while Rich is active, including alpha and
+        // shade settings beyond the expression colors synchronized before.
+        for alpha in [AlphaMode::Opaque, AlphaMode::Mask(0.4), AlphaMode::Blend] {
+            let expected = {
+                let mut assets = app.world_mut().resource_mut::<Assets<MToonMaterial>>();
+                let mut material = assets.get_mut(native.id()).unwrap();
+                material.alpha_mode = alpha;
+                material.double_sided = true;
+                material.transparent_with_z_write = true;
+                material.base_color_texture = Some(Handle::default());
+                material.shade_multiply_texture = Some(Handle::default());
+                material.shading_shift_texture = Some(Handle::default());
+                material.shade.shading_shift_factor = 0.3;
+                material.shade.toony_factor = 1.0;
+                material.emissive = LinearRgba::new(2.0, 0.1, 0.2, 1.0);
+                material.uv_transform = bevy::math::Affine2::from_translation(Vec2::splat(0.2));
+                material.clone()
+            };
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<Assets<RichMtoonMaterial>>()
+                    .get(rich.id())
+                    .unwrap()
+                    .base,
+                expected
+            );
+        }
+
+        set_look(&mut app, false, 0.5);
+        app.update();
+        assert_eq!(native_handle(&mut app, mesh).unwrap().id(), native.id());
+        let source = app
+            .world()
+            .resource::<Assets<MToonMaterial>>()
+            .get(native.id())
+            .unwrap();
+        assert_eq!(source.alpha_mode, AlphaMode::Blend);
+        assert_eq!(source.shade.toony_factor, 1.0);
+        assert_eq!(source.emissive.red, 2.0);
     }
 }

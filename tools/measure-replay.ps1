@@ -8,6 +8,7 @@ param(
     [string]$Ffmpeg,
     [string]$PresentMon,
     [switch]$Uncapped,
+    [switch]$Rich,
     [switch]$NoBuild
 )
 
@@ -27,8 +28,7 @@ if (!$Ffmpeg) {
 }
 if (!$Ffmpeg) { throw 'FFmpeg is required only to prepare the video. Specify -Ffmpeg <ffmpeg.exe>.' }
 if (!$NoBuild) {
-    & cargo build --release -p xtask -j 8
-    if ($LASTEXITCODE -ne 0) { throw "Release build failed: $LASTEXITCODE" }
+    & "$PSScriptRoot/cargo-windows.ps1" -CargoArguments @('build', '--release', '--package', 'xtask', '-j', '1')
 }
 foreach ($clip in $Video) {
     $videoPath = (Resolve-Path -LiteralPath $clip).Path
@@ -43,7 +43,7 @@ foreach ($clip in $Video) {
         if ($LASTEXITCODE -ne 0) { throw "FFmpeg preparation failed: $LASTEXITCODE" }
         Move-Item -LiteralPath $pending -Destination $rgb
     }
-    $exe = Join-Path $repo 'target/release/xtask.exe'
+    $exe = Join-Path $repo 'target/llvm/x86_64-pc-windows-gnullvm/release/xtask.exe'
     $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
     $hostProcess = Get-Process -Id $PID
     $originalAffinity = $hostProcess.ProcessorAffinity
@@ -76,6 +76,7 @@ foreach ($clip in $Video) {
         backend_request = $env:WGPU_BACKEND
         logical_processors = $LogicalProcessors; processor_affinity = $measurementAffinity
         presentation = $presentation
+        rich_look = [ordered]@{ enabled = [bool]$Rich; strength = 1.0 }
         presentmon_sha256 = if ($PresentMon) { (Get-FileHash -LiteralPath $PresentMon -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
         presentmon_clock = if ($PresentMon) { @{
             qpc = [Diagnostics.Stopwatch]::GetTimestamp()
@@ -94,28 +95,27 @@ foreach ($clip in $Video) {
         $log = Join-Path $runRoot "run-$run.log"
         Write-Host "Replay $run / $Runs -> $out"
         $presentProcess = $null
-        $replayProcess = $null
         try {
-            # Windows children inherit affinity; set it BEFORE Bevy/MediaPipe start.
-            $hostProcess.ProcessorAffinity = [IntPtr]$measurementAffinity
-            # This is the measured GUI, which must be visible for display events.
-            # Only the external collector runs hidden.
-            $replayProcess = Start-Process -FilePath $exe -WindowStyle Normal -PassThru `
-                -ArgumentList @('tracking-replay', ('"{0}"' -f $rgb), ('"{0}"' -f $modelPath), `
-                    ('"{0}"' -f $out), $LogicalProcessors, $presentation) `
-                -RedirectStandardOutput $log -RedirectStandardError (Join-Path $runRoot "run-$run-error.log")
-            $hostProcess.ProcessorAffinity = $originalAffinity
             if ($PresentMon) {
-                # Keep the external ETW observer outside the app's CPU budget.
+                if (Get-Process -Name xtask -ErrorAction SilentlyContinue) {
+                    throw 'Close other xtask runs before collecting by process name.'
+                }
+                # Start the external observer before restricting the Cargo child.
                 $presentProcess = Start-Process -FilePath $PresentMon -WindowStyle Hidden -PassThru `
-                    -ArgumentList @('--process_id', $replayProcess.Id, '--session_name', "RusTuberV-Replay-$PID", `
+                    -ArgumentList @('--process_name', 'xtask.exe', '--session_name', "RusTuberV-Replay-$PID", `
                         '--qpc_time', '--no_console_stats', `
                         '--output_file', ('"{0}"' -f (Join-Path $runRoot "run-$run-presentmon.csv"))) `
                     -RedirectStandardOutput (Join-Path $runRoot "run-$run-presentmon.log") `
                     -RedirectStandardError (Join-Path $runRoot "run-$run-presentmon-error.log")
             }
-            $replayProcess.WaitForExit()
-            $replayExit = $replayProcess.ExitCode
+            # Both Cargo and the measured GUI inherit the three-CPU budget.
+            # All application execution uses the project's CLANG64 wrapper.
+            $hostProcess.ProcessorAffinity = [IntPtr]$measurementAffinity
+            $cargoArguments = @('run', '--release', '--package', 'xtask', '-j', '1', '--',
+                'tracking-replay', $rgb, $modelPath, $out, "$LogicalProcessors", $presentation)
+            if ($Rich) { $cargoArguments += '--rich' }
+            & "$PSScriptRoot/cargo-windows.ps1" -CargoArguments $cargoArguments *> $log
+            $hostProcess.ProcessorAffinity = $originalAffinity
             if ($presentProcess) {
                 # End only the trace session started above. Process-exit events
                 # are not reliable without elevation, even when CSV capture works.
@@ -130,9 +130,7 @@ foreach ($clip in $Video) {
                 & $PresentMon --session_name "RusTuberV-Replay-$PID" --terminate_existing_session *> (Join-Path $runRoot "run-$run-presentmon-stop.log")
                 if (!$presentProcess.WaitForExit(5000)) { Stop-Process -Id $presentProcess.Id }
             }
-            if ($replayProcess -and !$replayProcess.HasExited) { Stop-Process -Id $replayProcess.Id }
         }
-        if ($replayExit -ne 0) { throw "Replay failed: see $log" }
         Copy-Item -LiteralPath 'tracking_profile.toml' -Destination (Join-Path $out 'tracking_profile.toml')
         $summary = Get-Content -LiteralPath (Join-Path $out 'summary.json') -Raw | ConvertFrom-Json
         $display = $null
