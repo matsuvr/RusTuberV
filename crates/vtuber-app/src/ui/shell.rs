@@ -380,7 +380,8 @@ mod tests {
         vm.avatar.lifecycle = crate::ui_model::AvatarLifecycleState::Ready;
         let mut render = |app: &mut App, events| {
             let mut over_ui = false;
-            let _ = ctx.run_ui(
+            crate::ui::run_headless_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

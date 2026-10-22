@@ -368,7 +368,6 @@ mod tests {
                         roll_radians: phase.sin() * 0.3,
                         active: frame < 180,
                         weight: 1.0,
-                        ..Default::default()
                     },
                     BodyTrackingPositionInput {
                         head_offset: Vec3::new(phase.sin() * 0.03, 0.0, 0.02),

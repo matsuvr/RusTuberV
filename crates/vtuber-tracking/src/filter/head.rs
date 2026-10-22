@@ -31,10 +31,11 @@ pub struct HeadFilterParams {
     pub max_dt_sec: f32,
     /// Maximum accepted angular departure from the filtered rotation, in radians.
     ///
-    /// A target farther from the current smoothed rotation is rejected without
-    /// advancing the rotation, velocity, or timestamp. This compares the target
-    /// with the filtered state, not with the preceding raw observation. A later
-    /// target is accepted once it falls within this limit.
+    /// A target farther from the current smoothed rotation is rejected while
+    /// the previous accepted response continues. The comparison uses the
+    /// filtered state, not the preceding raw observation. A later
+    /// target is accepted once it falls within this limit. Reconnection after
+    /// an absence explicitly accepts the new heading.
     pub max_step_rad: f32,
 }
 
@@ -62,6 +63,7 @@ impl HeadFilterParams {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct FilterState {
     spring: RotationSpring,
+    target: UnitQuaternion<f32>,
     last_time: MonoTimeNs,
 }
 
@@ -150,6 +152,7 @@ impl HeadRotationFilter {
         let Some(mut state) = self.state else {
             self.state = Some(FilterState {
                 spring: RotationSpring::new(target),
+                target,
                 last_time: timestamp,
             });
             return target;
@@ -178,17 +181,49 @@ impl HeadRotationFilter {
         };
         if error.norm() > max_step {
             self.quarantined_samples = self.quarantined_samples.saturating_add(1);
-            return state.spring.value;
+            return self.advance(timestamp).unwrap_or(state.spring.value);
         }
 
         // A critically damped second-order response in the local rotation
         // vector is the SO(3) equivalent of a biquad. The quaternion remains
         // on SO(3); only the tangent-space error and velocity are filtered.
         let smoothed = state.spring.step_local(signed_target, dt_sec, tau);
+        state.target = signed_target;
         state.last_time = timestamp;
         self.state = Some(state);
 
         smoothed
+    }
+
+    /// Continues the existing response toward the last accepted observation.
+    /// Missing or rejected observations never become an extrapolation target.
+    pub fn advance(&mut self, timestamp: MonoTimeNs) -> Option<UnitQuaternion<f32>> {
+        let state = self.state.as_mut()?;
+        let dt = elapsed_seconds(timestamp, state.last_time, self.params.max_dt_sec);
+        if dt > 0.0 {
+            state.spring.step_local(
+                state.target,
+                dt,
+                self.params.time_constant_sec.max(f32::EPSILON),
+            );
+            state.last_time = timestamp;
+        }
+        Some(state.spring.value)
+    }
+
+    /// Accepts the first usable pose after loss without discarding momentum.
+    /// A long absence may contain a real rotation beyond the per-frame limit.
+    pub fn reconnect(
+        &mut self,
+        target: UnitQuaternion<f32>,
+        timestamp: MonoTimeNs,
+    ) -> UnitQuaternion<f32> {
+        if let Some(state) = self.state.as_mut() {
+            state.target = target;
+            self.advance(timestamp).unwrap_or(target)
+        } else {
+            self.update(target, timestamp)
+        }
     }
 
     /// Returns the current smoothed rotation without advancing the filter.
@@ -202,12 +237,73 @@ impl HeadRotationFilter {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use approx::assert_relative_eq;
     use nalgebra::Vector3;
 
     fn ts(ns: u64) -> MonoTimeNs {
         MonoTimeNs(ns)
+    }
+
+    #[test]
+    fn missing_frames_finish_the_accepted_motion_at_each_render_rate() {
+        for hz in [30u64, 60, 120] {
+            let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+            let _ = filter.update(UnitQuaternion::identity(), ts(0));
+            let target = UnitQuaternion::from_euler_angles(0.2, 0.6, -0.1);
+            let first = filter.update(target, ts(16_000_000));
+            let mut previous = first.angle_to(&target);
+            for frame in 1..=hz * 10 {
+                let out = filter
+                    .advance(ts(16_000_000 + frame * 1_000_000_000 / hz))
+                    .unwrap();
+                let distance = out.angle_to(&target);
+                assert!(distance <= previous + 1e-5, "{hz} Hz frame {frame}");
+                previous = distance;
+            }
+            assert!(
+                previous < 1e-5,
+                "last accepted heading must survive prolonged loss"
+            );
+            filter.reset();
+            assert!(filter.advance(ts(11_000_000_000)).is_none());
+        }
+    }
+
+    #[test]
+    fn a_rejected_target_does_not_stop_or_redirect_accepted_motion() {
+        let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+        let _ = filter.update(UnitQuaternion::identity(), ts(0));
+        let target = UnitQuaternion::from_euler_angles(0.0, 0.5, 0.0);
+        let first = filter.update(target, ts(16_000_000));
+        let mut missing = filter.clone();
+        let out = filter.update(
+            UnitQuaternion::from_euler_angles(0.0, -2.0, 0.0),
+            ts(32_000_000),
+        );
+        let expected = missing.advance(ts(32_000_000)).unwrap();
+        assert!(out.angle_to(&expected) < 1e-6);
+        assert!(out.angle_to(&target) < first.angle_to(&target));
+        assert_eq!(filter.quarantined_samples(), 1);
+    }
+
+    #[test]
+    fn reconnect_keeps_momentum_and_can_reach_a_large_new_heading() {
+        let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+        let _ = filter.update(UnitQuaternion::identity(), ts(0));
+        let target = UnitQuaternion::from_euler_angles(0.0, 0.5, 0.0);
+        let _ = filter.update(target, ts(16_000_000));
+        let mut uninterrupted = filter.clone();
+        let out = filter.reconnect(target, ts(32_000_000));
+        assert!(out.angle_to(&uninterrupted.update(target, ts(32_000_000))) < 1e-6);
+        let changed = UnitQuaternion::from_euler_angles(0.0, -1.2, 0.0);
+        let first = filter.reconnect(changed, ts(48_000_000));
+        assert!(first.angle_to(&changed) > 0.5, "reconnection must not snap");
+        for frame in 1..=60 {
+            let _ = filter.update(changed, ts(48_000_000 + frame * 16_666_667));
+        }
+        assert!(filter.current().unwrap().angle_to(&changed) < 1e-5);
     }
 
     #[test]

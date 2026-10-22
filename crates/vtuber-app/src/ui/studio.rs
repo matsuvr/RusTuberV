@@ -1097,21 +1097,6 @@ fn calibration_page(
         ui,
         lang.pick("腕のトラッキング", "Arm tracking", "手臂跟踪", "팔 트래킹"),
         |ui| {
-            let mut enabled = vm.arm_tracking_enabled;
-            if ui
-                .checkbox(
-                    &mut enabled,
-                    lang.pick(
-                        "Webカメラで腕を追跡",
-                        "Track arms from the webcam",
-                        "使用网络摄像头跟踪手臂",
-                        "웹캠으로 팔 추적",
-                    ),
-                )
-                .changed()
-            {
-                state.emit(actions, UiAction::SetArmTrackingEnabled { enabled });
-            }
             if ui
                 .add_enabled(
                     vm.arm_tracking_enabled,
@@ -1512,7 +1497,7 @@ mod tests {
         vm.avatar.is_ready = true;
         vm.avatar.lifecycle = AvatarLifecycleState::Ready;
         let mut state = UiState::default();
-        let _ = ctx.run_ui(input, |ui| {
+        crate::ui::run_headless_ui(&ctx, input, |ui| {
             render_studio(
                 &mut actions,
                 ui.ctx(),
@@ -1546,7 +1531,8 @@ mod tests {
                 vm.avatar.is_ready = true;
                 vm.avatar.lifecycle = AvatarLifecycleState::Ready;
                 let mut render = |state: &mut UiState, events: Vec<egui::Event>, dialog_active| {
-                    let _ = ctx.run_ui(
+                    crate::ui::run_headless_ui(
+                        &ctx,
                         egui::RawInput {
                             screen_rect: Some(egui::Rect::from_min_size(
                                 egui::Pos2::ZERO,
@@ -1664,11 +1650,11 @@ mod tests {
         state.set_controls_open(false);
         // Frame 1 is the area sizing pass (invisible); frame 2 registers the
         // interactive widget for egui's next-frame hit test.
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
             floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja, 1.0);
         });
         let mut rect = egui::Rect::NOTHING;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
             rect = floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja, 1.0).rect;
         });
         assert!(!state.controls_open);
@@ -1684,7 +1670,7 @@ mod tests {
                 modifiers: egui::Modifiers::default(),
             });
         }
-        let _ = ctx.run_ui(input, |ui| {
+        crate::ui::run_headless_ui(&ctx, input, |ui| {
             floating_settings_control(ui.ctx(), &mut state, UiLanguage::Ja, 1.0);
         });
         assert!(state.controls_open);
@@ -1742,7 +1728,7 @@ mod tests {
         let preview = PreviewState::default();
         let landmarks = PreviewLandmarkState::default();
         let mut render = |state: &mut UiState| {
-            let _ = ctx.run_ui(input(), |ui| {
+            crate::ui::run_headless_ui(&ctx, input(), |ui| {
                 render_studio(
                     &mut actions,
                     ui.ctx(),
@@ -1789,7 +1775,7 @@ mod tests {
             UiLanguage::Ko,
         ] {
             let ctx = egui::Context::default();
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
                 oss_licenses_page(ui, lang);
             });
         }
@@ -1843,12 +1829,12 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
                 render_rich_look_controls(&mut actions, ui, &vm, &mut state, lang);
             });
             let mut off = vm;
             off.look.enabled = false;
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
                 render_rich_look_controls(&mut actions, ui, &off, &mut state, lang);
             });
             // Neither enabled nor disabled controls emit actions without input.

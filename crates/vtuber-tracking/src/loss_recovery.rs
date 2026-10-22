@@ -1,26 +1,10 @@
-//! Loss hold, eased neutral return, and reacquisition blend for face
-//! tracking.
+//! Face-loss presentation: retain the accepted head pose, release facial
+//! expressions and gaze, and reconnect observations without a snap.
 //!
-//! When a tracked face disappears, the avatar should not snap instantly to
-//! neutral nor freeze in place. [`LossRecovery`] publishes the last valid
-//! frame with an authority that follows the shared loss-blend timeline
-//! ([`LossBlendProfile`], also used by the arm channels): the pose is held
-//! for the hold time, then the confidence that every consumer weights the
-//! pose by eases to zero over the return duration, so the head sinks back to
-//! neutral like the arms sink back to their virtual anchor. Expressions, the
-//! detailed Perfect Sync coefficients, and the gaze confidence fade along
-//! with it so a briefly lost face does not collapse mid-speech but releases
-//! cleanly.
-//!
-//! When the face reappears, a timed smoothstep blend whose duration is the
-//! profile's acquire time reconnects the tracked frames from wherever the
-//! return had reached instead of snapping.
-//!
-//! All timing uses the caller-supplied [`Duration`] delta and monotonic
-//! timestamps, so behaviour is deterministic and testable without a wall
-//! clock. The per-frame cost is a handful of coefficient operations with no
-//! allocation, so loss handling stays negligible even when it runs on every
-//! frame.
+//! Rotation continues in the pipeline's damped head filter toward its last
+//! accepted target. Loss does not reduce head authority or invent motion.
+//! The shared loss timeline releases expressions and gaze; arms independently
+//! return to their relaxed anchors. Source timestamps remain stale during loss.
 
 use std::time::Duration;
 
@@ -60,8 +44,7 @@ pub struct LossRecoveryConfigError(#[from] LossBlendConfigError);
 enum RecoveryState {
     /// No synthetic motion is in progress; pass tracked frames through.
     Idle,
-    /// Returning from the loss pose to neutral along the shared loss
-    /// timeline.
+    /// Releasing expressions and gaze while retaining the head pose.
     Returning {
         /// Frame at the start of the loss episode.
         from: AvatarControlFrame,
@@ -78,9 +61,8 @@ enum RecoveryState {
     },
 }
 
-/// Holds the last observed pose when a face is lost, eases the pose's
-/// authority back to neutral along the shared loss timeline, and blends back
-/// to tracked frames on reacquire.
+/// Retains head authority during loss, releases expressions and gaze, and
+/// blends facial details back on reacquisition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LossRecovery {
     params: LossBlendProfile,
@@ -111,7 +93,7 @@ impl LossRecovery {
         &self.params
     }
 
-    /// Returns `true` while returning to neutral.
+    /// Returns `true` while a loss episode is retaining the pose and releasing facial detail.
     #[must_use]
     pub fn is_returning(&self) -> bool {
         matches!(self.state, RecoveryState::Returning { .. })
@@ -130,7 +112,8 @@ impl LossRecovery {
     /// [`TrackingStateMachine`](crate::TrackingStateMachine)). `dt` is the
     /// elapsed time since the last call. `tracked` is the latest valid
     /// tracked frame, if any. `produced_at` is the monotonic timestamp to
-    /// stamp on any produced frame.
+    /// stamp on any produced frame. `filtered_head` supplies the pipeline
+    /// spring output, which already covers rotation loss and reconnection.
     ///
     /// The returned frame reuses the source sequence and capture timestamp of
     /// the last valid frame during the return and the recovery blend so that
@@ -141,6 +124,7 @@ impl LossRecovery {
         state: TrackingState,
         dt: Duration,
         tracked: Option<AvatarControlFrame>,
+        filtered_head: Option<HeadPose>,
         produced_at: MonoTimeNs,
     ) -> Option<AvatarControlFrame> {
         // Keep track of the most recent valid frame for future return phases.
@@ -150,12 +134,12 @@ impl LossRecovery {
 
         let old = std::mem::replace(&mut self.state, RecoveryState::Idle);
 
-        let (next, output) = match (state, old, tracked) {
+        let (next, mut output) = match (state, old, tracked) {
             // A tracked frame is available while we are actively tracking.
             // Pass it through, or start/continue a recovery blend if we were
             // previously returning or mid-recovery.
             (
-                TrackingState::Tracking | TrackingState::Acquiring,
+                TrackingState::Tracking | TrackingState::Degraded | TrackingState::Acquiring,
                 RecoveryState::Idle,
                 Some(target),
             ) => {
@@ -166,12 +150,12 @@ impl LossRecovery {
                 }
             }
             (
-                TrackingState::Tracking | TrackingState::Acquiring,
+                TrackingState::Tracking | TrackingState::Degraded | TrackingState::Acquiring,
                 RecoveryState::Returning { .. },
                 Some(target),
             ) => self.start_recovery(target, dt, state, produced_at),
             (
-                TrackingState::Tracking | TrackingState::Acquiring,
+                TrackingState::Tracking | TrackingState::Degraded | TrackingState::Acquiring,
                 RecoveryState::Recovering { from, elapsed },
                 Some(target),
             ) => advance_recovery(from, target, elapsed, dt, state, produced_at, &self.params),
@@ -197,6 +181,13 @@ impl LossRecovery {
             (_, old, _) => (old, self.last_output.clone()),
         };
 
+        // The render-clock spring already smooths rotation, including during
+        // loss/reconnection. Do not add a second acquisition lag to that path.
+        if let Some(head) = filtered_head
+            && let Some(frame) = output.as_mut()
+        {
+            frame.head = head;
+        }
         self.state = next;
         if let Some(ref out) = output {
             self.last_output = Some(out.clone());
@@ -253,12 +244,8 @@ impl LossRecovery {
         )
     }
 
-    /// Starts the return-to-neutral phase from the most recent output.
-    ///
-    /// The hold publishes the loss frame unchanged. When the previous episode
-    /// already decayed fully (the machine can stay in a lost state past the
-    /// return), static neutral frames keep being emitted so a finished
-    /// episode never restarts its timeline.
+    /// Starts facial release from the last displayed frame, preserving pose
+    /// authority and the observation's source identity.
     fn start_return(
         &mut self,
         state: TrackingState,
@@ -267,10 +254,6 @@ impl LossRecovery {
         let Some(origin) = self.last_output.clone().or_else(|| self.last_valid.clone()) else {
             return (RecoveryState::Idle, None);
         };
-        if is_fully_neutral(&origin) {
-            let neutral = neutral_frame(&origin, produced_at, state);
-            return (RecoveryState::Idle, Some(neutral));
-        }
         let mut frame = origin;
         frame.state = state;
         frame.produced_at = produced_at;
@@ -308,12 +291,7 @@ fn advance_recovery(
     }
 }
 
-/// Advances the return-to-neutral one frame.
-///
-/// The authority of the held loss frame decays along the shared loss
-/// timeline: full during the hold, then smoothstep-eased to zero. At zero the
-/// last frame publishes exact zeros so the avatar releases every Perfect Sync
-/// morph before the coefficients are dropped on the following frames.
+/// Advances facial release while keeping the accepted pose authority.
 fn advance_return(
     from: AvatarControlFrame,
     elapsed: Duration,
@@ -324,23 +302,13 @@ fn advance_return(
 ) -> (RecoveryState, Option<AvatarControlFrame>) {
     let elapsed = elapsed.saturating_add(dt);
     let factor = loss_return_factor(elapsed, params);
-    if factor <= 0.0 {
-        (
-            RecoveryState::Idle,
-            Some(held_frame(&from, 0.0, state, produced_at)),
-        )
-    } else {
-        let blended = held_frame(&from, factor, state, produced_at);
-        (RecoveryState::Returning { from, elapsed }, Some(blended))
-    }
+    let blended = held_frame(&from, factor, state, produced_at);
+    // Keep the episode after facial release so repeated missing frames cannot
+    // restart the hold or resurrect an old mouth/eye expression.
+    (RecoveryState::Returning { from, elapsed }, Some(blended))
 }
 
-/// Builds the synthetic frame for the current return state.
-///
-/// The head pose, translation, and gaze direction are held; the confidence
-/// the consumers weight them by decays with `factor`, exactly like the arm
-/// channels' weight ramps toward the virtual anchor. Expressions, the
-/// detailed coefficients, and the gaze confidence fade along with it.
+/// Holds head pose and translation; releases expressions and gaze authority.
 fn held_frame(
     origin: &AvatarControlFrame,
     factor: f32,
@@ -352,7 +320,7 @@ fn held_frame(
         source_seq: origin.source_seq,
         captured_at: origin.captured_at,
         produced_at,
-        confidence: origin.confidence * factor,
+        confidence: origin.confidence,
         state,
         head: origin.head,
         head_translation: origin.head_translation,
@@ -360,7 +328,7 @@ fn held_frame(
         expressions: blend_expressions(
             &origin.expressions,
             &ExpressionCoefficients::default(),
-            factor,
+            1.0 - factor,
         ),
         detailed_face: origin
             .detailed_face
@@ -380,15 +348,6 @@ fn scale_gaze(gaze: GazeSignal, factor: f32) -> GazeSignal {
         }
         GazeTrackingState::Unavailable => GazeSignal::UNAVAILABLE,
     }
-}
-
-/// Returns `true` when the frame carries no more authority.
-///
-/// Synthetic frames end with exactly-zero confidence, so this check
-/// recognises both a completed return-to-neutral and the static neutral
-/// frames emitted while searching.
-fn is_fully_neutral(frame: &AvatarControlFrame) -> bool {
-    frame.confidence <= 0.0
 }
 
 /// Maximum absolute coefficient difference between two expression sets.
@@ -467,26 +426,6 @@ fn choose_shortest_arc(
 fn negate(q: UnitQuaternion<f32>) -> UnitQuaternion<f32> {
     let inner = q.quaternion();
     UnitQuaternion::from_quaternion(Quaternion::new(-inner.w, -inner.i, -inner.j, -inner.k))
-}
-
-/// Builds a frame that is fully neutral in head pose and expressions.
-fn neutral_frame(
-    base: &AvatarControlFrame,
-    produced_at: MonoTimeNs,
-    state: TrackingState,
-) -> AvatarControlFrame {
-    AvatarControlFrame {
-        source_seq: base.source_seq,
-        captured_at: base.captured_at,
-        produced_at,
-        confidence: 0.0,
-        state,
-        head: HeadPose::default(),
-        head_translation: HeadTranslationSignal::UNAVAILABLE,
-        gaze: GazeSignal::degraded(0.0, 0.0, 0.0),
-        expressions: ExpressionCoefficients::default(),
-        detailed_face: None,
-    }
 }
 
 /// Blends two frames, keeping the source sequence from `from`.
@@ -710,12 +649,14 @@ mod tests {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(tracked.clone()),
+            None,
             MonoTimeNs(33_333_333),
         );
         let held = lr
             .update(
                 TrackingState::LostHold,
                 Duration::from_millis(50),
+                None,
                 None,
                 MonoTimeNs(50_000_000),
             )
@@ -729,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn loss_recovery_eases_authority_to_neutral_over_return_duration() {
+    fn loss_recovery_retains_head_and_releases_expressions_over_return_duration() {
         let mut lr = LossRecovery::new(test_params()).unwrap();
         let tracked = frame(1, 0.5, 0.25, -0.4, 0.8);
 
@@ -737,46 +678,47 @@ mod tests {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(tracked.clone()),
+            None,
             MonoTimeNs(33_333_333),
         );
         let _ = lr.update(
             TrackingState::LostHold,
             Duration::from_millis(100),
             None,
+            None,
             MonoTimeNs(100_000_000),
         );
 
-        // Past the hold the eased authority must decrease monotonically and
-        // never exceed the authority at the moment of loss.
+        // Expressions release monotonically while head authority stays fixed.
         let full = tracked.head.yaw_rad * tracked.confidence;
-        let mut previous = full;
+        let mut previous_expression = tracked.expressions.aa;
         for step in 1..=5 {
             let eased = lr
                 .update(
                     TrackingState::LostHold,
                     Duration::from_millis(60),
                     None,
+                    None,
                     MonoTimeNs(100_000_000 + step as u64 * 60_000_000),
                 )
                 .expect("returning frame should be emitted");
             let weight = eased.head.yaw_rad * eased.confidence;
-            assert!(
-                weight <= previous + 1.0e-6 && weight <= full + 1.0e-5,
-                "the eased authority must decrease monotonically: step {step}: {weight}"
-            );
-            previous = weight;
+            assert_relative_eq!(weight, full, epsilon = 1e-6);
+            assert!(eased.expressions.aa <= previous_expression + 1e-6);
+            previous_expression = eased.expressions.aa;
         }
 
-        // Once the return duration is over, the authority is exactly zero.
+        // Facial release completes without reducing the retained head authority.
         let final_frame = lr
             .update(
                 TrackingState::ReturningNeutral,
                 Duration::from_secs(2),
                 None,
+                None,
                 MonoTimeNs(1_500_000_000),
             )
             .expect("should emit the fully eased frame");
-        assert_relative_eq!(final_frame.confidence, 0.0, epsilon = 1e-6);
+        assert_relative_eq!(final_frame.confidence, tracked.confidence, epsilon = 1e-6);
         assert_relative_eq!(final_frame.expressions.aa, 0.0, epsilon = 1e-6);
         assert_eq!(final_frame.state, TrackingState::ReturningNeutral);
     }
@@ -791,6 +733,7 @@ mod tests {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(first.clone()),
+            None,
             MonoTimeNs(16_000_000),
         );
 
@@ -799,12 +742,14 @@ mod tests {
             TrackingState::LostHold,
             Duration::from_millis(100),
             None,
+            None,
             MonoTimeNs(116_000_000),
         );
         let before_reacquire = lr
             .update(
                 TrackingState::ReturningNeutral,
                 Duration::from_millis(100),
+                None,
                 None,
                 MonoTimeNs(216_000_000),
             )
@@ -817,6 +762,7 @@ mod tests {
                 TrackingState::Tracking,
                 Duration::from_millis(50),
                 Some(target.clone()),
+                None,
                 MonoTimeNs(266_000_000),
             )
             .unwrap();
@@ -845,6 +791,7 @@ mod tests {
                 TrackingState::Tracking,
                 Duration::from_millis(200),
                 Some(target.clone()),
+                None,
                 MonoTimeNs(466_000_000),
             )
             .unwrap();
@@ -865,12 +812,14 @@ mod tests {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(tracked.clone()),
+            None,
             MonoTimeNs(16_000_000),
         );
         let held = lr
             .update(
                 TrackingState::LostHold,
                 Duration::from_millis(50),
+                None,
                 None,
                 MonoTimeNs(66_000_000),
             )
@@ -890,11 +839,13 @@ mod tests {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(frame(1, 0.0, 0.0, 0.0, 0.0)),
+            None,
             MonoTimeNs(33_333_333),
         );
         let _ = lr.update(
             TrackingState::LostHold,
             Duration::from_millis(100),
+            None,
             None,
             MonoTimeNs(133_333_333),
         );
@@ -903,10 +854,11 @@ mod tests {
                 TrackingState::Searching,
                 Duration::from_millis(400),
                 None,
+                None,
                 MonoTimeNs(533_333_333),
             )
             .unwrap();
-        assert_relative_eq!(neutral.confidence, 0.0, epsilon = 1e-6);
+        assert_relative_eq!(neutral.confidence, 0.9, epsilon = 1e-6);
 
         let reacquired = frame(2, 0.8, 0.0, 0.0, 0.0);
         let reconnected = lr
@@ -914,6 +866,7 @@ mod tests {
                 TrackingState::Acquiring,
                 Duration::from_millis(16),
                 Some(reacquired.clone()),
+                None,
                 MonoTimeNs(550_000_000),
             )
             .expect("reacquire should emit a frame");

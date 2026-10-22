@@ -158,8 +158,7 @@ mod tests {
     }
 
     fn json_of(bytes: &[u8]) -> Value {
-        let document = Glb::parse(bytes).unwrap().document;
-        document
+        Glb::parse(bytes).unwrap().document
     }
 
     fn expressions_of(bytes: &[u8]) -> Value {

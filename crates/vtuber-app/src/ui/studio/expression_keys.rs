@@ -424,7 +424,7 @@ mod tests {
         dialog_active: bool,
     ) {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(input, |ctx| {
+        crate::ui::run_headless_ui(&ctx, input, |ctx| {
             expression_key_input(actions, ctx, vm, state, dialog_active)
         });
     }
@@ -498,7 +498,8 @@ mod tests {
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
         // Frame 1: Escape goes down once and clears.
-        let _ = ctx.run_ui(
+        crate::ui::run_headless_ui(
+            &ctx,
             focused_input(vec![expression_key_event(
                 egui::Key::Escape,
                 false,
@@ -510,7 +511,8 @@ mod tests {
 
         // Frame 2: the OS repeats the held Escape. egui marks the event as a
         // repeat, which must not clear again.
-        let _ = ctx.run_ui(
+        crate::ui::run_headless_ui(
+            &ctx,
             focused_input(vec![expression_key_event(
                 egui::Key::Escape,
                 true,
@@ -524,7 +526,8 @@ mod tests {
         );
 
         // A modified Space stays with the existing shortcut handling.
-        let _ = ctx.run_ui(
+        crate::ui::run_headless_ui(
+            &ctx,
             focused_input(vec![expression_key_event(
                 egui::Key::Space,
                 false,
@@ -575,7 +578,8 @@ mod tests {
         let vm = ready_expression_view_model();
         let mut state = UiState::default();
         // Frame 1: the physical key goes down once.
-        let _ = ctx.run_ui(
+        crate::ui::run_headless_ui(
+            &ctx,
             focused_input(vec![expression_key_event(
                 egui::Key::Num1,
                 false,
@@ -587,7 +591,8 @@ mod tests {
 
         // Frame 2: the OS repeats the held key. egui marks the event as a
         // repeat, which must not toggle again.
-        let _ = ctx.run_ui(
+        crate::ui::run_headless_ui(
+            &ctx,
             focused_input(vec![expression_key_event(
                 egui::Key::Num1,
                 false,
@@ -601,7 +606,8 @@ mod tests {
         );
 
         // Key-up alone never clears.
-        let _ = ctx.run_ui(
+        crate::ui::run_headless_ui(
+            &ctx,
             focused_input(vec![egui::Event::Key {
                 key: egui::Key::Num1,
                 physical_key: Some(egui::Key::Num1),
@@ -695,7 +701,7 @@ mod tests {
         let mut state = UiState::default();
         let mut text = String::new();
         // First frame registers and focuses the text edit.
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.text_edit_singleline(&mut text).request_focus();
             });
@@ -706,7 +712,7 @@ mod tests {
             false,
             egui::Modifiers::NONE,
         )]);
-        let _ = ctx.run_ui(input, |ctx| {
+        crate::ui::run_headless_ui(&ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.text_edit_singleline(&mut text);
             });
@@ -791,7 +797,7 @@ mod tests {
         let mut state = UiState::default();
         let mut vm = ready_expression_view_model();
         // Without a catalog: the load-model message renders.
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
             expression_keys_page(&mut actions, ui, &vm, &mut state, UiLanguage::Ja);
         });
 
@@ -809,7 +815,7 @@ mod tests {
             expression: Some("vanished".into()),
             selected: false,
         }];
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
             expression_keys_page(&mut actions, ui, &vm, &mut state, UiLanguage::Ja);
         });
     }

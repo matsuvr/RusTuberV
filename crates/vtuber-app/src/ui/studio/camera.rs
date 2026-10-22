@@ -9,6 +9,67 @@ use bevy_egui::egui::{Color32, CornerRadius, TextureId, vec2};
 use vtuber_avatar::AvatarMotionMirror;
 use vtuber_core::monotonic_now;
 
+fn hand_tracking_switch(ui: &mut Ui, enabled: &mut bool, label: &str) -> egui::Response {
+    let switch_size = vec2(36.0, 22.0);
+    let gap = 10.0;
+    let text_color = ui.visuals().text_color();
+    let text = ui.painter().layout(
+        label.to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        text_color,
+        (ui.available_width() - switch_size.x - gap).max(0.0),
+    );
+    let size = vec2(text.size().x + gap + switch_size.x, text.size().y.max(28.0));
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *enabled = !*enabled;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *enabled, label)
+    });
+
+    if ui.is_rect_visible(rect) {
+        let progress = ui.ctx().animate_bool_with_time(response.id, *enabled, 0.16);
+        let accent = Color32::from_rgb(0, 122, 255);
+        let fill = Color32::from_rgb(174, 174, 178).lerp_to_gamma(accent, progress);
+        let track = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - switch_size.x / 2.0, rect.center().y),
+            switch_size,
+        );
+        let painter = ui.painter();
+        painter.galley(
+            egui::pos2(rect.left(), rect.center().y - text.size().y / 2.0),
+            text,
+            text_color,
+        );
+        painter.rect_filled(track, 11.0, fill);
+        let center = egui::pos2(
+            egui::lerp(track.left() + 11.0..=track.right() - 11.0, progress),
+            track.center().y,
+        );
+        painter.add(
+            egui::epaint::Shadow {
+                offset: [0, 1],
+                blur: 3,
+                spread: 0,
+                color: Color32::from_black_alpha(45),
+            }
+            .as_shape(egui::Rect::from_center_size(center, vec2(18.0, 18.0)), 9.0),
+        );
+        painter.circle_filled(center, 9.0, Color32::WHITE);
+        if response.has_focus() {
+            painter.rect_stroke(
+                track.expand(3.0),
+                14.0,
+                egui::Stroke::new(2.0, accent),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn camera_controls(
     actions: &mut ActionQueue,
     ui: &mut Ui,
@@ -45,6 +106,24 @@ fn camera_controls(
         .clicked()
     {
         state.emit(actions, UiAction::RefreshCameras);
+    }
+    if vm.camera.selected_index.is_some() {
+        ui.add_space(8.0);
+        let mut enabled = vm.arm_tracking_enabled;
+        if hand_tracking_switch(
+            ui,
+            &mut enabled,
+            lang.pick(
+                "手のトラッキングあり",
+                "Hand tracking",
+                "手部跟踪",
+                "손 트래킹",
+            ),
+        )
+        .changed()
+        {
+            state.emit(actions, UiAction::SetArmTrackingEnabled { enabled });
+        }
     }
     if vm.camera.available_cameras.is_empty() {
         ui.label(lang.pick(

@@ -3,11 +3,17 @@ Revision: 96678a0c761c2839ccbf6a0d9a92421339fdbafc
 Upstream: https://github.com/not-elm/bevy_vrm1 (v0.10.0)
 License: MIT OR Apache-2.0 (LICENSE-MIT and LICENSE-APACHE2)
 
-This source-only copy carries one application-required correction:
+This source-only copy carries application-required corrections:
 src/vrm/mtoon/outline_pass.rs clears MToonMaterialInstances on extraction.
 Otherwise removed native material components remain queued for native outlines
 after a switch to RichMtoonMaterial, whose extra uniform binding is incompatible
 with the native pipeline. Asset ownership and shader behavior are unchanged.
 One trailing-space-only doc comment cleanup is in mtoon/material/outline.rs.
+
+src/vrm/gltf/materials.rs applies the VRMC_materials_mtoon specification defaults
+to optional material properties, and glTF identity defaults (offset 0, scale 1)
+to omitted texture extensions and UV transform components. This permits valid
+VRM 1.0 materials without exporter-specific placeholder properties to load as
+MToon. Required specification versions and texture indices remain required.
 
 Examples, documentation, test assets, and repository metadata are not vendored.

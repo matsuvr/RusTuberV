@@ -353,7 +353,7 @@ mod tests {
         let mut state = UiState::default();
         let review = review_fixture();
         // Frame 1 registers the modal; frame 2 receives the Escape.
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
             avatar_import_review_modal(
                 &mut actions,
                 ui.ctx(),
@@ -371,7 +371,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(input, |ui| {
+        crate::ui::run_headless_ui(&ctx, input, |ui| {
             avatar_import_review_modal(
                 &mut actions,
                 ui.ctx(),
@@ -394,7 +394,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = UiState::default();
         let review = review_fixture();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
             avatar_import_review_modal(
                 &mut actions,
                 ui.ctx(),

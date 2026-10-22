@@ -241,28 +241,25 @@ fn palm_rotation(target: ArmTrackingTarget) -> Option<UnitQuaternion<f32>> {
 
 /// Time constant of the observed wrist position, in seconds.
 ///
-/// An observed hand that is genuinely moving must reach the avatar without the
-/// arm-length lag a slower filter would add, so this is a fixed response and
-/// not one that stretches with the observation's speed: a fast hand is motion,
-/// not an outlier. A detection teleport is rejected outright by
+/// Attenuate depth noise before it becomes elbow flexion, including when the
+/// elbow observation itself is quiet. The recorded stationary-camera regression
+/// bounds the final bone motion, not just this filter's Cartesian output. This remains
+/// a fixed response, including for a fast hand. A detection teleport is rejected by
 /// [`ArmTrackingProfile::max_wrist_step`] instead, and a real loss is eased back
 /// by the shared loss blend.
-const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.05;
+const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.125;
 
-/// Elbow motion relative to the shoulder-wrist midpoint is a separate, noisier
-/// observation. Carry the midpoint with the wrist's response and damp only
-/// this residual more slowly to attenuate elbow-only noise while a moving
-/// hand still carries the arm promptly.
+/// Independently damp the shoulder-relative elbow observation. Splitting it
+/// into a fast wrist midpoint and a slower residual creates elbow motion from
+/// wrist-only noise: the two filters cannot cancel at different bandwidths.
+/// Fixed bone lengths and coupled motion belong to the downstream FK solver.
 const ARM_ELBOW_TIME_CONSTANT_SEC: f32 = 0.15;
 
 /// Time constant of the observed palm plane, in seconds.
 ///
 /// The palm normal comes from a cross product of two hand keypoints and is the
-/// noisiest observed channel, so it keeps a longer constant than the wrist
-/// rather than the same one. It is deliberately only twice the wrist constant:
-/// the previous 0.30 s left the orientation trailing the hand position by three
-/// times as long, which read as the palm lagging behind the wrist rather than
-/// as a smoother plane.
+/// noisiest observed channel. Keep orientation responsive alongside position;
+/// the former 300 ms response visibly trailed hand translation.
 const ARM_PALM_TIME_CONSTANT_SEC: f32 = 0.10;
 
 /// Visibility at or above which an arm observation counts as good.
@@ -282,7 +279,7 @@ const ARM_GOOD_FRAMES: u32 = 4;
 /// because the count is in camera frames: Pose and the Hand Landmarker share one
 /// worker, so a frame is tens of milliseconds, and the same wait was added on
 /// top of the shared `LossBlend` acquire ramp that already eases the authority
-/// back over a second. Nothing here snaps, because that ramp is unchanged.
+/// back over its configured duration. The gate does not bypass that ramp.
 const ARM_REACQUIRE_GOOD_FRAMES: u32 = 2;
 /// Consecutive bad observations required before an adopted arm is lost.
 const ARM_BAD_FRAMES: u32 = 6;
@@ -364,12 +361,16 @@ impl ArmAdoptionGate {
 /// what reads as the elbow popping upward.
 const ELBOW_PLANE_MAX_RATE_RAD_PER_SEC: f32 = 3.0;
 
+#[cfg(test)]
+#[path = "arm_tracking_noise_tests.rs"]
+mod noise_tests;
+
 /// Render-clock critically damped state for one arm's wrist, bend plane, and
 /// palm plane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ArmSmootherState {
     wrist: VectorSpring,
-    elbow_offset: VectorSpring,
+    elbow: VectorSpring,
     palm: Option<RotationSpring>,
     fingers: Option<FingerSmootherState>,
     /// Bend-plane direction emitted on the previous tick, used to rate-limit
@@ -382,7 +383,7 @@ impl ArmSmootherState {
     fn new(target: ArmTrackingTarget) -> Self {
         Self {
             wrist: VectorSpring::new(vector(target.wrist)),
-            elbow_offset: VectorSpring::new(vector(target.elbow_pole) - vector(target.wrist) * 0.5),
+            elbow: VectorSpring::new(vector(target.elbow_pole)),
             palm: palm_rotation(target).map(RotationSpring::new),
             fingers: target.fingers.map(FingerSmootherState::new),
             last_plane: None,
@@ -393,8 +394,8 @@ impl ArmSmootherState {
         let dt_sec = bounded_dt(dt_sec, DEFAULT_MAX_DT_SEC);
         self.wrist
             .step(vector(target.wrist), dt_sec, ARM_POSITION_TIME_CONSTANT_SEC);
-        self.elbow_offset.step(
-            vector(target.elbow_pole) - vector(target.wrist) * 0.5,
+        self.elbow.step(
+            vector(target.elbow_pole),
             dt_sec,
             ARM_ELBOW_TIME_CONSTANT_SEC,
         );
@@ -411,7 +412,7 @@ impl ArmSmootherState {
         }
         let plane = limit_plane_rotation(
             self.last_plane,
-            self.elbow_offset.position + self.wrist.position * 0.5,
+            self.elbow.position,
             self.wrist.position,
             dt_sec,
         );
@@ -1502,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn wrist_motion_carries_the_elbow_without_a_second_position_delay() {
+    fn a_stationary_elbow_does_not_inherit_wrist_noise() {
         let initial = ArmTrackingTarget {
             wrist: [0.0, 0.0, 0.8],
             elbow_pole: [0.3, -0.2, 0.4],
@@ -1510,16 +1511,54 @@ mod tests {
             palm_forward: None,
             fingers: None,
         };
-        let offset = vector(initial.elbow_pole) - vector(initial.wrist) * 0.5;
+        for fps in [30, 60, 120] {
+            let mut smoother = ArmSmootherState::new(initial);
+            let mut largest = 0.0_f32;
+            for tick in 0..fps * 4 {
+                let sample = tick / (fps / 30);
+                let phase = sample as f32 * std::f32::consts::TAU * 3.0 / 30.0;
+                let mut observed = initial;
+                // A stationary elbow with noisy wrist depth is also a valid
+                // forearm motion. The elbow observation did not move.
+                observed.wrist[2] += 0.03 * phase.sin();
+                let output = smoother.advance(observed, 1.0 / fps as f32);
+                largest =
+                    largest.max((vector(output.elbow_pole) - vector(initial.elbow_pole)).norm());
+            }
+            assert!(
+                largest < 1.0e-5,
+                "{fps} Hz: invented elbow displacement {largest}"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_wrist_and_elbow_follow_their_own_observations_without_overshoot() {
+        let initial = ArmTrackingTarget {
+            wrist: [0.0, 0.0, 0.8],
+            elbow_pole: [0.3, -0.2, 0.4],
+            palm_normal: None,
+            palm_forward: None,
+            fingers: None,
+        };
         let mut smoother = ArmSmootherState::new(initial);
         let mut moved = initial;
         moved.wrist[0] += 0.4;
         moved.elbow_pole[0] += 0.2;
-        for _ in 0..60 {
+        let mut previous = initial;
+        for tick in 0..180 {
             let output = smoother.advance(moved, 1.0 / 60.0);
-            assert!(
-                (vector(output.elbow_pole) - vector(output.wrist) * 0.5 - offset).norm() < 2.0e-6
-            );
+            assert!(output.wrist[0] >= previous.wrist[0]);
+            assert!(output.elbow_pole[0] >= previous.elbow_pole[0]);
+            assert!(output.wrist[0] <= moved.wrist[0] + 1.0e-6);
+            assert!(output.elbow_pole[0] <= moved.elbow_pole[0] + 1.0e-6);
+            if tick == 23 {
+                // Intentional motion must still arrive: over 80% wrist response
+                // and 74% elbow response within 400 ms, including a fast step.
+                assert!(output.wrist[0] > 0.4 * 0.80);
+                assert!(output.elbow_pole[0] - initial.elbow_pole[0] > 0.2 * 0.74);
+            }
+            previous = output;
         }
         let output = smoother.advance(moved, 1.0 / 60.0);
         near(output.wrist, moved.wrist);
@@ -1655,7 +1694,7 @@ mod tests {
         control
     }
 
-    /// Frames needed to settle calibration and the one-second acquire ramp.
+    /// Frames needed to settle calibration and the acquire ramp.
     const TRACKED_FRAMES: u64 = ARM_CALIBRATION_CAPACITY as u64 + 45;
 
     /// Tracks a steady arm until calibration and the blends are fully settled.
@@ -2835,7 +2874,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_wrist_returns_to_virtual_over_several_seconds() {
+    fn a_lost_wrist_eases_to_virtual_within_the_hand_lowering_interval() {
         let profile = ArmTrackingProfile::default();
         let base = arm();
         let mut state = tracked_state(base, &profile);
@@ -2849,8 +2888,8 @@ mod tests {
             observations.push((now, control.weights.left.wrist));
         }
 
-        // The hold keeps full authority, and the eased five-second return has
-        // barely started a second after the loss: no snap to the virtual arm.
+        // Keep the visibility gate and hold, then lower the arm before the
+        // next benchmark gesture. The middle of the return must stay gradual.
         let (_, held) = observations[0];
         assert_eq!(held, 1.0);
         let at_one_second = observations
@@ -2859,17 +2898,17 @@ mod tests {
             .expect("one second is inside the recorded window")
             .1;
         assert!(
-            at_one_second > 0.8,
-            "the return must start slowly, got {at_one_second}"
+            at_one_second > 0.4 && at_one_second < 0.8,
+            "the arm should be partway down after a second, got {at_one_second}"
         );
-        let at_three_seconds = observations
+        let at_two_and_half_seconds = observations
             .iter()
-            .find(|(now, _)| *now >= loss_at + 3_150_000_000)
-            .expect("three seconds are inside the recorded window")
+            .find(|(now, _)| *now >= loss_at + 2_500_000_000)
+            .expect("the hand-lowering interval is inside the recorded window")
             .1;
-        assert!(
-            at_three_seconds > 0.2 && at_three_seconds < 0.6,
-            "the return should be in progress after three seconds, got {at_three_seconds}"
+        assert_eq!(
+            at_two_and_half_seconds, 0.0,
+            "the arm should settle before the next gesture"
         );
 
         let mut previous = 1.0;

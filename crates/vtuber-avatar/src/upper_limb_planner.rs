@@ -56,7 +56,7 @@ impl Space<'_, '_> {
         }
         let progress = point.last().copied().unwrap_or(0.0);
         let mut pose = interpolate(self.from, self.to, progress);
-        for (arm, values) in pose.iter_mut().zip(point.chunks_exact(9)) {
+        for (arm, values) in pose.iter_mut().zip(point.as_chunks::<9>().0) {
             if let Some(arm) = arm {
                 for ((angle, value), (lo, hi)) in arm.angles.iter_mut().zip(values).zip(BOUNDS) {
                     *angle = lo + value * (hi - lo);

@@ -33,6 +33,102 @@ use vtuber_avatar::lifecycle::{
 };
 use vtuber_avatar::unload::{ActiveControlFrame, despawn_unloading_avatar};
 
+#[test]
+fn mtoon_omitted_material_properties_use_specification_defaults() {
+    let material: VrmcMaterialsExtensitions =
+        serde_json::from_value(serde_json::json!({"specVersion": "1.0"}))
+            .expect("only the specification version is required");
+    assert_eq!(material.matcap_factor, [1.0; 3]);
+    assert_eq!(material.shade_color_factor, [1.0; 3]);
+    assert_eq!(material.shading_toony_factor, 0.9);
+    assert_eq!(material.gi_equalization_factor, 0.9);
+    assert_eq!(material.parametric_rim_fresnel_power, 5.0);
+    assert_eq!(material.rim_lighting_mix_factor, 1.0);
+    assert_eq!(material.outline_lighting_mix_factor, 1.0);
+    assert_eq!(material.outline_width_mode, "none");
+    assert_eq!(material.outline_color_factor, [0.0; 3]);
+    assert_eq!(material.parametric_rim_color_factor, [0.0; 3]);
+    assert_eq!(material.shading_shift_factor, 0.0);
+    assert_eq!(material.parametric_rim_lift_factor, 0.0);
+    assert_eq!(material.render_queue_offset_number, 0.0);
+    assert_eq!(material.uv_animation_rotation_speed_factor, 0.0);
+    assert_eq!(material.uv_animation_scroll_x_speed_factor, 0.0);
+    assert_eq!(material.uv_animation_scroll_y_speed_factor, 0.0);
+    assert!(!material.transparent_with_z_write);
+    assert!(serde_json::from_value::<VrmcMaterialsExtensitions>(serde_json::json!({})).is_err());
+    assert!(serde_json::from_value::<VrmTexture>(serde_json::json!({})).is_err());
+}
+
+#[test]
+fn mtoon_partial_material_preserves_authored_properties_and_texture_defaults() {
+    let material: VrmcMaterialsExtensitions = serde_json::from_value(serde_json::json!({
+        "specVersion": "1.0", "shadeColorFactor": [0.5, 0.6, 0.7],
+        "shadeMultiplyTexture": {"index": 3}, "shadingToonyFactor": 0.8,
+        "outlineWidthMode": "worldCoordinates", "outlineWidthFactor": 0.01,
+        "transparentWithZWrite": true, "shadingShiftTexture": {"index": 2}
+    }))
+    .expect("optional properties do not require exporter-specific placeholders");
+    assert_eq!(material.shade_color_factor, [0.5, 0.6, 0.7]);
+    assert_eq!(material.shading_toony_factor, 0.8);
+    assert_eq!(material.outline_width_mode, "worldCoordinates");
+    assert_eq!(material.outline_width_factor, Some(0.01));
+    assert!(material.transparent_with_z_write);
+    let texture = material
+        .shade_multiply_texture
+        .expect("authored shade texture");
+    assert_eq!(texture.index, 3);
+    assert_eq!(
+        texture.extensions.khr_texture_transform,
+        KhrTextureTransform::default()
+    );
+    let shift = material
+        .shading_shift_texture
+        .expect("authored shift texture");
+    assert_eq!(shift.index, 2);
+    assert_eq!(shift.tex_coord, 0.0);
+    assert_eq!(shift.scale, 1.0);
+}
+
+#[test]
+fn mtoon_texture_without_optional_uv_transform_uses_identity() {
+    for value in [
+        serde_json::json!({"index": 7}),
+        serde_json::json!({"index": 7, "extensions": {}}),
+    ] {
+        let texture: VrmTexture =
+            serde_json::from_value(value).expect("texture transforms are optional");
+        assert_eq!(texture.index, 7);
+        assert_eq!(
+            texture.extensions.khr_texture_transform,
+            KhrTextureTransform::default()
+        );
+    }
+}
+
+#[test]
+fn mtoon_texture_partial_uv_transform_preserves_authored_values() {
+    for (transform, offset, scale) in [
+        (
+            serde_json::json!({"offset": [0.25, 0.5]}),
+            [0.25, 0.5],
+            [1.0, 1.0],
+        ),
+        (
+            serde_json::json!({"scale": [0.5, 2.0]}),
+            [0.0, 0.0],
+            [0.5, 2.0],
+        ),
+    ] {
+        let texture: VrmTexture = serde_json::from_value(serde_json::json!({
+            "index": 7,
+            "extensions": {"KHR_texture_transform": transform}
+        }))
+        .expect("omitted UV components have identity defaults");
+        assert_eq!(texture.extensions.khr_texture_transform.offset, offset);
+        assert_eq!(texture.extensions.khr_texture_transform.scale, scale);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

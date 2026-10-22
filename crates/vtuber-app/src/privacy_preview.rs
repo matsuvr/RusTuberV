@@ -182,8 +182,10 @@ mod tests {
         assert!(
             output
                 .rgba
-                .chunks_exact(4)
-                .all(|pixel| pixel == [12, 34, 56, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [12, 34, 56, 255])
         );
     }
 

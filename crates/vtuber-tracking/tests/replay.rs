@@ -287,7 +287,7 @@ fn replay_output_timestamps_trace_back_to_input() {
 }
 
 #[test]
-fn replay_lost_face_returns_to_neutral() {
+fn replay_lost_face_retains_the_last_accepted_heading() {
     let mut pipeline = TrackingPipeline::new(config()).unwrap();
     pipeline.apply_calibration(neutral_profile()).unwrap();
 
@@ -312,9 +312,9 @@ fn replay_lost_face_returns_to_neutral() {
 
     let outputs = replay(&stream, &mut pipeline);
     let last = outputs.last().expect("stream should produce frames");
-    assert_relative_eq!(last.head.yaw_rad, 0.0, epsilon = 1e-3);
-    assert_relative_eq!(last.head.pitch_rad, 0.0, epsilon = 1e-3);
-    assert_relative_eq!(last.head.roll_rad, 0.0, epsilon = 1e-3);
+    assert_relative_eq!(last.head.yaw_rad, 15.0f32.to_radians(), epsilon = 1e-3);
+    assert_relative_eq!(last.head.pitch_rad, 5.0f32.to_radians(), epsilon = 1e-3);
+    assert_relative_eq!(last.head.roll_rad, -5.0f32.to_radians(), epsilon = 1e-3);
 }
 
 #[test]

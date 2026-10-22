@@ -101,7 +101,7 @@ mod tests {
             UiLanguage::Ja,
         ] {
             ctx.set_fonts(load_fonts(language));
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
                 for font in [
                     egui::FontId::proportional(16.0),
                     egui::FontId::monospace(16.0),

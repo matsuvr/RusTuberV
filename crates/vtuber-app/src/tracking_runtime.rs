@@ -142,6 +142,12 @@ impl TrackingRuntime {
     /// Camera calibration is retained unless the caller explicitly clears it.
     fn invalidate_session(&mut self, now: MonoTimeNs) {
         self.reset_control_state();
+        self.discard_pending_observations(now);
+    }
+
+    /// An input fault invalidates observations, not the displayed pose or its
+    /// spring state. A retry must supply a newly captured observation.
+    fn discard_pending_observations(&mut self, now: MonoTimeNs) {
         self.observation_gate.reset(now);
         self.held_sample = None;
     }
@@ -212,6 +218,18 @@ struct TrackingDiagnosticsCache {
     auto_neutral_state: Option<(AutoNeutralState, String)>,
 }
 
+fn input_failure(
+    state: crate::orchestrator::PipelineState,
+    error: Option<&crate::orchestrator::OrchestratorError>,
+) -> bool {
+    use crate::orchestrator::{OrchestratorError, PipelineState};
+    matches!(state, PipelineState::Stopping | PipelineState::Failed)
+        && matches!(
+            error,
+            Some(OrchestratorError::CameraFailed(_) | OrchestratorError::InferenceFailed(_))
+        )
+}
+
 /// Applies calibration intents and processes one latest inference result.
 pub fn tracking_bridge_system(
     mut tracking: ResMut<TrackingRuntime>,
@@ -242,8 +260,11 @@ pub fn tracking_bridge_system(
             pipeline_state,
             crate::orchestrator::PipelineState::Idle | crate::orchestrator::PipelineState::Stopping
         );
-    let pipeline_failed = pipeline_state == crate::orchestrator::PipelineState::Failed;
-    if capture_inactive || pipeline_failed || power.sleeping {
+    let input_failed = input_failure(pipeline_state, orchestrator.last_error());
+    if ((capture_inactive || pipeline_state == crate::orchestrator::PipelineState::Failed)
+        && !input_failed)
+        || power.sleeping
+    {
         tracking.invalidate_session(now);
         tracking.recenter_requested = false;
         view_model.tracking = crate::ui_model::TrackingViewModel::default();
@@ -295,9 +316,17 @@ pub fn tracking_bridge_system(
         .unwrap_or_else(|| Duration::from_nanos(33_333_333));
     tracking.last_update = Some(now);
 
-    let dispatch = tracking
-        .observation_gate
-        .dispatch(inference.latest_face_sample.as_ref(), now);
+    if input_failed {
+        tracking.discard_pending_observations(now);
+    }
+    let dispatch = tracking.observation_gate.dispatch(
+        if input_failed {
+            None
+        } else {
+            inference.latest_face_sample.as_ref()
+        },
+        now,
+    );
     let neutral_sample = match &dispatch {
         ObservationDispatch::Face(sample) => Some((**sample).clone()),
         // The held observation keeps feeding the pipeline between inference
@@ -422,6 +451,8 @@ fn tracking_view(state: TrackingState, confidence: f32) -> crate::ui_model::Trac
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
     use vtuber_core::face_tracking::{
         FaceBlendshapeSet, FaceLandmark, FaceTrackingQuality, MEDIAPIPE_FACE_LANDMARK_COUNT,
@@ -551,6 +582,80 @@ mod tests {
                 .dispatch(Some(&face), MonoTimeNs(1_150_000_000)),
             ObservationDispatch::NoFace
         );
+    }
+
+    #[test]
+    fn input_fault_retains_the_head_response_but_rejects_in_flight_observations() {
+        let mut runtime = TrackingRuntime::default();
+        let mut face = sample(7, 1_000_000_000);
+        face.camera_to_face.rotation_xyzw = [0.0, (0.3f32).sin(), 0.0, (0.3f32).cos()];
+        let mut tracked = None;
+        for tick in 1..=10 {
+            tracked = runtime
+                .pipeline
+                .update_mediapipe(
+                    Some(&face),
+                    Some(vtuber_core::CameraFaceTransform::identity()),
+                    None,
+                    MonoTimeNs(1_000_000_000 + tick * 16_666_667),
+                    Duration::from_millis(16),
+                )
+                .frame;
+        }
+        let tracked = tracked.expect("tracked head before input failure");
+        runtime.latest_control = Some((vtuber_avatar::AvatarGeneration(1), tracked.clone()));
+        runtime.held_sample = Some(face.clone());
+        runtime.control_active = true;
+        runtime.discard_pending_observations(MonoTimeNs(1_200_000_000));
+        assert!(runtime.control_active);
+        assert_eq!(
+            runtime.latest_control.as_ref().map(|(_, frame)| frame),
+            Some(&tracked)
+        );
+        assert!(runtime.held_sample.is_none());
+        assert_eq!(
+            runtime
+                .observation_gate
+                .dispatch(Some(&face), MonoTimeNs(1_210_000_000)),
+            ObservationDispatch::NoFace
+        );
+        let held = runtime
+            .pipeline
+            .update_mediapipe(
+                None,
+                Some(vtuber_core::CameraFaceTransform::identity()),
+                None,
+                MonoTimeNs(1_220_000_000),
+                Duration::from_millis(16),
+            )
+            .frame
+            .expect("input failure must use the normal loss response");
+        assert!((held.head.yaw_rad - tracked.head.yaw_rad).abs() < 1e-4);
+        assert_eq!(held.source_seq, tracked.source_seq);
+        assert_eq!(held.captured_at, tracked.captured_at);
+        face.captured_at = MonoTimeNs(1_230_000_000);
+        assert!(matches!(
+            runtime
+                .observation_gate
+                .dispatch(Some(&face), MonoTimeNs(1_240_000_000)),
+            ObservationDispatch::Face(_)
+        ));
+    }
+
+    #[test]
+    fn input_failures_retain_pose_through_shutdown_but_explicit_stops_do_not() {
+        use crate::orchestrator::{OrchestratorError, PipelineState};
+        for error in [
+            OrchestratorError::CameraFailed("disconnected".into()),
+            OrchestratorError::InferenceFailed("worker exited".into()),
+        ] {
+            assert!(input_failure(PipelineState::Stopping, Some(&error)));
+            assert!(input_failure(PipelineState::Failed, Some(&error)));
+            assert!(!input_failure(PipelineState::Running, Some(&error)));
+            assert!(!input_failure(PipelineState::Idle, Some(&error)));
+        }
+        assert!(!input_failure(PipelineState::Stopping, None));
+        assert!(!input_failure(PipelineState::Failed, None));
     }
 
     #[test]

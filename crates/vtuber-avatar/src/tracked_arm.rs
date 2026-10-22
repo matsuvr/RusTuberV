@@ -460,7 +460,7 @@ mod tests {
 
     /// The default test chain plus authored index/little-finger rest positions
     /// whose cross product points along +Y, i.e. a palm facing up.
-
+    ///
     /// A chain whose fingers form straight +X chains, so a flexion of zero
     /// leaves every bone at its rest orientation and any non-zero flexion is
     /// visible as a real rotation. The four roots are spread across Z so the

@@ -470,8 +470,10 @@ mod tests {
         assert!(
             frame
                 .data()
-                .chunks_exact(12)
-                .all(|pixels| { pixels == [50, 100, 149, 128, 40, 50, 60, 255, 0, 0, 0, 0] })
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .all(|pixels| { *pixels == [50, 100, 149, 128, 40, 50, 60, 255, 0, 0, 0, 0] })
         );
         assert_eq!(slot.received_frames(), 1);
         assert_eq!(slot.rejected_frames(), 0);

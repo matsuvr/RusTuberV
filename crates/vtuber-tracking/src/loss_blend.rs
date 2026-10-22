@@ -1,17 +1,9 @@
-//! Unified tracking-loss ramp shared by the arm channels and the face
-//! pipeline.
+//! Shared timing for lost arms and facial detail.
 //!
-//! A tracked channel that is lost must not snap: it holds the authority it
-//! had when it was lost for [`LossBlendProfile::hold`], then eases back to
-//! the relaxed (virtual arm / neutral) pose over
-//! [`LossBlendProfile::return_duration`]. A reacquired channel ramps back to
-//! full authority over [`LossBlendProfile::acquire`], continuing from
-//! wherever the return had decayed to. Both directions are smoothstep-shaped,
-//! so a blend starts and lands with zero slope and never jumps.
-//!
-//! [`LossBlend`] tracks that timeline per channel in weight space; the face
-//! pipeline applies the same timeline in pose space via
-//! [`loss_return_factor`].
+//! Arms hold briefly and return to their relaxed anchors. Facial expressions
+//! and gaze use the same release envelope; head pose retains its authority.
+//! Reacquired detail follows a smoothstep envelope, while head rotation uses
+//! its existing damped spring throughout loss and reconnection.
 
 use std::time::Duration;
 
@@ -56,23 +48,16 @@ pub enum LossBlendConfigError {
     },
 }
 
-/// Timing of the unified tracking-loss ramp.
-///
-/// One profile drives every loss/recovery timeline in the workspace: a lost
-/// channel holds its authority for [`LossBlendProfile::hold`], then eases to
-/// the relaxed pose over [`LossBlendProfile::return_duration`], and a
-/// reacquired channel ramps back up over [`LossBlendProfile::acquire`]. The
-/// defaults match the evaluated arm-tracking values, and the face pipeline
-/// shares them so head and hands lose and recover identically.
+/// Timing of arm authority and facial-detail release/reacquisition.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LossBlendProfile {
     /// How long a lost channel keeps its last value before returning.
     pub hold: Duration,
     /// How long the eased return to the relaxed pose takes after the hold.
     ///
-    /// The default is deliberately long: when a channel is lost, it should
-    /// sink back to its relaxed pose like a person lowering a hand, not snap
-    /// to neutral.
+    /// The default follows the benchmark video's hand-lowering interval.
+    /// Smoothstep keeps the start and end at zero slope while allowing a lost
+    /// hand to settle before the subject's next gesture.
     pub return_duration: Duration,
     /// How long a fully reacquired channel takes to blend back in.
     ///
@@ -85,8 +70,8 @@ impl Default for LossBlendProfile {
     fn default() -> Self {
         Self {
             hold: Duration::from_millis(150),
-            return_duration: Duration::from_secs(5),
-            acquire: Duration::from_secs(1),
+            return_duration: Duration::from_secs(2),
+            acquire: Duration::from_millis(500),
         }
     }
 }

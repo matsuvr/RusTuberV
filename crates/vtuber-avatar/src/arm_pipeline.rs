@@ -380,6 +380,21 @@ impl Default for TrackedArmControl {
     }
 }
 
+/// Signed upper-arm coronal descent used by existing pose diagnostics.
+#[must_use]
+pub fn coronal_descent_radians(rest_direction: Vec3, upper_direction: Vec3) -> Option<f32> {
+    let forward = Vec3::Z;
+    let rest_coronal =
+        crate::arm::finite_normalized(rest_direction - forward * rest_direction.dot(forward))?;
+    let coronal =
+        crate::arm::finite_normalized(upper_direction - forward * upper_direction.dot(forward))?;
+    let swing_axis = crate::arm::finite_normalized(rest_coronal.cross(-Vec3::Y))?;
+    Some(f32::atan2(
+        rest_coronal.cross(coronal).dot(swing_axis),
+        rest_coronal.dot(coronal),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -719,19 +734,4 @@ mod tests {
             assert!(p.is_finite(), "no NaN in swivel-modified poles");
         }
     }
-}
-
-/// Signed upper-arm coronal descent used by existing pose diagnostics.
-#[must_use]
-pub fn coronal_descent_radians(rest_direction: Vec3, upper_direction: Vec3) -> Option<f32> {
-    let forward = Vec3::Z;
-    let rest_coronal =
-        crate::arm::finite_normalized(rest_direction - forward * rest_direction.dot(forward))?;
-    let coronal =
-        crate::arm::finite_normalized(upper_direction - forward * upper_direction.dot(forward))?;
-    let swing_axis = crate::arm::finite_normalized(rest_coronal.cross(-Vec3::Y))?;
-    Some(f32::atan2(
-        rest_coronal.cross(coronal).dot(swing_axis),
-        rest_coronal.dot(coronal),
-    ))
 }

@@ -1018,6 +1018,10 @@ fn report(commands: &mut Commands, root: Entity, state: &mut UpperLimbState, sta
 }
 
 #[cfg(test)]
+#[path = "upper_limb_stability_tests.rs"]
+mod stability_tests;
+
+#[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
@@ -1027,7 +1031,7 @@ mod tests {
         ArmBlendWeight, ArmBlendWeights, ArmControlFrame, ArmTrackingTarget, ArmTrackingTargets,
     };
 
-    fn update_after_worker(app: &mut App) {
+    pub(super) fn update_after_worker(app: &mut App) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app
             .world()
@@ -1076,7 +1080,7 @@ mod tests {
         chain
     }
 
-    fn rig() -> (App, Entity, ArmChainBinding, ArmChainBinding) {
+    pub(super) fn rig() -> (App, Entity, ArmChainBinding, ArmChainBinding) {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(

@@ -884,11 +884,10 @@ mod tests {
         capabilities.gaze_backend = SelectedGazeBackend::Expression;
         capabilities.declared_look_at = DeclaredLookAtType::Expression;
         capabilities.perfect_sync = PerfectSyncCapabilities::from_named_statuses(
-            (vtuber_core::ArkitBlendshape::ALL
+            vtuber_core::ArkitBlendshape::ALL
                 .into_iter()
-                .map(vtuber_core::ArkitBlendshape::canonical_name))
-            .into_iter()
-            .map(|name| (name, true)),
+                .map(vtuber_core::ArkitBlendshape::canonical_name)
+                .map(|name| (name, true)),
         );
         let catalog = AvatarExpressionCatalog::build(
             "model".into(),

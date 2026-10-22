@@ -12,7 +12,7 @@ Windowsは`win-RusTuberV-<version>-x64.zip`、Macは`mac-RusTuberV-<version>-arm
 [MSYS2 CLANG64環境](WINDOWS-LLVM.md)を準備する。
 
 ```powershell
-.\tools\package-windows.ps1 -Version 0.1.2
+.\tools\package-windows.ps1 -Version 0.1.3
 ```
 
 この処理は指定NDI SDKとMSYS2 CLANG64で x86_64-pc-windows-gnullvm 向けの既定機能をビルドし、

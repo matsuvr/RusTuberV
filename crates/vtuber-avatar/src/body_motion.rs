@@ -306,11 +306,8 @@ pub fn update_body_tracking_position_input(
     );
     metrics.idle_blend = idle_state.blend();
 
-    // The idle sway cross-fades with the control frame instead of replacing
-    // it: during a loss the sway fades in over the still-easing offsets, and
-    // after a reacquire it fades out while the tracked channels resume. The
-    // envelope continues from its current value on both direction changes,
-    // so neither transition snaps.
+    // Add idle sway about the retained position, using the same envelope
+    // as the rotation bridge. It does not pull a held pose toward neutral.
     let idle = idle_state.target();
     let blend = idle_state.blend().clamp(0.0, 1.0);
     let idle_head = Vec3::new(
@@ -320,17 +317,25 @@ pub fn update_body_tracking_position_input(
     );
     let (frame_head, frame_body, frame_weight) =
         match position_channels(frame, mirrored, profiles, body_scale) {
-            // Lost frames still carry the return and a decaying confidence, so
-            // they are published like tracked frames: marking the input inactive
+            // Lost frames retain the accepted pose authority, so they are
+            // published like tracked frames: marking the input inactive
             // would snap the root to rest the moment the face leaves the frame.
             Some((head, body)) => (head, body, frame.confidence.clamp(0.0, 1.0)),
             // Unavailable translation must not zero out a tracked rotation pose;
             // while the idle episode blends, the sway keeps flowing over zero.
             None => (Vec3::ZERO, Vec3::ZERO, 0.0),
         };
-    let head_target = (1.0 - blend) * frame_head + blend * idle_head;
-    let body_target = (1.0 - blend) * frame_body;
     let weight = ((1.0 - blend) * frame_weight + blend).clamp(0.0, 1.0);
+    // IdleTarget is already enveloped. Preserve the observed contribution
+    // while adding small motion about that position, including at full loss.
+    let (head_target, body_target) = if weight > 0.0 {
+        (
+            (frame_head * frame_weight + idle_head) / weight,
+            frame_body * frame_weight / weight,
+        )
+    } else {
+        (Vec3::ZERO, Vec3::ZERO)
+    };
     let (head_offset, body_offset) = follow.advance(
         binding.generation,
         head_target,

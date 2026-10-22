@@ -202,6 +202,12 @@ retained. Optional missing MCPs leave the wrist protected by its forearm cap,
 without claiming coverage of unknown fingers. Upper arms may overlap the torso;
 forearms, palms and opposite arms are still checked, including swept paths.
 
+The head uses a separate spherical proxy attached to the head bone, with a
+standard skull radius of .1 times object rest scale and 10% extra radial
+clearance. Its centre sits one unpadded radius above the head joint along model
+up. This is a RusTuberV approximation independent of hair and render meshes;
+all arm regions check it, including swept paths as the head moves.
+
 Elbow target correction uses the shoulder--wrist swivel idea from Unzueta et al.,
 [Full-body performance animation with Sequential Inverse Kinematics](https://doi.org/10.1016/j.gmod.2008.03.002),
 Graphical Models 70 (2008), section 8. This is an independent bounded target

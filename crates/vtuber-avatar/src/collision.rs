@@ -10,9 +10,14 @@ use parry3d::{
 };
 use std::collections::HashMap;
 
+/// Standard skull proxy in model units, with a small mesh-independent shell.
+const SKULL_RADIUS: f32 = 0.1;
+const HEAD_RADIUS_SCALE: f32 = 1.1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Region {
     Torso,
+    Head,
     Upper(crate::arm::ArmSide),
     Forearm(crate::arm::ArmSide),
     Hand(crate::arm::ArmSide),
@@ -99,6 +104,19 @@ pub(crate) fn bind_collision_geometry(
             if capsules.is_empty() {
                 return Err(CollisionError::MissingBone);
             }
+            // The head joint is at the skull base. Offset along model up,
+            // independent of authored bone axes, and keep the centre fixed
+            // while adding 10% radial clearance. Hair never sizes this proxy.
+            let head_center = rest(binding.head)?.translation()
+                + root_rest.affine().transform_vector3(Vec3::Y * SKULL_RADIUS);
+            capsules.push(CapsuleCollider {
+                bone: binding.head,
+                region: Region::Head,
+                endpoints: [head_center; 2],
+                radius: SKULL_RADIUS
+                    * root_rest.affine().matrix3.x_axis.length()
+                    * HEAD_RADIUS_SCALE,
+            });
             for chain in [binding.left_arm, binding.right_arm].into_iter().flatten() {
                 capsules.extend(arm_capsules(chain));
                 capsules.extend(palm_capsules(chain));
@@ -258,7 +276,7 @@ impl CollisionGeometry {
         let torso: Vec<_> = self
             .capsules
             .iter()
-            .filter(|c| c.region == Region::Torso)
+            .filter(|c| matches!(c.region, Region::Torso | Region::Head))
             .filter_map(|c| {
                 body.get(&c.bone).map(|m| {
                     let [a, b] = c
@@ -325,7 +343,7 @@ impl CollisionGeometry {
                     | (Region::Forearm(x), Region::Hand(y))
                     | (Region::Hand(x), Region::Forearm(y))
                     | (Region::Hand(x), Region::Hand(y)) => x == y,
-                    (Region::Torso, Region::Torso)
+                    (Region::Torso | Region::Head, Region::Torso | Region::Head)
                     | (Region::Upper(_), Region::Torso)
                     | (Region::Torso, Region::Upper(_)) => true,
                     _ => false,
@@ -771,7 +789,8 @@ mod tests {
             let hips = spawn(Vec3::Y);
             let spine = spawn(Vec3::Y * 1.15);
             let neck = spawn(Vec3::Y * 1.5);
-            let mut binding = AvatarBinding::head_only(root, neck, AvatarGeneration(1));
+            let head = spawn(Vec3::Y * 1.6);
+            let mut binding = AvatarBinding::head_only(root, head, AvatarGeneration(1));
             binding.spine = Some(spine);
             binding.neck = Some(neck);
             let mut chain = crate::upper_limb::tests::chain(ArmSide::Left);
@@ -814,13 +833,82 @@ mod tests {
             geometry
         };
         let a = bind_test_geometry(1.0, Quat::IDENTITY);
-        assert_eq!(a.capsules.len(), 4);
+        assert_eq!(a.capsules.len(), 5);
         assert!(
             a.capsules
                 .iter()
                 .filter(|c| c.region == Region::Torso)
                 .all(|c| (c.radius - 0.1).abs() < 1e-6)
         );
+        let head = a
+            .capsules
+            .iter()
+            .find(|c| c.region == Region::Head)
+            .unwrap();
+        assert!((head.radius - 0.11).abs() < 1e-6);
+        assert!(head.endpoints[0].distance(Vec3::Y * 1.7) < 1e-6);
+        assert_eq!(head.endpoints[0], head.endpoints[1]);
+        assert!(a.bones().any(|bone| bone == head.bone));
+        for side in [ArmSide::Left, ArmSide::Right] {
+            for region in [
+                Region::Upper(side),
+                Region::Forearm(side),
+                Region::Hand(side),
+            ] {
+                // A hand just outside the bare skull must already meet the
+                // added shell, from every direction, without fitting a mesh.
+                for axis in [
+                    Vec3::X,
+                    Vec3::NEG_X,
+                    Vec3::Y,
+                    Vec3::NEG_Y,
+                    Vec3::Z,
+                    Vec3::NEG_Z,
+                ] {
+                    let hand = CapsuleCollider {
+                        bone: entity(100),
+                        region,
+                        endpoints: [head.endpoints[0] + axis * 0.125; 2],
+                        radius: 0.02,
+                    };
+                    let padded = CollisionGeometry::new(vec![head.clone(), hand.clone()], &[]);
+                    assert!(!padded.pose_is_clear(&identity, 0.0).unwrap());
+                    let bare = CollisionGeometry::new(
+                        vec![
+                            CapsuleCollider {
+                                radius: 0.1,
+                                ..head.clone()
+                            },
+                            hand,
+                        ],
+                        &[],
+                    );
+                    assert!(bare.pose_is_clear(&identity, 0.0).unwrap());
+                }
+            }
+        }
+        // Moving the head through a stationary hand is also checked between
+        // clear endpoints, using the same bone motion as the rendered head.
+        let hand = CapsuleCollider {
+            bone: entity(100),
+            region: Region::Hand(ArmSide::Left),
+            endpoints: [head.endpoints[0] + Vec3::X * 0.15; 2],
+            radius: 0.02,
+        };
+        let moving = CollisionGeometry::new(vec![head.clone(), hand], &[]);
+        let end = |bone| {
+            Some(BoneMotion {
+                rotation: Quat::IDENTITY,
+                translation: if bone == head.bone {
+                    Vec3::X * 0.3
+                } else {
+                    Vec3::ZERO
+                },
+            })
+        };
+        assert!(moving.pose_is_clear(&identity, 0.0).unwrap());
+        assert!(moving.pose_is_clear(&end, 0.0).unwrap());
+        assert!(!moving.sweep_is_clear(&identity, &end, |_| 0.0).unwrap());
         let b = bind_test_geometry(3.0, Quat::from_euler(EulerRot::XYZ, 0.4, -0.3, 0.7));
         for (a, b) in a.capsules.iter().zip(&b.capsules) {
             assert_eq!(a.region, b.region);

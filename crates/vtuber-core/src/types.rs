@@ -453,7 +453,7 @@ pub enum TrackingState {
     Degraded,
     /// Face was lost; holding last pose briefly.
     LostHold,
-    /// Returning to neutral after lost hold expires.
+    /// Releasing facial detail after lost hold expires; head pose is retained.
     ReturningNeutral,
 }
 
@@ -466,7 +466,9 @@ pub struct AvatarControlFrame {
     pub captured_at: MonoTimeNs,
     /// When this control frame was produced.
     pub produced_at: MonoTimeNs,
-    /// Aggregated tracking confidence in `[0, 1]`.
+    /// Pose authority in `[0, 1]`, derived from aggregated tracking confidence.
+    /// Loss retains the last accepted authority for head presentation; inspect
+    /// `state` and `captured_at` for observation availability and freshness.
     pub confidence: f32,
     /// Current tracking state.
     pub state: TrackingState,

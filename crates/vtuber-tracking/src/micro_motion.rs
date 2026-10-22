@@ -274,6 +274,8 @@ fn breath_offset(profile: &MicroMotionProfile, elapsed_secs: f32, body_scale_met
 pub struct MicroMotionBlender {
     transition_secs: f32,
     blend: f32,
+    phase_start_blend: f32,
+    motion_started_at: Option<MonoTimeNs>,
     idle_started_at: Option<MonoTimeNs>,
     live_started_at: Option<MonoTimeNs>,
 }
@@ -292,6 +294,8 @@ impl MicroMotionBlender {
         Ok(Self {
             transition_secs: profile.transition.as_secs_f32(),
             blend: 0.0,
+            phase_start_blend: 0.0,
+            motion_started_at: None,
             idle_started_at: None,
             live_started_at: None,
         })
@@ -314,20 +318,31 @@ impl MicroMotionBlender {
         let transition = self.transition_secs.max(f32::EPSILON);
         if tracked {
             if self.live_started_at.is_none() {
+                self.phase_start_blend = self.blend;
                 self.live_started_at = Some(now);
                 self.idle_started_at = None;
             }
             let start = self.live_started_at.unwrap_or(now);
             let elapsed = Duration::from_nanos(now.0.saturating_sub(start.0)).as_secs_f32();
-            self.blend *= 1.0 - smoothstep(transition_progress(elapsed, transition));
+            self.blend = self.phase_start_blend
+                * (1.0 - smoothstep(transition_progress(elapsed, transition)));
+            if self.blend <= 0.0 {
+                self.motion_started_at = None;
+            }
         } else {
             if self.idle_started_at.is_none() {
+                self.phase_start_blend = self.blend;
+                // Keep the sway/breath phase through a partial reacquisition
+                // and re-loss. Only a fully released episode starts anew.
+                self.motion_started_at.get_or_insert(now);
                 self.idle_started_at = Some(now);
                 self.live_started_at = None;
             }
             let start = self.idle_started_at.unwrap_or(now);
             let elapsed = Duration::from_nanos(now.0.saturating_sub(start.0)).as_secs_f32();
-            self.blend += (1.0 - self.blend) * smoothstep(transition_progress(elapsed, transition));
+            self.blend = self.phase_start_blend
+                + (1.0 - self.phase_start_blend)
+                    * smoothstep(transition_progress(elapsed, transition));
         }
         if !self.blend.is_finite() {
             self.blend = 0.0;
@@ -338,6 +353,8 @@ impl MicroMotionBlender {
     /// Clears all episode state (avatar replacement / unload / reset).
     pub fn reset(&mut self) {
         self.blend = 0.0;
+        self.phase_start_blend = 0.0;
+        self.motion_started_at = None;
         self.idle_started_at = None;
         self.live_started_at = None;
     }
@@ -351,7 +368,7 @@ impl MicroMotionBlender {
     /// Time since the idle episode started, if one is recorded.
     #[must_use]
     pub fn elapsed_since_idle_start(&self, now: MonoTimeNs) -> Duration {
-        match self.idle_started_at {
+        match self.motion_started_at {
             Some(start) => Duration::from_nanos(now.0.saturating_sub(start.0)),
             None => Duration::ZERO,
         }
@@ -390,11 +407,14 @@ pub fn blended_idle_target(
 
 /// Whether a control-frame state counts as "actively tracked".
 ///
-/// Only [`TrackingState::Tracking`] and [`TrackingState::Degraded`] hold a
-/// live observation; every other state starts or continues an idle episode.
+/// Tracking, degraded tracking, and acquisition carry a live observation;
+/// unavailable states start or continue an idle episode.
 #[must_use]
 pub fn is_tracked_state(state: TrackingState) -> bool {
-    matches!(state, TrackingState::Tracking | TrackingState::Degraded)
+    matches!(
+        state,
+        TrackingState::Tracking | TrackingState::Degraded | TrackingState::Acquiring
+    )
 }
 
 #[cfg(test)]
@@ -764,6 +784,61 @@ mod tests {
     }
 
     #[test]
+    fn blender_uses_elapsed_time_instead_of_the_number_of_render_ticks() {
+        for hz in [30u64, 60, 120] {
+            let mut blender = MicroMotionBlender::new(&profile()).unwrap();
+            for tick in 0..=hz * 2 {
+                let blend = blender.update(false, MonoTimeNs(tick * 1_000_000_000 / hz));
+                let progress = tick as f32 / (hz * 4) as f32;
+                assert_relative_eq!(blend, smoothstep(progress), epsilon = 1e-5);
+            }
+            assert_relative_eq!(blender.blend(), 0.5, epsilon = 1e-5);
+            for tick in 0..=hz * 2 {
+                let blend =
+                    blender.update(true, MonoTimeNs(2_000_000_000 + tick * 1_000_000_000 / hz));
+                let progress = tick as f32 / (hz * 4) as f32;
+                assert_relative_eq!(blend, 0.5 * (1.0 - smoothstep(progress)), epsilon = 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn sway_and_breath_phase_continue_through_reacquire_and_reloss() {
+        let p = profile();
+        let mut blender = MicroMotionBlender::new(&p).unwrap();
+        let _ = blender.update(false, MonoTimeNs(0));
+        let blend = blender.update(false, MonoTimeNs(2_000_000_000));
+        let before = blended_idle_target(
+            &p,
+            1,
+            blender.elapsed_since_idle_start(MonoTimeNs(2_000_000_000)),
+            1.0,
+            blend,
+        );
+        for tracked in [true, false, true] {
+            let blend = blender.update(tracked, MonoTimeNs(2_000_000_000));
+            let after = blended_idle_target(
+                &p,
+                1,
+                blender.elapsed_since_idle_start(MonoTimeNs(2_000_000_000)),
+                1.0,
+                blend,
+            );
+            assert_eq!(
+                before, after,
+                "a direction change must not reset motion phase"
+            );
+        }
+        let _ = blender.update(true, MonoTimeNs(6_000_000_000));
+        assert_eq!(blender.blend(), 0.0);
+        let _ = blender.update(false, MonoTimeNs(7_000_000_000));
+        assert_eq!(
+            blender.elapsed_since_idle_start(MonoTimeNs(7_000_000_000)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
     fn composition_scales_the_idle_target_by_blend() {
         let p = profile();
         let base = idle_target(&p, 5, seconds(5.0), 1.0);
@@ -804,10 +879,10 @@ mod tests {
     fn only_tracked_states_count_as_live() {
         assert!(is_tracked_state(TrackingState::Tracking));
         assert!(is_tracked_state(TrackingState::Degraded));
+        assert!(is_tracked_state(TrackingState::Acquiring));
         for state in [
             TrackingState::Starting,
             TrackingState::Searching,
-            TrackingState::Acquiring,
             TrackingState::LostHold,
             TrackingState::ReturningNeutral,
         ] {

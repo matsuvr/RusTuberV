@@ -757,11 +757,10 @@ mod tests {
     #[test]
     fn perfect_sync_full_52_names_are_complete() {
         let caps = PerfectSyncCapabilities::from_named_statuses(
-            (ArkitBlendshape::ALL
+            ArkitBlendshape::ALL
                 .into_iter()
-                .map(ArkitBlendshape::canonical_name))
-            .into_iter()
-            .map(|name| (name, true)),
+                .map(ArkitBlendshape::canonical_name)
+                .map(|name| (name, true)),
         );
         assert_eq!(caps.present_count(), 52);
         assert_eq!(caps.effective_count(), 52);
@@ -810,26 +809,23 @@ mod tests {
     #[test]
     fn perfect_sync_requires_all_51_channels_except_tongue_out() {
         let all_52 = PerfectSyncCapabilities::from_named_statuses(
-            (ArkitBlendshape::ALL
+            ArkitBlendshape::ALL
                 .into_iter()
-                .map(ArkitBlendshape::canonical_name))
-            .into_iter()
-            .map(|name| (name, true)),
+                .map(ArkitBlendshape::canonical_name)
+                .map(|name| (name, true)),
         );
         assert!(all_52.supports_perfect_sync());
 
         // TongueOut is not required: a model without a tongue expression is
         // still a complete Perfect Sync model.
         let without_tongue = PerfectSyncCapabilities::from_named_statuses(
-            (required_perfect_sync_names())
-                .into_iter()
-                .map(|name| (name, true)),
+            required_perfect_sync_names().map(|name| (name, true)),
         );
         assert!(without_tongue.supports_perfect_sync());
 
         let missing_one = PerfectSyncCapabilities::from_named_statuses(
-            (required_perfect_sync_names().filter(|name| *name != "JawOpen"))
-                .into_iter()
+            required_perfect_sync_names()
+                .filter(|name| *name != "JawOpen")
                 .map(|name| (name, true)),
         );
         assert!(!missing_one.supports_perfect_sync());

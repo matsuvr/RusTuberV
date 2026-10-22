@@ -13,6 +13,16 @@
 //! quarantines a wrist step beyond the calibrated arm length — and a lost
 //! channel is eased back by the shared loss blend rather than by stiffening the
 //! filter.
+//!
+//! For scalar/Cartesian channels with fixed positive tau, the transfer function
+//! is H(s) = 1 / (1 + tau*s)^2. Its impulse response
+//! h(t) = t*exp(-t/tau)/tau^2 is nonnegative and integrates to one. Holding each
+//! observation for dt gives weights h[k] = S((k+1)*dt) - S(k*dt), where
+//! S(t) = 1 - (1+t/tau)*exp(-t/tau). These weights are also nonnegative and sum
+//! to one: convolution cannot increase peak magnitude or total squared noise
+//! (including its settling tail), even when several noise sources correlate.
+//! This contract assumes zero initial perturbation and a fixed sample interval;
+//! nonlinear rotations, anatomical projection and IK need separate tests.
 
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
@@ -198,6 +208,44 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn held_input_impulse_has_nonnegative_unit_mass_and_matches_the_analytic_response() {
+        // A unit pulse followed by zero probes the actual retained-state
+        // implementation, not just the one-step coefficients. Positivity and
+        // unit mass imply ||h*x||_2 <= ||x||_2 for ANY correlated input x.
+        for fps in [30, 60, 120] {
+            for tau in [0.025_f32, 0.05, 0.10, 0.125, 0.15, 0.30] {
+                let dt = 1.0 / fps as f32;
+                let ticks = (30.0 * tau / dt).ceil() as usize;
+                let mut spring = ScalarSpring::new(0.0);
+                let mut mass = 0.0_f64;
+                for tick in 0..ticks {
+                    let value = spring.step(if tick == 0 { 1.0 } else { 0.0 }, dt, tau);
+                    let residual = |t: f64| {
+                        let u = t / f64::from(tau);
+                        (1.0 + u) * (-u).exp()
+                    };
+                    let t = tick as f64 * f64::from(dt);
+                    let expected = residual(t) - residual(t + f64::from(dt));
+                    assert!(
+                        value >= -1.0e-8,
+                        "{fps} Hz, tau={tau}, tick={tick}: {value}"
+                    );
+                    assert!(
+                        (f64::from(value) - expected).abs() < 1.0e-6,
+                        "{fps} Hz, tau={tau}, tick={tick}: {value} != {expected}"
+                    );
+                    mass += f64::from(value);
+                }
+                assert!(
+                    (mass - 1.0).abs() < 1.0e-5,
+                    "{fps} Hz, tau={tau}: mass={mass}"
+                );
+                assert!(spring.value.abs() < 1.0e-8);
+            }
+        }
+    }
 
     #[test]
     fn a_fixed_response_steps_the_same_way_regardless_of_the_error_size() {

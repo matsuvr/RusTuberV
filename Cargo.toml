@@ -16,7 +16,7 @@ exclude = ["vendor/mediapipe-rs", "vendor/nokhwa", "vendor/nokhwa-bindings-windo
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "MIT"
 # Minimum supported compiler; rust-toolchain.toml follows the stable channel.

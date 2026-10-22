@@ -610,7 +610,7 @@ fn legacy_curve_is_linear(curve: &[Value]) -> bool {
     if curve.len() < 8 || !curve.len().is_multiple_of(4) {
         return false;
     }
-    let keys = curve.chunks_exact(4).collect::<Vec<_>>();
+    let keys = curve.as_chunks::<4>().0;
     let Some(first) = keys.first() else {
         return false;
     };

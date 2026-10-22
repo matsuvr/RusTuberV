@@ -617,6 +617,10 @@ impl TrackingPipeline {
 
     fn reset_temporal_filters(&mut self) {
         self.head_filter.reset();
+        self.reset_face_detail_filters();
+    }
+
+    fn reset_face_detail_filters(&mut self) {
         self.translation_filter.reset();
         self.gaze_filter.reset();
         self.expression_filter.reset();
@@ -812,7 +816,9 @@ impl TrackingPipeline {
         for action in &transition.actions {
             match action {
                 crate::state_machine::TrackingAction::ResetFilters => {
-                    self.reset_temporal_filters();
+                    // Acquisition must not erase the head spring's position
+                    // and velocity every time dim light interrupts detection.
+                    self.reset_face_detail_filters();
                 }
                 crate::state_machine::TrackingAction::StartHold
                 | crate::state_machine::TrackingAction::StartReturnToNeutral => {}
@@ -830,8 +836,12 @@ impl TrackingPipeline {
             .map(|frame| frame.translation)
             .unwrap_or(HeadTranslationSignal::UNAVAILABLE);
         let translation = self.translation_filter.update(raw_translation, now);
+        let reconnect = matches!(
+            transition.previous,
+            TrackingState::LostHold | TrackingState::ReturningNeutral | TrackingState::Searching
+        );
+        let head = self.update_head_filter(&pose_result, now, reconnect);
         let tracked = observation.map(|obs| {
-            let head = self.update_head_filter(&pose_result, now);
             let mut expressions = self.expression_filter.update(&obs.expressions, now);
             if let Some(closure) = closure {
                 self.expression_filter
@@ -861,9 +871,13 @@ impl TrackingPipeline {
         });
 
         // 7. Loss recovery glides, decays, and blends reacquired frames.
-        let frame = self
-            .loss_recovery
-            .update(transition.current, dt, tracked, now);
+        let frame = self.loss_recovery.update(
+            transition.current,
+            dt,
+            tracked,
+            self.head_filter.is_initialized().then_some(head),
+            now,
+        );
 
         PipelineUpdate {
             frame,
@@ -910,14 +924,19 @@ impl TrackingPipeline {
         &mut self,
         pose_result: &Option<Result<HeadPoseFrame, HeadPoseFailure>>,
         now: MonoTimeNs,
+        reconnect: bool,
     ) -> HeadPose {
         if let Some(Ok(pose_frame)) = pose_result {
             let q = semantic_pose_to_quaternion(pose_frame.pose);
-            let filtered_q = self.head_filter.update(q, now);
+            let filtered_q = if reconnect {
+                self.head_filter.reconnect(q, now)
+            } else {
+                self.head_filter.update(q, now)
+            };
             quaternion_to_semantic_pose(filtered_q)
         } else {
             self.head_filter
-                .current()
+                .advance(now)
                 .map(quaternion_to_semantic_pose)
                 .unwrap_or_default()
         }
@@ -2064,6 +2083,71 @@ mod assembly {
             second.head,
             third.head
         );
+    }
+
+    #[test]
+    fn intermittent_and_prolonged_face_loss_preserve_heading_and_reconnect_smoothly() {
+        for hz in [30u64, 60, 120] {
+            let mut pipeline = TrackingPipeline::new(config()).unwrap();
+            let neutral = mediapipe_sample(&[]);
+            let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(33_333_333));
+            let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(66_666_666));
+            let target = rotated_mediapipe_sample(2, 30.0);
+            let first = track_mediapipe(&mut pipeline, &target, MonoTimeNs(100_000_000)).unwrap();
+            let mut previous = first;
+            for tick in 1..=hz * 10 {
+                let now = MonoTimeNs(100_000_000 + tick * 1_000_000_000 / hz);
+                let frame = pipeline
+                    .update_mediapipe(
+                        None,
+                        Some(CameraFaceTransform::identity()),
+                        None,
+                        now,
+                        Duration::from_secs_f64(1.0 / hz as f64),
+                    )
+                    .frame
+                    .unwrap();
+                assert_eq!(frame.source_seq, target.source_seq);
+                assert_eq!(frame.captured_at, target.captured_at);
+                assert!(frame.head.yaw_rad >= previous.head.yaw_rad - 1e-5);
+                assert!((frame.confidence - previous.confidence).abs() < 1e-6);
+                previous = frame;
+            }
+            assert!((previous.head.yaw_rad - 30f32.to_radians()).abs() < 1e-4);
+            // Alternating visibility must not reset the spring or add a second
+            // half-second recovery envelope to a slowly moving head.
+            let changed = rotated_mediapipe_sample(3, 35.0);
+            for tick in 1..=hz {
+                let now = MonoTimeNs(10_100_000_000 + tick * 1_000_000_000 / hz);
+                let frame = pipeline
+                    .update_mediapipe(
+                        (tick % 2 == 0).then_some(&changed),
+                        Some(CameraFaceTransform::identity()),
+                        None,
+                        now,
+                        Duration::from_secs_f64(1.0 / hz as f64),
+                    )
+                    .frame
+                    .unwrap();
+                assert!(frame.head.yaw_rad >= previous.head.yaw_rad - 1e-4);
+                assert!((frame.head.yaw_rad - previous.head.yaw_rad).abs() < 0.06);
+                previous = frame;
+            }
+            assert!((previous.head.yaw_rad - 35f32.to_radians()).abs() < 1e-3);
+            pipeline.reset();
+            assert!(
+                pipeline
+                    .update_mediapipe(
+                        None,
+                        Some(CameraFaceTransform::identity()),
+                        None,
+                        MonoTimeNs(12_000_000_000),
+                        Duration::from_millis(16)
+                    )
+                    .frame
+                    .is_none()
+            );
+        }
     }
 
     #[test]

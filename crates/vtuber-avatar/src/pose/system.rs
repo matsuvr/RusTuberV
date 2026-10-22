@@ -201,17 +201,14 @@ pub fn update_body_tracking_pose_input(
 
     *input = body_tracking_input(frame, mirrored);
 
-    // Tracking-loss idle (ADR-021): the bounded idle yaw/pitch cross-fades
-    // with the control frame instead of replacing it. The blend continues
-    // from its current value on both direction changes, so during a loss the
-    // sway fades in over the still-easing pose, and after a reacquire it
-    // fades out while the tracked pose resumes — the head never snaps.
+    // Add bounded, enveloped idle motion about the retained heading. The
+    // same envelope fades away as live observations reconnect.
     if let Some(idle_state) = idle_state.as_ref() {
         let blend = idle_state.blend();
         if blend > 0.0 {
             let idle = idle_state.target();
             let horizontal_sign = MotionMirror::new(mirrored).horizontal(1.0);
-            *input = fade_pose_input(*input, idle, horizontal_sign, blend);
+            *input = add_idle_pose(*input, idle, horizontal_sign, blend);
         }
     }
 
@@ -219,13 +216,9 @@ pub fn update_body_tracking_pose_input(
     metrics.record_apply(frame.source_seq, frame.captured_at, applied_at);
 }
 
-/// Cross-fades one pose input with the idle sway by `blend`.
-///
-/// The two contributions the writer multiplies by the weight are cross-faded
-/// exactly, so at `blend = 0` the input is unchanged and at `blend = 1` it is
-/// the idle sway alone; in between the control frame's contribution shrinks
-/// with its own weight instead of being zeroed.
-fn fade_pose_input(
+/// Adds an already-enveloped idle target to the weighted observed pose.
+/// Normalization preserves that contribution as the idle envelope changes.
+fn add_idle_pose(
     input: BodyTrackingPoseInput,
     idle: &vtuber_tracking::IdleTarget,
     horizontal_sign: f32,
@@ -234,11 +227,14 @@ fn fade_pose_input(
     let blend = blend.clamp(0.0, 1.0);
     let frame_weight = input.weight.clamp(0.0, 1.0);
     let weight = ((1.0 - blend) * frame_weight + blend).clamp(0.0, 1.0);
-    let yaw_total = (1.0 - blend) * input.yaw_radians * frame_weight
-        + blend * (horizontal_sign * idle.yaw_radians);
-    let pitch_total =
-        (1.0 - blend) * input.pitch_radians * frame_weight + blend * idle.pitch_radians;
-    let roll_total = (1.0 - blend) * input.roll_radians * frame_weight;
+    // IdleTarget already includes its envelope. Add it around the retained
+    // pose instead of dragging a turned head toward the default orientation.
+    let yaw_total = input.yaw_radians * frame_weight + horizontal_sign * idle.yaw_radians;
+    let pitch_total = input.pitch_radians * frame_weight + idle.pitch_radians;
+    let roll_total = input.roll_radians * frame_weight;
+    if weight <= 0.0 {
+        return input;
+    }
     BodyTrackingPoseInput {
         yaw_radians: yaw_total / weight,
         pitch_radians: pitch_total / weight,
@@ -256,11 +252,8 @@ fn body_tracking_input(frame: &AvatarControlFrame, mirrored: bool) -> BodyTracki
         pitch_radians: frame.head.pitch_rad,
         roll_radians: mirror.horizontal(frame.head.roll_rad),
         weight: frame.confidence,
-        // The control frame already carries the loss glide and a confidence
-        // that decays to zero. Marking the input inactive during loss would
-        // zero the dependency's target instantly and snap the head and body to
-        // rest the moment the face leaves the frame; the weight is the only
-        // blend that may reach zero.
+        // Loss retains pose authority. Freshness is carried by the frame's
+        // state and capture timestamp rather than by zeroing the pose input.
         active: true,
     }
 }
@@ -881,8 +874,8 @@ mod tests {
 
     #[test]
     fn pose_input_stays_active_so_loss_glides_instead_of_snapping() {
-        // The control frame carries the loss glide and a confidence that
-        // decays to zero, so the input must stay active: the dependency turns
+        // The control frame retains head authority during loss. The input
+        // must stay active: the dependency turns
         // an inactive input into an instant zero target.
         for state in [
             TrackingState::Tracking,
@@ -935,10 +928,10 @@ mod tests {
         assert_eq!(metrics.capture_to_apply_p95_ms(), 40.0);
     }
     #[test]
-    fn idle_cross_fade_preserves_the_pose_contribution_at_zero_blend() {
+    fn idle_addition_preserves_the_pose_contribution_at_zero_blend() {
         let idle = vtuber_tracking::IdleTarget::default();
         let input = body_tracking_input(&frame(TrackingState::Tracking), true);
-        let faded = fade_pose_input(input, &idle, 1.0, 0.0);
+        let faded = add_idle_pose(input, &idle, 1.0, 0.0);
         assert!(
             (faded.yaw_radians - input.yaw_radians).abs() < 1.0e-6
                 && (faded.pitch_radians - input.pitch_radians).abs() < 1.0e-6
@@ -949,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_cross_fade_blends_in_the_sway_without_zeroing_the_pose() {
+    fn idle_addition_blends_in_the_sway_without_zeroing_the_pose() {
         // A loss while the head is turned: the pose authority has eased to
         // 0.4 and the idle sway is half faded in on top of it instead of
         // replacing it.
@@ -966,14 +959,14 @@ mod tests {
             weight: 0.4,
             active: true,
         };
-        let faded = fade_pose_input(eased, &idle, 1.0, 0.5);
+        let faded = add_idle_pose(eased, &idle, 1.0, 0.5);
 
-        // The composed target is the exact cross-fade of the two products,
-        // not a replacement that would zero the easing pose.
-        let expected_yaw = 0.5 * (0.5 * 0.4) + 0.5 * idle.yaw_radians;
+        // The composed target retains the weighted pose and adds the already
+        // enveloped sway once.
+        let expected_yaw = 0.5 * 0.4 + idle.yaw_radians;
         assert!(
             (faded.yaw_radians * faded.weight - expected_yaw).abs() < 1.0e-5,
-            "cross-fade product mismatch: {} vs {expected_yaw}",
+            "additive product mismatch: {} vs {expected_yaw}",
             faded.yaw_radians * faded.weight
         );
         assert!(
@@ -984,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_cross_fade_at_full_blend_is_the_idle_sway() {
+    fn idle_addition_at_full_blend_retains_the_heading_and_adds_sway() {
         let idle = vtuber_tracking::IdleTarget {
             yaw_radians: 0.05,
             pitch_radians: 0.02,
@@ -995,20 +988,21 @@ mod tests {
             yaw_radians: 0.5,
             pitch_radians: 0.3,
             roll_radians: 0.1,
-            weight: 0.0,
+            weight: 0.4,
             active: true,
         };
-        let faded = fade_pose_input(eased, &idle, 1.0, 1.0);
+        let faded = add_idle_pose(eased, &idle, 1.0, 1.0);
         assert!(
-            (faded.yaw_radians - idle.yaw_radians).abs() < 1.0e-6
-                && (faded.pitch_radians - idle.pitch_radians).abs() < 1.0e-6
+            (faded.yaw_radians - (0.5 * 0.4 + idle.yaw_radians)).abs() < 1.0e-6
+                && (faded.pitch_radians - (0.3 * 0.4 + idle.pitch_radians)).abs() < 1.0e-6
+                && (faded.roll_radians - 0.1 * 0.4).abs() < 1.0e-6
                 && (faded.weight - 1.0).abs() < 1.0e-6,
-            "full blend must be the idle sway: {faded:?}"
+            "full blend must preserve the weighted pose and add sway: {faded:?}"
         );
     }
 
     #[test]
-    fn idle_cross_fade_fades_out_monotonically_after_reacquire() {
+    fn idle_addition_fades_out_monotonically_after_reacquire() {
         let idle = vtuber_tracking::IdleTarget {
             yaw_radians: 0.05,
             ..vtuber_tracking::IdleTarget::default()
@@ -1024,9 +1018,13 @@ mod tests {
         let mut previous_sway = f32::INFINITY;
         for step in 0..4u64 {
             let blend = 1.0 - step as f32 * 0.25;
-            let faded = fade_pose_input(tracked, &idle, 1.0, blend);
+            let enveloped = vtuber_tracking::IdleTarget {
+                yaw_radians: idle.yaw_radians * blend,
+                ..idle
+            };
+            let faded = add_idle_pose(tracked, &enveloped, 1.0, blend);
             let contribution = faded.yaw_radians * faded.weight;
-            let expected = blend * idle.yaw_radians + (1.0 - blend) * 0.3 * 0.9;
+            let expected = blend * idle.yaw_radians + 0.3 * 0.9;
             assert!(
                 (contribution - expected).abs() < 1.0e-5,
                 "step {step}: {contribution} vs {expected}"
@@ -1039,7 +1037,7 @@ mod tests {
         }
 
         // At zero blend the tracked pose is untouched.
-        let zero = fade_pose_input(tracked, &idle, 1.0, 0.0);
+        let zero = add_idle_pose(tracked, &vtuber_tracking::IdleTarget::default(), 1.0, 0.0);
         assert!(
             (zero.yaw_radians * zero.weight - 0.3 * 0.9).abs() < 1.0e-5,
             "zero blend must not alter the tracked pose"

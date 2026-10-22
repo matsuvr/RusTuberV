@@ -6,7 +6,7 @@
     clippy::indexing_slicing
 )]
 
-//! Integration tests for the shared loss hold, eased neutral return, and
+//! Integration tests for retained head pose, facial release, and
 //! reacquisition blend.
 //!
 //! These tests verify that `LossRecovery` behaves deterministically using
@@ -89,6 +89,77 @@ fn detailed_value(frame: &AvatarControlFrame, channel: ArkitBlendshape) -> f32 {
 }
 
 #[test]
+fn degraded_observations_keep_updating_the_pose() {
+    let mut recovery = LossRecovery::new(test_params()).unwrap();
+    let _ = recovery.update(
+        TrackingState::Tracking,
+        Duration::from_millis(16),
+        Some(frame(1, 0.2, 0.0, 0.0, 0.3)),
+        None,
+        MonoTimeNs(16_000_000),
+    );
+    let mut target = frame(2, 0.4, 0.1, 0.0, 0.5);
+    target.state = TrackingState::Degraded;
+    target.confidence = 0.4;
+    let output = recovery
+        .update(
+            TrackingState::Degraded,
+            Duration::from_millis(16),
+            Some(target.clone()),
+            None,
+            MonoTimeNs(32_000_000),
+        )
+        .unwrap();
+    assert_eq!(output, target);
+}
+
+#[test]
+fn coarse_and_detailed_expressions_share_the_hold_release_and_remain_released() {
+    let mut recovery = LossRecovery::new(test_params()).unwrap();
+    let tracked = detailed_frame(1, 0.8);
+    let _ = recovery.update(
+        TrackingState::Tracking,
+        Duration::from_millis(16),
+        Some(tracked.clone()),
+        None,
+        MonoTimeNs(16_000_000),
+    );
+    let _ = recovery.update(
+        TrackingState::LostHold,
+        Duration::from_millis(16),
+        None,
+        None,
+        MonoTimeNs(32_000_000),
+    );
+    let mut now = 32_000_000;
+    for (dt, factor) in [(100, 1.0), (100, 0.5), (100, 0.0), (10_000, 0.0)] {
+        now += dt * 1_000_000;
+        let out = recovery
+            .update(
+                TrackingState::Searching,
+                Duration::from_millis(dt),
+                None,
+                None,
+                MonoTimeNs(now),
+            )
+            .unwrap();
+        assert_relative_eq!(
+            out.expressions.aa,
+            tracked.expressions.aa * factor,
+            epsilon = 1e-6
+        );
+        assert_relative_eq!(
+            detailed_value(&out, ArkitBlendshape::JawOpen),
+            0.8 * factor,
+            epsilon = 1e-6
+        );
+        assert_eq!(out.head, tracked.head);
+        assert_eq!(out.confidence, tracked.confidence);
+        assert_eq!(out.captured_at, tracked.captured_at);
+    }
+}
+
+#[test]
 fn loss_recovery_hold_preserves_source_sequence() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
     let tracked = frame(7, 0.3, 0.1, -0.2, 0.5);
@@ -97,12 +168,14 @@ fn loss_recovery_hold_preserves_source_sequence() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
     let held = recovery
         .update(
             TrackingState::LostHold,
             Duration::from_millis(50),
+            None,
             None,
             MonoTimeNs(66_000_000),
         )
@@ -119,7 +192,7 @@ fn loss_recovery_hold_preserves_source_sequence() {
 }
 
 #[test]
-fn loss_recovery_eases_authority_monotonically_over_return_duration() {
+fn loss_recovery_preserves_authority_after_expression_release() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
     let tracked = frame(1, 179.0f32.to_radians(), 0.0, 0.0, 0.0);
 
@@ -127,12 +200,14 @@ fn loss_recovery_eases_authority_monotonically_over_return_duration() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
     // The hold keeps the pose and the authority unchanged.
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
+        None,
         None,
         MonoTimeNs(116_000_000),
     );
@@ -143,6 +218,7 @@ fn loss_recovery_eases_authority_monotonically_over_return_duration() {
             .update(
                 TrackingState::ReturningNeutral,
                 Duration::from_millis(40),
+                None,
                 None,
                 MonoTimeNs(116_000_000 + step * 40_000_000),
             )
@@ -156,17 +232,17 @@ fn loss_recovery_eases_authority_monotonically_over_return_duration() {
         previous = authority;
     }
 
-    // After the full return duration has elapsed, the authority is exactly
-    // zero: the consumers render the neutral pose.
+    // Facial release does not change the accepted head authority.
     let neutral = recovery
         .update(
             TrackingState::ReturningNeutral,
             Duration::from_millis(200),
             None,
+            None,
             MonoTimeNs(500_000_000),
         )
         .expect("neutral frame should be emitted");
-    assert_relative_eq!(neutral.confidence, 0.0, epsilon = 1e-6);
+    assert_relative_eq!(neutral.confidence, 0.9, epsilon = 1e-6);
 }
 
 #[test]
@@ -179,6 +255,7 @@ fn loss_recovery_reacquire_limits_jump() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(first.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
 
@@ -187,12 +264,14 @@ fn loss_recovery_reacquire_limits_jump() {
         TrackingState::LostHold,
         Duration::from_millis(100),
         None,
+        None,
         MonoTimeNs(116_000_000),
     );
     let before_reacquire = recovery
         .update(
             TrackingState::ReturningNeutral,
             Duration::from_millis(100),
+            None,
             None,
             MonoTimeNs(216_000_000),
         )
@@ -205,6 +284,7 @@ fn loss_recovery_reacquire_limits_jump() {
             TrackingState::Tracking,
             Duration::from_millis(50),
             Some(target.clone()),
+            None,
             MonoTimeNs(266_000_000),
         )
         .unwrap();
@@ -233,6 +313,7 @@ fn loss_recovery_reacquire_limits_jump() {
             TrackingState::Tracking,
             Duration::from_millis(200),
             Some(target.clone()),
+            None,
             MonoTimeNs(466_000_000),
         )
         .unwrap();
@@ -253,12 +334,14 @@ fn loss_recovery_holds_detailed_face_during_loss_hold() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
     let held = recovery
         .update(
             TrackingState::LostHold,
             Duration::from_millis(50),
+            None,
             None,
             MonoTimeNs(66_000_000),
         )
@@ -278,12 +361,14 @@ fn loss_recovery_eases_detailed_face_monotonically_toward_zero() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked),
+        None,
         MonoTimeNs(16_000_000),
     );
     // Spend the hold so the next updates ease the coefficients.
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
+        None,
         None,
         MonoTimeNs(116_000_000),
     );
@@ -295,6 +380,7 @@ fn loss_recovery_eases_detailed_face_monotonically_toward_zero() {
             .update(
                 TrackingState::ReturningNeutral,
                 Duration::from_millis(50),
+                None,
                 None,
                 MonoTimeNs(116_000_000 + step * 50_000_000),
             )
@@ -324,7 +410,7 @@ fn loss_recovery_eases_detailed_face_monotonically_toward_zero() {
 }
 
 #[test]
-fn loss_recovery_publishes_zero_detailed_face_before_dropping_it() {
+fn loss_recovery_keeps_detailed_face_released_during_prolonged_loss() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
     let tracked = detailed_frame(11, 0.8);
 
@@ -332,11 +418,13 @@ fn loss_recovery_publishes_zero_detailed_face_before_dropping_it() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked),
+        None,
         MonoTimeNs(16_000_000),
     );
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
+        None,
         None,
         MonoTimeNs(116_000_000),
     );
@@ -347,6 +435,7 @@ fn loss_recovery_publishes_zero_detailed_face_before_dropping_it() {
             TrackingState::ReturningNeutral,
             Duration::from_millis(300),
             None,
+            None,
             MonoTimeNs(416_000_000),
         )
         .expect("the final return frame should be emitted");
@@ -356,19 +445,20 @@ fn loss_recovery_publishes_zero_detailed_face_before_dropping_it() {
     assert_eq!(released, Arkit52Coefficients::default());
     assert_relative_eq!(released.get(ArkitBlendshape::JawOpen), 0.0, epsilon = 1e-6);
 
-    // Once neutral is reached the coefficients are dropped, and the tracker
-    // in the avatar adapter has already seen the zeros.
+    // Subsequent missing frames keep publishing zeros without resurrecting
+    // the last observed mouth or eye coefficients.
     let after = recovery
         .update(
             TrackingState::Searching,
             Duration::from_millis(16),
             None,
+            None,
             MonoTimeNs(432_000_000),
         )
         .expect("searching should keep emitting neutral frames");
     assert!(
-        after.detailed_face.is_none(),
-        "searching frames must not retain ARKit52 coefficients"
+        after.detailed_face == Some(Arkit52Coefficients::default()),
+        "searching frames must keep ARKit52 coefficients released"
     );
 }
 
@@ -381,6 +471,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
     // Fully ease to neutral: the coefficients are dropped.
@@ -388,17 +479,20 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
         TrackingState::LostHold,
         Duration::from_millis(100),
         None,
+        None,
         MonoTimeNs(116_000_000),
     );
     let _ = recovery.update(
         TrackingState::ReturningNeutral,
         Duration::from_millis(300),
         None,
+        None,
         MonoTimeNs(416_000_000),
     );
     let _ = recovery.update(
         TrackingState::Searching,
         Duration::from_millis(16),
+        None,
         None,
         MonoTimeNs(432_000_000),
     );
@@ -410,6 +504,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(reacquired.clone()),
+            None,
             MonoTimeNs(448_000_000),
         )
         .expect("reacquire should emit a frame");
@@ -424,6 +519,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(reacquired.clone()),
+            None,
             MonoTimeNs(464_000_000),
         )
         .expect("reacquire should emit a frame");
@@ -446,6 +542,7 @@ fn loss_recovery_reacquire_blends_detailed_face_continuously() {
                 TrackingState::Tracking,
                 Duration::from_millis(20),
                 Some(reacquired.clone()),
+                None,
                 MonoTimeNs(464_000_000 + step * 20_000_000),
             )
             .expect("recovery frame");
@@ -518,6 +615,7 @@ fn loss_recovery_does_not_publish_stale_observation_as_new_frame() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
 
@@ -534,6 +632,7 @@ fn loss_recovery_does_not_publish_stale_observation_as_new_frame() {
             .update(
                 state,
                 Duration::from_millis(50),
+                None,
                 None,
                 MonoTimeNs(16_000_000 + step as u64 * 50_000_000),
             )
@@ -554,6 +653,7 @@ fn loss_recovery_does_not_publish_stale_observation_as_new_frame() {
                 TrackingState::Tracking,
                 Duration::from_millis(30),
                 Some(reacquired.clone()),
+                None,
                 MonoTimeNs(600_000_000 + step as u64 * 30_000_000),
             )
             .expect("frame should be emitted during recovery");
@@ -587,12 +687,14 @@ fn loss_recovery_hold_preserves_head_translation() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
     let held = recovery
         .update(
             TrackingState::LostHold,
             Duration::from_millis(50),
+            None,
             None,
             MonoTimeNs(66_000_000),
         )
@@ -602,7 +704,7 @@ fn loss_recovery_hold_preserves_head_translation() {
 }
 
 #[test]
-fn loss_recovery_eases_translation_authority_to_zero_while_available() {
+fn loss_recovery_preserves_translation_authority_while_lost() {
     let mut recovery = LossRecovery::new(test_params()).unwrap();
     let tracked = with_translation(1, 0.04, -0.02, 0.06);
 
@@ -610,11 +712,13 @@ fn loss_recovery_eases_translation_authority_to_zero_while_available() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(16_000_000),
     );
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
+        None,
         None,
         MonoTimeNs(116_000_000),
     );
@@ -626,6 +730,7 @@ fn loss_recovery_eases_translation_authority_to_zero_while_available() {
             TrackingState::ReturningNeutral,
             Duration::from_millis(150),
             None,
+            None,
             MonoTimeNs(266_000_000),
         )
         .expect("the eased return should emit a frame");
@@ -634,8 +739,8 @@ fn loss_recovery_eases_translation_authority_to_zero_while_available() {
         "mid-return translation must stay distinguishable from unavailable"
     );
     assert!(
-        mid.confidence < tracked.confidence,
-        "the translation authority must be easing: {}",
+        mid.confidence == tracked.confidence,
+        "the retained translation authority changed: {}",
         mid.confidence
     );
 
@@ -644,10 +749,11 @@ fn loss_recovery_eases_translation_authority_to_zero_while_available() {
             TrackingState::ReturningNeutral,
             Duration::from_millis(500),
             None,
+            None,
             MonoTimeNs(766_000_000),
         )
         .expect("fully eased frame should be emitted");
-    assert_relative_eq!(neutral.confidence, 0.0, epsilon = 1e-6);
+    assert_relative_eq!(neutral.confidence, 0.9, epsilon = 1e-6);
 }
 
 #[test]
@@ -661,12 +767,14 @@ fn rotation_only_producer_falls_back_to_unavailable_translation() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked),
+        None,
         MonoTimeNs(16_000_000),
     );
     let held = recovery
         .update(
             TrackingState::LostHold,
             Duration::from_millis(50),
+            None,
             None,
             MonoTimeNs(66_000_000),
         )
@@ -677,6 +785,7 @@ fn rotation_only_producer_falls_back_to_unavailable_translation() {
         .update(
             TrackingState::ReturningNeutral,
             Duration::from_millis(100),
+            None,
             None,
             MonoTimeNs(266_000_000),
         )
@@ -693,6 +802,7 @@ fn rotation_only_producer_falls_back_to_unavailable_translation() {
             TrackingState::Tracking,
             Duration::from_millis(50),
             Some(reacquired),
+            None,
             MonoTimeNs(316_000_000),
         )
         .expect("recovery should emit a frame");
@@ -708,11 +818,13 @@ fn loss_recovery_reacquire_from_searching_does_not_snap() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(frame(1, 0.0, 0.0, 0.0, 0.0)),
+        None,
         MonoTimeNs(33_333_333),
     );
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
+        None,
         None,
         MonoTimeNs(133_333_333),
     );
@@ -721,10 +833,11 @@ fn loss_recovery_reacquire_from_searching_does_not_snap() {
             TrackingState::Searching,
             Duration::from_millis(400),
             None,
+            None,
             MonoTimeNs(533_333_333),
         )
         .expect("searching should emit a frame");
-    assert_relative_eq!(neutral.confidence, 0.0, epsilon = 1e-6);
+    assert_relative_eq!(neutral.confidence, 0.9, epsilon = 1e-6);
 
     let reacquired = frame(2, 0.8, 0.0, 0.0, 0.0);
     let reconnected = recovery
@@ -732,6 +845,7 @@ fn loss_recovery_reacquire_from_searching_does_not_snap() {
             TrackingState::Acquiring,
             Duration::from_millis(16),
             Some(reacquired.clone()),
+            None,
             MonoTimeNs(550_000_000),
         )
         .expect("reacquire should emit a frame");
@@ -752,12 +866,14 @@ fn loss_recovery_repeated_loss_does_not_oscillate_back_to_tracked_pose() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(tracked.clone()),
+        None,
         MonoTimeNs(33_333_333),
     );
     // The first lost update is the hold; the authority stays unchanged.
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
+        None,
         None,
         MonoTimeNs(133_333_333),
     );
@@ -766,15 +882,15 @@ fn loss_recovery_repeated_loss_does_not_oscillate_back_to_tracked_pose() {
             TrackingState::LostHold,
             Duration::from_millis(150),
             None,
+            None,
             MonoTimeNs(283_333_333),
         )
         .expect("the return should continue while the machine stays in LostHold");
 
-    // The authority must keep easing down, not snap back to the tracked
-    // pose because the state machine is still in LostHold.
+    // Repeated missing frames must keep the accepted head authority.
     assert!(
-        pose_authority(&easing) < pose_authority(&tracked),
-        "the return must not oscillate back to the tracked pose, got {}",
+        (pose_authority(&easing) - pose_authority(&tracked)).abs() < 1e-6,
+        "the retained head authority changed, got {}",
         easing.head.yaw_rad
     );
     assert!(recovery.is_returning());
@@ -787,11 +903,13 @@ fn loss_recovery_reacquires_with_the_same_blend_after_a_second_loss() {
         TrackingState::Tracking,
         Duration::from_millis(16),
         Some(frame(1, 0.4, 0.0, 0.0, 0.0)),
+        None,
         MonoTimeNs(33_333_333),
     );
     let _ = recovery.update(
         TrackingState::LostHold,
         Duration::from_millis(100),
+        None,
         None,
         MonoTimeNs(133_333_333),
     );
@@ -803,12 +921,14 @@ fn loss_recovery_reacquires_with_the_same_blend_after_a_second_loss() {
         TrackingState::Tracking,
         Duration::from_millis(50),
         Some(target.clone()),
+        None,
         MonoTimeNs(183_333_333),
     );
     let resumed = recovery
         .update(
             TrackingState::LostHold,
             Duration::from_millis(100),
+            None,
             None,
             MonoTimeNs(283_333_333),
         )
@@ -831,6 +951,7 @@ fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
             TrackingState::Tracking,
             Duration::from_millis(16),
             Some(tracked.clone()),
+            None,
             MonoTimeNs(16_000_000),
         )
         .unwrap();
@@ -838,6 +959,7 @@ fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
         .update(
             TrackingState::LostHold,
             Duration::from_millis(50),
+            None,
             None,
             MonoTimeNs(66_000_000),
         )
@@ -855,6 +977,7 @@ fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
             TrackingState::LostHold,
             Duration::from_millis(150),
             None,
+            None,
             MonoTimeNs(216_000_000),
         )
         .unwrap();
@@ -870,6 +993,7 @@ fn loss_recovery_gaze_holds_returns_and_reacquires_without_snap() {
             TrackingState::Tracking,
             Duration::from_millis(50),
             Some(target),
+            None,
             MonoTimeNs(266_000_000),
         )
         .unwrap();
