@@ -110,19 +110,18 @@ impl InferenceRuntime {
         result
     }
 
-    /// Reads one latest-only canonical MediaPipe result, suppressing duplicate output.
-    pub fn read_latest(&mut self) -> Option<FaceTrackingSample> {
+    /// Retains the latest canonical MediaPipe result, suppressing duplicate output.
+    pub fn poll_latest(&mut self) -> Result<(), vtuber_core::SlotPoisoned> {
         let outcome_slot = self.controller.canonical_outcome_slot();
         if let Some(vtuber_core::ReadResult::New {
             generation,
             value: outcome,
-        }) = outcome_slot.try_read_after(self.canonical_outcome_generation)
+        }) = outcome_slot.try_read_after(self.canonical_outcome_generation)?
         {
             self.canonical_outcome_generation = generation;
             match outcome {
                 FaceTrackingOutcome::Face(sample) => {
-                    self.latest_face_sample = Some(sample.clone());
-                    return Some(sample);
+                    self.latest_face_sample = Some(sample);
                 }
                 FaceTrackingOutcome::NoFace { .. } => {
                     self.latest_face_sample = None;
@@ -130,7 +129,7 @@ impl InferenceRuntime {
                 }
             }
         }
-        None
+        Ok(())
     }
 }
 
@@ -226,9 +225,14 @@ pub(crate) struct InferenceRateState {
 pub(crate) fn read_inference_output_system(
     mut inference: ResMut<InferenceRuntime>,
     mut diagnostics: ResMut<DiagnosticsSnapshot>,
+    mut orchestrator: ResMut<Orchestrator>,
     mut rates: Local<InferenceRateState>,
 ) {
-    let _ = inference.read_latest();
+    if let Err(error) = inference.poll_latest() {
+        inference.latest_face_sample = None;
+        inference.latest_observation = None;
+        orchestrator.fail_inference(error.to_string());
+    }
     let mut status = inference.status();
     let new_observation = match (status.last_source_seq, status.last_finished_at) {
         (Some(seq), Some(finished_at)) if rates.last_seq != Some(seq) => Some((seq, finished_at.0)),

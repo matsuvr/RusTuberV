@@ -54,377 +54,385 @@ pub(crate) fn run_inference_worker(
     outcome_slot: Arc<LatestSlot<InferenceOutcome>>,
     canonical_outcome_slot: Arc<LatestSlot<FaceTrackingOutcome>>,
 ) -> InferenceWorkerResult {
-    let mut loaded: Option<LoadedRuntime> = None;
-    let mut last_gen = None;
+    let result = (|| -> Result<InferenceWorkerResult> {
+        let mut loaded: Option<LoadedRuntime> = None;
+        let mut last_gen = None;
 
-    let mut last_processed_seq: Option<FrameSeq> = None;
-    let mut paused = false;
-    let mut failed = false;
+        let mut last_processed_seq: Option<FrameSeq> = None;
+        let mut paused = false;
+        let mut failed = false;
 
-    update_status(&status, |s| {
-        s.transition_to(InferenceWorkerState::Idle);
-    });
+        update_status(&status, |s| {
+            s.transition_to(InferenceWorkerState::Idle);
+        })?;
 
-    'worker: while !stop.is_stopped() {
-        // Drain control commands first so state changes take effect immediately.
-        loop {
-            match command_rx.try_recv() {
-                Ok(ControlCommand::LoadModel {
-                    descriptor,
-                    settings,
-                }) => {
-                    update_status(&status, |s| {
-                        s.set_pipeline_info(
-                            Some(descriptor.id.clone()),
-                            Some(descriptor.sha256.clone()),
-                            None,
-                        );
-                        s.transition_to(InferenceWorkerState::LoadingModel);
-                    });
+        'worker: while !stop.is_stopped() {
+            // Drain control commands first so state changes take effect immediately.
+            loop {
+                match command_rx.try_recv() {
+                    Ok(ControlCommand::LoadModel {
+                        descriptor,
+                        settings,
+                    }) => {
+                        update_status(&status, |s| {
+                            s.set_pipeline_info(
+                                Some(descriptor.id.clone()),
+                                Some(descriptor.sha256.clone()),
+                                None,
+                            );
+                            s.transition_to(InferenceWorkerState::LoadingModel);
+                        })?;
 
-                    // A failed replacement must not retain the previous model.
-                    loaded = None;
-                    match load_inference_context(&descriptor, &settings) {
-                        Ok(ctx) => {
-                            loaded = Some(LoadedRuntime::Legacy(ctx));
-                            failed = false;
-                            update_status(&status, |s| {
-                                s.transition_to(InferenceWorkerState::Running);
-                                s.clear_consecutive_errors();
-                            });
-                        }
-                        Err(err) => {
-                            failed = true;
-                            update_status(&status, |s| {
-                                s.record_failure(
-                                    vtuber_core::monotonic_now(),
-                                    FailureStage::ModelLoad,
-                                    err,
-                                );
-                            });
-                        }
-                    }
-                }
-                Ok(ControlCommand::LoadPipeline {
-                    descriptor,
-                    artifact_root,
-                    settings,
-                }) => {
-                    update_status(&status, |s| {
-                        s.set_pipeline_info(
-                            Some(descriptor.id.clone()),
-                            Some(descriptor.detector.sha256.clone()),
-                            Some(descriptor.landmarks.sha256.clone()),
-                        );
-                        s.transition_to(InferenceWorkerState::LoadingModel);
-                    });
-
-                    // A failed replacement must not retain the previous model.
-                    loaded = None;
-                    match load_composite_runtime(&descriptor, &artifact_root, &settings) {
-                        Ok(runtime) => {
-                            loaded = Some(LoadedRuntime::Composite(runtime));
-                            failed = false;
-                            update_status(&status, |s| {
-                                s.transition_to(InferenceWorkerState::Running);
-                                s.clear_consecutive_errors();
-                            });
-                        }
-                        Err(err) => {
-                            failed = true;
-                            update_status(&status, |s| {
-                                s.record_failure(
-                                    vtuber_core::monotonic_now(),
-                                    FailureStage::ModelLoad,
-                                    err,
-                                );
-                            });
+                        // A failed replacement must not retain the previous model.
+                        loaded = None;
+                        match load_inference_context(&descriptor, &settings) {
+                            Ok(ctx) => {
+                                loaded = Some(LoadedRuntime::Legacy(ctx));
+                                failed = false;
+                                update_status(&status, |s| {
+                                    s.transition_to(InferenceWorkerState::Running);
+                                    s.clear_consecutive_errors();
+                                })?;
+                            }
+                            Err(err) => {
+                                failed = true;
+                                update_status(&status, |s| {
+                                    s.record_failure(
+                                        vtuber_core::monotonic_now(),
+                                        FailureStage::ModelLoad,
+                                        err,
+                                    );
+                                })?;
+                            }
                         }
                     }
-                }
-                Ok(ControlCommand::LoadMediaPipe { task }) => {
-                    update_status(&status, |s| {
-                        s.set_pipeline_info(
-                            Some("mediapipe-face-landmarker".into()),
-                            Some(MediaPipeTask::Face.sha256().into()),
-                            None,
-                        );
-                        s.transition_to(InferenceWorkerState::LoadingModel);
-                    });
+                    Ok(ControlCommand::LoadPipeline {
+                        descriptor,
+                        artifact_root,
+                        settings,
+                    }) => {
+                        update_status(&status, |s| {
+                            s.set_pipeline_info(
+                                Some(descriptor.id.clone()),
+                                Some(descriptor.detector.sha256.clone()),
+                                Some(descriptor.landmarks.sha256.clone()),
+                            );
+                            s.transition_to(InferenceWorkerState::LoadingModel);
+                        })?;
 
-                    // A failed replacement must not retain the previous model.
-                    loaded = None;
-                    match crate::backend::mediapipe::MediaPipeRuntime::from_task_source(&task)
-                        .map(|runtime| Box::new(runtime) as Box<dyn FaceTrackingInference>)
-                    {
-                        Ok(runtime) => {
-                            loaded = Some(LoadedRuntime::MediaPipe(runtime));
-                            failed = false;
-                            update_status(&status, |s| {
-                                s.transition_to(InferenceWorkerState::Running);
-                                s.clear_consecutive_errors();
-                            });
-                        }
-                        Err(err) => {
-                            failed = true;
-                            update_status(&status, |s| {
-                                s.record_failure(
-                                    vtuber_core::monotonic_now(),
-                                    FailureStage::ModelLoad,
-                                    err,
-                                );
-                            });
+                        // A failed replacement must not retain the previous model.
+                        loaded = None;
+                        match load_composite_runtime(&descriptor, &artifact_root, &settings) {
+                            Ok(runtime) => {
+                                loaded = Some(LoadedRuntime::Composite(runtime));
+                                failed = false;
+                                update_status(&status, |s| {
+                                    s.transition_to(InferenceWorkerState::Running);
+                                    s.clear_consecutive_errors();
+                                })?;
+                            }
+                            Err(err) => {
+                                failed = true;
+                                update_status(&status, |s| {
+                                    s.record_failure(
+                                        vtuber_core::monotonic_now(),
+                                        FailureStage::ModelLoad,
+                                        err,
+                                    );
+                                })?;
+                            }
                         }
                     }
-                }
-                Ok(ControlCommand::Pause) => {
-                    paused = true;
-                }
-                Ok(ControlCommand::Resume) => {
-                    paused = false;
-                }
-                Ok(ControlCommand::Reset) => {
-                    loaded = None;
-                    failed = false;
-                    last_gen = None;
-                    last_processed_seq = None;
-                    update_status(&status, |s| {
-                        s.transition_to(InferenceWorkerState::Idle);
-                        s.clear_consecutive_errors();
-                        s.set_pipeline_info(None, None, None);
-                        s.set_roi_diagnostics(None, None);
-                    });
-                }
-                #[cfg(test)]
-                #[allow(
-                    clippy::panic,
-                    reason = "test-only command; the panic is the scripted outcome under test"
-                )]
-                Ok(ControlCommand::Panic) => {
-                    panic!("inference worker panic requested by test");
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    stop.stop();
-                    update_status(&status, |s| {
-                        s.transition_to(InferenceWorkerState::Stopping);
-                    });
-                    break 'worker;
+                    Ok(ControlCommand::LoadMediaPipe { task }) => {
+                        update_status(&status, |s| {
+                            s.set_pipeline_info(
+                                Some("mediapipe-face-landmarker".into()),
+                                Some(MediaPipeTask::Face.sha256().into()),
+                                None,
+                            );
+                            s.transition_to(InferenceWorkerState::LoadingModel);
+                        })?;
+
+                        // A failed replacement must not retain the previous model.
+                        loaded = None;
+                        match crate::backend::mediapipe::MediaPipeRuntime::from_task_source(&task)
+                            .map(|runtime| Box::new(runtime) as Box<dyn FaceTrackingInference>)
+                        {
+                            Ok(runtime) => {
+                                loaded = Some(LoadedRuntime::MediaPipe(runtime));
+                                failed = false;
+                                update_status(&status, |s| {
+                                    s.transition_to(InferenceWorkerState::Running);
+                                    s.clear_consecutive_errors();
+                                })?;
+                            }
+                            Err(err) => {
+                                failed = true;
+                                update_status(&status, |s| {
+                                    s.record_failure(
+                                        vtuber_core::monotonic_now(),
+                                        FailureStage::ModelLoad,
+                                        err,
+                                    );
+                                })?;
+                            }
+                        }
+                    }
+                    Ok(ControlCommand::Pause) => {
+                        paused = true;
+                    }
+                    Ok(ControlCommand::Resume) => {
+                        paused = false;
+                    }
+                    Ok(ControlCommand::Reset) => {
+                        loaded = None;
+                        failed = false;
+                        last_gen = None;
+                        last_processed_seq = None;
+                        update_status(&status, |s| {
+                            s.transition_to(InferenceWorkerState::Idle);
+                            s.clear_consecutive_errors();
+                            s.set_pipeline_info(None, None, None);
+                            s.set_roi_diagnostics(None, None);
+                        })?;
+                    }
+                    #[cfg(test)]
+                    #[allow(
+                        clippy::panic,
+                        reason = "test-only command; the panic is the scripted outcome under test"
+                    )]
+                    Ok(ControlCommand::Panic) => {
+                        panic!("inference worker panic requested by test");
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        stop.stop();
+                        update_status(&status, |s| {
+                            s.transition_to(InferenceWorkerState::Stopping);
+                        })?;
+                        break 'worker;
+                    }
                 }
             }
-        }
 
-        if paused || loaded.is_none() || failed {
-            // Wait briefly before polling again so the loop remains responsive.
-            std::thread::sleep(Duration::from_millis(10));
-            continue;
-        }
+            if paused || loaded.is_none() || failed {
+                // Wait briefly before polling again so the loop remains responsive.
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
 
-        let wait_start = Instant::now();
-        match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
-            Some(ReadResult::New {
-                generation,
-                value: frame,
-            }) => {
-                let wait_duration = wait_start.elapsed();
-                let skipped = vtuber_core::skipped_generations(last_gen, generation);
-                update_status(&status, |s| s.record_input_skipped(skipped));
-                last_gen = Some(generation);
+            let wait_start = Instant::now();
+            match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50))? {
+                Some(ReadResult::New {
+                    generation,
+                    value: frame,
+                }) => {
+                    let wait_duration = wait_start.elapsed();
+                    let skipped = vtuber_core::skipped_generations(last_gen, generation);
+                    update_status(&status, |s| s.record_input_skipped(skipped))?;
+                    last_gen = Some(generation);
 
-                if let Some(last_seq) = last_processed_seq
-                    && frame.seq <= last_seq
-                {
-                    update_status(&status, |s| s.record_duplicate_suppressed());
-                    continue;
-                }
-                last_processed_seq = Some(frame.seq);
-
-                let InferenceContext {
-                    runtime,
-                    params,
-                    buffers,
-                    pipeline,
-                } = match loaded.as_mut() {
-                    Some(LoadedRuntime::Composite(runtime)) => {
-                        if process_composite_frame(
-                            runtime,
-                            &frame,
-                            wait_duration,
-                            &status,
-                            &output_slot,
-                            &outcome_slot,
-                        ) {
-                            failed = true;
-                        }
+                    if let Some(last_seq) = last_processed_seq
+                        && frame.seq <= last_seq
+                    {
+                        update_status(&status, |s| s.record_duplicate_suppressed())?;
                         continue;
                     }
-                    Some(LoadedRuntime::MediaPipe(runtime)) => {
-                        if process_mediapipe_frame(
-                            runtime,
-                            &frame,
-                            wait_duration,
-                            &status,
-                            &canonical_outcome_slot,
-                        ) {
-                            failed = true;
+                    last_processed_seq = Some(frame.seq);
+
+                    let InferenceContext {
+                        runtime,
+                        params,
+                        buffers,
+                        pipeline,
+                    } = match loaded.as_mut() {
+                        Some(LoadedRuntime::Composite(runtime)) => {
+                            if process_composite_frame(
+                                runtime.as_mut(),
+                                &frame,
+                                wait_duration,
+                                &status,
+                                &output_slot,
+                                &outcome_slot,
+                            )? {
+                                failed = true;
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                    Some(LoadedRuntime::Legacy(context)) => context,
-                    None => continue,
-                };
+                        Some(LoadedRuntime::MediaPipe(runtime)) => {
+                            if process_mediapipe_frame(
+                                runtime.as_mut(),
+                                &frame,
+                                wait_duration,
+                                &status,
+                                &canonical_outcome_slot,
+                            )? {
+                                failed = true;
+                            }
+                            continue;
+                        }
+                        Some(LoadedRuntime::Legacy(context)) => context,
+                        None => continue,
+                    };
 
-                // The legacy runtime is a combined model and has no separate
-                // landmark stage. Do not use detector cadence to skip the
-                // entire frame: the composite runtime owns detector cadence
-                // while keeping landmark inference on every active frame.
-                pipeline.record_detector_run(frame.seq);
+                    // The legacy runtime is a combined model and has no separate
+                    // landmark stage. Do not use detector cadence to skip the
+                    // entire frame: the composite runtime owns detector cadence
+                    // while keeping landmark inference on every active frame.
+                    pipeline.record_detector_run(frame.seq);
 
-                let start = Instant::now();
-                let started_at = vtuber_core::monotonic_now();
+                    let start = Instant::now();
+                    let started_at = vtuber_core::monotonic_now();
 
-                match preprocess_frame(buffers, &frame, params) {
-                    Ok(tensor) => {
-                        let preprocess_duration = start.elapsed();
-                        let infer_start = Instant::now();
-                        match runtime.infer(tensor, &params.input_shape) {
-                            Ok(observation) => {
-                                let infer_duration = infer_start.elapsed();
-                                let decode_start = Instant::now();
+                    match preprocess_frame(buffers, &frame, params) {
+                        Ok(tensor) => {
+                            let preprocess_duration = start.elapsed();
+                            let infer_start = Instant::now();
+                            match runtime.infer(tensor, &params.input_shape) {
+                                Ok(observation) => {
+                                    let infer_duration = infer_start.elapsed();
+                                    let decode_start = Instant::now();
 
-                                if let Err(err) = validate_observation(&observation) {
+                                    if let Err(err) = validate_observation(&observation) {
+                                        pipeline.mark_lost();
+                                        let halt = update_status(&status, |s| {
+                                            s.record_frame_error(
+                                                vtuber_core::monotonic_now(),
+                                                FailureStage::Decode,
+                                                err,
+                                                MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
+                                            )
+                                        })?;
+                                        if halt {
+                                            failed = true;
+                                        }
+                                    } else {
+                                        // A low-confidence result or out-of-bounds ROI moves the pipeline
+                                        // back to the lost state so the detector runs again.
+                                        let _ = pipeline.update_from_observation(
+                                            &observation,
+                                            frame.width,
+                                            frame.height,
+                                        );
+                                        let decode_duration = decode_start.elapsed();
+
+                                        let elapsed = start.elapsed();
+                                        let finished_at = vtuber_core::monotonic_now();
+                                        let observation = RawFaceObservation {
+                                            source_seq: frame.seq,
+                                            captured_at: frame.captured_at,
+                                            inference_started_at: started_at,
+                                            inference_finished_at: finished_at,
+                                            ..observation
+                                        };
+
+                                        let output_replacements_before =
+                                            output_slot.replacement_count()?;
+                                        let observation_roi = observation.roi;
+                                        let outcome = InferenceOutcome::Face(observation.clone());
+                                        if !output_slot.publish(observation)? {
+                                            update_status(&status, |s| {
+                                                s.record_publish_rejected()
+                                            })?;
+                                        }
+                                        let _ = outcome_slot.publish(outcome)?;
+                                        let output_replacements_delta = output_slot
+                                            .replacement_count()?
+                                            .saturating_sub(output_replacements_before);
+
+                                        update_status(&status, |s| {
+                                            s.record_stage_duration(
+                                                InferenceStage::Wait,
+                                                wait_duration,
+                                            );
+                                            s.record_stage_duration(
+                                                InferenceStage::Preprocess,
+                                                preprocess_duration,
+                                            );
+                                            // Detector and landmark are combined in the current single-
+                                            // stage runtime. Landmark timing will be split out when the
+                                            // pipeline supports a separate landmark-only path.
+                                            s.record_stage_duration(
+                                                InferenceStage::Detector,
+                                                infer_duration,
+                                            );
+                                            s.record_stage_duration(
+                                                InferenceStage::Decode,
+                                                decode_duration,
+                                            );
+                                            s.record_stage_duration(InferenceStage::Total, elapsed);
+                                            s.record_output_replacements(output_replacements_delta);
+                                            s.record_processed(frame.seq, finished_at, elapsed);
+                                            s.set_last_roi(Some(observation_roi));
+                                        })?;
+                                        update_status(&status, |s| s.clear_consecutive_errors())?;
+                                    }
+                                }
+                                Err(err) => {
                                     pipeline.mark_lost();
                                     let halt = update_status(&status, |s| {
                                         s.record_frame_error(
                                             vtuber_core::monotonic_now(),
-                                            FailureStage::Decode,
+                                            FailureStage::Runtime,
                                             err,
                                             MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
                                         )
-                                    });
+                                    })?;
                                     if halt {
                                         failed = true;
                                     }
-                                } else {
-                                    // A low-confidence result or out-of-bounds ROI moves the pipeline
-                                    // back to the lost state so the detector runs again.
-                                    let _ = pipeline.update_from_observation(
-                                        &observation,
-                                        frame.width,
-                                        frame.height,
-                                    );
-                                    let decode_duration = decode_start.elapsed();
-
-                                    let elapsed = start.elapsed();
-                                    let finished_at = vtuber_core::monotonic_now();
-                                    let observation = RawFaceObservation {
-                                        source_seq: frame.seq,
-                                        captured_at: frame.captured_at,
-                                        inference_started_at: started_at,
-                                        inference_finished_at: finished_at,
-                                        ..observation
-                                    };
-
-                                    let output_replacements_before =
-                                        output_slot.replacement_count();
-                                    let observation_roi = observation.roi;
-                                    let outcome = InferenceOutcome::Face(observation.clone());
-                                    if !output_slot.publish(observation) {
-                                        update_status(&status, |s| s.record_publish_rejected());
-                                    }
-                                    let _ = outcome_slot.publish(outcome);
-                                    let output_replacements_delta = output_slot
-                                        .replacement_count()
-                                        .saturating_sub(output_replacements_before);
-
-                                    update_status(&status, |s| {
-                                        s.record_stage_duration(
-                                            InferenceStage::Wait,
-                                            wait_duration,
-                                        );
-                                        s.record_stage_duration(
-                                            InferenceStage::Preprocess,
-                                            preprocess_duration,
-                                        );
-                                        // Detector and landmark are combined in the current single-
-                                        // stage runtime. Landmark timing will be split out when the
-                                        // pipeline supports a separate landmark-only path.
-                                        s.record_stage_duration(
-                                            InferenceStage::Detector,
-                                            infer_duration,
-                                        );
-                                        s.record_stage_duration(
-                                            InferenceStage::Decode,
-                                            decode_duration,
-                                        );
-                                        s.record_stage_duration(InferenceStage::Total, elapsed);
-                                        s.record_output_replacements(output_replacements_delta);
-                                        s.record_processed(frame.seq, finished_at, elapsed);
-                                        s.set_last_roi(Some(observation_roi));
-                                    });
-                                    update_status(&status, |s| s.clear_consecutive_errors());
-                                }
-                            }
-                            Err(err) => {
-                                pipeline.mark_lost();
-                                let halt = update_status(&status, |s| {
-                                    s.record_frame_error(
-                                        vtuber_core::monotonic_now(),
-                                        FailureStage::Runtime,
-                                        err,
-                                        MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
-                                    )
-                                });
-                                if halt {
-                                    failed = true;
                                 }
                             }
                         }
-                    }
-                    Err(err) => {
-                        pipeline.mark_lost();
-                        let halt = update_status(&status, |s| {
-                            s.record_frame_error(
-                                vtuber_core::monotonic_now(),
-                                FailureStage::Preprocess,
-                                err,
-                                MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
-                            )
-                        });
-                        if halt {
-                            failed = true;
+                        Err(err) => {
+                            pipeline.mark_lost();
+                            let halt = update_status(&status, |s| {
+                                s.record_frame_error(
+                                    vtuber_core::monotonic_now(),
+                                    FailureStage::Preprocess,
+                                    err,
+                                    MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
+                                )
+                            })?;
+                            if halt {
+                                failed = true;
+                            }
                         }
                     }
                 }
-            }
-            Some(ReadResult::Closed) => {
-                update_status(&status, |s| {
-                    s.transition_to(InferenceWorkerState::Stopping);
-                });
-                break;
-            }
-            None => {
-                // The wait timed out; check the stop token before looping so
-                // shutdown completes promptly even when no frames are arriving.
-                if stop.is_stopped() {
+                Some(ReadResult::Closed) => {
+                    update_status(&status, |s| {
+                        s.transition_to(InferenceWorkerState::Stopping);
+                    })?;
                     break;
                 }
+                None => {
+                    // The wait timed out; check the stop token before looping so
+                    // shutdown completes promptly even when no frames are arriving.
+                    if stop.is_stopped() {
+                        break;
+                    }
+                }
             }
         }
-    }
 
-    update_status(&status, |s| {
-        if s.state != InferenceWorkerState::Failed {
-            s.transition_to(InferenceWorkerState::Stopping);
-        }
-    });
+        update_status(&status, |s| {
+            if s.state != InferenceWorkerState::Failed {
+                s.transition_to(InferenceWorkerState::Stopping);
+            }
+        })?;
 
-    let final_metrics = status
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .metrics();
+        let final_metrics = status
+            .lock()
+            .map_err(|_| InferenceError::StatusPoisoned)?
+            .metrics();
 
-    InferenceWorkerResult { final_metrics }
+        Ok(InferenceWorkerResult {
+            final_metrics,
+            failure: None,
+        })
+    })();
+    finish_worker_result(result, &status)
 }
 
 /// Processes one frame through the worker-owned composite runtime.
@@ -432,19 +440,19 @@ pub(crate) fn run_inference_worker(
 /// Returns `true` when the caller should transition the worker to failed after
 /// the bounded consecutive-error policy is exceeded.
 fn process_composite_frame(
-    runtime: &mut Box<dyn FrameFaceInference>,
+    runtime: &mut dyn FrameFaceInference,
     frame: &VideoFrame,
     wait_duration: Duration,
     status: &SharedStatus,
     output_slot: &LatestSlot<RawFaceObservation>,
     outcome_slot: &LatestSlot<InferenceOutcome>,
-) -> bool {
+) -> Result<bool> {
     let total_started = Instant::now();
     let outcome = runtime.infer_frame(frame);
     let timing = runtime.take_timing();
     let elapsed = total_started.elapsed();
     let finished_at = vtuber_core::monotonic_now();
-    record_composite_timing(status, wait_duration, timing, elapsed);
+    record_composite_timing(status, wait_duration, timing, elapsed)?;
 
     match outcome {
         Ok(FrameInferenceOutcome::Face(observation)) => {
@@ -459,35 +467,35 @@ fn process_composite_frame(
                 });
             }
 
-            let output_replacements_before = output_slot.replacement_count();
+            let output_replacements_before = output_slot.replacement_count()?;
             let observation_roi = observation.roi;
-            let _ = outcome_slot.publish(InferenceOutcome::Face(observation.clone()));
-            if !output_slot.publish(observation) {
-                update_status(status, |s| s.record_publish_rejected());
+            let _ = outcome_slot.publish(InferenceOutcome::Face(observation.clone()))?;
+            if !output_slot.publish(observation)? {
+                update_status(status, |s| s.record_publish_rejected())?;
             }
             let output_replacements_delta = output_slot
-                .replacement_count()
+                .replacement_count()?
                 .saturating_sub(output_replacements_before);
             update_status(status, |s| {
                 s.record_output_replacements(output_replacements_delta);
                 s.record_processed(frame.seq, finished_at, elapsed);
                 s.set_last_roi(Some(observation_roi));
                 s.clear_consecutive_errors();
-            });
-            false
+            })?;
+            Ok(false)
         }
         Ok(FrameInferenceOutcome::NoFace) => {
             let _ = outcome_slot.publish(InferenceOutcome::NoFace {
                 source_seq: frame.seq,
                 captured_at: frame.captured_at,
                 inference_finished_at: finished_at,
-            });
+            })?;
             update_status(status, |s| {
                 s.record_no_face(frame.seq, finished_at, elapsed);
                 s.set_last_roi(None);
                 s.clear_consecutive_errors();
-            });
-            false
+            })?;
+            Ok(false)
         }
         Err(error) => update_status(status, |s| {
             s.record_frame_error(
@@ -502,16 +510,16 @@ fn process_composite_frame(
 
 /// Processes one frame through the worker-owned canonical MediaPipe runtime.
 fn process_mediapipe_frame(
-    runtime: &mut Box<dyn FaceTrackingInference>,
+    runtime: &mut dyn FaceTrackingInference,
     frame: &VideoFrame,
     wait_duration: Duration,
     status: &SharedStatus,
     canonical_outcome_slot: &LatestSlot<FaceTrackingOutcome>,
-) -> bool {
+) -> Result<bool> {
     let total_started = Instant::now();
     let outcome = runtime.infer_face_tracking(frame);
     let elapsed = total_started.elapsed();
-    record_mediapipe_timing(status, wait_duration, elapsed);
+    record_mediapipe_timing(status, wait_duration, elapsed)?;
 
     match outcome {
         Ok(outcome) => {
@@ -523,27 +531,25 @@ fn process_mediapipe_frame(
                     ..
                 } => *inference_finished_at,
             };
-            let replacements_before = canonical_outcome_slot.replacement_count();
-            if !canonical_outcome_slot.publish(outcome.clone()) {
-                update_status(status, |s| s.record_publish_rejected());
+            let replacements_before = canonical_outcome_slot.replacement_count()?;
+            let has_face = matches!(outcome, FaceTrackingOutcome::Face(_));
+            if !canonical_outcome_slot.publish(outcome)? {
+                update_status(status, |s| s.record_publish_rejected())?;
             }
             let replacements_delta = canonical_outcome_slot
-                .replacement_count()
+                .replacement_count()?
                 .saturating_sub(replacements_before);
             update_status(status, |s| {
                 s.record_output_replacements(replacements_delta);
                 s.set_last_roi(None);
                 s.clear_consecutive_errors();
-                match outcome {
-                    FaceTrackingOutcome::Face(_) => {
-                        s.record_processed(source_seq, finished_at, elapsed);
-                    }
-                    FaceTrackingOutcome::NoFace { .. } => {
-                        s.record_no_face(source_seq, finished_at, elapsed);
-                    }
+                if has_face {
+                    s.record_processed(source_seq, finished_at, elapsed);
+                } else {
+                    s.record_no_face(source_seq, finished_at, elapsed);
                 }
-            });
-            false
+            })?;
+            Ok(false)
         }
         Err(error) => update_status(status, |s| {
             s.record_frame_error(
@@ -567,11 +573,15 @@ fn mediapipe_failure_stage(error: &InferenceError) -> FailureStage {
     }
 }
 
-fn record_mediapipe_timing(status: &SharedStatus, wait_duration: Duration, elapsed: Duration) {
+fn record_mediapipe_timing(
+    status: &SharedStatus,
+    wait_duration: Duration,
+    elapsed: Duration,
+) -> Result<()> {
     update_status(status, |s| {
         s.record_stage_duration(InferenceStage::Wait, wait_duration);
         s.record_stage_duration(InferenceStage::Total, elapsed);
-    });
+    })
 }
 
 fn composite_failure_stage(error: &InferenceError) -> FailureStage {
@@ -601,109 +611,115 @@ pub fn run_composite_inference_worker(
     frame_slot: Arc<LatestSlot<VideoFrame>>,
     output_slot: Arc<LatestSlot<RawFaceObservation>>,
 ) -> InferenceWorkerResult {
-    let mut last_gen = None;
+    let result = (|| -> Result<InferenceWorkerResult> {
+        let mut last_gen = None;
 
-    let mut last_processed_seq: Option<FrameSeq> = None;
+        let mut last_processed_seq: Option<FrameSeq> = None;
 
-    update_status(&status, |s| s.transition_to(InferenceWorkerState::Running));
+        update_status(&status, |s| s.transition_to(InferenceWorkerState::Running))?;
 
-    while !stop.is_stopped() {
-        let wait_started = Instant::now();
-        match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
-            Some(ReadResult::New {
-                generation,
-                value: frame,
-            }) => {
-                let wait_duration = wait_started.elapsed();
-                let skipped = vtuber_core::skipped_generations(last_gen, generation);
-                update_status(&status, |s| s.record_input_skipped(skipped));
-                last_gen = Some(generation);
+        while !stop.is_stopped() {
+            let wait_started = Instant::now();
+            match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50))? {
+                Some(ReadResult::New {
+                    generation,
+                    value: frame,
+                }) => {
+                    let wait_duration = wait_started.elapsed();
+                    let skipped = vtuber_core::skipped_generations(last_gen, generation);
+                    update_status(&status, |s| s.record_input_skipped(skipped))?;
+                    last_gen = Some(generation);
 
-                if let Some(last_seq) = last_processed_seq
-                    && frame.seq <= last_seq
-                {
-                    update_status(&status, |s| s.record_duplicate_suppressed());
-                    continue;
-                }
-                last_processed_seq = Some(frame.seq);
+                    if let Some(last_seq) = last_processed_seq
+                        && frame.seq <= last_seq
+                    {
+                        update_status(&status, |s| s.record_duplicate_suppressed())?;
+                        continue;
+                    }
+                    last_processed_seq = Some(frame.seq);
 
-                let total_started = Instant::now();
-                let outcome = runtime.infer_frame(&frame);
-                let timing = runtime.take_timing();
-                let elapsed = total_started.elapsed();
-                let finished_at = vtuber_core::monotonic_now();
-                record_composite_timing(&status, wait_duration, timing, elapsed);
+                    let total_started = Instant::now();
+                    let outcome = runtime.infer_frame(&frame);
+                    let timing = runtime.take_timing();
+                    let elapsed = total_started.elapsed();
+                    let finished_at = vtuber_core::monotonic_now();
+                    record_composite_timing(&status, wait_duration, timing, elapsed)?;
 
-                match outcome {
-                    Ok(FrameInferenceOutcome::Face(observation)) => {
-                        if let Err(error) = validate_observation(&observation) {
+                    match outcome {
+                        Ok(FrameInferenceOutcome::Face(observation)) => {
+                            if let Err(error) = validate_observation(&observation) {
+                                let halt = update_status(&status, |s| {
+                                    s.record_frame_error(
+                                        vtuber_core::monotonic_now(),
+                                        FailureStage::Decode,
+                                        error,
+                                        MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
+                                    )
+                                })?;
+                                if halt {
+                                    break;
+                                }
+                                continue;
+                            }
+
+                            let output_replacements_before = output_slot.replacement_count()?;
+                            if !output_slot.publish(observation.clone())? {
+                                update_status(&status, |s| s.record_publish_rejected())?;
+                            }
+                            let output_replacements_delta = output_slot
+                                .replacement_count()?
+                                .saturating_sub(output_replacements_before);
+                            update_status(&status, |s| {
+                                s.record_output_replacements(output_replacements_delta);
+                                s.record_processed(frame.seq, finished_at, elapsed);
+                                s.set_last_roi(Some(observation.roi));
+                                s.clear_consecutive_errors();
+                            })?;
+                        }
+                        Ok(FrameInferenceOutcome::NoFace) => {
+                            update_status(&status, |s| {
+                                s.record_no_face(frame.seq, finished_at, elapsed);
+                                s.set_last_roi(None);
+                                s.clear_consecutive_errors();
+                            })?;
+                        }
+                        Err(error) => {
                             let halt = update_status(&status, |s| {
                                 s.record_frame_error(
                                     vtuber_core::monotonic_now(),
-                                    FailureStage::Decode,
+                                    composite_failure_stage(&error),
                                     error,
                                     MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
                                 )
-                            });
+                            })?;
                             if halt {
                                 break;
                             }
-                            continue;
-                        }
-
-                        let output_replacements_before = output_slot.replacement_count();
-                        if !output_slot.publish(observation.clone()) {
-                            update_status(&status, |s| s.record_publish_rejected());
-                        }
-                        let output_replacements_delta = output_slot
-                            .replacement_count()
-                            .saturating_sub(output_replacements_before);
-                        update_status(&status, |s| {
-                            s.record_output_replacements(output_replacements_delta);
-                            s.record_processed(frame.seq, finished_at, elapsed);
-                            s.set_last_roi(Some(observation.roi));
-                            s.clear_consecutive_errors();
-                        });
-                    }
-                    Ok(FrameInferenceOutcome::NoFace) => {
-                        update_status(&status, |s| {
-                            s.record_no_face(frame.seq, finished_at, elapsed);
-                            s.set_last_roi(None);
-                            s.clear_consecutive_errors();
-                        });
-                    }
-                    Err(error) => {
-                        let halt = update_status(&status, |s| {
-                            s.record_frame_error(
-                                vtuber_core::monotonic_now(),
-                                composite_failure_stage(&error),
-                                error,
-                                MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
-                            )
-                        });
-                        if halt {
-                            break;
                         }
                     }
                 }
+                Some(ReadResult::Closed) | None if frame_slot.is_closed()? => break,
+                Some(ReadResult::Closed) => break,
+                None => {}
             }
-            Some(ReadResult::Closed) | None if frame_slot.is_closed() => break,
-            Some(ReadResult::Closed) => break,
-            None => {}
         }
-    }
 
-    update_status(&status, |s| {
-        if s.state != InferenceWorkerState::Failed {
-            s.transition_to(InferenceWorkerState::Stopping);
-        }
-    });
+        update_status(&status, |s| {
+            if s.state != InferenceWorkerState::Failed {
+                s.transition_to(InferenceWorkerState::Stopping);
+            }
+        })?;
 
-    let final_metrics = status
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .metrics();
-    InferenceWorkerResult { final_metrics }
+        let final_metrics = status
+            .lock()
+            .map_err(|_| InferenceError::StatusPoisoned)?
+            .metrics();
+        Ok(InferenceWorkerResult {
+            final_metrics,
+            failure: None,
+        })
+    })();
+    finish_worker_result(result, &status)
 }
 
 fn record_composite_timing(
@@ -711,7 +727,7 @@ fn record_composite_timing(
     wait_duration: Duration,
     timing: crate::runtime::FrameInferenceTiming,
     elapsed: Duration,
-) {
+) -> Result<()> {
     update_status(status, |s| {
         s.set_roi_diagnostics(timing.detector_confidence, timing.roi_state);
         s.record_stage_duration(InferenceStage::Wait, wait_duration);
@@ -735,7 +751,7 @@ fn record_composite_timing(
                 timing.total
             },
         );
-    });
+    })
 }
 
 fn load_inference_context(
@@ -791,121 +807,127 @@ pub fn run_pose_worker(
     task: &MediaPipeTaskSource,
     hand_task: &MediaPipeTaskSource,
 ) -> InferenceWorkerResult {
-    update_status(&status, |s| {
-        s.set_pipeline_info(
-            Some("mediapipe-pose+hand-landmarker".into()),
-            Some(MediaPipeTask::Pose.sha256().into()),
-            Some(MediaPipeTask::Hand.sha256().into()),
-        );
-        s.transition_to(InferenceWorkerState::LoadingModel);
-    });
+    let result = (|| -> Result<InferenceWorkerResult> {
+        update_status(&status, |s| {
+            s.set_pipeline_info(
+                Some("mediapipe-pose+hand-landmarker".into()),
+                Some(MediaPipeTask::Pose.sha256().into()),
+                Some(MediaPipeTask::Hand.sha256().into()),
+            );
+            s.transition_to(InferenceWorkerState::LoadingModel);
+        })?;
 
-    let mut runtime =
-        match crate::backend::mediapipe::MediaPipePoseRuntime::from_task_sources(task, hand_task) {
+        let mut runtime = match crate::backend::mediapipe::MediaPipePoseRuntime::from_task_sources(
+            task, hand_task,
+        ) {
             Ok(runtime) => runtime,
             Err(error) => {
                 update_status(&status, |s| {
                     s.record_failure(vtuber_core::monotonic_now(), FailureStage::ModelLoad, error);
-                });
-                return InferenceWorkerResult {
+                })?;
+                return Ok(InferenceWorkerResult {
+                    failure: None,
                     final_metrics: status
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .map_err(|_| InferenceError::StatusPoisoned)?
                         .metrics(),
-                };
+                });
             }
         };
 
-    update_status(&status, |s| {
-        s.transition_to(InferenceWorkerState::Running);
-        s.clear_consecutive_errors();
-    });
+        update_status(&status, |s| {
+            s.transition_to(InferenceWorkerState::Running);
+            s.clear_consecutive_errors();
+        })?;
 
-    let mut last_gen = None;
-    let mut last_processed_seq: Option<FrameSeq> = None;
+        let mut last_gen = None;
+        let mut last_processed_seq: Option<FrameSeq> = None;
 
-    'worker: while !stop.is_stopped() {
-        match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
-            Some(ReadResult::New {
-                generation,
-                value: frame,
-            }) => {
-                let skipped = vtuber_core::skipped_generations(last_gen, generation);
-                update_status(&status, |s| s.record_input_skipped(skipped));
-                last_gen = Some(generation);
-                if let Some(last_seq) = last_processed_seq
-                    && frame.seq <= last_seq
-                {
-                    update_status(&status, |s| s.record_duplicate_suppressed());
-                    continue;
-                }
-                last_processed_seq = Some(frame.seq);
-
-                // Measure inference work, excluding the wait for the next image.
-                let started = Instant::now();
-                match runtime.infer(&frame) {
-                    Ok(pose) => {
-                        let elapsed = started.elapsed();
-                        let replacements_before = output_slot.replacement_count();
-                        if !output_slot.publish(pose) {
-                            update_status(&status, |s| s.record_publish_rejected());
-                        }
-                        let replacements_delta = output_slot
-                            .replacement_count()
-                            .saturating_sub(replacements_before);
-                        let finished_at = vtuber_core::monotonic_now();
-                        update_status(&status, |s| {
-                            s.record_output_replacements(replacements_delta);
-                            s.record_stage_duration(InferenceStage::Total, elapsed);
-                            s.record_processed(frame.seq, finished_at, elapsed);
-                            s.clear_consecutive_errors();
-                        });
+        'worker: while !stop.is_stopped() {
+            match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50))? {
+                Some(ReadResult::New {
+                    generation,
+                    value: frame,
+                }) => {
+                    let skipped = vtuber_core::skipped_generations(last_gen, generation);
+                    update_status(&status, |s| s.record_input_skipped(skipped))?;
+                    last_gen = Some(generation);
+                    if let Some(last_seq) = last_processed_seq
+                        && frame.seq <= last_seq
+                    {
+                        update_status(&status, |s| s.record_duplicate_suppressed())?;
+                        continue;
                     }
-                    Err(error) => {
-                        let halt = update_status(&status, |s| {
-                            s.record_frame_error(
-                                vtuber_core::monotonic_now(),
-                                mediapipe_failure_stage(&error),
-                                error,
-                                MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
-                            )
-                        });
-                        if halt {
-                            break 'worker;
+                    last_processed_seq = Some(frame.seq);
+
+                    // Measure inference work, excluding the wait for the next image.
+                    let started = Instant::now();
+                    match runtime.infer(&frame) {
+                        Ok(pose) => {
+                            let elapsed = started.elapsed();
+                            let replacements_before = output_slot.replacement_count()?;
+                            if !output_slot.publish(pose)? {
+                                update_status(&status, |s| s.record_publish_rejected())?;
+                            }
+                            let replacements_delta = output_slot
+                                .replacement_count()?
+                                .saturating_sub(replacements_before);
+                            let finished_at = vtuber_core::monotonic_now();
+                            update_status(&status, |s| {
+                                s.record_output_replacements(replacements_delta);
+                                s.record_stage_duration(InferenceStage::Total, elapsed);
+                                s.record_processed(frame.seq, finished_at, elapsed);
+                                s.clear_consecutive_errors();
+                            })?;
                         }
+                        Err(error) => {
+                            let halt = update_status(&status, |s| {
+                                s.record_frame_error(
+                                    vtuber_core::monotonic_now(),
+                                    mediapipe_failure_stage(&error),
+                                    error,
+                                    MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
+                                )
+                            })?;
+                            if halt {
+                                break 'worker;
+                            }
+                        }
+                    }
+                }
+                Some(ReadResult::Closed) => break,
+                None => {
+                    if stop.is_stopped() {
+                        break;
                     }
                 }
             }
-            Some(ReadResult::Closed) => break,
-            None => {
-                if stop.is_stopped() {
-                    break;
-                }
+        }
+
+        update_status(&status, |s| {
+            if s.state != InferenceWorkerState::Failed {
+                s.transition_to(InferenceWorkerState::Stopping);
             }
-        }
-    }
+        })?;
 
-    update_status(&status, |s| {
-        if s.state != InferenceWorkerState::Failed {
-            s.transition_to(InferenceWorkerState::Stopping);
-        }
-    });
-
-    let final_metrics = status
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .metrics();
-    InferenceWorkerResult { final_metrics }
+        let final_metrics = status
+            .lock()
+            .map_err(|_| InferenceError::StatusPoisoned)?
+            .metrics();
+        Ok(InferenceWorkerResult {
+            final_metrics,
+            failure: None,
+        })
+    })();
+    finish_worker_result(result, &status)
 }
 
-fn update_status<F, R>(status: &SharedStatus, f: F) -> R
+fn update_status<F, R>(status: &SharedStatus, f: F) -> Result<R>
 where
     F: FnOnce(&mut crate::state::InferenceWorkerStatus) -> R,
 {
-    let mut s = status
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(&mut s)
+    let mut s = status.lock().map_err(|_| InferenceError::StatusPoisoned)?;
+    Ok(f(&mut s))
 }
 
 /// Validates decoded model outputs before they are used for tracking.
@@ -936,6 +958,32 @@ fn validate_observation(observation: &RawFaceObservation) -> crate::error::Resul
     }
 
     Ok(())
+}
+
+fn finish_worker_result(
+    result: Result<InferenceWorkerResult>,
+    status: &SharedStatus,
+) -> InferenceWorkerResult {
+    match result {
+        Ok(result) => result,
+        Err(error) => {
+            let final_metrics = match status.lock() {
+                Ok(mut status) => {
+                    status.record_failure(
+                        vtuber_core::monotonic_now(),
+                        FailureStage::Runtime,
+                        error.clone(),
+                    );
+                    status.metrics()
+                }
+                Err(_) => Default::default(),
+            };
+            InferenceWorkerResult {
+                failure: Some(error),
+                final_metrics,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1087,7 +1135,9 @@ mod tests {
 
         // Publish a frame before asking the worker to load the model. A startup
         // failure must not consume it.
-        frame_slot.publish(dummy_video_frame(1));
+        frame_slot
+            .publish(dummy_video_frame(1))
+            .expect("slot access");
 
         controller
             .load_model(descriptor, RuntimeSettings::default())
@@ -1125,9 +1175,12 @@ mod tests {
         // The frame must still be unread because the worker failed before
         // entering the inference loop.
         assert_eq!(status.frames_processed, 0);
-        assert_eq!(frame_slot.generation(), 1);
+        assert_eq!(frame_slot.generation().expect("slot generation"), 1);
         assert!(
-            matches!(frame_slot.try_read_after(0), Some(ReadResult::New { .. })),
+            matches!(
+                frame_slot.try_read_after(0).expect("slot access"),
+                Some(ReadResult::New { .. })
+            ),
             "frame slot should still contain the published frame"
         );
 
@@ -1151,7 +1204,9 @@ mod tests {
         let (mut controller, frame_slot, _output_slot) = new_controller();
         controller.start_worker().expect("start worker");
 
-        frame_slot.publish(dummy_video_frame(1));
+        frame_slot
+            .publish(dummy_video_frame(1))
+            .expect("slot access");
 
         controller
             .load_model(descriptor, RuntimeSettings::default())
@@ -1176,9 +1231,12 @@ mod tests {
         );
 
         assert_eq!(status.frames_processed, 0);
-        assert_eq!(frame_slot.generation(), 1);
+        assert_eq!(frame_slot.generation().expect("slot generation"), 1);
         assert!(
-            matches!(frame_slot.try_read_after(0), Some(ReadResult::New { .. })),
+            matches!(
+                frame_slot.try_read_after(0).expect("slot access"),
+                Some(ReadResult::New { .. })
+            ),
             "frame slot should still contain the published frame"
         );
 
@@ -1316,7 +1374,9 @@ mod tests {
             "injected runtime worker should reach Running without a model artifact"
         );
 
-        frame_slot.publish(dummy_video_frame(1));
+        frame_slot
+            .publish(dummy_video_frame(1))
+            .expect("slot access");
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             if status.lock().unwrap().frames_processed > 0 {
@@ -1369,24 +1429,30 @@ mod tests {
 
         update_status(&status, |s| {
             s.transition_to(InferenceWorkerState::Running);
-        });
+        })
+        .expect("worker status");
 
         while !stop.is_stopped() {
             let wait_start = Instant::now();
-            match frame_slot.wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50)) {
+            match frame_slot
+                .wait_read_after(last_gen.unwrap_or(0), Duration::from_millis(50))
+                .expect("slot access")
+            {
                 Some(ReadResult::New {
                     generation,
                     value: frame,
                 }) => {
                     let wait_duration = wait_start.elapsed();
                     let skipped = vtuber_core::skipped_generations(last_gen, generation);
-                    update_status(&status, |s| s.record_input_skipped(skipped));
+                    update_status(&status, |s| s.record_input_skipped(skipped))
+                        .expect("worker status");
                     last_gen = Some(generation);
 
                     if let Some(last_seq) = last_processed_seq
                         && frame.seq <= last_seq
                     {
-                        update_status(&status, |s| s.record_duplicate_suppressed());
+                        update_status(&status, |s| s.record_duplicate_suppressed())
+                            .expect("worker status");
                         continue;
                     }
                     last_processed_seq = Some(frame.seq);
@@ -1415,7 +1481,8 @@ mod tests {
                                                 err,
                                                 MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
                                             )
-                                        });
+                                        })
+                                        .expect("worker status");
                                         if halt {
                                             break;
                                         }
@@ -1433,12 +1500,14 @@ mod tests {
                                     };
 
                                     let output_replacements_before =
-                                        output_slot.replacement_count();
-                                    if !output_slot.publish(observation) {
-                                        update_status(&status, |s| s.record_publish_rejected());
+                                        output_slot.replacement_count().expect("slot access");
+                                    if !output_slot.publish(observation).expect("slot access") {
+                                        update_status(&status, |s| s.record_publish_rejected())
+                                            .expect("worker status");
                                     }
                                     let output_replacements_delta = output_slot
                                         .replacement_count()
+                                        .expect("slot access")
                                         .saturating_sub(output_replacements_before);
 
                                     update_status(&status, |s| {
@@ -1461,8 +1530,10 @@ mod tests {
                                         s.record_stage_duration(InferenceStage::Total, elapsed);
                                         s.record_output_replacements(output_replacements_delta);
                                         s.record_processed(frame.seq, finished_at, elapsed);
-                                    });
-                                    update_status(&status, |s| s.clear_consecutive_errors());
+                                    })
+                                    .expect("worker status");
+                                    update_status(&status, |s| s.clear_consecutive_errors())
+                                        .expect("worker status");
                                 }
                                 Err(err) => {
                                     let halt = update_status(&status, |s| {
@@ -1472,7 +1543,8 @@ mod tests {
                                             err,
                                             MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
                                         )
-                                    });
+                                    })
+                                    .expect("worker status");
                                     if halt {
                                         break;
                                     }
@@ -1487,7 +1559,8 @@ mod tests {
                                     err,
                                     MAX_CONSECUTIVE_RECOVERABLE_ERRORS,
                                 )
-                            });
+                            })
+                            .expect("worker status");
                             if halt {
                                 break;
                             }
@@ -1507,14 +1580,18 @@ mod tests {
             if s.state != InferenceWorkerState::Failed {
                 s.transition_to(InferenceWorkerState::Stopping);
             }
-        });
+        })
+        .expect("worker status");
 
         let final_metrics = status
             .lock()
             .expect("InferenceController status mutex poisoned")
             .metrics();
 
-        InferenceWorkerResult { final_metrics }
+        InferenceWorkerResult {
+            final_metrics,
+            failure: None,
+        }
     }
 
     #[test]
@@ -1609,15 +1686,17 @@ mod tests {
         let producer_slot = Arc::clone(&frame_slot);
         let producer = std::thread::spawn(move || {
             for seq in 1..=FRAME_COUNT {
-                producer_slot.publish(VideoFrame {
-                    seq: FrameSeq(seq),
-                    captured_at: MonoTimeNs(seq * 1_000_000),
-                    width: 64,
-                    height: 64,
-                    stride_bytes: 64 * 3,
-                    format: PixelFormat::Rgb8,
-                    data: vec![seq as u8; 64 * 64 * 3].into(),
-                });
+                producer_slot
+                    .publish(VideoFrame {
+                        seq: FrameSeq(seq),
+                        captured_at: MonoTimeNs(seq * 1_000_000),
+                        width: 64,
+                        height: 64,
+                        stride_bytes: 64 * 3,
+                        format: PixelFormat::Rgb8,
+                        data: vec![seq as u8; 64 * 64 * 3].into(),
+                    })
+                    .expect("slot access");
                 std::thread::sleep(Duration::from_millis(33));
             }
         });
@@ -1667,7 +1746,7 @@ mod tests {
             "metrics should report zero skipped sequences"
         );
         assert_eq!(
-            output_slot.generation(),
+            output_slot.generation().expect("slot generation"),
             status_final.frames_processed,
             "output slot generation should match processed count"
         );
@@ -1748,27 +1827,31 @@ mod tests {
         .expect("spawn");
 
         // Publish seq 1, wait for it to be processed, then publish seq 1 again.
-        frame_slot.publish(VideoFrame {
-            seq: FrameSeq(1),
-            captured_at: MonoTimeNs(1_000_000),
-            width: 64,
-            height: 64,
-            stride_bytes: 64 * 3,
-            format: PixelFormat::Rgb8,
-            data: vec![1u8; 64 * 64 * 3].into(),
-        });
+        frame_slot
+            .publish(VideoFrame {
+                seq: FrameSeq(1),
+                captured_at: MonoTimeNs(1_000_000),
+                width: 64,
+                height: 64,
+                stride_bytes: 64 * 3,
+                format: PixelFormat::Rgb8,
+                data: vec![1u8; 64 * 64 * 3].into(),
+            })
+            .expect("slot access");
 
         std::thread::sleep(Duration::from_millis(60));
 
-        frame_slot.publish(VideoFrame {
-            seq: FrameSeq(1),
-            captured_at: MonoTimeNs(2_000_000),
-            width: 64,
-            height: 64,
-            stride_bytes: 64 * 3,
-            format: PixelFormat::Rgb8,
-            data: vec![1u8; 64 * 64 * 3].into(),
-        });
+        frame_slot
+            .publish(VideoFrame {
+                seq: FrameSeq(1),
+                captured_at: MonoTimeNs(2_000_000),
+                width: 64,
+                height: 64,
+                stride_bytes: 64 * 3,
+                format: PixelFormat::Rgb8,
+                data: vec![1u8; 64 * 64 * 3].into(),
+            })
+            .expect("slot access");
 
         std::thread::sleep(Duration::from_millis(60));
         handle.stop();
@@ -1866,15 +1949,17 @@ mod tests {
         let producer_slot = Arc::clone(&frame_slot);
         let producer = std::thread::spawn(move || {
             for seq in 1..=FRAME_COUNT {
-                producer_slot.publish(VideoFrame {
-                    seq: FrameSeq(seq),
-                    captured_at: MonoTimeNs(seq * 1_000_000),
-                    width: 64,
-                    height: 64,
-                    stride_bytes: 64 * 3,
-                    format: PixelFormat::Rgb8,
-                    data: vec![seq as u8; 64 * 64 * 3].into(),
-                });
+                producer_slot
+                    .publish(VideoFrame {
+                        seq: FrameSeq(seq),
+                        captured_at: MonoTimeNs(seq * 1_000_000),
+                        width: 64,
+                        height: 64,
+                        stride_bytes: 64 * 3,
+                        format: PixelFormat::Rgb8,
+                        data: vec![seq as u8; 64 * 64 * 3].into(),
+                    })
+                    .expect("slot access");
                 std::thread::sleep(Duration::from_millis(PRODUCER_INTERVAL_MS));
             }
         });
@@ -1923,7 +2008,7 @@ mod tests {
         // The capture timestamp must be carried through to the observation.
         if let Some(ReadResult::New {
             value: observation, ..
-        }) = output_slot.try_read_after(0)
+        }) = output_slot.try_read_after(0).expect("slot access")
         {
             let expected_captured_at = status_final
                 .last_source_seq
@@ -2046,15 +2131,17 @@ mod tests {
         // Enough frames must be sent to exceed the recoverable error threshold.
         const ERROR_THRESHOLD: u32 = MAX_CONSECUTIVE_RECOVERABLE_ERRORS;
         for seq in 1..=ERROR_THRESHOLD + 5 {
-            frame_slot.publish(VideoFrame {
-                seq: FrameSeq(seq as u64),
-                captured_at: MonoTimeNs(seq as u64 * 1_000_000),
-                width: 64,
-                height: 64,
-                stride_bytes: 64 * 3,
-                format: PixelFormat::Rgb8,
-                data: vec![seq as u8; 64 * 64 * 3].into(),
-            });
+            frame_slot
+                .publish(VideoFrame {
+                    seq: FrameSeq(seq as u64),
+                    captured_at: MonoTimeNs(seq as u64 * 1_000_000),
+                    width: 64,
+                    height: 64,
+                    stride_bytes: 64 * 3,
+                    format: PixelFormat::Rgb8,
+                    data: vec![seq as u8; 64 * 64 * 3].into(),
+                })
+                .expect("slot access");
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -2164,15 +2251,17 @@ mod tests {
 
         const ERROR_THRESHOLD: u32 = MAX_CONSECUTIVE_RECOVERABLE_ERRORS;
         for seq in 1..=ERROR_THRESHOLD + 5 {
-            frame_slot.publish(VideoFrame {
-                seq: FrameSeq(u64::from(seq)),
-                captured_at: MonoTimeNs(u64::from(seq) * 1_000_000),
-                width: 64,
-                height: 64,
-                stride_bytes: 64 * 3,
-                format: PixelFormat::Rgb8,
-                data: vec![(seq % 256) as u8; 64 * 64 * 3].into(),
-            });
+            frame_slot
+                .publish(VideoFrame {
+                    seq: FrameSeq(u64::from(seq)),
+                    captured_at: MonoTimeNs(u64::from(seq) * 1_000_000),
+                    width: 64,
+                    height: 64,
+                    stride_bytes: 64 * 3,
+                    format: PixelFormat::Rgb8,
+                    data: vec![(seq % 256) as u8; 64 * 64 * 3].into(),
+                })
+                .expect("slot access");
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -2200,7 +2289,7 @@ mod tests {
             "consecutive error counter should exceed the threshold"
         );
         assert_eq!(
-            output_slot.generation(),
+            output_slot.generation().expect("slot generation"),
             0,
             "no observation should be published when decode fails"
         );
@@ -2320,8 +2409,12 @@ mod tests {
             "pose worker should reach Running"
         );
 
-        frame_slot.publish(dummy_video_frame(1));
-        let output = output_slot.wait_read_after(0, Duration::from_secs(30));
+        frame_slot
+            .publish(dummy_video_frame(1))
+            .expect("slot access");
+        let output = output_slot
+            .wait_read_after(0, Duration::from_secs(30))
+            .expect("slot access");
         assert!(
             matches!(output, Some(ReadResult::New { .. })),
             "pose worker should publish one completed frame"

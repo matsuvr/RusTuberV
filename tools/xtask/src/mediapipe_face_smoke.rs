@@ -279,8 +279,13 @@ fn run_worker(
     };
     let mut last_generation = 0;
     while !stop.is_stopped() {
-        let Some(read) = frame_slot.wait_read_after(last_generation, FRAME_WAIT) else {
-            continue;
+        let read = match frame_slot.wait_read_after(last_generation, FRAME_WAIT) {
+            Ok(Some(read)) => read,
+            Ok(None) => continue,
+            Err(error) => {
+                stats.failure = Some(error.to_string());
+                break;
+            }
         };
         let (frame, read_generation) = match read {
             ReadResult::New {

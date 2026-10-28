@@ -220,8 +220,14 @@ fn resting_pose_is_independent_of_vrm1_authored_rest_rotations() {
         ] {
             assert!(a.distance(b) < 2.0e-5);
         }
-        let (an, af) = a.palm.unwrap();
-        let (bn, bf) = b.palm.unwrap();
+        let PalmBasis {
+            normal: an,
+            forward: af,
+        } = a.palm.unwrap();
+        let PalmBasis {
+            normal: bn,
+            forward: bf,
+        } = b.palm.unwrap();
         assert!(an.distance(bn) < 2.0e-5);
         assert!(af.distance(bf) < 2.0e-5);
         assert!(bf.cross(bn).dot(Vec3::Z) > 0.99);
@@ -246,7 +252,7 @@ fn resting_profile_keeps_elbow_extended_and_thumb_forward() {
         let (solved, status) = problem.solve_neutral([Some(target.neutral), None]);
         let joints = solved[0].unwrap();
         let pose = joints.forward(&chain).unwrap();
-        let (normal, forward) = pose.palm.unwrap();
+        let PalmBasis { normal, forward } = pose.palm.unwrap();
         assert!(matches!(status, SolveStatus::Feasible { .. }));
         assert!(joints.angles[3] < 5.0_f32.to_radians());
         assert!(forward.cross(normal).dot(Vec3::Z) > 0.99);
@@ -463,8 +469,11 @@ fn lost_arm_recovers_neutral_palm_and_joint_pose() {
     let recovered = recovered[0].unwrap().forward(&chain).unwrap();
     assert!(recovered.wrist.distance(expected.wrist) < 0.002);
     assert!(recovered.elbow.distance(expected.elbow) < 0.002);
-    let (normal, forward) = recovered.palm.unwrap();
-    let (wanted_normal, wanted_forward) = expected.palm.unwrap();
+    let PalmBasis { normal, forward } = recovered.palm.unwrap();
+    let PalmBasis {
+        normal: wanted_normal,
+        forward: wanted_forward,
+    } = expected.palm.unwrap();
     assert!(normal.dot(wanted_normal) > 0.999);
     assert!(forward.dot(wanted_forward) > 0.999);
 }
@@ -475,9 +484,12 @@ fn unreachable_palm_rotation_does_not_pull_the_arm_away_from_its_positions() {
     let pose = state(1.3, 1.1, -0.3, 1.5);
     let original = pose.forward(&chain).unwrap();
     let mut target = goal(pose, &chain);
-    let (normal, forward) = target.palm.unwrap();
+    let PalmBasis { normal, forward } = target.palm.unwrap();
     let turn = Quat::from_axis_angle(forward, 2.5);
-    target.palm = Some((turn * normal, forward));
+    target.palm = Some(PalmBasis {
+        normal: turn * normal,
+        forward,
+    });
     let body = HashMap::new();
     let geometry = CollisionGeometry::default();
     let problem = Problem {
@@ -526,7 +538,14 @@ fn narrow_palm_recovers_a_large_forearm_rotation_without_moving_the_elbow() {
         initial.angles[4] = 1.3;
         let expected = wanted.forward(&chain).unwrap();
         let first = initial.forward(&chain).unwrap();
-        assert!(first.palm.unwrap().0.dot(expected.palm.unwrap().0) < -0.5);
+        assert!(
+            first
+                .palm
+                .unwrap()
+                .normal
+                .dot(expected.palm.unwrap().normal)
+                < -0.5
+        );
         let mut target = goal(wanted, &chain);
         target.neutral = initial;
         target.neutral_girdle = Some(Vec2::new(initial.angles[7], initial.angles[8]));
@@ -543,8 +562,22 @@ fn narrow_palm_recovers_a_large_forearm_rotation_without_moving_the_elbow() {
         let (solved, status) = problem.solve([Some(initial), None], 96);
         assert!(matches!(status, SolveStatus::Feasible { .. }));
         let result = solved[0].unwrap().forward(&chain).unwrap();
-        assert!(result.palm.unwrap().0.dot(expected.palm.unwrap().0) > 0.999);
-        assert!(result.palm.unwrap().1.dot(expected.palm.unwrap().1) > 0.999);
+        assert!(
+            result
+                .palm
+                .unwrap()
+                .normal
+                .dot(expected.palm.unwrap().normal)
+                > 0.999
+        );
+        assert!(
+            result
+                .palm
+                .unwrap()
+                .forward
+                .dot(expected.palm.unwrap().forward)
+                > 0.999
+        );
         assert!(result.elbow.distance(expected.elbow) < 0.002);
         assert!(result.wrist.distance(expected.wrist) < 0.002);
     }
@@ -995,13 +1028,16 @@ fn cached_arm_differences_match_full_fk_residuals_contacts_jacobians_and_solutio
                 3 | 4 => {
                     for (side, goal) in problem.goals.iter_mut().enumerate() {
                         let chain = problem.chains[side].unwrap();
-                        let (normal, forward) =
+                        let PalmBasis { normal, forward } =
                             current[side].unwrap().forward(chain).unwrap().palm.unwrap();
                         let half_turn = Quat::from_axis_angle(
                             forward,
                             std::f32::consts::PI + if case == 3 { -1.0e-4 } else { 1.0e-4 },
                         );
-                        goal.as_mut().unwrap().palm = Some((half_turn * normal, forward));
+                        goal.as_mut().unwrap().palm = Some(PalmBasis {
+                            normal: half_turn * normal,
+                            forward,
+                        });
                     }
                 }
                 5 => {

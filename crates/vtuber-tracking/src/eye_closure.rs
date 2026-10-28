@@ -159,7 +159,7 @@ impl EyeThreshold {
     ///
     /// Returns [`EyeThresholdError`] for non-finite values or a pair that does
     /// not satisfy `0 <= close_at < reopen_at <= 1`.
-    pub fn new(close_at: f32, reopen_at: f32) -> Result<Self, EyeThresholdError> {
+    pub fn try_new(close_at: f32, reopen_at: f32) -> Result<Self, EyeThresholdError> {
         if !close_at.is_finite() || !reopen_at.is_finite() {
             return Err(EyeThresholdError::NonFinite {
                 close: close_at,
@@ -181,7 +181,7 @@ impl EyeThreshold {
     /// Const constructor for this crate's compile-time-known default pairs.
     ///
     /// The pair is asserted at compile time, so the constant itself cannot be
-    /// invalid. Runtime values must still use [`Self::new`], which reports a
+    /// invalid. Runtime values must still use [`Self::try_new`], which reports a
     /// failure as a value instead of panicking.
     #[must_use]
     pub(crate) const fn from_constants(close_at: f32, reopen_at: f32) -> Self {
@@ -747,8 +747,8 @@ mod tests {
 
     fn thresholds(left: (f32, f32), right: (f32, f32)) -> EyeClosureThresholds {
         EyeClosureThresholds::new(
-            EyeThreshold::new(left.0, left.1).unwrap(),
-            EyeThreshold::new(right.0, right.1).unwrap(),
+            EyeThreshold::try_new(left.0, left.1).unwrap(),
+            EyeThreshold::try_new(right.0, right.1).unwrap(),
         )
     }
 
@@ -761,11 +761,11 @@ mod tests {
 
     #[test]
     fn threshold_validation_rejects_non_finite_and_out_of_order() {
-        assert!(EyeThreshold::new(f32::NAN, 0.5).is_err());
-        assert!(EyeThreshold::new(-0.1, 0.5).is_err());
-        assert!(EyeThreshold::new(0.5, 0.5).is_err());
-        assert!(EyeThreshold::new(0.6, 0.5).is_err());
-        assert!(EyeThreshold::new(0.0, 1.0).is_ok());
+        assert!(EyeThreshold::try_new(f32::NAN, 0.5).is_err());
+        assert!(EyeThreshold::try_new(-0.1, 0.5).is_err());
+        assert!(EyeThreshold::try_new(0.5, 0.5).is_err());
+        assert!(EyeThreshold::try_new(0.6, 0.5).is_err());
+        assert!(EyeThreshold::try_new(0.0, 1.0).is_ok());
     }
 
     #[test]
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn equality_at_each_edge_matches_the_documented_direction() {
-        let threshold = EyeThreshold::new(0.4, 0.6).unwrap();
+        let threshold = EyeThreshold::try_new(0.4, 0.6).unwrap();
         assert_eq!(
             threshold.decide(EyeOpenness::Open, 0.4),
             EyeOpenness::Closed
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn hysteresis_holds_half_open_values_closed() {
-        let threshold = EyeThreshold::new(0.4, 0.6).unwrap();
+        let threshold = EyeThreshold::try_new(0.4, 0.6).unwrap();
         let closed = threshold.decide(EyeOpenness::Open, 0.35);
         assert_eq!(closed, EyeOpenness::Closed);
         assert_eq!(threshold.decide(closed, 0.5), EyeOpenness::Closed);
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn unknown_recovers_through_the_entry_condition() {
-        let threshold = EyeThreshold::new(0.4, 0.6).unwrap();
+        let threshold = EyeThreshold::try_new(0.4, 0.6).unwrap();
         assert_eq!(
             threshold.decide(EyeOpenness::Unknown, 0.5),
             EyeOpenness::Open

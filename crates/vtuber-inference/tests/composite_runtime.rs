@@ -188,7 +188,7 @@ fn composite_runtime_worker_reports_no_face_without_runtime_failure() {
     })
     .expect("spawn");
 
-    frame_slot.publish(frame(1));
+    frame_slot.publish(frame(1)).expect("slot access");
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if status.lock().expect("test status mutex").no_face_frames == 1 {
@@ -198,7 +198,7 @@ fn composite_runtime_worker_reports_no_face_without_runtime_failure() {
     }
 
     worker.stop();
-    frame_slot.close();
+    frame_slot.close().expect("slot cleanup");
     assert!(matches!(worker.join(), WorkerResult::Completed(_)));
     let final_status = status.lock().expect("test status mutex");
     assert_eq!(final_status.no_face_frames, 1);

@@ -119,13 +119,18 @@ impl PoseRuntime {
         self.worker
             .as_ref()
             .is_some_and(|worker| !worker.is_finished())
-            && self.lock_status().state != InferenceWorkerState::Failed
+            && self
+                .lock_status()
+                .is_ok_and(|status| status.state != InferenceWorkerState::Failed)
     }
 
     /// Snapshot of the combined Pose/Hand worker timings and progress.
     #[must_use]
     pub fn status(&self) -> vtuber_inference::InferenceWorkerStatus {
-        self.lock_status().clone()
+        match self.lock_status() {
+            Ok(status) => status.clone(),
+            Err(error) => vtuber_inference::InferenceWorkerStatus::failed(error),
+        }
     }
 
     /// Reaps an exited worker and clears its retained observations.
@@ -148,6 +153,7 @@ impl PoseRuntime {
     /// in the shared status, so the bridge does not retry the same request; an
     /// explicit arm-tracking off-then-on reselection clears it.
     pub fn ensure_running(&mut self) -> Result<(), InferenceError> {
+        drop(self.lock_status()?);
         if self.worker.is_some() {
             return Ok(());
         }
@@ -182,7 +188,7 @@ impl PoseRuntime {
                     kind: spawn_error.kind(),
                     message: spawn_error.to_string(),
                 };
-                self.lock_status().record_failure(
+                self.lock_status()?.record_failure(
                     vtuber_core::monotonic_now(),
                     FailureStage::WorkerSpawn,
                     error.clone(),
@@ -194,7 +200,9 @@ impl PoseRuntime {
 
     /// Clears a retained failure so an explicit reselection can retry.
     fn clear_worker_failure(&mut self) {
-        let mut status = self.lock_status();
+        let Ok(mut status) = self.lock_status() else {
+            return;
+        };
         if status.last_failure.is_none() {
             return;
         }
@@ -202,11 +210,14 @@ impl PoseRuntime {
         status.transition_to(InferenceWorkerState::Idle);
     }
 
-    /// Locks the shared status, recovering from a poisoned worker panic.
-    fn lock_status(&self) -> std::sync::MutexGuard<'_, vtuber_inference::InferenceWorkerStatus> {
+    /// Locks the shared status without exposing poisoned state.
+    fn lock_status(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, vtuber_inference::InferenceWorkerStatus>, InferenceError>
+    {
         self.status
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_err(|_| InferenceError::StatusPoisoned)
     }
 
     /// Stops the Pose worker and drops its observation state.
@@ -221,11 +232,22 @@ impl PoseRuntime {
         vtuber_inference::completion::finish_worker_join(result, &self.status).map(|_| ())
     }
 
+    fn record_slot_failure(&self, error: vtuber_core::SlotPoisoned) {
+        if let Some(worker) = &self.worker {
+            worker.stop();
+        }
+        if let Ok(mut status) = self.lock_status() {
+            status.record_failure(monotonic_now(), FailureStage::Runtime, error.into());
+        }
+    }
+
     fn invalidate_session(&mut self, now: MonoTimeNs) {
         self.tracking.reset_temporal();
         self.output_generation = 0;
         self.held_frame = None;
-        self.output_slot.clear();
+        if let Err(error) = self.output_slot.clear() {
+            self.record_slot_failure(error);
+        }
         // A worker can finish an in-flight camera frame after the slot is cleared.
         self.observations_after = now;
     }
@@ -252,10 +274,18 @@ impl PoseRuntime {
             self.last_avatar_generation = generation;
             self.invalidate_session(now);
         }
+        let output = match self.output_slot.try_read_after(self.output_generation) {
+            Ok(output) => output,
+            Err(error) => {
+                self.held_frame = None;
+                self.record_slot_failure(error);
+                return None;
+            }
+        };
         if let Some(ReadResult::New {
             generation,
             value: frame,
-        }) = self.output_slot.try_read_after(self.output_generation)
+        }) = output
         {
             self.output_generation = generation;
             if frame.captured_at >= self.observations_after {
@@ -447,12 +477,15 @@ pub fn pose_worker_bridge_system(
             | vtuber_camera::CaptureServiceState::Reconnecting
     );
     // Read the retained failure under a short status lock, then spawn outside it.
-    let start = should_start_pose(
-        pose.enabled(),
-        capture_active,
-        pose.is_running(),
-        pose.lock_status().last_failure.as_ref(),
-    );
+    let running = pose.is_running();
+    let start = pose.lock_status().is_ok_and(|status| {
+        should_start_pose(
+            pose.enabled(),
+            capture_active,
+            running,
+            status.last_failure.as_ref(),
+        )
+    });
     if start {
         if let Err(error) = pose.ensure_running() {
             error!("pose worker could not be started: {error}");
@@ -567,7 +600,12 @@ mod tests {
     fn assert_bridge_neither_retried_nor_reported(app: &App) {
         let pose = app.world().resource::<PoseRuntime>();
         assert!(!pose.is_running());
-        assert!(pose.lock_status().last_failure.is_some());
+        assert!(
+            pose.lock_status()
+                .expect("worker status")
+                .last_failure
+                .is_some()
+        );
         assert!(
             app.world()
                 .resource::<Orchestrator>()
@@ -586,7 +624,7 @@ mod tests {
             observation: None,
         };
         pose.held_frame = Some(frame);
-        pose.output_slot.publish(frame);
+        pose.output_slot.publish(frame).expect("slot access");
         pose.power.generation = pose.power.generation.wrapping_sub(1);
         assert!(
             pose.read_latest(AvatarGeneration::default(), MonoTimeNs(200))
@@ -594,7 +632,7 @@ mod tests {
         );
         assert!(pose.held_frame.is_none());
         // A CPU inference started before suspend can complete after resume.
-        pose.output_slot.publish(frame);
+        pose.output_slot.publish(frame).expect("slot access");
         assert!(
             pose.read_latest(AvatarGeneration::default(), MonoTimeNs(210))
                 .is_none()
@@ -617,7 +655,11 @@ mod tests {
         assert_eq!(pose.output_generation, 0);
         assert!(pose.held_frame.is_none());
         assert!(matches!(
-            pose.lock_status().last_failure.as_ref().map(|f| &f.error),
+            pose.lock_status()
+                .expect("worker status")
+                .last_failure
+                .as_ref()
+                .map(|f| &f.error),
             Some(InferenceError::WorkerPanicked)
         ));
     }
@@ -646,7 +688,7 @@ mod tests {
             inference_finished_at: MonoTimeNs(12),
             observation: None,
         };
-        assert!(pose.output_slot.publish(frame));
+        assert!(pose.output_slot.publish(frame).expect("slot access"));
         let control = pose.read_latest(first, MonoTimeNs(13)).unwrap();
         assert_eq!(control.source_seq, frame.source_seq);
         assert_eq!(
@@ -655,24 +697,36 @@ mod tests {
         );
         assert!(pose.read_latest(second, MonoTimeNs(15)).is_none());
         // An old camera frame finishes after the replacement reset.
-        assert!(pose.output_slot.publish(PoseArmFrame {
-            inference_finished_at: MonoTimeNs(16),
-            ..frame
-        }));
+        assert!(
+            pose.output_slot
+                .publish(PoseArmFrame {
+                    inference_finished_at: MonoTimeNs(16),
+                    ..frame
+                })
+                .expect("slot access")
+        );
         assert!(pose.read_latest(second, MonoTimeNs(17)).is_none());
-        assert!(pose.output_slot.publish(PoseArmFrame {
-            captured_at: MonoTimeNs(18),
-            ..frame
-        }));
+        assert!(
+            pose.output_slot
+                .publish(PoseArmFrame {
+                    captured_at: MonoTimeNs(18),
+                    ..frame
+                })
+                .expect("slot access")
+        );
         assert!(pose.read_latest(second, MonoTimeNs(19)).is_some());
 
         pose.recalibrate();
         assert!(pose.read_latest(second, monotonic_now()).is_none());
         let captured_at = monotonic_now();
-        assert!(pose.output_slot.publish(PoseArmFrame {
-            captured_at,
-            ..frame
-        }));
+        assert!(
+            pose.output_slot
+                .publish(PoseArmFrame {
+                    captured_at,
+                    ..frame
+                })
+                .expect("slot access")
+        );
         assert!(pose.read_latest(second, monotonic_now()).is_some());
         pose.stop().unwrap();
         assert!(pose.read_latest(second, monotonic_now()).is_none());
@@ -698,7 +752,12 @@ mod tests {
         assert!(pose.worker.is_none());
         assert_eq!(pose.poll_worker_exit(), Ok(()));
         assert_eq!(
-            pose.lock_status().last_failure.as_ref().unwrap().stage,
+            pose.lock_status()
+                .expect("worker status")
+                .last_failure
+                .as_ref()
+                .unwrap()
+                .stage,
             FailureStage::WorkerPanic
         );
     }
@@ -729,7 +788,10 @@ mod tests {
             .unwrap(),
         );
         wait_for_pose_exit(&pose);
-        assert_eq!(pose.lock_status().state, InferenceWorkerState::Failed);
+        assert_eq!(
+            pose.lock_status().expect("worker status").state,
+            InferenceWorkerState::Failed
+        );
         assert!(!pose.is_running());
 
         let mut app = App::new();
@@ -758,6 +820,7 @@ mod tests {
             app.world()
                 .resource::<PoseRuntime>()
                 .lock_status()
+                .expect("worker status")
                 .last_failure
                 .as_ref()
                 .unwrap()
@@ -774,7 +837,12 @@ mod tests {
         let mut pose = app.world_mut().resource_mut::<PoseRuntime>();
         pose.set_enabled(false);
         pose.set_enabled(true);
-        assert!(pose.lock_status().last_failure.is_none());
+        assert!(
+            pose.lock_status()
+                .expect("worker status")
+                .last_failure
+                .is_none()
+        );
         pose.finish_spawn(Ok(test_pose_worker())).unwrap();
         assert!(pose.is_running());
         pose.stop().unwrap();
@@ -800,7 +868,7 @@ mod tests {
         assert_eq!(*kind, std::io::ErrorKind::Other);
         assert_eq!(message, "simulated spawn failure");
 
-        let status = pose.lock_status();
+        let status = pose.lock_status().expect("worker status");
         assert_eq!(status.state, InferenceWorkerState::Failed);
         let failure = status
             .last_failure
@@ -827,7 +895,7 @@ mod tests {
     #[test]
     fn a_retained_spawn_failure_blocks_the_next_start() {
         let pose = pose_with_spawn_failure();
-        let status = pose.lock_status();
+        let status = pose.lock_status().expect("worker status");
         let failure = status
             .last_failure
             .as_ref()
@@ -841,7 +909,7 @@ mod tests {
 
         // Re-assigning the same value is not a retry request.
         pose.set_enabled(true);
-        let status = pose.lock_status();
+        let status = pose.lock_status().expect("worker status");
         let failure = status
             .last_failure
             .as_ref()
@@ -850,10 +918,15 @@ mod tests {
         drop(status);
 
         pose.set_enabled(false);
-        assert!(pose.lock_status().last_failure.is_some());
+        assert!(
+            pose.lock_status()
+                .expect("worker status")
+                .last_failure
+                .is_some()
+        );
 
         pose.set_enabled(true);
-        let status = pose.lock_status();
+        let status = pose.lock_status().expect("worker status");
         assert!(status.last_failure.is_none());
         assert_eq!(status.state, InferenceWorkerState::Idle);
         assert!(should_start_pose(
@@ -892,6 +965,7 @@ mod tests {
         // A worker that already reached Running: the successful spawn must not
         // overwrite the state it published.
         pose.lock_status()
+            .expect("worker status")
             .transition_to(InferenceWorkerState::Running);
         pose.finish_spawn(Ok(worker))
             .expect("a successful spawn retains the worker");
@@ -907,7 +981,10 @@ mod tests {
             let pose = app.world().resource::<PoseRuntime>();
             assert!(pose.is_running());
             assert!(!stop_token.is_stopped());
-            assert_eq!(pose.lock_status().state, InferenceWorkerState::Running);
+            assert_eq!(
+                pose.lock_status().expect("worker status").state,
+                InferenceWorkerState::Running
+            );
             assert!(
                 app.world()
                     .resource::<Orchestrator>()

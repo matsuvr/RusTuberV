@@ -94,6 +94,7 @@ impl ThoraxState {
         }
     }
 
+    #[must_use]
     pub fn without_motion(self) -> Self {
         Self {
             neutral: self.neutral,

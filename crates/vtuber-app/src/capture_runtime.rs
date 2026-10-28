@@ -273,9 +273,9 @@ impl CaptureRuntime {
     /// Tries to read the latest frame from the slot.
     ///
     /// Returns `None` if no new frame is available.
-    pub fn try_read_frame(&mut self) -> Option<VideoFrame> {
+    pub fn try_read_frame(&mut self) -> Result<Option<VideoFrame>, vtuber_core::SlotPoisoned> {
         let slot = self.controller.frame_slot();
-        match slot.try_read_after(self.last_generation) {
+        match slot.try_read_after(self.last_generation)? {
             Some(vtuber_core::ReadResult::New {
                 generation,
                 value: frame,
@@ -285,9 +285,9 @@ impl CaptureRuntime {
                 // is the cursor, so the consumer never re-reads an old value
                 // nor skips an unread newer one.
                 self.last_generation = generation;
-                Some(frame)
+                Ok(Some(frame))
             }
-            Some(vtuber_core::ReadResult::Closed) | None => None,
+            Some(vtuber_core::ReadResult::Closed) | None => Ok(None),
         }
     }
 }
@@ -304,6 +304,7 @@ pub struct LatestVideoFrame {
 pub(crate) fn read_latest_frame(
     mut capture: ResMut<CaptureRuntime>,
     mut latest: ResMut<LatestVideoFrame>,
+    mut orchestrator: ResMut<crate::orchestrator::Orchestrator>,
     mut power: Local<vtuber_platform::PowerState>,
     mut after: Local<u64>,
 ) {
@@ -316,10 +317,13 @@ pub(crate) fn read_latest_frame(
     if current.sleeping {
         return;
     }
-    if let Some(frame) = capture.try_read_frame()
-        && frame.captured_at.0 >= *after
-    {
-        latest.frame = Some(frame);
+    match capture.try_read_frame() {
+        Ok(Some(frame)) if frame.captured_at.0 >= *after => latest.frame = Some(frame),
+        Ok(_) => {}
+        Err(error) => {
+            latest.frame = None;
+            orchestrator.fail_camera(error.to_string());
+        }
     }
 }
 
@@ -599,7 +603,10 @@ mod preview_tests {
 
     /// Waits for one Pose-slot publication and returns the reader cursor.
     fn read_pose_frame(pose: &LatestSlot<VideoFrame>, cursor: u64) -> u64 {
-        match pose.wait_read_after(cursor, std::time::Duration::from_secs(3)) {
+        match pose
+            .wait_read_after(cursor, std::time::Duration::from_secs(3))
+            .expect("pose slot")
+        {
             Some(vtuber_core::ReadResult::New { generation, .. }) => generation,
             _ => panic!("the Pose slot should receive the captured frame"),
         }

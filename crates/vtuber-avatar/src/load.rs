@@ -58,7 +58,7 @@ impl UserAssetPath {
     ///
     /// Returns [`AssetPathError`] when the path is empty, uses the wrong scheme,
     /// has invalid syntax, or escapes the asset source root.
-    pub fn new(path: impl Into<String>) -> Result<Self, AssetPathError> {
+    pub fn try_new(path: impl Into<String>) -> Result<Self, AssetPathError> {
         let path = path.into();
 
         if !path.starts_with(Self::SCHEME) {
@@ -93,7 +93,7 @@ impl UserAssetPath {
     ///
     /// Returns [`AssetPathError`] if the identifier produces an invalid path.
     pub fn avatar_model_path(id: &AvatarAssetId) -> Result<Self, AssetPathError> {
-        Self::new(format!("{}avatars/{}/model.vrm", Self::SCHEME, id.0))
+        Self::try_new(format!("{}avatars/{}/model.vrm", Self::SCHEME, id.0))
     }
 
     /// Returns the underlying path string, including the `user://` scheme.
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn typed_path_borrows_the_asset_path_parsed_at_construction() {
-        let path = UserAssetPath::new("user://avatars/abc123/model.vrm").unwrap();
+        let path = UserAssetPath::try_new("user://avatars/abc123/model.vrm").unwrap();
         assert!(std::ptr::eq(path.as_asset_path(), &path.asset_path));
         assert_eq!(path.as_asset_path().to_string(), path.as_str());
         assert_eq!(path.as_asset_path().clone(), path.clone().into_asset_path());
@@ -612,14 +612,15 @@ mod tests {
 
     #[test]
     fn avatar_load_request_rejects_absolute_path_conversion() {
-        let err = UserAssetPath::new("C:/models/avatar.vrm").expect_err("absolute path rejected");
+        let err =
+            UserAssetPath::try_new("C:/models/avatar.vrm").expect_err("absolute path rejected");
         assert!(matches!(
             err,
             AssetPathError::MissingScheme | AssetPathError::WrongScheme
         ));
 
-        let err =
-            UserAssetPath::new("user:///C:/models/avatar.vrm").expect_err("rooted path rejected");
+        let err = UserAssetPath::try_new("user:///C:/models/avatar.vrm")
+            .expect_err("rooted path rejected");
         assert!(matches!(err, AssetPathError::EscapesSourceRoot));
     }
 }

@@ -4,7 +4,7 @@
 use crate::{
     arm::ArmChainBinding,
     collision::{BoneMotion, CollisionError, CollisionGeometry},
-    upper_limb::{ArmCandidate, ArmJoints},
+    upper_limb::{ArmCandidate, ArmJoints, PalmBasis},
 };
 use bevy::prelude::*;
 
@@ -145,7 +145,7 @@ fn second_order_correction(
 pub(crate) struct ArmGoal {
     pub wrist: Vec3,
     pub elbow: Option<Vec3>,
-    pub palm: Option<(Vec3, Vec3)>,
+    pub palm: Option<PalmBasis>,
     pub shoulder: Option<Vec3>,
     pub weight: vtuber_core::arm_tracking::ArmBlendWeight,
     pub shoulder_weight: f32,
@@ -167,8 +167,10 @@ impl ArmGoal {
         let pose = neutral.forward(chain)?;
         let offset = pose.shoulder - chain.rest.upper_arm.position;
         let direction = (target.wrist - chain.rest.upper_arm.position).try_normalize()?;
-        let palm = crate::arm::rest_palm_normal(chain)
-            .map(|_| (Vec3::Z.cross(direction).normalize(), direction));
+        let palm = crate::arm::rest_palm_normal(chain).map(|_| PalmBasis {
+            normal: Vec3::Z.cross(direction).normalize(),
+            forward: direction,
+        });
         Some(Self {
             wrist: target.wrist + offset,
             elbow: Some(analytic.elbow + offset),
@@ -202,7 +204,7 @@ pub(crate) struct Problem<'a> {
 struct NeutralPose {
     wrist: Vec3,
     elbow: Vec3,
-    palm: Option<(Vec3, Vec3)>,
+    palm: Option<PalmBasis>,
 }
 
 // A solve owns its neutral FK tasks; no cache survives a changed Problem.

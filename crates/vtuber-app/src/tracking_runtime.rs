@@ -23,11 +23,11 @@ use crate::ui_model::{CalibrationViewModel, TrackingState as UiTrackingState, Ui
 pub(crate) const INFERENCE_SILENCE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq)]
-enum ObservationDispatch {
+enum ObservationDispatch<'a> {
     /// No new inference result and the last result is still fresh.
     NoUpdate,
     /// A new, fresh face observation is ready for tracking.
-    Face(Box<FaceTrackingSample>),
+    Face(&'a FaceTrackingSample),
     /// The current inference result is absent or stale.
     NoFace,
 }
@@ -49,11 +49,11 @@ impl ObservationGate {
         self.observations_after = Some(now);
     }
 
-    fn dispatch(
+    fn dispatch<'a>(
         &mut self,
-        latest: Option<&FaceTrackingSample>,
+        latest: Option<&'a FaceTrackingSample>,
         now: MonoTimeNs,
-    ) -> ObservationDispatch {
+    ) -> ObservationDispatch<'a> {
         let Some(observation) = latest else {
             return ObservationDispatch::NoFace;
         };
@@ -70,7 +70,7 @@ impl ObservationGate {
         if is_new {
             self.last_source_seq = Some(observation.source_seq);
             return if fresh {
-                ObservationDispatch::Face(Box::new(observation.clone()))
+                ObservationDispatch::Face(observation)
             } else {
                 ObservationDispatch::NoFace
             };
@@ -118,7 +118,7 @@ impl Default for TrackingRuntime {
             clippy::expect_used,
             reason = "`PipelineConfig::default()` is a valid configuration by definition and the repository tests pin it"
         )]
-        let pipeline = TrackingPipeline::new(config)
+        let pipeline = TrackingPipeline::try_new(config)
             .expect("default tracking configuration is an internal invariant");
         Self {
             pipeline,
@@ -327,8 +327,8 @@ pub fn tracking_bridge_system(
         },
         now,
     );
-    let neutral_sample = match &dispatch {
-        ObservationDispatch::Face(sample) => Some((**sample).clone()),
+    let neutral_sample = match dispatch {
+        ObservationDispatch::Face(sample) => Some(sample),
         // The held observation keeps feeding the pipeline between inference
         // results so the filters advance at the render rate. Re-running the
         // same sample through the filters is what reconstructs a continuous
@@ -339,7 +339,7 @@ pub fn tracking_bridge_system(
         tracking.held_sample = None;
     }
 
-    if let Some(sample) = neutral_sample.as_ref() {
+    if let Some(sample) = neutral_sample {
         let neutral_update = if tracking.recenter_requested {
             tracking.auto_neutral.recenter(sample)
         } else {
@@ -361,7 +361,7 @@ pub fn tracking_bridge_system(
         }
     }
     if let Some(sample) = neutral_sample {
-        tracking.held_sample = Some(sample);
+        tracking.held_sample = Some(sample.clone());
     }
 
     let neutral = tracking.auto_neutral.reference();

@@ -387,7 +387,10 @@ fn run_windows(options: Options) -> Result<(), String> {
                     );
                     status.metrics()
                 };
-                InferenceWorkerResult { final_metrics }
+                InferenceWorkerResult {
+                    final_metrics,
+                    failure: None,
+                }
             }
         }
     })
@@ -407,72 +410,81 @@ fn run_windows(options: Options) -> Result<(), String> {
     let mut neutral_observation = None;
     let mut pose_stats = PoseStats::default();
 
-    while Instant::now() < deadline {
-        if let Some(protocol) = guided.as_mut()
-            && let Some(action) = protocol.tick(started.elapsed())
-        {
-            match action {
-                GuidedAction::None => {}
-                GuidedAction::StopCapture => capture
-                    .stop()
-                    .map_err(|error| format!("guided capture stop failed: {error}"))?,
-                GuidedAction::StartCapture => capture
-                    .select_and_start(device.clone(), CameraRequest::default())
-                    .map_err(|error| format!("guided capture restart failed: {error}"))?,
+    let processing = (|| -> Result<(), String> {
+        while Instant::now() < deadline {
+            if let Some(protocol) = guided.as_mut()
+                && let Some(action) = protocol.tick(started.elapsed())
+            {
+                match action {
+                    GuidedAction::None => {}
+                    GuidedAction::StopCapture => capture
+                        .stop()
+                        .map_err(|error| format!("guided capture stop failed: {error}"))?,
+                    GuidedAction::StartCapture => capture
+                        .select_and_start(device.clone(), CameraRequest::default())
+                        .map_err(|error| format!("guided capture restart failed: {error}"))?,
+                }
             }
-        }
 
-        if let Some(snapshot_path) = options.snapshot.as_deref()
-            && !snapshot_written
-        {
-            match frame_slot.try_read_after(frame_generation) {
+            if let Some(snapshot_path) = options.snapshot.as_deref()
+                && !snapshot_written
+            {
+                match frame_slot
+                    .try_read_after(frame_generation)
+                    .map_err(|error| error.to_string())?
+                {
+                    Some(ReadResult::New {
+                        generation,
+                        value: frame,
+                    }) => {
+                        frame_generation = generation;
+                        save_snapshot(&frame, snapshot_path)?;
+                        println!("Saved snapshot: {}", snapshot_path.display());
+                        snapshot_written = true;
+                    }
+                    Some(ReadResult::Closed) | None => {}
+                }
+            }
+
+            match output_slot
+                .try_read_after(output_generation)
+                .map_err(|error| error.to_string())?
+            {
                 Some(ReadResult::New {
                     generation,
-                    value: frame,
+                    value: observation,
                 }) => {
-                    frame_generation = generation;
-                    save_snapshot(&frame, snapshot_path)?;
-                    println!("Saved snapshot: {}", snapshot_path.display());
-                    snapshot_written = true;
+                    output_generation = generation;
+                    if neutral_observation.is_none() {
+                        neutral_observation = Some(observation.clone());
+                    }
+                    if let Some(neutral) = neutral_observation.as_ref()
+                        && let Some(pose) = solve_observation_pose(neutral, &observation)
+                    {
+                        pose_stats.record(pose);
+                    }
+                    latest_observation = Some(observation);
                 }
                 Some(ReadResult::Closed) | None => {}
             }
-        }
 
-        match output_slot.try_read_after(output_generation) {
-            Some(ReadResult::New {
-                generation,
-                value: observation,
-            }) => {
-                output_generation = generation;
-                if neutral_observation.is_none() {
-                    neutral_observation = Some(observation.clone());
-                }
-                if let Some(neutral) = neutral_observation.as_ref()
-                    && let Some(pose) = solve_observation_pose(neutral, &observation)
-                {
-                    pose_stats.record(pose);
-                }
-                latest_observation = Some(observation);
+            let capture_state = capture.state();
+            if matches!(capture_state, vtuber_camera::CaptureServiceState::BackOff) {
+                break;
             }
-            Some(ReadResult::Closed) | None => {}
+            if status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .state
+                == InferenceWorkerState::Failed
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
 
-        let capture_state = capture.state();
-        if matches!(capture_state, vtuber_camera::CaptureServiceState::BackOff) {
-            break;
-        }
-        if status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state
-            == InferenceWorkerState::Failed
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
+        Ok(())
+    })();
     let snapshot_missing = options.snapshot.is_some() && !snapshot_written;
     let deadline_reached = Instant::now() >= deadline;
     if deadline_reached
@@ -489,15 +501,22 @@ fn run_windows(options: Options) -> Result<(), String> {
     let camera_state = capture.state();
     inference_worker.stop();
     let inference_result = inference_worker.join();
-    output_slot.close();
+    let output_close = output_slot.close();
     let capture_metrics = capture.shutdown().map_err(|error| error.to_string())?;
+    processing?;
+    output_close.map_err(|error| error.to_string())?;
     let status_snapshot = status
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let elapsed = started.elapsed().as_secs_f64().max(f64::EPSILON);
     let metrics = match inference_result {
-        WorkerResult::Completed(result) => result.final_metrics,
+        WorkerResult::Completed(result) => {
+            if let Some(error) = result.failure {
+                return Err(error.to_string());
+            }
+            result.final_metrics
+        }
         WorkerResult::Panicked => {
             return Err("face-pipeline inference worker panicked".into());
         }

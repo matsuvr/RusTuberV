@@ -171,7 +171,10 @@ mod tests {
                 if stop.is_stopped() {
                     return "stop-polled";
                 }
-                match slot_for_worker.wait_read_after(last_gen, Duration::from_millis(50)) {
+                match slot_for_worker
+                    .wait_read_after(last_gen, Duration::from_millis(50))
+                    .expect("slot access")
+                {
                     Some(ReadResult::New { generation, value }) => {
                         last_gen = generation;
                         let _ = value;
@@ -184,7 +187,7 @@ mod tests {
         .expect("spawn");
 
         std::thread::sleep(Duration::from_millis(20));
-        slot.close();
+        slot.close().expect("slot cleanup");
         assert_eq!(handle.join(), WorkerResult::Completed("slot-closed"));
     }
 

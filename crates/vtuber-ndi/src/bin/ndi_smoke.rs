@@ -238,7 +238,10 @@ fn submit_pattern(
     slot.copy_from_slice(&foreground);
     let frame = VideoOutputFrame::new_bgra8(WIDTH, HEIGHT, FrameSeq(seq), MonoTimeNs(seq), data)
         .map_err(|error| format!("test frame invalid: {error}"))?;
-    match controller.submit_frame(frame) {
+    match controller
+        .submit_frame(frame)
+        .map_err(|error| error.to_string())?
+    {
         NdiSubmitResult::Submitted | NdiSubmitResult::Replaced => Ok(()),
         NdiSubmitResult::RejectedNotRunning => Err("sender rejected a smoke frame".to_owned()),
     }

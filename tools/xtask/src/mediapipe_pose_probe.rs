@@ -249,13 +249,15 @@ fn run_windows(options: Options) -> Result<(), String> {
     let data = Arc::new(Mutex::new(ProbeData::default()));
     let frame_slot = capture.frame_slot();
     let frame_deadline = Instant::now() + Duration::from_secs(5);
-    while frame_slot.generation() == 0 && Instant::now() < frame_deadline {
+    while frame_slot.generation().map_err(|error| error.to_string())? == 0
+        && Instant::now() < frame_deadline
+    {
         if capture.worker_finished() {
             break;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    if frame_slot.generation() == 0 {
+    if frame_slot.generation().map_err(|error| error.to_string())? == 0 {
         let state = capture.state();
         let metrics = capture.metrics();
         if let Err(shutdown_error) = capture.shutdown() {
@@ -287,7 +289,7 @@ fn run_windows(options: Options) -> Result<(), String> {
     let worker_result = worker.join();
     let capture_state = capture.state();
     let capture_metrics = capture.metrics();
-    let frame_generation = frame_slot.generation();
+    let frame_generation = frame_slot.generation().map_err(|error| error.to_string())?;
     let capture_shutdown = capture.shutdown();
     let output = match worker_result {
         WorkerResult::Completed(output) => output,
@@ -346,8 +348,16 @@ fn run_worker(
     };
     let mut generation = 0;
     while !stop.is_stopped() {
-        let Some(read) = frame_slot.wait_read_after(generation, FRAME_WAIT) else {
-            continue;
+        let read = match frame_slot.wait_read_after(generation, FRAME_WAIT) {
+            Ok(Some(read)) => read,
+            Ok(None) => continue,
+            Err(error) => {
+                return ProbeWorkerOutput {
+                    data: data.lock().map(|guard| guard.clone()).unwrap_or_default(),
+                    library_source,
+                    failure: Some(error.to_string()),
+                };
+            }
         };
         let (frame, read_generation) = match read {
             ReadResult::New {

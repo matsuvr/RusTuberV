@@ -121,7 +121,8 @@ fn user_asset_path_constructed_from_sha256_id() {
 
 #[test]
 fn user_asset_path_rejects_absolute_filesystem_path() {
-    let err = UserAssetPath::new("C:\\models\\avatar.vrm").expect_err("must reject absolute path");
+    let err =
+        UserAssetPath::try_new("C:\\models\\avatar.vrm").expect_err("must reject absolute path");
     assert!(
         matches!(
             err,

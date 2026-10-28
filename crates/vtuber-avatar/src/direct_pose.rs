@@ -412,13 +412,13 @@ type BodyTrackingPoseRoot<'a> = (
 /// and before VRM gaze control and constraints. The function
 /// is public so integration tests and custom schedules can verify that path.
 pub fn apply_direct_body_tracking(params: DirectPoseParams<'_, '_>) {
-    apply_direct_tracking(params, false);
+    apply_direct_tracking(params, /* head_only */ false);
 }
 
 /// Finish face tracking against the admitted chest on every render tick.
 /// Bones that actually deform collision geometry stay on the checked path.
 pub(crate) fn apply_direct_head_tracking(params: DirectPoseParams<'_, '_>) {
-    apply_direct_tracking(params, true);
+    apply_direct_tracking(params, /* head_only */ true);
 }
 
 /// Queries and per-bone state for direct body/head tracking.

@@ -1,17 +1,18 @@
 //! VRM generation detection, metadata inspection, and source validation.
 
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 use vtuber_avatar::glb::Glb;
 use vtuber_avatar::vrm::prepare_vrm_document;
 
 use super::{HumanoidNodes, ModelImportError, VrmGeneration, VrmInspectionSummary};
 
-/// Inspects a VRM file without copying it.
+/// Inspects a VRM file without generating a prepared GLB byte buffer.
 pub fn inspect_vrm<P: AsRef<Path>>(path: P) -> Result<VrmInspectionSummary, ModelImportError> {
     let path = path.as_ref();
     let bytes = fs::read(path)?;
-    prepare_and_inspect_vrm(path, &bytes).map(|(summary, _)| summary)
+    inspect_document(path, &bytes).map(|(summary, _, _)| summary)
 }
 
 /// Inspects the same converted document that will be stored and loaded.
@@ -19,6 +20,20 @@ pub(super) fn prepare_and_inspect_vrm(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(VrmInspectionSummary, Vec<u8>), ModelImportError> {
+    let (summary, glb, changed) = inspect_document(path, bytes)?;
+    let prepared = if changed {
+        glb.to_vec()
+            .map_err(|error| ModelImportError::GlbParse(error.to_string()))?
+    } else {
+        bytes.to_vec()
+    };
+    Ok((summary, prepared))
+}
+
+fn inspect_document<'a>(
+    path: &Path,
+    bytes: &'a [u8],
+) -> Result<(VrmInspectionSummary, Glb<'a>, bool), ModelImportError> {
     let mut glb =
         Glb::parse(bytes).map_err(|error| ModelImportError::GlbParse(error.to_string()))?;
     let (source, changed) = prepare_vrm_document(&mut glb.document)?;
@@ -88,13 +103,7 @@ pub(super) fn prepare_and_inspect_vrm(
     }
     summary.exporter_version = source.exporter_version;
     summary.compatibility_warnings = source.compatibility_warnings;
-    let prepared = if changed {
-        glb.to_vec()
-            .map_err(|error| ModelImportError::GlbParse(error.to_string()))?
-    } else {
-        bytes.to_vec()
-    };
-    Ok((summary, prepared))
+    Ok((summary, glb, changed))
 }
 
 fn material_counts(root: &Value) -> (usize, usize, usize) {

@@ -7,6 +7,9 @@ use vtuber_core::{PixelFormat, StopToken, VideoFrame};
 /// Errors that can occur when enumerating or opening a camera.
 #[derive(Debug, Error)]
 pub enum CameraError {
+    /// A captured frame slot cannot be used after a panic while locked.
+    #[error(transparent)]
+    SlotPoisoned(#[from] vtuber_core::SlotPoisoned),
     /// Device enumeration failed.
     #[error("CAMERA_ENUM_FAILED: {0}")]
     EnumFailed(String),

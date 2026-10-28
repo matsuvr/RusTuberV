@@ -526,7 +526,7 @@ pub(crate) fn grid_candidates() -> Vec<EyeThreshold> {
         for width in WIDTHS {
             let reopen_at = close_at + width;
             if reopen_at <= 1.0
-                && let Ok(threshold) = EyeThreshold::new(close_at, reopen_at)
+                && let Ok(threshold) = EyeThreshold::try_new(close_at, reopen_at)
             {
                 candidates.push(threshold);
             }
@@ -1355,7 +1355,7 @@ mod tests {
             frame(105, None, None, 0.5, 0.5),
         ];
         let data = vec![take("t", frames)];
-        let predictions = replay_blink_candidate(&data, EyeThreshold::new(0.4, 0.7).unwrap());
+        let predictions = replay_blink_candidate(&data, EyeThreshold::try_new(0.4, 0.7).unwrap());
         assert!(predictions.iter().all(|p| p.state == EyeOpenness::Closed));
     }
 
@@ -1367,7 +1367,7 @@ mod tests {
         ];
         frames[1].timestamp_micros = 500_000;
         let data = vec![take("t", frames)];
-        let predictions = replay_blink_candidate(&data, EyeThreshold::new(0.4, 0.7).unwrap());
+        let predictions = replay_blink_candidate(&data, EyeThreshold::try_new(0.4, 0.7).unwrap());
         assert_eq!(predictions[0].state, EyeOpenness::Closed);
         assert_eq!(
             predictions[1].state,
@@ -1383,7 +1383,7 @@ mod tests {
             frame(0, None, None, 0.9, Some(0.1)),
         ];
         let data = vec![take("t", frames)];
-        let predictions = replay_blink_candidate(&data, EyeThreshold::new(0.4, 0.7).unwrap());
+        let predictions = replay_blink_candidate(&data, EyeThreshold::try_new(0.4, 0.7).unwrap());
         assert!(predictions.iter().all(|p| p.state == EyeOpenness::Closed));
     }
 

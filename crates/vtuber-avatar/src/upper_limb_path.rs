@@ -30,6 +30,7 @@ pub(crate) struct JointPath {
 const RESPONSE_SECONDS: f32 = 1.0 / 30.0;
 
 impl JointPath {
+    #[must_use]
     pub fn after_current_segment(&self) -> Self {
         let last = self.queued.back().or(self.segment.as_ref());
         Self {

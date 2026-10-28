@@ -103,7 +103,7 @@ impl NdiOutputRuntime {
     }
 
     fn stop(&mut self) {
-        self.controller.request_stop();
+        let _ = self.controller.request_stop();
         self.attempted_generation = None;
     }
 
@@ -292,7 +292,7 @@ mod tests {
         runtime
             .start_for_generation(intent.generation(), NdiOutputConfig::default())
             .unwrap();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         let awake = vtuber_platform::PowerState {
             sleeping: false,
             generation: runtime.power.generation + 1,
@@ -318,7 +318,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         let sleeping = vtuber_platform::PowerState {
             sleeping: true,
             generation: 1,
@@ -434,7 +434,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         app.update();
         assert!(matches!(
             app.world().resource::<NdiOutputRuntime>().status(),
@@ -465,7 +465,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         app.update();
         assert!(matches!(
             app.world().resource::<NdiOutputRuntime>().status(),
@@ -499,7 +499,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         app.update();
         app.world_mut()
             .resource_mut::<NdiOutputIntent>()
@@ -528,7 +528,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         app.update();
         app.world_mut()
             .resource_mut::<Orchestrator>()
@@ -552,7 +552,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         app.update();
         app.world_mut()
             .resource_mut::<Orchestrator>()
@@ -574,7 +574,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         app.update();
         app.world_mut()
             .resource_mut::<AvatarOutputFrameSlot>()
@@ -633,7 +633,7 @@ mod tests {
             .resource_mut::<NdiOutputIntent>()
             .request_start();
         app.update();
-        backend.wait_until_ready();
+        backend.wait_until_ready().expect("NDI startup");
         app.update();
         app.world_mut().resource_mut::<NdiOutputRuntime>().stop();
         app.world_mut()

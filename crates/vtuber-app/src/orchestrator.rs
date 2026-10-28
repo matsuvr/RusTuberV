@@ -152,6 +152,8 @@ pub enum ImportState {
 /// Errors that can occur in the orchestrator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrchestratorError {
+    /// Native file selection failed.
+    FileDialogFailed(String),
     /// Model import failed.
     ImportFailed(String),
     /// No camera selected.
@@ -179,6 +181,7 @@ pub enum OrchestratorError {
 impl fmt::Display for OrchestratorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FileDialogFailed(msg) => write!(f, "File dialog failed: {msg}"),
             Self::ImportFailed(msg) => write!(f, "Import failed: {msg}"),
             Self::NoCameraSelected => write!(f, "No camera selected"),
             Self::NoAvatarLoaded => write!(f, "No avatar loaded"),
@@ -247,6 +250,9 @@ impl Orchestrator {
             }
             UiAction::SelectCamera { index } => {
                 self.select_camera(*index);
+            }
+            UiAction::FileDialogFailed(error) => {
+                self.last_error = Some(OrchestratorError::FileDialogFailed(error.clone()));
             }
             UiAction::ImportAvatar { path } => {
                 self.import_avatar(path);

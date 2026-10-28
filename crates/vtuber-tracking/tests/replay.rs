@@ -245,10 +245,10 @@ fn assert_frames_eq(a: &AvatarControlFrame, b: &AvatarControlFrame) {
 
 #[test]
 fn replay_is_deterministic_for_same_stream_and_settings() {
-    let mut pipeline_a = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline_a = TrackingPipeline::try_new(config()).unwrap();
     pipeline_a.apply_calibration(neutral_profile()).unwrap();
 
-    let mut pipeline_b = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline_b = TrackingPipeline::try_new(config()).unwrap();
     pipeline_b.apply_calibration(neutral_profile()).unwrap();
 
     let stream = synthetic_stream();
@@ -264,7 +264,7 @@ fn replay_is_deterministic_for_same_stream_and_settings() {
 
 #[test]
 fn replay_output_timestamps_trace_back_to_input() {
-    let mut pipeline = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
     pipeline.apply_calibration(neutral_profile()).unwrap();
 
     let stream = synthetic_stream();
@@ -288,7 +288,7 @@ fn replay_output_timestamps_trace_back_to_input() {
 
 #[test]
 fn replay_lost_face_retains_the_last_accepted_heading() {
-    let mut pipeline = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
     pipeline.apply_calibration(neutral_profile()).unwrap();
 
     let neutral = synthetic_landmarks();
@@ -319,7 +319,7 @@ fn replay_lost_face_retains_the_last_accepted_heading() {
 
 #[test]
 fn dim_light_reacquire_reconnects_smoothly_without_snap() {
-    let mut pipeline = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
     pipeline.apply_calibration(neutral_profile()).unwrap();
 
     let neutral = synthetic_landmarks();
@@ -411,13 +411,13 @@ fn replay_reset_boundary_clears_state() {
     let stream = synthetic_stream();
 
     // Run the whole stream once without reset.
-    let mut pipeline_once = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline_once = TrackingPipeline::try_new(config()).unwrap();
     pipeline_once.apply_calibration(neutral_profile()).unwrap();
     let outputs_once = replay(&stream, &mut pipeline_once);
 
     // Run the stream, reset, then run the same stream again. The post-reset
     // outputs must match a fresh pipeline run of the same suffix.
-    let mut pipeline_reset = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline_reset = TrackingPipeline::try_new(config()).unwrap();
     pipeline_reset.apply_calibration(neutral_profile()).unwrap();
     let first_half = &stream[..stream.len() / 2];
     let second_half = &stream[stream.len() / 2..];
@@ -425,7 +425,7 @@ fn replay_reset_boundary_clears_state() {
     pipeline_reset.reset();
     let outputs_after_reset = replay(second_half, &mut pipeline_reset);
 
-    let mut pipeline_fresh = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline_fresh = TrackingPipeline::try_new(config()).unwrap();
     pipeline_fresh.apply_calibration(neutral_profile()).unwrap();
     let outputs_fresh = replay(second_half, &mut pipeline_fresh);
 
@@ -451,13 +451,13 @@ fn replay_new_calibration_boundary_resets_filter_state() {
     let first_half = &stream[..split];
     let second_half = &stream[split..];
 
-    let mut pipeline_a = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline_a = TrackingPipeline::try_new(config()).unwrap();
     pipeline_a.apply_calibration(neutral_profile()).unwrap();
     let _ = replay(first_half, &mut pipeline_a);
     pipeline_a.apply_calibration(neutral_profile()).unwrap();
     let outputs_a = replay(second_half, &mut pipeline_a);
 
-    let mut pipeline_b = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline_b = TrackingPipeline::try_new(config()).unwrap();
     pipeline_b.apply_calibration(neutral_profile()).unwrap();
     let _ = replay(first_half, &mut pipeline_b);
     pipeline_b.apply_calibration(neutral_profile()).unwrap();
@@ -471,7 +471,7 @@ fn replay_new_calibration_boundary_resets_filter_state() {
     // Filter reset is observable: after recalibration, a neutral observation
     // yields near-identity head pose even if the preceding frames had the
     // head turned.
-    let mut pipeline = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
     pipeline.apply_calibration(neutral_profile()).unwrap();
     let turned = rotate_landmarks(
         &synthetic_landmarks(),
@@ -505,7 +505,7 @@ fn replay_uses_persisted_settings() {
     let runtime_config = PipelineConfig::from_settings(&persisted);
     assert_eq!(runtime_config.calibration.required_sample_count(), 30);
 
-    let mut pipeline = TrackingPipeline::new(runtime_config).unwrap();
+    let mut pipeline = TrackingPipeline::try_new(runtime_config).unwrap();
     pipeline.apply_calibration(neutral_profile()).unwrap();
 
     let stream = synthetic_stream();
@@ -515,7 +515,7 @@ fn replay_uses_persisted_settings() {
 
 #[test]
 fn replay_gaze_appears_when_blendshapes_present() {
-    let mut pipeline = TrackingPipeline::new(config()).unwrap();
+    let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
     pipeline.apply_calibration(neutral_profile()).unwrap();
 
     let stream = vec![Some(observation(

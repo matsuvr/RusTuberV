@@ -5,6 +5,12 @@ use thiserror::Error;
 /// Errors that can occur during inference model loading or execution.
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum InferenceError {
+    /// A shared worker status can no longer be trusted after a panic.
+    #[error("inference status mutex poisoned")]
+    StatusPoisoned,
+    /// The frame or result slot can no longer be used after a panic.
+    #[error(transparent)]
+    SlotPoisoned(#[from] vtuber_core::SlotPoisoned),
     /// Failure while loading the approved MediaPipe native runtime or task.
     #[error("MediaPipe runtime load failed: {0}")]
     MediaPipeLoadFailed(String),

@@ -28,6 +28,8 @@ struct SlotState<T> {
 /// own generation cursor, can read the retained latest value: a read returns
 /// the value together with the generation it was published under, so readers
 /// never mark a newer publish as consumed.
+/// Every operation returns [`SlotPoisoned`] after a panic while holding the
+/// mutex; poisoned state is never recovered or exposed.
 pub struct LatestSlot<T> {
     inner: Mutex<SlotState<T>>,
     changed: Condvar,
@@ -53,6 +55,18 @@ impl<T> std::fmt::Debug for LatestSlot<T> {
             .finish()
     }
 }
+
+/// A slot mutex was poisoned; its retained state must no longer be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SlotPoisoned;
+
+impl std::fmt::Display for SlotPoisoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("latest-value slot mutex poisoned")
+    }
+}
+
+impl std::error::Error for SlotPoisoned {}
 
 /// Result of reading from a [`LatestSlot`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -94,13 +108,10 @@ impl<T> LatestSlot<T> {
     /// Publishes a value, replacing any retained value, even if it was read.
     ///
     /// Returns `false` if the slot has been closed.
-    pub fn publish(&self, value: T) -> bool {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub fn publish(&self, value: T) -> Result<bool, SlotPoisoned> {
+        let mut state = self.inner.lock().map_err(|_| SlotPoisoned)?;
         if state.closed {
-            return false;
+            return Ok(false);
         }
         if state.value.is_some() {
             state.replacements += 1;
@@ -108,7 +119,7 @@ impl<T> LatestSlot<T> {
         state.generation += 1;
         state.value = Some(value);
         self.changed.notify_all();
-        true
+        Ok(true)
     }
 
     /// Clones a retained value newer than this reader's `last_generation`.
@@ -116,16 +127,15 @@ impl<T> LatestSlot<T> {
     /// Returns `None` when there is no newer retained value (including after
     /// `clear`). A closed slot returns `Some(ReadResult::Closed)` regardless of
     /// the cursor. Reading does not remove a value or advance another reader.
-    #[must_use]
-    pub fn try_read_after(&self, last_generation: u64) -> Option<ReadResult<T>>
+    pub fn try_read_after(
+        &self,
+        last_generation: u64,
+    ) -> Result<Option<ReadResult<T>>, SlotPoisoned>
     where
         T: Clone,
     {
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::read_locked(&state, last_generation)
+        let state = self.inner.lock().map_err(|_| SlotPoisoned)?;
+        Ok(Self::read_locked(&state, last_generation))
     }
 
     /// Waits up to `timeout` for a value newer than this reader's cursor.
@@ -133,27 +143,28 @@ impl<T> LatestSlot<T> {
     /// Returns `None` on timeout without a newer retained value. Closing the
     /// slot wakes the wait and returns `Some(ReadResult::Closed)`. Values are
     /// cloned rather than consumed, as in [`Self::try_read_after`].
-    pub fn wait_read_after(&self, last_generation: u64, timeout: Duration) -> Option<ReadResult<T>>
+    pub fn wait_read_after(
+        &self,
+        last_generation: u64,
+        timeout: Duration,
+    ) -> Result<Option<ReadResult<T>>, SlotPoisoned>
     where
         T: Clone,
     {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.inner.lock().map_err(|_| SlotPoisoned)?;
         let started = std::time::Instant::now();
         loop {
             if let Some(result) = Self::read_locked(&state, last_generation) {
-                return Some(result);
+                return Ok(Some(result));
             }
             let remaining = timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
-                return None;
+                return Ok(None);
             }
             let (new_state, _) = self
                 .changed
                 .wait_timeout(state, remaining)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .map_err(|_| SlotPoisoned)?;
             state = new_state;
         }
     }
@@ -162,14 +173,15 @@ impl<T> LatestSlot<T> {
     ///
     /// Repeated calls are harmless. Subsequent publications return `false`;
     /// `clear` does not reopen the slot.
-    pub fn close(&self) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub fn close(&self) -> Result<(), SlotPoisoned> {
+        let mut state = self.inner.lock().map_err(|_| {
+            self.changed.notify_all();
+            SlotPoisoned
+        })?;
         state.closed = true;
         state.value = None;
         self.changed.notify_all();
+        Ok(())
     }
 
     /// Removes the currently retained value without closing the slot.
@@ -178,45 +190,34 @@ impl<T> LatestSlot<T> {
     /// so a consumer cannot process a frame captured by the previous session.
     /// The generation is intentionally unchanged: clearing is not a produced
     /// value and the next publish remains the only value visible to readers.
-    pub fn clear(&self) {
-        let mut state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub fn clear(&self) -> Result<(), SlotPoisoned> {
+        let mut state = self.inner.lock().map_err(|_| {
+            self.changed.notify_all();
+            SlotPoisoned
+        })?;
         state.value = None;
         self.changed.notify_all();
+        Ok(())
     }
 
     /// Returns the number of retained values replaced by successful publications.
     ///
     /// This is not a reader loss count: reads do not remove the retained value.
-    #[must_use]
-    pub fn replacement_count(&self) -> u64 {
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.replacements
+    pub fn replacement_count(&self) -> Result<u64, SlotPoisoned> {
+        let state = self.inner.lock().map_err(|_| SlotPoisoned)?;
+        Ok(state.replacements)
     }
 
     /// Returns the current generation.
-    #[must_use]
-    pub fn generation(&self) -> u64 {
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.generation
+    pub fn generation(&self) -> Result<u64, SlotPoisoned> {
+        let state = self.inner.lock().map_err(|_| SlotPoisoned)?;
+        Ok(state.generation)
     }
 
     /// Returns `true` if the slot has been closed.
-    #[must_use]
-    pub fn is_closed(&self) -> bool {
-        let state = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.closed
+    pub fn is_closed(&self) -> Result<bool, SlotPoisoned> {
+        let state = self.inner.lock().map_err(|_| SlotPoisoned)?;
+        Ok(state.closed)
     }
 
     fn read_locked(state: &SlotState<T>, last_generation: u64) -> Option<ReadResult<T>>
@@ -256,13 +257,13 @@ mod tests {
         let slot = LatestSlot::new();
         let value = NoDebug([187; 1024]);
         assert_eq!(value.0.len(), 1024);
-        slot.publish(value);
+        slot.publish(value).expect("slot access");
         let text = format!("{slot:?}");
         assert!(text.contains("generation: 1"));
         assert!(text.contains("has_value: true"));
         assert!(!text.contains("187"));
-        assert_eq!(slot.generation(), 1);
-        assert!(!slot.is_closed());
+        assert_eq!(slot.generation().expect("slot generation"), 1);
+        assert!(!slot.is_closed().expect("slot access"));
         let _guard = slot.inner.lock().unwrap();
         assert!(format!("{slot:?}").contains("<locked>"));
     }
@@ -273,11 +274,13 @@ mod tests {
         let mut frequent = None;
         let mut slow = None;
         for generation in 1..=4 {
-            slot.publish(generation);
+            slot.publish(generation).expect("slot access");
             let Some(ReadResult::New {
                 generation: current,
                 ..
-            }) = slot.try_read_after(frequent.unwrap_or(0))
+            }) = slot
+                .try_read_after(frequent.unwrap_or(0))
+                .expect("slot access")
             else {
                 panic!("new publication")
             };
@@ -287,7 +290,8 @@ mod tests {
                 slow = Some(current);
             }
         }
-        let Some(ReadResult::New { generation, .. }) = slot.try_read_after(slow.unwrap_or(0))
+        let Some(ReadResult::New { generation, .. }) =
+            slot.try_read_after(slow.unwrap_or(0)).expect("slot access")
         else {
             panic!("slow reader's latest publication")
         };
@@ -300,9 +304,9 @@ mod tests {
     #[test]
     fn publish_and_read() {
         let slot = LatestSlot::new();
-        assert!(slot.publish(42));
+        assert!(slot.publish(42).expect("slot access"));
         assert_eq!(
-            slot.try_read_after(0),
+            slot.try_read_after(0).expect("slot access"),
             Some(ReadResult::New {
                 generation: 1,
                 value: 42
@@ -313,47 +317,47 @@ mod tests {
     #[test]
     fn read_returns_the_newer_publish_after_the_cursor() {
         let slot = LatestSlot::new();
-        slot.publish(1);
+        slot.publish(1).expect("slot access");
         assert_eq!(
-            slot.try_read_after(0),
+            slot.try_read_after(0).expect("slot access"),
             Some(ReadResult::New {
                 generation: 1,
                 value: 1
             })
         );
-        slot.publish(2);
+        slot.publish(2).expect("slot access");
         assert_eq!(
-            slot.try_read_after(1),
+            slot.try_read_after(1).expect("slot access"),
             Some(ReadResult::New {
                 generation: 2,
                 value: 2
             })
         );
-        assert_eq!(slot.try_read_after(2), None);
+        assert_eq!(slot.try_read_after(2).expect("slot access"), None);
     }
 
     #[test]
     fn two_readers_with_independent_cursors_read_the_same_value() {
         let slot = LatestSlot::new();
-        slot.publish(5);
+        slot.publish(5).expect("slot access");
         assert_eq!(
-            slot.try_read_after(0),
+            slot.try_read_after(0).expect("slot access"),
             Some(ReadResult::New {
                 generation: 1,
                 value: 5
             })
         );
         assert_eq!(
-            slot.try_read_after(0),
+            slot.try_read_after(0).expect("slot access"),
             Some(ReadResult::New {
                 generation: 1,
                 value: 5
             })
         );
-        slot.publish(6);
-        slot.publish(7);
+        slot.publish(6).expect("slot access");
+        slot.publish(7).expect("slot access");
         assert_eq!(
-            slot.try_read_after(1),
+            slot.try_read_after(1).expect("slot access"),
             Some(ReadResult::New {
                 generation: 3,
                 value: 7
@@ -364,21 +368,25 @@ mod tests {
     #[test]
     fn replacement_count_increases_even_after_reads() {
         let slot = LatestSlot::<i32>::new();
-        slot.publish(1);
-        let _ = slot.try_read_after(0);
-        slot.publish(2);
-        let _ = slot.try_read_after(1);
-        slot.publish(3);
-        assert_eq!(slot.replacement_count(), 2);
+        slot.publish(1).expect("slot access");
+        let _ = slot.try_read_after(0).expect("slot access");
+        slot.publish(2).expect("slot access");
+        let _ = slot.try_read_after(1).expect("slot access");
+        slot.publish(3).expect("slot access");
+        assert_eq!(slot.replacement_count().expect("slot access"), 2);
     }
 
     #[test]
     fn close_wakes_waiter() {
         let slot: Arc<LatestSlot<i32>> = Arc::new(LatestSlot::new());
         let slot2 = Arc::clone(&slot);
-        let handle = thread::spawn(move || slot2.wait_read_after(0, Duration::from_secs(5)));
+        let handle = thread::spawn(move || {
+            slot2
+                .wait_read_after(0, Duration::from_secs(5))
+                .expect("slot access")
+        });
         thread::sleep(Duration::from_millis(50));
-        slot.close();
+        slot.close().expect("slot cleanup");
         let result = handle.join().expect("waiter panicked");
         assert_eq!(result, Some(ReadResult::Closed));
     }
@@ -386,24 +394,24 @@ mod tests {
     #[test]
     fn publish_after_close_is_ignored() {
         let slot = LatestSlot::new();
-        slot.close();
-        assert!(!slot.publish(1));
+        slot.close().expect("slot cleanup");
+        assert!(!slot.publish(1).expect("slot access"));
     }
 
     #[test]
     fn clear_removes_retained_value_without_closing_slot() {
         let slot = LatestSlot::new();
-        assert!(slot.publish(42));
-        let generation = slot.generation();
+        assert!(slot.publish(42).expect("slot access"));
+        let generation = slot.generation().expect("slot generation");
 
-        slot.clear();
+        slot.clear().expect("slot cleanup");
 
-        assert!(!slot.is_closed());
-        assert_eq!(slot.generation(), generation);
-        assert_eq!(slot.try_read_after(0), None);
-        assert!(slot.publish(43));
+        assert!(!slot.is_closed().expect("slot access"));
+        assert_eq!(slot.generation().expect("slot generation"), generation);
+        assert_eq!(slot.try_read_after(0).expect("slot access"), None);
+        assert!(slot.publish(43).expect("slot access"));
         assert_eq!(
-            slot.try_read_after(generation),
+            slot.try_read_after(generation).expect("slot access"),
             Some(ReadResult::New {
                 generation: generation + 1,
                 value: 43
@@ -416,9 +424,9 @@ mod tests {
         const N: usize = 100_000;
         let slot = LatestSlot::new();
         for value in 0..N {
-            assert!(slot.publish(value));
+            assert!(slot.publish(value).expect("slot access"));
         }
-        let result = slot.try_read_after(0);
+        let result = slot.try_read_after(0).expect("slot access");
         assert_eq!(
             result,
             Some(ReadResult::New {
@@ -426,7 +434,10 @@ mod tests {
                 value: N - 1
             })
         );
-        assert_eq!(slot.replacement_count(), (N - 1) as u64);
+        assert_eq!(
+            slot.replacement_count().expect("slot access"),
+            (N - 1) as u64
+        );
     }
 
     #[test]
@@ -436,7 +447,7 @@ mod tests {
 
         let producer = thread::spawn(move || {
             for value in 0..1000 {
-                slot2.publish(value);
+                slot2.publish(value).expect("slot access");
                 thread::sleep(Duration::from_micros(10));
             }
         });
@@ -444,8 +455,9 @@ mod tests {
         let mut last_seen = 0;
         let mut consumed = 0;
         while last_seen < 999 {
-            if let Some(ReadResult::New { generation, value }) =
-                slot.wait_read_after(last_seen, Duration::from_secs(1))
+            if let Some(ReadResult::New { generation, value }) = slot
+                .wait_read_after(last_seen, Duration::from_secs(1))
+                .expect("slot access")
             {
                 last_seen = generation;
                 consumed += 1;
@@ -460,33 +472,60 @@ mod tests {
             consumed < 1000,
             "slow consumer should skip frames; consumed {consumed}"
         );
-        assert_eq!(slot.try_read_after(slot.generation()), None);
+        assert_eq!(
+            slot.try_read_after(slot.generation().expect("slot generation"))
+                .expect("slot access"),
+            None
+        );
     }
 
     #[test]
     fn closed_slot_reports_closed() {
         let slot = LatestSlot::<i32>::new();
-        assert!(!slot.is_closed());
-        slot.close();
-        assert!(slot.is_closed());
-        assert_eq!(slot.try_read_after(0), Some(ReadResult::Closed));
+        assert!(!slot.is_closed().expect("slot access"));
+        slot.close().expect("slot cleanup");
+        assert!(slot.is_closed().expect("slot access"));
+        assert_eq!(
+            slot.try_read_after(0).expect("slot access"),
+            Some(ReadResult::Closed)
+        );
     }
 
     #[test]
     fn wait_with_max_duration_returns_immediately_when_ready_or_closed() {
         let slot = LatestSlot::new();
-        slot.publish(7);
+        slot.publish(7).expect("slot access");
         assert_eq!(
-            slot.wait_read_after(0, Duration::MAX),
+            slot.wait_read_after(0, Duration::MAX).expect("slot access"),
             Some(ReadResult::New {
                 generation: 1,
                 value: 7
             })
         );
-        slot.close();
+        slot.close().expect("slot cleanup");
         assert_eq!(
-            slot.wait_read_after(1, Duration::MAX),
+            slot.wait_read_after(1, Duration::MAX).expect("slot access"),
             Some(ReadResult::Closed)
         );
+    }
+
+    #[test]
+    fn poisoned_slot_rejects_reads_writes_and_cleanup() {
+        let slot = LatestSlot::new();
+        slot.publish(7).unwrap();
+        let panic = std::panic::catch_unwind(|| {
+            let mut state = slot.inner.lock().unwrap();
+            state.generation = 999;
+            panic!("interrupted slot update");
+        });
+        assert!(panic.is_err());
+        assert_eq!(slot.publish(8), Err(SlotPoisoned));
+        assert_eq!(slot.try_read_after(0), Err(SlotPoisoned));
+        assert_eq!(slot.wait_read_after(0, Duration::MAX), Err(SlotPoisoned));
+        assert_eq!(slot.generation(), Err(SlotPoisoned));
+        assert_eq!(slot.replacement_count(), Err(SlotPoisoned));
+        assert_eq!(slot.is_closed(), Err(SlotPoisoned));
+        assert_eq!(slot.clear(), Err(SlotPoisoned));
+        assert_eq!(slot.close(), Err(SlotPoisoned));
     }
 }

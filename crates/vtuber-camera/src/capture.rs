@@ -112,28 +112,28 @@ struct SharedState {
 /// whether the face slot accepted the frame; the Pose slot is allowed to be
 /// overwritten because it runs at its own cadence. Each slot keeps its own
 /// single-producer/single-consumer contract.
-#[must_use]
 pub fn publish_tracking_frame(
     frame: VideoFrame,
     face_slot: &LatestSlot<VideoFrame>,
     pose_slot: Option<&LatestSlot<VideoFrame>>,
-) -> bool {
-    let sent = face_slot.publish(frame.clone());
+) -> Result<bool, CameraError> {
+    let sent = face_slot.publish(frame.clone())?;
     if let Some(pose_slot) = pose_slot {
-        let _ = pose_slot.publish(frame);
+        let _ = pose_slot.publish(frame)?;
     }
-    sent
+    Ok(sent)
 }
 
 /// Discards retained frames from both consumers, e.g. across a stop or reconnect.
 fn clear_frame_slots(
     face_slot: &LatestSlot<VideoFrame>,
     pose_slot: Option<&LatestSlot<VideoFrame>>,
-) {
-    face_slot.clear();
-    if let Some(pose_slot) = pose_slot {
-        pose_slot.clear();
-    }
+) -> Result<(), CameraError> {
+    let face = face_slot.clear();
+    let pose = pose_slot.map(LatestSlot::clear).transpose();
+    face?;
+    pose?;
+    Ok(())
 }
 
 /// Production capture service controller.
@@ -164,7 +164,7 @@ impl Drop for CaptureController {
         if let Some(worker) = self.worker.take() {
             worker.stop();
             // Closing the slot wakes a worker waiting for its next frame.
-            self.frame_slot.close();
+            let _ = self.frame_slot.close();
             // Drop cannot return a shutdown error, so the final stop result the
             // worker reports is discarded here; use explicit shutdown when it
             // matters.
@@ -177,10 +177,9 @@ impl Drop for CaptureController {
 #[derive(Debug, Default)]
 struct CaptureWorkerResult {
     final_metrics: CaptureMetrics,
-    /// Failure of the last explicit stop the worker performed, if any. Carried
-    /// out of the worker thread so an explicit shutdown can report it; `Drop`
-    /// has no way to return it.
-    stop_error: Option<CameraError>,
+    /// Terminal processing or stream-stop failure, carried out of the worker
+    /// so explicit shutdown can report it; Drop has no way to return it.
+    failure: Option<CameraError>,
 }
 
 impl CaptureController {
@@ -387,11 +386,11 @@ impl CaptureController {
         } else {
             WorkerResult::Completed(CaptureWorkerResult {
                 final_metrics: self.metrics(),
-                stop_error: None,
+                failure: None,
             })
         };
         // Cleanup must also run after a panicked worker.
-        self.frame_slot.close();
+        self.frame_slot.close()?;
         let mut state = self
             .state
             .lock()
@@ -399,7 +398,7 @@ impl CaptureController {
         match result {
             WorkerResult::Completed(result) => {
                 state.state = CaptureServiceState::Idle;
-                if let Some(error) = result.stop_error {
+                if let Some(error) = result.failure {
                     state.metrics.last_error = Some(format!("{error:?}"));
                     return Err(error);
                 }
@@ -442,263 +441,46 @@ where
     let mut capture_requested = false;
     let mut last_power = backend.power_state();
 
-    while !stop.is_stopped() {
-        // Drain control commands first so state changes take effect immediately.
-        loop {
-            match command_rx.try_recv() {
-                Ok(ControlCommand::Start(device, request)) => {
-                    capture_requested = true;
-                    selected_device = Some(device);
-                    requested_format = Some(request);
-                    reconnect_plan = None;
-                    metrics.reconnect_attempts = 0;
-                    // A failed stop must not be hidden by opening a second
-                    // stream, so it is reported as this Start's failure.
-                    if let Err(err) = stop_active_stream(&mut active_stream) {
-                        capture_requested = false;
-                        metrics.last_error = Some(format!("{err:?}"));
-                        update_state(&state, |s| {
-                            s.state = CaptureServiceState::BackOff;
-                            s.metrics.reconnect_attempts = 0;
-                            s.metrics.last_error.clone_from(&metrics.last_error);
-                        });
-                        continue;
-                    }
-                    metrics.last_error = None;
-                    if backend.power_state().sleeping {
-                        clear_frame_slots(&slot, pose_slot.as_deref());
-                        update_state(&state, |s| s.state = CaptureServiceState::Suspended);
-                        continue;
-                    }
-                    update_state(&state, |s| {
-                        s.state = CaptureServiceState::Starting;
-                        s.metrics.reconnect_attempts = 0;
-                        s.metrics.last_error = None;
-                    });
-
-                    // Invariant: `selected_device` was assigned `Some(device)` above.
-                    let Some(device) = selected_device.as_ref() else {
-                        continue;
-                    };
-                    let start_power = backend.power_state();
-                    match open_and_stream(
-                        &backend,
-                        device,
-                        request,
-                        &stop,
-                        &state,
-                        &slot,
-                        pose_slot.as_deref(),
-                        &mut metrics,
-                        &mut next_frame_seq,
-                    ) {
-                        Ok(stream) => {
-                            last_power = start_power;
-                            active_stream = Some(stream);
-                            reconnect_plan = None;
-                            update_state(&state, |s| {
-                                s.state = CaptureServiceState::Running;
-                                s.metrics.reconnect_attempts = 0;
-                            });
-                        }
-                        Err(err) => {
+    let processing = (|| -> Result<(), CameraError> {
+        while !stop.is_stopped() {
+            // Drain control commands first so state changes take effect immediately.
+            loop {
+                match command_rx.try_recv() {
+                    Ok(ControlCommand::Start(device, request)) => {
+                        capture_requested = true;
+                        selected_device = Some(device);
+                        requested_format = Some(request);
+                        reconnect_plan = None;
+                        metrics.reconnect_attempts = 0;
+                        // A failed stop must not be hidden by opening a second
+                        // stream, so it is reported as this Start's failure.
+                        if let Err(err) = stop_active_stream(&mut active_stream) {
+                            capture_requested = false;
                             metrics.last_error = Some(format!("{err:?}"));
-                            // Opening a device immediately after release or hot-plug
-                            // can fail before the first frame. Use the same bounded
-                            // reconnect policy as a read failure during capture.
-                            if matches!(
-                                err,
-                                CameraError::OpenFailed(_)
-                                    | CameraError::Disconnected
-                                    | CameraError::FrameReadFailed(_)
-                            ) {
-                                reconnect_plan = Some(ReconnectPlan {
-                                    attempts: 0,
-                                    next_attempt_at: Instant::now() + reconnect_delay(1),
-                                });
-                            }
-                            capture_requested = reconnect_plan.is_some();
                             update_state(&state, |s| {
-                                s.state = if reconnect_plan.is_some() {
-                                    CaptureServiceState::Reconnecting
-                                } else {
-                                    CaptureServiceState::BackOff
-                                };
+                                s.state = CaptureServiceState::BackOff;
+                                s.metrics.reconnect_attempts = 0;
                                 s.metrics.last_error.clone_from(&metrics.last_error);
                             });
-                            active_stream = None;
+                            continue;
                         }
-                    }
-                }
-                Ok(ControlCommand::Stop) => {
-                    capture_requested = false;
-                    reconnect_plan = None;
-                    let stop_failed = record_stop_failure(
-                        &mut metrics,
-                        stop_active_stream(&mut active_stream).err(),
-                    );
-                    clear_frame_slots(&slot, pose_slot.as_deref());
-                    update_state(&state, |s| {
-                        // Selected/Idle only mean that no stream is retained.
-                        // They never imply that the stop succeeded; a failure is
-                        // readable through `last_error`.
-                        s.state = if selected_device.is_some() {
-                            CaptureServiceState::Selected
-                        } else {
-                            CaptureServiceState::Idle
-                        };
-                        if stop_failed {
-                            s.metrics.last_error.clone_from(&metrics.last_error);
+                        metrics.last_error = None;
+                        if backend.power_state().sleeping {
+                            clear_frame_slots(&slot, pose_slot.as_deref())?;
+                            update_state(&state, |s| s.state = CaptureServiceState::Suspended);
+                            continue;
                         }
-                    });
-                }
-                Ok(ControlCommand::Reset) => {
-                    capture_requested = false;
-                    let stop_failed = record_stop_failure(
-                        &mut metrics,
-                        stop_active_stream(&mut active_stream).err(),
-                    );
-                    clear_frame_slots(&slot, pose_slot.as_deref());
-                    selected_device = None;
-                    requested_format = None;
-                    reconnect_plan = None;
-                    update_state(&state, |s| {
-                        s.state = CaptureServiceState::Idle;
-                        s.selected_device = None;
-                        s.requested_format = None;
-                        if stop_failed {
-                            s.metrics.last_error.clone_from(&metrics.last_error);
-                        }
-                    });
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    stop.stop();
-                    break;
-                }
-            }
-        }
+                        update_state(&state, |s| {
+                            s.state = CaptureServiceState::Starting;
+                            s.metrics.reconnect_attempts = 0;
+                            s.metrics.last_error = None;
+                        });
 
-        let power = backend.power_state();
-        if capture_requested
-            && (power.generation != last_power.generation
-                || (power.sleeping && (active_stream.is_some() || reconnect_plan.is_some()))
-                || (!power.sleeping && last_power.sleeping))
-        {
-            // Never keep a native session from before sleep. This also handles
-            // a complete sleep/wake cycle that happened during a frame read.
-            reconnect_plan = None;
-            clear_frame_slots(&slot, pose_slot.as_deref());
-            if record_stop_failure(&mut metrics, stop_active_stream(&mut active_stream).err()) {
-                capture_requested = false;
-                update_state(&state, |s| {
-                    s.state = CaptureServiceState::BackOff;
-                    s.metrics.last_error.clone_from(&metrics.last_error);
-                });
-            } else {
-                metrics.reconnect_attempts = 0;
-                metrics.last_error = None;
-                if !power.sleeping {
-                    reconnect_plan = Some(ReconnectPlan {
-                        attempts: 0,
-                        next_attempt_at: Instant::now() + reconnect_delay(1),
-                    });
-                }
-                update_state(&state, |s| {
-                    s.state = if power.sleeping {
-                        CaptureServiceState::Suspended
-                    } else {
-                        CaptureServiceState::Reconnecting
-                    };
-                    s.metrics.reconnect_attempts = 0;
-                    s.metrics.last_error = None;
-                });
-            }
-        }
-        last_power = power;
-        if power.sleeping {
-            std::thread::sleep(Duration::from_millis(10));
-            continue;
-        }
-
-        // If a stream is active, capture one frame with a short timeout so we
-        // remain responsive to stop/commands.
-        if let Some(stream) = active_stream.as_mut() {
-            let next = stream.next_frame(&stop);
-            // A stop request can land between the loop check and the read, and
-            // a backend then reports the pending read as `Disconnected`. That is
-            // the end of the worker, not a lost device: the stream is retained
-            // so the final stop below still reaches it, and the stop request is
-            // never turned into a reconnect episode.
-            if stop.is_stopped() {
-                break;
-            }
-            let after_read = backend.power_state();
-            if after_read.sleeping || after_read.generation != last_power.generation {
-                // Let the next loop release the session before publishing.
-                continue;
-            }
-            match next {
-                Ok(frame) => {
-                    reconnect_plan = None;
-                    let frame = stamp_frame_sequence(frame, &mut next_frame_seq);
-                    metrics.frames_captured = metrics.frames_captured.saturating_add(1);
-                    if !publish_tracking_frame(frame, &slot, pose_slot.as_deref()) {
-                        metrics.publish_rejected_frames =
-                            metrics.publish_rejected_frames.saturating_add(1);
-                    }
-                    update_state(&state, |s| {
-                        s.metrics.frames_captured = metrics.frames_captured;
-                        s.metrics.publish_rejected_frames = metrics.publish_rejected_frames;
-                        s.metrics.format = metrics.format;
-                        s.state = CaptureServiceState::Running;
-                    });
-                }
-                Err(err @ (CameraError::Disconnected | CameraError::FrameReadFailed(_))) => {
-                    active_stream = None;
-                    clear_frame_slots(&slot, pose_slot.as_deref());
-                    metrics.last_error = Some(format!("{err:?}"));
-                    metrics.reconnect_attempts = 0;
-                    reconnect_plan = selected_device.as_ref().map(|_| ReconnectPlan {
-                        attempts: 0,
-                        next_attempt_at: Instant::now() + reconnect_delay(1),
-                    });
-                    update_state(&state, |s| {
-                        s.state = if reconnect_plan.is_some() {
-                            CaptureServiceState::Reconnecting
-                        } else {
-                            CaptureServiceState::BackOff
+                        // Invariant: `selected_device` was assigned `Some(device)` above.
+                        let Some(device) = selected_device.as_ref() else {
+                            continue;
                         };
-                        s.metrics.reconnect_attempts = 0;
-                        s.metrics.last_error.clone_from(&metrics.last_error);
-                    });
-                }
-                Err(err) => {
-                    metrics.last_error = Some(format!("{err:?}"));
-                    update_state(&state, |s| {
-                        s.metrics.last_error.clone_from(&metrics.last_error);
-                    });
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        } else if let Some(mut plan) = reconnect_plan {
-            match reconnect_decision(&plan, Instant::now()) {
-                ReconnectDecision::Wait => std::thread::sleep(Duration::from_millis(10)),
-                ReconnectDecision::Exhausted => {
-                    reconnect_plan = None;
-                    capture_requested = false;
-                    update_state(&state, |s| {
-                        s.state = CaptureServiceState::BackOff;
-                        s.metrics.last_error.clone_from(&metrics.last_error);
-                    });
-                }
-                ReconnectDecision::Attempt => {
-                    if let (Some(device), Some(request)) =
-                        (selected_device.as_ref(), requested_format)
-                    {
-                        plan.attempts += 1;
-                        metrics.reconnect_attempts = plan.attempts;
-                        update_state(&state, |s| s.metrics.reconnect_attempts = plan.attempts);
+                        let start_power = backend.power_state();
                         match open_and_stream(
                             &backend,
                             device,
@@ -711,42 +493,277 @@ where
                             &mut next_frame_seq,
                         ) {
                             Ok(stream) => {
+                                last_power = start_power;
                                 active_stream = Some(stream);
                                 reconnect_plan = None;
-                                update_state(&state, |s| s.state = CaptureServiceState::Running);
-                            }
-                            Err(error) => {
-                                metrics.last_error = Some(format!("{error:?}"));
-                                plan.next_attempt_at =
-                                    Instant::now() + reconnect_delay(plan.attempts + 1);
-                                reconnect_plan = Some(plan);
                                 update_state(&state, |s| {
-                                    s.metrics.last_error.clone_from(&metrics.last_error)
+                                    s.state = CaptureServiceState::Running;
+                                    s.metrics.reconnect_attempts = 0;
                                 });
+                            }
+                            Err(err) => {
+                                if matches!(err, CameraError::SlotPoisoned(_)) {
+                                    return Err(err);
+                                }
+                                metrics.last_error = Some(format!("{err:?}"));
+                                // Opening a device immediately after release or hot-plug
+                                // can fail before the first frame. Use the same bounded
+                                // reconnect policy as a read failure during capture.
+                                if matches!(
+                                    err,
+                                    CameraError::OpenFailed(_)
+                                        | CameraError::Disconnected
+                                        | CameraError::FrameReadFailed(_)
+                                ) {
+                                    reconnect_plan = Some(ReconnectPlan {
+                                        attempts: 0,
+                                        next_attempt_at: Instant::now() + reconnect_delay(1),
+                                    });
+                                }
+                                capture_requested = reconnect_plan.is_some();
+                                update_state(&state, |s| {
+                                    s.state = if reconnect_plan.is_some() {
+                                        CaptureServiceState::Reconnecting
+                                    } else {
+                                        CaptureServiceState::BackOff
+                                    };
+                                    s.metrics.last_error.clone_from(&metrics.last_error);
+                                });
+                                active_stream = None;
+                            }
+                        }
+                    }
+                    Ok(ControlCommand::Stop) => {
+                        capture_requested = false;
+                        reconnect_plan = None;
+                        let stop_failed = record_stop_failure(
+                            &mut metrics,
+                            stop_active_stream(&mut active_stream).err(),
+                        );
+                        clear_frame_slots(&slot, pose_slot.as_deref())?;
+                        update_state(&state, |s| {
+                            // Selected/Idle only mean that no stream is retained.
+                            // They never imply that the stop succeeded; a failure is
+                            // readable through `last_error`.
+                            s.state = if selected_device.is_some() {
+                                CaptureServiceState::Selected
+                            } else {
+                                CaptureServiceState::Idle
+                            };
+                            if stop_failed {
+                                s.metrics.last_error.clone_from(&metrics.last_error);
+                            }
+                        });
+                    }
+                    Ok(ControlCommand::Reset) => {
+                        capture_requested = false;
+                        let stop_failed = record_stop_failure(
+                            &mut metrics,
+                            stop_active_stream(&mut active_stream).err(),
+                        );
+                        clear_frame_slots(&slot, pose_slot.as_deref())?;
+                        selected_device = None;
+                        requested_format = None;
+                        reconnect_plan = None;
+                        update_state(&state, |s| {
+                            s.state = CaptureServiceState::Idle;
+                            s.selected_device = None;
+                            s.requested_format = None;
+                            if stop_failed {
+                                s.metrics.last_error.clone_from(&metrics.last_error);
+                            }
+                        });
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        stop.stop();
+                        break;
+                    }
+                }
+            }
+
+            let power = backend.power_state();
+            if capture_requested
+                && (power.generation != last_power.generation
+                    || (power.sleeping && (active_stream.is_some() || reconnect_plan.is_some()))
+                    || (!power.sleeping && last_power.sleeping))
+            {
+                // Never keep a native session from before sleep. This also handles
+                // a complete sleep/wake cycle that happened during a frame read.
+                reconnect_plan = None;
+                clear_frame_slots(&slot, pose_slot.as_deref())?;
+                if record_stop_failure(&mut metrics, stop_active_stream(&mut active_stream).err()) {
+                    capture_requested = false;
+                    update_state(&state, |s| {
+                        s.state = CaptureServiceState::BackOff;
+                        s.metrics.last_error.clone_from(&metrics.last_error);
+                    });
+                } else {
+                    metrics.reconnect_attempts = 0;
+                    metrics.last_error = None;
+                    if !power.sleeping {
+                        reconnect_plan = Some(ReconnectPlan {
+                            attempts: 0,
+                            next_attempt_at: Instant::now() + reconnect_delay(1),
+                        });
+                    }
+                    update_state(&state, |s| {
+                        s.state = if power.sleeping {
+                            CaptureServiceState::Suspended
+                        } else {
+                            CaptureServiceState::Reconnecting
+                        };
+                        s.metrics.reconnect_attempts = 0;
+                        s.metrics.last_error = None;
+                    });
+                }
+            }
+            last_power = power;
+            if power.sleeping {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+
+            // If a stream is active, capture one frame with a short timeout so we
+            // remain responsive to stop/commands.
+            if let Some(stream) = active_stream.as_mut() {
+                let next = stream.next_frame(&stop);
+                // A stop request can land between the loop check and the read, and
+                // a backend then reports the pending read as `Disconnected`. That is
+                // the end of the worker, not a lost device: the stream is retained
+                // so the final stop below still reaches it, and the stop request is
+                // never turned into a reconnect episode.
+                if stop.is_stopped() {
+                    break;
+                }
+                let after_read = backend.power_state();
+                if after_read.sleeping || after_read.generation != last_power.generation {
+                    // Let the next loop release the session before publishing.
+                    continue;
+                }
+                match next {
+                    Ok(frame) => {
+                        reconnect_plan = None;
+                        let frame = stamp_frame_sequence(frame, &mut next_frame_seq);
+                        metrics.frames_captured = metrics.frames_captured.saturating_add(1);
+                        if !publish_tracking_frame(frame, &slot, pose_slot.as_deref())? {
+                            metrics.publish_rejected_frames =
+                                metrics.publish_rejected_frames.saturating_add(1);
+                        }
+                        update_state(&state, |s| {
+                            s.metrics.frames_captured = metrics.frames_captured;
+                            s.metrics.publish_rejected_frames = metrics.publish_rejected_frames;
+                            s.metrics.format = metrics.format;
+                            s.state = CaptureServiceState::Running;
+                        });
+                    }
+                    Err(err @ (CameraError::Disconnected | CameraError::FrameReadFailed(_))) => {
+                        active_stream = None;
+                        clear_frame_slots(&slot, pose_slot.as_deref())?;
+                        metrics.last_error = Some(format!("{err:?}"));
+                        metrics.reconnect_attempts = 0;
+                        reconnect_plan = selected_device.as_ref().map(|_| ReconnectPlan {
+                            attempts: 0,
+                            next_attempt_at: Instant::now() + reconnect_delay(1),
+                        });
+                        update_state(&state, |s| {
+                            s.state = if reconnect_plan.is_some() {
+                                CaptureServiceState::Reconnecting
+                            } else {
+                                CaptureServiceState::BackOff
+                            };
+                            s.metrics.reconnect_attempts = 0;
+                            s.metrics.last_error.clone_from(&metrics.last_error);
+                        });
+                    }
+                    Err(err) => {
+                        metrics.last_error = Some(format!("{err:?}"));
+                        update_state(&state, |s| {
+                            s.metrics.last_error.clone_from(&metrics.last_error);
+                        });
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            } else if let Some(mut plan) = reconnect_plan {
+                match reconnect_decision(&plan, Instant::now()) {
+                    ReconnectDecision::Wait => std::thread::sleep(Duration::from_millis(10)),
+                    ReconnectDecision::Exhausted => {
+                        reconnect_plan = None;
+                        capture_requested = false;
+                        update_state(&state, |s| {
+                            s.state = CaptureServiceState::BackOff;
+                            s.metrics.last_error.clone_from(&metrics.last_error);
+                        });
+                    }
+                    ReconnectDecision::Attempt => {
+                        if let (Some(device), Some(request)) =
+                            (selected_device.as_ref(), requested_format)
+                        {
+                            plan.attempts += 1;
+                            metrics.reconnect_attempts = plan.attempts;
+                            update_state(&state, |s| s.metrics.reconnect_attempts = plan.attempts);
+                            match open_and_stream(
+                                &backend,
+                                device,
+                                request,
+                                &stop,
+                                &state,
+                                &slot,
+                                pose_slot.as_deref(),
+                                &mut metrics,
+                                &mut next_frame_seq,
+                            ) {
+                                Ok(stream) => {
+                                    active_stream = Some(stream);
+                                    reconnect_plan = None;
+                                    update_state(&state, |s| {
+                                        s.state = CaptureServiceState::Running
+                                    });
+                                }
+                                Err(error) => {
+                                    if matches!(error, CameraError::SlotPoisoned(_)) {
+                                        return Err(error);
+                                    }
+                                    metrics.last_error = Some(format!("{error:?}"));
+                                    plan.next_attempt_at =
+                                        Instant::now() + reconnect_delay(plan.attempts + 1);
+                                    reconnect_plan = Some(plan);
+                                    update_state(&state, |s| {
+                                        s.metrics.last_error.clone_from(&metrics.last_error)
+                                    });
+                                }
                             }
                         }
                     }
                 }
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
             }
-        } else {
-            std::thread::sleep(Duration::from_millis(10));
         }
-    }
 
-    let stop_error = stop_active_stream(&mut active_stream).err();
+        Ok(())
+    })();
+
+    let processing_failed = processing.is_err();
+    let cleanup_error = stop_active_stream(&mut active_stream).err();
+    let stop_error = processing.err().or(cleanup_error);
     if let Some(error) = &stop_error {
         metrics.last_error = Some(format!("{error:?}"));
     }
 
     let final_metrics = metrics.clone();
     update_state(&state, |s| {
-        s.state = CaptureServiceState::Idle;
+        s.state = if processing_failed {
+            CaptureServiceState::BackOff
+        } else {
+            CaptureServiceState::Idle
+        };
         s.metrics = metrics;
     });
 
     CaptureWorkerResult {
         final_metrics,
-        stop_error,
+        failure: stop_error,
     }
 }
 
@@ -802,12 +819,11 @@ where
     if power.sleeping {
         return Err(CameraError::Disconnected);
     }
+    // Clear stale frames before opening a native stream; a poisoned slot
+    // rejects the session before any stream needs to be released.
+    clear_frame_slots(slot, pose_slot)?;
     let mut stream = backend.open(device, &request)?;
     metrics.format = Some(stream.actual_format());
-
-    // Discard stale slot contents so the consumer does not see an old frame
-    // after a reconnect.
-    clear_frame_slots(slot, pose_slot);
 
     // Capture one frame immediately to confirm the device is really alive.
     match stream.next_frame(stop) {
@@ -819,7 +835,14 @@ where
             }
             let frame = stamp_frame_sequence(frame, next_frame_seq);
             metrics.frames_captured = metrics.frames_captured.saturating_add(1);
-            if !publish_tracking_frame(frame, slot, pose_slot) {
+            let sent = match publish_tracking_frame(frame, slot, pose_slot) {
+                Ok(sent) => sent,
+                Err(error) => {
+                    let _ = stream.stop();
+                    return Err(error);
+                }
+            };
+            if !sent {
                 metrics.publish_rejected_frames = metrics.publish_rejected_frames.saturating_add(1);
             }
             update_state(state, |s| {
@@ -1293,7 +1316,11 @@ mod tests {
         let (controller, opened, probe, power) = sleep_controller(0);
         opened.recv_timeout(Duration::from_secs(2)).unwrap();
         wait_for_state(&controller, CaptureServiceState::Running);
-        let before = controller.frame_slot().try_read_after(0).unwrap();
+        let before = controller
+            .frame_slot()
+            .try_read_after(0)
+            .expect("slot access")
+            .unwrap();
         let before_seq = match before {
             vtuber_core::ReadResult::New { value, .. } => value.seq,
             _ => panic!("expected a frame"),
@@ -1301,13 +1328,23 @@ mod tests {
         power.store(3, Ordering::Release);
         wait_for_state(&controller, CaptureServiceState::Suspended);
         assert_eq!(probe.stop_calls.load(Ordering::Acquire), 1);
-        assert!(controller.frame_slot().try_read_after(0).is_none());
+        assert!(
+            controller
+                .frame_slot()
+                .try_read_after(0)
+                .expect("slot access")
+                .is_none()
+        );
         assert!(opened.recv_timeout(Duration::from_millis(250)).is_err());
         assert_eq!(controller.metrics().reconnect_attempts, 0);
         power.store(2, Ordering::Release);
         opened.recv_timeout(Duration::from_secs(2)).unwrap();
         wait_for_state(&controller, CaptureServiceState::Running);
-        let after = controller.frame_slot().try_read_after(0).unwrap();
+        let after = controller
+            .frame_slot()
+            .try_read_after(0)
+            .expect("slot access")
+            .unwrap();
         match after {
             vtuber_core::ReadResult::New { value, .. } => assert!(value.seq > before_seq),
             _ => panic!("expected a frame"),
@@ -1400,7 +1437,7 @@ mod tests {
         assert!(text.contains("has_worker: false"));
         assert!(text.contains("has_command_channel: false"));
         assert!(controller.worker.is_none());
-        assert!(!controller.frame_slot.is_closed());
+        assert!(!controller.frame_slot.is_closed().expect("slot access"));
     }
 
     #[test]
@@ -1417,7 +1454,7 @@ mod tests {
             controller.shutdown(),
             Err(CameraError::WorkerPanicked)
         ));
-        assert!(slot.is_closed());
+        assert!(slot.is_closed().expect("slot access"));
     }
 
     #[test]
@@ -1518,12 +1555,24 @@ mod tests {
                 ControlCommand::Stop => {
                     controller.stop().unwrap();
                     wait_for_state(&controller, CaptureServiceState::Selected);
-                    assert!(controller.frame_slot().try_read_after(0).is_none());
+                    assert!(
+                        controller
+                            .frame_slot()
+                            .try_read_after(0)
+                            .expect("slot access")
+                            .is_none()
+                    );
                 }
                 ControlCommand::Reset => {
                     controller.reset().unwrap();
                     wait_for_state(&controller, CaptureServiceState::Idle);
-                    assert!(controller.frame_slot().try_read_after(0).is_none());
+                    assert!(
+                        controller
+                            .frame_slot()
+                            .try_read_after(0)
+                            .expect("slot access")
+                            .is_none()
+                    );
                 }
                 ControlCommand::Start(device, request) => {
                     controller.select_and_start(device, request).unwrap();
@@ -1642,7 +1691,9 @@ mod tests {
 
         // Wait briefly for the worker to produce at least one frame.
         let slot = controller.frame_slot();
-        let result = slot.wait_read_after(0, Duration::from_secs(2));
+        let result = slot
+            .wait_read_after(0, Duration::from_secs(2))
+            .expect("slot access");
         assert!(matches!(result, Some(vtuber_core::ReadResult::New { .. })));
 
         let metrics = controller.shutdown().unwrap();
@@ -1663,7 +1714,9 @@ mod tests {
             .unwrap();
 
         let slot = controller.frame_slot();
-        let _ = slot.wait_read_after(0, Duration::from_secs(2));
+        let _ = slot
+            .wait_read_after(0, Duration::from_secs(2))
+            .expect("slot access");
 
         controller.stop().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1675,7 +1728,7 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(controller.selected_device(), Some(device));
-        assert!(slot.try_read_after(0).is_none());
+        assert!(slot.try_read_after(0).expect("slot access").is_none());
         let _ = controller.shutdown();
     }
 
@@ -1722,7 +1775,7 @@ mod tests {
         let slot = controller.frame_slot();
         let metrics = controller.shutdown().unwrap();
 
-        assert!(slot.is_closed());
+        assert!(slot.is_closed().expect("slot access"));
         assert!(metrics.frames_captured > 0);
     }
 
@@ -1796,17 +1849,23 @@ mod tests {
             data: vec![7_u8].into(),
         };
         let pointer = Arc::as_ptr(&frame.data);
-        assert!(publish_tracking_frame(frame, &face, Some(&pose)));
+        assert!(publish_tracking_frame(frame, &face, Some(&pose)).expect("frame publication"));
 
         let vtuber_core::ReadResult::New {
             value: face_frame, ..
-        } = face.try_read_after(0).expect("face frame published")
+        } = face
+            .try_read_after(0)
+            .expect("slot access")
+            .expect("face frame published")
         else {
             panic!("face slot should contain a new frame");
         };
         let vtuber_core::ReadResult::New {
             value: pose_frame, ..
-        } = pose.try_read_after(0).expect("pose frame published")
+        } = pose
+            .try_read_after(0)
+            .expect("slot access")
+            .expect("pose frame published")
         else {
             panic!("pose slot should contain a new frame");
         };
@@ -1828,11 +1887,14 @@ mod tests {
         };
         let mut rejected = 0;
         for _ in 0..3 {
-            rejected += u64::from(!publish_tracking_frame(frame.clone(), &face, None));
+            rejected += u64::from(
+                !publish_tracking_frame(frame.clone(), &face, None).expect("frame publication"),
+            );
         }
         assert_eq!(rejected, 0);
-        face.close();
-        rejected += u64::from(!publish_tracking_frame(frame, &face, None));
+        face.close().expect("slot cleanup");
+        rejected +=
+            u64::from(!publish_tracking_frame(frame, &face, None).expect("frame publication"));
         assert_eq!(rejected, 1);
     }
 
@@ -1848,9 +1910,9 @@ mod tests {
             format: vtuber_core::PixelFormat::Gray8,
             data: vec![0_u8].into(),
         };
-        assert!(publish_tracking_frame(frame, &face, None));
+        assert!(publish_tracking_frame(frame, &face, None).expect("frame publication"));
         assert!(matches!(
-            face.try_read_after(0),
+            face.try_read_after(0).expect("slot access"),
             Some(vtuber_core::ReadResult::New { .. })
         ));
     }
@@ -1891,7 +1953,9 @@ mod tests {
             let Some(vtuber_core::ReadResult::New {
                 generation,
                 value: pose_frame,
-            }) = pose.wait_read_after(cursor, Duration::from_secs(2))
+            }) = pose
+                .wait_read_after(cursor, Duration::from_secs(2))
+                .expect("slot access")
             else {
                 panic!("pose slot should receive the captured frame");
             };
@@ -1902,7 +1966,7 @@ mod tests {
             wait_for_state(&controller, CaptureServiceState::Selected);
             // The stale frame is discarded, so the reader sees nothing until the
             // next start republishes.
-            assert!(pose.try_read_after(cursor).is_none());
+            assert!(pose.try_read_after(cursor).expect("slot access").is_none());
         }
         let _ = controller.shutdown();
     }
@@ -1917,7 +1981,8 @@ mod tests {
             .unwrap();
         wait_for_state(&controller, CaptureServiceState::Running);
         assert!(matches!(
-            slot.wait_read_after(0, Duration::from_secs(2)),
+            slot.wait_read_after(0, Duration::from_secs(2))
+                .expect("slot access"),
             Some(vtuber_core::ReadResult::New { .. })
         ));
         let _ = controller.shutdown();
@@ -1952,7 +2017,13 @@ mod tests {
             );
             // Stale frames are still discarded and the selection still follows
             // the requested command.
-            assert!(controller.frame_slot().try_read_after(0).is_none());
+            assert!(
+                controller
+                    .frame_slot()
+                    .try_read_after(0)
+                    .expect("slot access")
+                    .is_none()
+            );
             assert_eq!(
                 controller.selected_device(),
                 if reset { None } else { Some(test_device()) }
@@ -1997,7 +2068,7 @@ mod tests {
             .expect_err("the final stop failure is returned");
         assert!(matches!(error, CameraError::StopFailed(_)), "{error:?}");
         // Cleanup still ran, and the worker was reclaimed by the join.
-        assert!(slot.is_closed());
+        assert!(slot.is_closed().expect("slot access"));
         assert_eq!(
             probe.stop_calls.load(std::sync::atomic::Ordering::SeqCst),
             1
@@ -2036,7 +2107,7 @@ mod tests {
         // The retained stream is stopped exactly once and never dropped
         // unreported, and the slot close still runs.
         assert_eq!(stop_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(slot.is_closed());
+        assert!(slot.is_closed().expect("slot access"));
     }
 
     #[test]

@@ -105,7 +105,7 @@ fn golden_model_startup_frames_output_stop() {
     // Publish frames at roughly 30 fps while the model runs.
     const FRAME_COUNT: u64 = 8;
     for seq in 1..=FRAME_COUNT {
-        frame_slot.publish(make_frame(seq));
+        frame_slot.publish(make_frame(seq)).expect("slot access");
         std::thread::sleep(Duration::from_millis(33));
     }
 
@@ -130,6 +130,7 @@ fn golden_model_startup_frames_output_stop() {
     // Read the latest published observation before shutdown clears the slot.
     let observation = output_slot
         .try_read_after(0)
+        .expect("slot access")
         .expect("output slot should contain a value")
         .expect_new("output slot should contain a new value");
 
@@ -153,8 +154,8 @@ fn golden_model_startup_frames_output_stop() {
 
     // Clean shutdown must join the worker and close both slots.
     let metrics = controller.shutdown().unwrap();
-    assert!(frame_slot.is_closed());
-    assert!(output_slot.is_closed());
+    assert!(frame_slot.is_closed().expect("slot access"));
+    assert!(output_slot.is_closed().expect("slot access"));
 
     assert_eq!(
         metrics.frames.processed, status.frames_processed,

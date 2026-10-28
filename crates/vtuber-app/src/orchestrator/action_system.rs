@@ -241,6 +241,7 @@ pub fn process_ui_actions_system(
             | UiAction::SelectCamera { .. }
             | UiAction::ImportAvatar { .. }
             | UiAction::RequestAvatarImportReview { .. }
+            | UiAction::FileDialogFailed(_)
             | UiAction::SetAvatarImportReviewAccepted { .. }
             | UiAction::AcceptAvatarImportReview
             | UiAction::CancelAvatarImportReview

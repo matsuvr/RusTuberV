@@ -22,9 +22,10 @@ pub fn reap_finished_worker(
     }
     let worker = worker.take()?;
     let result = finish_worker_join(worker.join(), status);
-    let status = status
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let status = match status.lock() {
+        Ok(status) => status,
+        Err(_) => return Some(Err(InferenceError::StatusPoisoned)),
+    };
     if status.state == InferenceWorkerState::Failed
         && let Some(failure) = &status.last_failure
     {
@@ -42,16 +43,29 @@ pub fn finish_worker_join(
     status: &SharedStatus,
 ) -> Result<InferenceWorkerResult, InferenceError> {
     match result {
-        WorkerResult::Completed(result) => Ok(result),
+        WorkerResult::Completed(result) => {
+            if let Some(error) = &result.failure {
+                return Err(error.clone());
+            }
+            let status = status.lock().map_err(|_| InferenceError::StatusPoisoned)?;
+            if let Some(failure) = &status.last_failure
+                && matches!(
+                    failure.error,
+                    InferenceError::SlotPoisoned(_) | InferenceError::StatusPoisoned
+                )
+            {
+                return Err(failure.error.clone());
+            }
+            Ok(result)
+        }
         WorkerResult::Panicked => {
-            status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record_failure(
+            if let Ok(mut status) = status.lock() {
+                status.record_failure(
                     vtuber_core::monotonic_now(),
                     FailureStage::WorkerPanic,
                     InferenceError::WorkerPanicked,
                 );
+            }
             Err(InferenceError::WorkerPanicked)
         }
     }

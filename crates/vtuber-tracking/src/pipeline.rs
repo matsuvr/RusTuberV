@@ -505,7 +505,7 @@ impl TrackingPipeline {
     /// # Errors
     ///
     /// Returns [`PipelineConfigError`] if any subsystem parameter is invalid.
-    pub fn new(config: PipelineConfig) -> Result<Self, PipelineConfigError> {
+    pub fn try_new(config: PipelineConfig) -> Result<Self, PipelineConfigError> {
         let expression_filter =
             ExpressionFilter::new(default_expression_calibration(), config.expression_filter);
         let detailed_expression_filter = DetailedExpressionFilter::new(config.expression_filter);
@@ -603,7 +603,7 @@ impl TrackingPipeline {
     /// Resets filters and tracking state without changing calibration.
     #[expect(
         clippy::expect_used,
-        reason = "`self.config` was validated in `TrackingPipeline::new`, so re-deriving the sub-components cannot fail"
+        reason = "`self.config` was validated in `TrackingPipeline::try_new`, so re-deriving the sub-components cannot fail"
     )]
     pub fn reset(&mut self) {
         self.reset_temporal_filters();
@@ -792,7 +792,8 @@ impl TrackingPipeline {
         calibration_available: bool,
     ) -> PipelineUpdate {
         // 2. Frame confidence from all available sources.
-        let frame_confidence = self.synthesize_confidence(observation, &pose_result);
+        let pose_frame = pose_result.as_ref().and_then(|result| result.as_ref().ok());
+        let frame_confidence = self.synthesize_confidence(observation, pose_frame);
 
         // 3. Hysteresis gate.
         let confidence_assessment = self.confidence_gate.update(frame_confidence);
@@ -830,9 +831,7 @@ impl TrackingPipeline {
             .or_else(|| observation.map(extract_gaze))
             .unwrap_or(GazeSignal::UNAVAILABLE);
         let filtered_gaze = self.gaze_filter.update(raw_gaze, dt);
-        let raw_translation = pose_result
-            .as_ref()
-            .and_then(|result| result.as_ref().ok())
+        let raw_translation = pose_frame
             .map(|frame| frame.translation)
             .unwrap_or(HeadTranslationSignal::UNAVAILABLE);
         let translation = self.translation_filter.update(raw_translation, now);
@@ -840,7 +839,7 @@ impl TrackingPipeline {
             transition.previous,
             TrackingState::LostHold | TrackingState::ReturningNeutral | TrackingState::Searching
         );
-        let head = self.update_head_filter(&pose_result, now, reconnect);
+        let head = self.update_head_filter(pose_frame, now, reconnect);
         let tracked = observation.map(|obs| {
             let mut expressions = self.expression_filter.update(&obs.expressions, now);
             if let Some(closure) = closure {
@@ -889,16 +888,14 @@ impl TrackingPipeline {
     fn synthesize_confidence(
         &self,
         observation: Option<&RawFaceObservation>,
-        pose_result: &Option<Result<HeadPoseFrame, HeadPoseFailure>>,
+        pose_frame: Option<&HeadPoseFrame>,
     ) -> f32 {
         let Some(obs) = observation else {
             return 0.0;
         };
 
         let landmark = mean_landmark_confidence(&obs.landmarks);
-        let pose = pose_result
-            .as_ref()
-            .and_then(|r| r.as_ref().map(|p| p.confidence).ok());
+        let pose = pose_frame.map(|frame| frame.confidence);
         let expression = if obs.expressions.is_valid() {
             Some(
                 (obs.expressions.blink_left_confidence
@@ -922,11 +919,11 @@ impl TrackingPipeline {
 
     fn update_head_filter(
         &mut self,
-        pose_result: &Option<Result<HeadPoseFrame, HeadPoseFailure>>,
+        pose_frame: Option<&HeadPoseFrame>,
         now: MonoTimeNs,
         reconnect: bool,
     ) -> HeadPose {
-        if let Some(Ok(pose_frame)) = pose_result {
+        if let Some(pose_frame) = pose_frame {
             let q = semantic_pose_to_quaternion(pose_frame.pose);
             let filtered_q = if reconnect {
                 self.head_filter.reconnect(q, now)
@@ -1680,13 +1677,13 @@ mod assembly {
 
     #[test]
     fn pipeline_starts_uncalibrated_and_searching() {
-        let pipeline = TrackingPipeline::new(config()).unwrap();
+        let pipeline = TrackingPipeline::try_new(config()).unwrap();
         assert!(!pipeline.is_calibrated());
     }
 
     #[test]
     fn uncalibrated_observation_does_not_crash() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         let obs = observation(1, vec![], relaxed_expression());
         let update = pipeline.update(
             Some(&obs),
@@ -1699,7 +1696,7 @@ mod assembly {
 
     #[test]
     fn calibrated_neutral_observation_yields_identity() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         let obs1 = observation(1, neutral_profile().landmarks.clone(), relaxed_expression());
@@ -1728,7 +1725,7 @@ mod assembly {
 
     #[test]
     fn output_timestamps_trace_back_to_input() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         let obs = observation(7, neutral_profile().landmarks.clone(), relaxed_expression());
@@ -1746,7 +1743,7 @@ mod assembly {
 
     #[test]
     fn reset_clears_filter_state_but_keeps_calibration() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         // Move to a non-neutral pose.
@@ -1791,7 +1788,7 @@ mod assembly {
 
     #[test]
     fn applying_new_calibration_resets_filter_state() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         let mut rotated_landmarks = neutral_profile().landmarks.clone();
@@ -1848,7 +1845,7 @@ mod assembly {
 
     #[test]
     fn gaze_is_extracted_from_blendshapes() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         let mut obs = observation(1, neutral_profile().landmarks.clone(), relaxed_expression());
@@ -1886,7 +1883,7 @@ mod assembly {
 
     #[test]
     fn no_blendshapes_means_no_gaze() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         let obs = observation(1, neutral_profile().landmarks.clone(), relaxed_expression());
@@ -1901,7 +1898,7 @@ mod assembly {
 
     #[test]
     fn right_then_center_keeps_center_as_valid_zero_gaze() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         let mut right = observation(1, neutral_profile().landmarks.clone(), relaxed_expression());
@@ -1974,7 +1971,7 @@ mod assembly {
 
     #[test]
     fn mediapipe_sample_publishes_detailed_face_and_standard_expressions() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         let sample = mediapipe_sample(&[
             (MediaPipeBlendshape::JawOpen, 0.8),
             (MediaPipeBlendshape::MouthSmileLeft, 0.6),
@@ -2004,7 +2001,7 @@ mod assembly {
 
     #[test]
     fn legacy_observation_leaves_detailed_face_empty() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         pipeline.apply_calibration(neutral_profile()).unwrap();
 
         let obs = observation(1, neutral_profile().landmarks.clone(), relaxed_expression());
@@ -2021,7 +2018,7 @@ mod assembly {
 
     #[test]
     fn reset_drops_detailed_face_state() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         let open = mediapipe_sample(&[(MediaPipeBlendshape::JawOpen, 1.0)]);
         let closed = mediapipe_sample(&[]);
 
@@ -2052,7 +2049,7 @@ mod assembly {
 
     #[test]
     fn held_sample_keeps_advancing_the_head_filter_between_observations() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         let neutral = mediapipe_sample(&[]);
 
         // Acquire on the neutral pose, then step to a 10-degree target. The
@@ -2088,7 +2085,7 @@ mod assembly {
     #[test]
     fn intermittent_and_prolonged_face_loss_preserve_heading_and_reconnect_smoothly() {
         for hz in [30u64, 60, 120] {
-            let mut pipeline = TrackingPipeline::new(config()).unwrap();
+            let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
             let neutral = mediapipe_sample(&[]);
             let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(33_333_333));
             let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(66_666_666));
@@ -2152,7 +2149,7 @@ mod assembly {
 
     #[test]
     fn held_sample_keeps_advancing_the_translation_filter_between_observations() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         let neutral = mediapipe_sample(&[]);
         let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(33_333_333));
         let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(66_666_666));
@@ -2187,7 +2184,7 @@ mod assembly {
 
     #[test]
     fn held_re_feed_keeps_the_observation_identity_but_advances_the_stamp() {
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         let neutral = mediapipe_sample(&[]);
         let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(33_333_333));
         let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(66_666_666));
@@ -2211,7 +2208,7 @@ mod assembly {
                 .get(ArkitBlendshape::JawOpen)
         }
 
-        let mut pipeline = TrackingPipeline::new(config()).unwrap();
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
         let closed = mediapipe_sample(&[]);
         let _ = track_mediapipe(&mut pipeline, &closed, MonoTimeNs(33_333_333));
         let _ = track_mediapipe(&mut pipeline, &closed, MonoTimeNs(66_666_666));

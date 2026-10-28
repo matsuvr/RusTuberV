@@ -112,6 +112,14 @@ pub enum FailureStage {
 pub type SharedStatus = Arc<std::sync::Mutex<InferenceWorkerStatus>>;
 
 impl InferenceWorkerStatus {
+    /// Builds a failure snapshot without reading potentially damaged shared data.
+    #[must_use]
+    pub fn failed(error: InferenceError) -> Self {
+        let mut status = Self::new();
+        status.record_failure(vtuber_core::monotonic_now(), FailureStage::Runtime, error);
+        status
+    }
+
     /// Creates a new status snapshot in [`InferenceWorkerState::Idle`].
     #[must_use]
     pub fn new() -> Self {

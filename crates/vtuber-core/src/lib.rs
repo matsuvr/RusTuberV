@@ -6,13 +6,13 @@
 //! ```
 //! use vtuber_core::{LatestSlot, ReadResult};
 //! let slot = LatestSlot::new();
-//! assert!(slot.publish(42));
-//! let Some(ReadResult::New { generation, value }) = slot.try_read_after(0) else {
+//! assert!(slot.publish(42).unwrap());
+//! let Some(ReadResult::New { generation, value }) = slot.try_read_after(0).unwrap() else {
 //!     return;
 //! };
 //! assert_eq!(value, 42);
-//! assert!(slot.try_read_after(generation).is_none());
-//! slot.close();
+//! assert!(slot.try_read_after(generation).unwrap().is_none());
+//! slot.close().unwrap();
 //! ```
 
 #![forbid(unsafe_code)]
@@ -63,7 +63,7 @@ pub use face_tracking::{
     MEDIAPIPE_FACE_LANDMARK_COUNT, MediaPipeBlendshape,
 };
 pub use observation::RawExpressionObservation;
-pub use slot::{LatestSlot, ReadResult, skipped_generations};
+pub use slot::{LatestSlot, ReadResult, SlotPoisoned, skipped_generations};
 pub use stop::StopToken;
 pub use time::now as monotonic_now;
 pub use types::{

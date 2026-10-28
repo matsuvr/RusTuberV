@@ -92,6 +92,9 @@ pub enum UiAction {
     /// direction becomes the new front.
     ResetAvatarCamera,
 
+    /// Report a native file dialog failure.
+    FileDialogFailed(String),
+
     // --- Avatar actions ---
     /// Import a VRM model from the given path.
     ImportAvatar {

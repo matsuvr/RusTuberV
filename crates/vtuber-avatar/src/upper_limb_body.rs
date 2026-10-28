@@ -118,6 +118,7 @@ impl BodyPose {
         Arc::ptr_eq(&self.rig, &other.rig) && self.locals == other.locals
     }
 
+    #[must_use]
     pub fn interpolate(&self, other: &Self, amount: f32) -> Self {
         if amount <= 0.0 {
             return self.clone();

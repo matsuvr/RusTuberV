@@ -8,23 +8,28 @@ use super::shell::UiState;
 use crate::actions::{RichLookChange, UiAction};
 use crate::diagnostics::DiagnosticsSnapshot;
 use crate::error_presenter::ErrorPresentation;
-use crate::licenses::LicenseGroup;
 use crate::preview::PreviewState;
 use crate::preview_landmarks::PreviewLandmarkState;
 use crate::settings::UiLanguage;
-use crate::ui_model::{AvatarLifecycleState, NdiOutputUiState, Pane, TrackingState, UiViewModel};
+use crate::ui_model::{AvatarLifecycleState, Pane, TrackingState, UiViewModel};
 use bevy_egui::egui::{self, Color32, CornerRadius, Frame, Id, RichText, TextureId, Ui, vec2};
 use vtuber_avatar::{ArmPoseProfileOverride, AvatarMotionMirror};
 
 mod camera;
+mod diagnostics;
 mod expression_keys;
 mod import_review;
+mod licenses;
 mod looking_glass;
+mod output;
 
 use camera::{camera_select_page, camera_status_page};
+use diagnostics::diagnostics_page;
 pub(crate) use expression_keys::expression_key_input;
 use expression_keys::expression_keys_page;
 use import_review::render_avatar_import_review;
+use licenses::oss_licenses_page;
+use output::output_page;
 
 /// Sidebar destinations in display order. There is no hierarchy: every
 /// destination shows all of its sections in the right pane at once.
@@ -1126,117 +1131,6 @@ fn calibration_page(
     arm_pose_section(actions, ui, vm, state, lang);
 }
 
-fn output_page(
-    actions: &mut ActionQueue,
-    ui: &mut Ui,
-    vm: &UiViewModel,
-    state: &mut UiState,
-    lang: UiLanguage,
-) {
-    section(
-        ui,
-        lang.pick(
-            "NDI — アバターのみ",
-            "NDI — avatar only",
-            "NDI — 仅虚拟形象",
-            "NDI — 아바타만",
-        ),
-        |ui| {
-            let status = match vm.ndi_output.state {
-                NdiOutputUiState::Off => lang.pick("停止", "Off", "已停止", "중지"),
-                NdiOutputUiState::Starting => {
-                    lang.pick("開始中…", "Starting…", "正在启动…", "시작 중…")
-                }
-                NdiOutputUiState::Live => lang.pick("送信中", "Sending", "发送中", "전송 중"),
-                NdiOutputUiState::Error => lang.pick("エラー", "Error", "错误", "오류"),
-            };
-            ui.label(format!(
-                "{}: {status}",
-                lang.pick("状態", "Status", "状态", "상태")
-            ));
-            if let Some(name) = &vm.ndi_output.source_name {
-                ui.label(format!(
-                    "{}: {name}",
-                    lang.pick("ソース名", "Source name", "源名称", "소스 이름")
-                ));
-            }
-            if let Some(count) = vm.ndi_output.connections {
-                ui.label(format!(
-                    "{}: {count}",
-                    lang.pick("受信数", "Receivers", "接收端数量", "수신 수")
-                ));
-            }
-            if !vm.ndi_output.available {
-                ui.label(lang.pick(
-                    "このビルドにはNDI出力が含まれていません。",
-                    "This build does not include NDI output.",
-                    "此构建未包含NDI输出。",
-                    "이 빌드에는 NDI 출력이 포함되어 있지 않습니다.",
-                ));
-            } else if !vm.ndi_output.runtime_installed {
-                ui.label(lang.pick(
-                    "NDIランタイムが見つかりません。NDIを使う場合のみ必要です。",
-                    "NDI runtime not found. It is needed only when using NDI.",
-                    "未找到NDI运行库。仅使用NDI时需要它。",
-                    "NDI 런타임을 찾지 못했습니다. NDI를 사용할 때만 필요합니다.",
-                ));
-            }
-            ui.hyperlink_to(
-                lang.pick(
-                    "NDI®公式サイト",
-                    "NDI® website",
-                    "NDI®官方网站",
-                    "NDI® 공식 사이트",
-                ),
-                "https://ndi.video",
-            );
-            ui.small("NDI® is a registered trademark of Vizrt NDI AB.");
-            ui.horizontal_wrapped(|ui| {
-                if primary_button(
-                    ui,
-                    lang.pick("NDI送信を開始", "Start NDI", "开始NDI发送", "NDI 전송 시작"),
-                    vm.can_start_ndi_output() && vm.ndi_output.runtime_installed,
-                )
-                .clicked()
-                {
-                    state.emit(actions, UiAction::StartNdiOutput);
-                }
-                if ui
-                    .add_enabled(
-                        vm.can_stop_ndi_output(),
-                        egui::Button::new(lang.pick(
-                            "NDI送信を停止",
-                            "Stop NDI",
-                            "停止NDI发送",
-                            "NDI 전송 중지",
-                        )),
-                    )
-                    .clicked()
-                {
-                    state.emit(actions, UiAction::StopNdiOutput);
-                }
-            });
-            if let Some(code) = &vm.ndi_output.error_code {
-                ui.label(format!(
-                    "{}: {code}",
-                    lang.pick("エラーコード", "Error code", "错误代码", "오류 코드")
-                ));
-            }
-            if let Some(detail) = &vm.ndi_output.error_message {
-                egui::CollapsingHeader::new(lang.pick(
-                    "技術情報（原文）",
-                    "Technical details (original)",
-                    "技术详情（原文）",
-                    "기술 정보 (원문)",
-                ))
-                .show(ui, |ui| {
-                    ui.label(detail);
-                });
-            }
-        },
-    );
-}
-
 /// Rich-look switch and lighting/effect strength.
 ///
 /// The controls edit the live [`vtuber_avatar::AvatarLookSettings`] the look
@@ -1299,142 +1193,6 @@ fn render_rich_look_controls(
             );
         }
     });
-}
-
-fn diagnostics_page(
-    ui: &mut Ui,
-    vm: &UiViewModel,
-    snapshot: &DiagnosticsSnapshot,
-    lang: UiLanguage,
-) {
-    section(
-        ui,
-        lang.pick("トラッキング", "Tracking", "跟踪", "트래킹"),
-        |ui| {
-            let tracking = match vm.tracking.state {
-                TrackingState::Idle => lang.pick("停止中", "Idle", "已停止", "중지됨"),
-                TrackingState::Initializing => {
-                    lang.pick("初期化中", "Initializing", "初始化中", "초기화 중")
-                }
-                TrackingState::WaitingForFace => lang.pick(
-                    "顔の検出待ち（カメラに顔を映してください）",
-                    "Waiting for a face (face the camera)",
-                    "等待检测脸部（请面向摄像头）",
-                    "얼굴 감지 대기 중 (카메라를 바라보세요)",
-                ),
-                TrackingState::Tracking => lang.pick("追跡中", "Tracking", "跟踪中", "트래킹 중"),
-                TrackingState::Lost => lang.pick(
-                    "顔を検出できません",
-                    "Face lost",
-                    "未检测到脸部",
-                    "얼굴을 찾지 못함",
-                ),
-            };
-            ui.label(tracking);
-            ui.label(format!(
-                "{}: {:.0}%",
-                lang.pick("信頼度", "Confidence", "置信度", "신뢰도"),
-                vm.tracking.confidence * 100.0
-            ));
-            ui.label(avatar_label(vm.avatar.lifecycle, lang));
-        },
-    );
-    section(
-        ui,
-        lang.pick("詳細診断", "Detailed diagnostics", "详细诊断", "상세 진단"),
-        |ui| {
-            egui::CollapsingHeader::new(lang.pick(
-                "技術情報を開く",
-                "Open technical details",
-                "打开技术详情",
-                "기술 정보 열기",
-            ))
-            .show(ui, |ui| {
-                ui.label(RichText::new(format!("{snapshot:#?}")).monospace());
-            });
-        },
-    );
-}
-
-/// Licenses of the built application. Only the headings are localized; every
-/// license body stays in the language its author published it in.
-fn oss_licenses_page(ui: &mut Ui, lang: UiLanguage) {
-    section(
-        ui,
-        lang.pick("同梱アセット", "Bundled assets", "内置资源", "번들 에셋"),
-        |ui| {
-            license_groups(ui, "bundled", crate::licenses::bundled_groups(), lang);
-        },
-    );
-    section(
-        ui,
-        lang.pick(
-            "依存パッケージ",
-            "Dependency packages",
-            "依赖包",
-            "의존 패키지",
-        ),
-        |ui| {
-            license_groups(
-                ui,
-                "dependencies",
-                crate::licenses::dependency_groups(),
-                lang,
-            );
-        },
-    );
-}
-
-fn license_groups(ui: &mut Ui, list_id: &str, groups: &[LicenseGroup], lang: UiLanguage) {
-    for (group_index, group) in groups.iter().enumerate() {
-        let heading = format!(
-            "{}  ({} {})",
-            group.expression,
-            group.items.len(),
-            lang.pick("件", "items", "项", "개")
-        );
-        egui::CollapsingHeader::new(RichText::new(heading).strong())
-            .id_salt(("oss_licenses", list_id, group_index))
-            .show(ui, |ui| {
-                let mut items = group
-                    .items
-                    .iter()
-                    .map(|item| {
-                        if item.version.is_empty() {
-                            item.name.to_string()
-                        } else {
-                            format!("{} {}", item.name, item.version)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                items.push('\n');
-                ui.label(RichText::new(items).monospace());
-                if group.texts.is_empty() {
-                    ui.label(lang.pick(
-                        "このパッケージはライセンス本文を同梱していません。上流の配布元を参照してください。",
-                        "These packages ship no license text. See their upstream distribution.",
-                        "这些包未附带许可证正文，请参阅其上游分发。",
-                        "이 패키지에는 라이선스 본문이 포함되어 있지 않습니다. 업스트림 배포를 참조하세요.",
-                    ));
-                }
-                for (text_index, text) in group.texts.iter().enumerate() {
-                    // Two crates under one expression rarely share a file, and
-                    // their copyright lines are what tells them apart.
-                    let holder = text.body.lines().next().unwrap_or_default().trim();
-                    let title = if holder.is_empty() {
-                        text.file_name.to_string()
-                    } else {
-                        format!("{} — {holder}", text.file_name)
-                    };
-                    egui::CollapsingHeader::new(RichText::new(title).monospace())
-                        .id_salt(("license_text", text_index))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(text.body).monospace());
-                        });
-                }
-            });
-    }
 }
 
 #[cfg(test)]

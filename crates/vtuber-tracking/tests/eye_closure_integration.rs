@@ -92,7 +92,7 @@ fn sample(
 fn pipeline() -> TrackingPipeline {
     let threshold = EyeGeometryThreshold::new(0.2, 0.5, 0.0).expect("geometry threshold");
     let thresholds = EyeGeometryThresholds::new(threshold, threshold);
-    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).expect("pipeline");
     pipeline.set_eye_closure_thresholds(thresholds);
     pipeline
 }
@@ -173,7 +173,7 @@ fn a_wink_closes_only_the_intended_eye() {
 fn high_blink_with_an_open_gap_does_not_pin() {
     let threshold = EyeGeometryThreshold::new(0.2, 0.5, 0.5).expect("geometry threshold");
     let thresholds = EyeGeometryThresholds::new(threshold, threshold);
-    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).expect("pipeline");
     pipeline.set_eye_closure_thresholds(thresholds);
     let mut last = None;
     for seq in 0..10 {
@@ -216,7 +216,7 @@ fn a_long_capture_gap_drops_the_carried_closure() {
 fn live_pins_agree_with_the_offline_replay() {
     let threshold = EyeGeometryThreshold::new(0.2, 0.5, 0.0).expect("geometry threshold");
     let thresholds = EyeGeometryThresholds::new(threshold, threshold);
-    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).expect("pipeline");
     pipeline.set_eye_closure_thresholds(thresholds);
     let mut offline = GeometryEyeClosureTracker::new(thresholds);
     for seq in 0..12 {
@@ -261,7 +261,7 @@ fn live_pins_agree_with_the_offline_replay() {
 
 #[test]
 fn without_a_profile_the_builtin_raw_blink_rule_reaches_exactly_one() {
-    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).expect("pipeline");
     assert!(!pipeline.eye_closure_active());
     let mut last = None;
     for seq in 0..10 {
@@ -281,7 +281,7 @@ fn without_a_profile_the_builtin_raw_blink_rule_reaches_exactly_one() {
 
 #[test]
 fn without_a_profile_an_open_eye_is_not_pinned() {
-    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).expect("pipeline");
     let mut last = None;
     for seq in 0..10 {
         let captured_at = seq * 33_000_000;
@@ -305,7 +305,7 @@ fn without_a_profile_an_open_eye_is_not_pinned() {
 
 #[test]
 fn without_a_profile_a_wink_closes_only_the_intended_eye() {
-    let mut pipeline = TrackingPipeline::new(PipelineConfig::default()).expect("pipeline");
+    let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).expect("pipeline");
     let mut last = None;
     for seq in 0..10 {
         let captured_at = seq * 33_000_000;

@@ -1,10 +1,8 @@
 //! Joint-coordinate candidate and single FK for the upper-limb solver.
 
-use crate::{
-    arm::{ArmChainBinding, ArmIkInput, ArmIkTarget, RestSpaceBonePose},
-    arm_pose::{ResolvedArmPose, ResolvedBoneDelta},
-    collision::BoneMotion,
-};
+use crate::arm::{ArmChainBinding, ArmIkInput, ArmIkTarget, RestSpaceBonePose};
+use crate::arm_pose::{ResolvedArmPose, ResolvedBoneDelta};
+use crate::collision::BoneMotion;
 use bevy::prelude::*;
 use std::collections::HashMap;
 use vtuber_core::arm_tracking::HandFingerPose;
@@ -44,6 +42,13 @@ pub(crate) const BOUNDS: [(f32, f32); 9] = [
     (-0.046 * 2.269, 0.046 * 1.658 + 0.123 * std::f32::consts::PI),
 ];
 
+/// Palm plane normal and longitudinal axis in the same coordinate space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PalmBasis {
+    pub normal: Vec3,
+    pub forward: Vec3,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ArmCandidate {
     pub joint_margin: f32,
@@ -52,7 +57,7 @@ pub(crate) struct ArmCandidate {
     pub shoulder: Vec3,
     pub elbow: Vec3,
     pub wrist: Vec3,
-    pub palm: Option<(Vec3, Vec3)>,
+    pub palm: Option<PalmBasis>,
     pub motion: HashMap<Entity, BoneMotion>,
 }
 
@@ -242,7 +247,10 @@ impl ArmJoints {
             shoulder: girdle.centre,
             elbow,
             wrist,
-            palm: palm.map(|(n, f)| (hand_model * n, hand_model * f)),
+            palm: palm.map(|(normal, forward)| PalmBasis {
+                normal: hand_model * normal,
+                forward: hand_model * forward,
+            }),
             motion,
         })
     }
@@ -442,8 +450,14 @@ pub(crate) mod tests {
                 ] {
                     assert!(a.distance(b) < 2.0e-6);
                 }
-                let (an, af) = a.palm.unwrap();
-                let (bn, bf) = b.palm.unwrap();
+                let PalmBasis {
+                    normal: an,
+                    forward: af,
+                } = a.palm.unwrap();
+                let PalmBasis {
+                    normal: bn,
+                    forward: bf,
+                } = b.palm.unwrap();
                 assert!(an.distance(bn) < 2.0e-6);
                 assert!(af.distance(bf) < 2.0e-6);
                 for (bone, motion) in a.motion {
@@ -509,8 +523,14 @@ pub(crate) mod tests {
         ] {
             assert!(reflect(a).distance(b) < 2.0e-6);
         }
-        let (ln, lf) = l.palm.unwrap();
-        let (rn, rf) = r.palm.unwrap();
+        let PalmBasis {
+            normal: ln,
+            forward: lf,
+        } = l.palm.unwrap();
+        let PalmBasis {
+            normal: rn,
+            forward: rf,
+        } = r.palm.unwrap();
         assert!((-reflect(ln)).distance(rn) < 2.0e-6);
         assert!(reflect(lf).distance(rf) < 2.0e-6);
     }
@@ -569,8 +589,15 @@ pub(crate) mod tests {
                 assert_eq!(pose.wrist, initial.wrist);
                 assert_eq!(pose.elbow, initial.elbow);
                 assert!(
-                    pose.palm.unwrap().0.distance(initial.palm.unwrap().0)
-                        + pose.palm.unwrap().1.distance(initial.palm.unwrap().1)
+                    pose.palm
+                        .unwrap()
+                        .normal
+                        .distance(initial.palm.unwrap().normal)
+                        + pose
+                            .palm
+                            .unwrap()
+                            .forward
+                            .distance(initial.palm.unwrap().forward)
                         > 0.01
                 );
             }

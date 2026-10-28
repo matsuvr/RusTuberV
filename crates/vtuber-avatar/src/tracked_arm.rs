@@ -3,6 +3,7 @@
 //! This module never writes Transforms. Live integration must route its output
 //! through the existing arm compositor, not register another bone writer.
 
+use crate::upper_limb::PalmBasis;
 use bevy::prelude::{Mat3, Quat, Vec3};
 use vtuber_core::arm_tracking::{ArmTrackingTarget, HandFingerPose};
 
@@ -245,14 +246,14 @@ pub(crate) fn retarget_palm_frame(
     chain: &ArmChainBinding,
     normal: Vec3,
     forward: Vec3,
-) -> Option<(Vec3, Vec3)> {
+) -> Option<PalmBasis> {
     let side_sign = chain.side.outward_sign();
     let canonical = palm_frame(Vec3::Y * side_sign, Vec3::X * side_sign)?;
     let delta = palm_frame(normal, forward)? * canonical.inverse();
-    Some((
-        delta * rest_palm_normal(chain)?,
-        delta * rest_palm_forward(chain)?,
-    ))
+    Some(PalmBasis {
+        normal: delta * rest_palm_normal(chain)?,
+        forward: delta * rest_palm_forward(chain)?,
+    })
 }
 
 /// SO(3) palm orientation error, scaled by authored palm length. Each
@@ -261,8 +262,8 @@ pub(crate) fn retarget_palm_frame(
 /// The length keeps angular and Cartesian tasks in physical distance units.
 pub(crate) fn palm_orientation_error(
     chain: &ArmChainBinding,
-    current: (Vec3, Vec3),
-    wanted: (Vec3, Vec3),
+    current: PalmBasis,
+    wanted: PalmBasis,
 ) -> Option<Vec3> {
     Some(palm_rotation_error(current, wanted)? * palm_length(chain)?)
 }
@@ -273,9 +274,9 @@ pub(crate) fn palm_orientation_error(
 /// flips sign at a half-turn, producing a spurious derivative near PI / h.
 pub(crate) fn palm_orientation_error_near_reference(
     chain: &ArmChainBinding,
-    current: (Vec3, Vec3),
-    wanted: (Vec3, Vec3),
-    reference_palm: (Vec3, Vec3),
+    current: PalmBasis,
+    wanted: PalmBasis,
+    reference_palm: PalmBasis,
 ) -> Option<Vec3> {
     let error = palm_rotation_error(current, wanted)?;
     let reference_error = palm_rotation_error(reference_palm, wanted)?;
@@ -289,9 +290,10 @@ pub(crate) fn palm_orientation_error_near_reference(
     Some(error * palm_length(chain)?)
 }
 
-fn palm_rotation_error(current: (Vec3, Vec3), wanted: (Vec3, Vec3)) -> Option<Vec3> {
-    let mut rotation =
-        (palm_frame(wanted.0, wanted.1)? * palm_frame(current.0, current.1)?.inverse()).normalize();
+fn palm_rotation_error(current: PalmBasis, wanted: PalmBasis) -> Option<Vec3> {
+    let mut rotation = (palm_frame(wanted.normal, wanted.forward)?
+        * palm_frame(current.normal, current.forward)?.inverse())
+    .normalize();
     if rotation.w < 0.0 {
         rotation = -rotation;
     }
@@ -356,15 +358,21 @@ mod tests {
             let chain = crate::upper_limb::tests::chain(side);
             let normal = rest_palm_normal(&chain).unwrap();
             let forward = rest_palm_forward(&chain).unwrap();
-            let wanted = (-normal, forward);
+            let wanted = PalmBasis {
+                normal: -normal,
+                forward,
+            };
             let h = f32::EPSILON.cbrt();
             let sample = |angle| {
                 let turn = Quat::from_axis_angle(forward, angle);
                 palm_orientation_error_near_reference(
                     &chain,
-                    (turn * normal, forward),
+                    PalmBasis {
+                        normal: turn * normal,
+                        forward,
+                    },
                     wanted,
-                    (normal, forward),
+                    PalmBasis { normal, forward },
                 )
                 .unwrap()
             };
@@ -407,9 +415,9 @@ mod tests {
                     let mapped =
                         retarget_palm_frame(&chain, delta * Vec3::Y * sign, delta * Vec3::X * sign)
                             .unwrap();
-                    near(mapped.0, delta * rest.0);
-                    near(mapped.1, delta * rest.1);
-                    let normalized = (palm_frame(mapped.0, mapped.1).unwrap()
+                    near(mapped.normal, delta * rest.0);
+                    near(mapped.forward, delta * rest.1);
+                    let normalized = (palm_frame(mapped.normal, mapped.forward).unwrap()
                         * palm_frame(rest.0, rest.1).unwrap().inverse())
                     .normalize();
                     assert!(normalized.dot(delta).abs() > 1.0 - 8.0 * f32::EPSILON);

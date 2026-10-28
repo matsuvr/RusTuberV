@@ -28,6 +28,19 @@ pub fn present_error(
         language.pick(ja, en, zh, ko).to_string()
     };
     match error {
+        OrchestratorError::FileDialogFailed(detail) => ErrorPresentation {
+            code: "FILE_DIALOG_FAILED",
+            user_message: format!(
+                "{}: {detail}",
+                language.pick(
+                    "ファイル選択に失敗しました",
+                    "File selection failed",
+                    "文件选择失败",
+                    "파일 선택에 실패했습니다",
+                )
+            ),
+            suggested_actions: vec![UiAction::DismissError],
+        },
         OrchestratorError::ImportFailed(detail) => ErrorPresentation {
             code: "IMPORT_FAILED",
             user_message: format!(
