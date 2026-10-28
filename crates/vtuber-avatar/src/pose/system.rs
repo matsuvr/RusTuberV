@@ -40,8 +40,8 @@ pub struct PoseApplyMetrics {
     /// Monotonic time when the most recent frame was applied.
     pub last_applied_at: Option<vtuber_core::MonoTimeNs>,
     /// First-apply latency of the most recently observed control frame.
-    pub last_capture_to_apply_ms: Option<f64>,
-    /// Fixed-size capture-to-apply latency samples.
+    pub last_frame_received_to_apply_ms: Option<f64>,
+    /// Fixed-size frame-receipt-to-apply latency samples.
     latency_samples: FixedStats,
 }
 
@@ -55,7 +55,7 @@ impl Default for PoseApplyMetrics {
             skipped_stale_entity: 0,
             last_applied_source_seq: None,
             last_applied_at: None,
-            last_capture_to_apply_ms: None,
+            last_frame_received_to_apply_ms: None,
             latency_samples: FixedStats::new(256),
         }
     }
@@ -83,27 +83,27 @@ impl PoseApplyMetrics {
             .0
             .checked_sub(captured_at.0)
             .map(|ns| ns as f64 / 1_000_000.0);
-        self.last_capture_to_apply_ms = latency_ms;
+        self.last_frame_received_to_apply_ms = latency_ms;
         if let Some(latency_ms) = latency_ms {
             self.latency_samples.record(latency_ms);
         }
     }
 
-    /// Number of capture-to-apply latency samples retained.
+    /// Number of frame-receipt-to-apply latency samples retained.
     #[must_use]
     pub fn latency_sample_count(&self) -> usize {
         self.latency_samples.count()
     }
 
-    /// p50 capture-to-apply latency in milliseconds.
+    /// p50 frame-receipt-to-apply latency in milliseconds.
     #[must_use]
-    pub fn capture_to_apply_p50_ms(&self) -> f64 {
+    pub fn frame_received_to_apply_p50_ms(&self) -> f64 {
         self.latency_samples.p50()
     }
 
-    /// p95 capture-to-apply latency in milliseconds.
+    /// p95 frame-receipt-to-apply latency in milliseconds.
     #[must_use]
-    pub fn capture_to_apply_p95_ms(&self) -> f64 {
+    pub fn frame_received_to_apply_p95_ms(&self) -> f64 {
         self.latency_samples.p95()
     }
 }
@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_to_apply_records_each_source_sequence_once() {
+    fn frame_received_to_apply_records_each_source_sequence_once() {
         let mut metrics = PoseApplyMetrics::default();
         metrics.record_apply(
             vtuber_core::FrameSeq(7),
@@ -916,8 +916,8 @@ mod tests {
 
         assert_eq!(metrics.frames_applied, 2);
         assert_eq!(metrics.latency_sample_count(), 1);
-        assert_eq!(metrics.capture_to_apply_p50_ms(), 30.0);
-        assert_eq!(metrics.last_capture_to_apply_ms, Some(30.0));
+        assert_eq!(metrics.frame_received_to_apply_p50_ms(), 30.0);
+        assert_eq!(metrics.last_frame_received_to_apply_ms, Some(30.0));
 
         metrics.record_apply(
             vtuber_core::FrameSeq(8),
@@ -925,7 +925,7 @@ mod tests {
             vtuber_core::MonoTimeNs(6_040_000_000),
         );
         assert_eq!(metrics.latency_sample_count(), 2);
-        assert_eq!(metrics.capture_to_apply_p95_ms(), 40.0);
+        assert_eq!(metrics.frame_received_to_apply_p95_ms(), 40.0);
     }
     #[test]
     fn idle_addition_preserves_the_pose_contribution_at_zero_blend() {

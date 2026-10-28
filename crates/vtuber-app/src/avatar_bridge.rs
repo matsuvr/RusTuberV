@@ -55,11 +55,13 @@ pub fn sync_avatar_diagnostics(
             .saturating_add(metrics.skipped_generation_mismatch)
             .saturating_add(metrics.skipped_stale_entity);
         if metrics.latency_sample_count() > 0 {
-            diagnostics.capture_to_apply_p50_ms = Some(metrics.capture_to_apply_p50_ms() as f32);
-            diagnostics.capture_to_apply_p95_ms = Some(metrics.capture_to_apply_p95_ms() as f32);
+            diagnostics.frame_received_to_apply_p50_ms =
+                Some(metrics.frame_received_to_apply_p50_ms() as f32);
+            diagnostics.frame_received_to_apply_p95_ms =
+                Some(metrics.frame_received_to_apply_p95_ms() as f32);
         } else {
-            diagnostics.capture_to_apply_p50_ms = None;
-            diagnostics.capture_to_apply_p95_ms = None;
+            diagnostics.frame_received_to_apply_p50_ms = None;
+            diagnostics.frame_received_to_apply_p95_ms = None;
         }
     }
 }

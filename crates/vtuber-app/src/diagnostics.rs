@@ -96,10 +96,11 @@ pub struct DiagnosticsSnapshot {
     /// Number of avatar pose frames skipped because the lifecycle/binding was
     /// not ready.
     pub avatar_frames_skipped: u64,
-    /// p50 capture-to-avatar-apply latency in milliseconds.
-    pub capture_to_apply_p50_ms: Option<f32>,
-    /// p95 capture-to-avatar-apply latency in milliseconds.
-    pub capture_to_apply_p95_ms: Option<f32>,
+    /// p50 frame-receipt-to-avatar-apply latency in milliseconds.
+    /// Excludes camera exposure/driver buffering and rendering/display latency.
+    pub frame_received_to_apply_p50_ms: Option<f32>,
+    /// p95 frame-receipt-to-avatar-apply latency in milliseconds.
+    pub frame_received_to_apply_p95_ms: Option<f32>,
     /// Last stable error code, if any.
     pub last_error_code: Option<String>,
     /// Last error message, if any.

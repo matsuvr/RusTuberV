@@ -44,10 +44,12 @@ pub struct ArmEvaluationSummary {
     pub upper_arm_length_error_meters: f32,
     /// Mean absolute forearm length error, in meters.
     pub forearm_length_error_meters: f32,
-    /// Mean wrist spread on auto-detected stationary frames, in meters.
-    pub stationary_wrist_variance_meters: f32,
-    /// Largest per-frame bend-plane turn, in radians.
-    pub pole_max_step_radians: f32,
+    /// Wrist RMS deviation from each contiguous stationary segment's mean, in meters.
+    /// Segments are weighted by their number of frames.
+    pub stationary_wrist_rms_meters: f32,
+    /// Largest per-frame shoulder-to-elbow direction change, in radians.
+    /// This is not a bend-plane or pole-vector angle.
+    pub upper_arm_direction_max_step_radians: f32,
     /// Mean capture-to-display latency in nanoseconds.
     pub capture_to_display_mean_ns: f64,
     /// 95th-percentile capture-to-display latency in nanoseconds.
@@ -94,8 +96,8 @@ pub fn evaluate_arm_sequence(samples: &[ArmEvaluationSample]) -> ArmEvaluationSu
         .sum::<f32>()
         / count_f;
 
-    let stationary_wrist_variance_meters = stationary_wrist_variance(samples);
-    let pole_max_step_radians = pole_max_step(samples);
+    let stationary_wrist_rms_meters = stationary_wrist_rms(samples);
+    let upper_arm_direction_max_step_radians = upper_arm_direction_max_step(samples);
 
     let mut latencies: Vec<u64> = samples
         .iter()
@@ -113,41 +115,59 @@ pub fn evaluate_arm_sequence(samples: &[ArmEvaluationSample]) -> ArmEvaluationSu
         wrist_reach_error_meters,
         upper_arm_length_error_meters,
         forearm_length_error_meters,
-        stationary_wrist_variance_meters,
-        pole_max_step_radians,
+        stationary_wrist_rms_meters,
+        upper_arm_direction_max_step_radians,
         capture_to_display_mean_ns,
         capture_to_display_p95_ns,
         sample_count: count,
     }
 }
 
-fn stationary_wrist_variance(samples: &[ArmEvaluationSample]) -> f32 {
-    let mut wrists: Vec<Vector3<f32>> = Vec::new();
-    let mut previous: Option<Vector3<f32>> = None;
-    for sample in samples {
-        let target = vector(sample.final_target);
-        let stationary = previous.is_none_or(|value| (target - value).norm() < STATIONARY_EPSILON);
+fn stationary_wrist_rms(samples: &[ArmEvaluationSample]) -> f32 {
+    // A segment contains at least one stationary target transition. Its first
+    // frame is the predecessor of that transition, not a separate pose.
+    let mut start: Option<usize> = None;
+    let mut sum_squared = 0.0;
+    let mut frame_count = 0_usize;
+    for (index, pair) in samples.windows(2).enumerate() {
+        let [previous, current] = pair else {
+            continue;
+        };
+        let stationary = (vector(current.final_target) - vector(previous.final_target)).norm()
+            < STATIONARY_EPSILON;
         if stationary {
-            wrists.push(vector(sample.wrist));
+            start.get_or_insert(index);
+        } else if let Some(segment_start) = start.take()
+            && let Some(segment) = samples.get(segment_start..=index)
+        {
+            accumulate_segment(segment, &mut sum_squared, &mut frame_count);
         }
-        previous = Some(target);
     }
-    if wrists.is_empty() {
-        return 0.0;
+    if let Some(segment_start) = start
+        && let Some(segment) = samples.get(segment_start..)
+    {
+        accumulate_segment(segment, &mut sum_squared, &mut frame_count);
     }
-    let count = wrists.len() as f32;
-    let mean = wrists
-        .iter()
-        .fold(Vector3::zeros(), |sum, value| sum + value)
-        / count;
-    wrists
-        .iter()
-        .map(|value| (value - mean).norm_squared())
-        .sum::<f32>()
-        / count
+    if frame_count == 0 {
+        0.0
+    } else {
+        (sum_squared / frame_count as f32).sqrt()
+    }
 }
 
-fn pole_max_step(samples: &[ArmEvaluationSample]) -> f32 {
+fn accumulate_segment(samples: &[ArmEvaluationSample], sum_squared: &mut f32, count: &mut usize) {
+    let mean = samples
+        .iter()
+        .fold(Vector3::zeros(), |sum, sample| sum + vector(sample.wrist))
+        / samples.len() as f32;
+    *sum_squared += samples
+        .iter()
+        .map(|sample| (vector(sample.wrist) - mean).norm_squared())
+        .sum::<f32>();
+    *count += samples.len();
+}
+
+fn upper_arm_direction_max_step(samples: &[ArmEvaluationSample]) -> f32 {
     let mut maximum = 0.0_f32;
     for pair in samples.windows(2) {
         let [previous, current] = pair else {
@@ -228,26 +248,68 @@ mod tests {
     }
 
     #[test]
-    fn stationary_variance_only_counts_frames_that_do_not_move() {
-        // Three stationary frames plus one moving frame; the moving frame's
-        // wrist must not inflate the stationary spread.
+    fn stationary_rms_does_not_mix_separate_positions() {
         let samples = [
             sample(0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
-            sample(1, [0.0, 0.0, 0.0], [0.001, 0.0, 0.0]),
-            sample(2, [0.0, 0.0, 0.0], [-0.001, 0.0, 0.0]),
+            sample(1, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            sample(2, [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
             sample(3, [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
         ];
-        let summary = evaluate_arm_sequence(&samples);
-        assert!(summary.stationary_wrist_variance_meters < 1.0e-6);
+        assert_eq!(
+            evaluate_arm_sequence(&samples).stationary_wrist_rms_meters,
+            0.0
+        );
     }
 
     #[test]
-    fn pole_step_reports_a_flip() {
+    fn stationary_rms_is_in_meters() {
+        let samples = [
+            sample(0, [0.0; 3], [-0.001, 0.0, 0.0]),
+            sample(1, [0.0; 3], [0.001, 0.0, 0.0]),
+        ];
+        assert!(
+            (evaluate_arm_sequence(&samples).stationary_wrist_rms_meters - 0.001).abs() < 1.0e-7
+        );
+    }
+
+    #[test]
+    fn stationary_rms_weights_segments_by_frame_count_and_excludes_motion() {
+        let samples = [
+            sample(0, [0.0; 3], [-0.001, 0.0, 0.0]),
+            sample(1, [0.0; 3], [0.001, 0.0, 0.0]),
+            sample(2, [0.5, 0.0, 0.0], [100.0, 0.0, 0.0]),
+            sample(3, [1.0, 0.0, 0.0], [1.0, -0.003, 0.0]),
+            sample(4, [1.0, 0.0, 0.0], [1.0, 0.003, 0.0]),
+            sample(5, [1.0, 0.0, 0.0], [1.0, -0.003, 0.0]),
+            sample(6, [1.0, 0.0, 0.0], [1.0, 0.003, 0.0]),
+        ];
+        let expected = ((2.0_f32 * 0.001_f32.powi(2) + 4.0 * 0.003_f32.powi(2)) / 6.0).sqrt();
+        assert!(
+            (evaluate_arm_sequence(&samples).stationary_wrist_rms_meters - expected).abs() < 1.0e-7
+        );
+    }
+
+    #[test]
+    fn no_stationary_transition_has_zero_rms() {
+        let samples = [
+            sample(0, [0.0; 3], [0.0; 3]),
+            sample(1, [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ];
+        assert_eq!(
+            evaluate_arm_sequence(&samples).stationary_wrist_rms_meters,
+            0.0
+        );
+    }
+
+    #[test]
+    fn upper_arm_direction_step_reports_a_flip() {
         let mut first = sample(0, [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]);
         first.elbow = [0.0, 0.5, 0.0];
         let mut second = sample(1, [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]);
         second.elbow = [0.0, -0.5, 0.0];
         let summary = evaluate_arm_sequence(&[first, second]);
-        assert!((summary.pole_max_step_radians - std::f32::consts::PI).abs() < 1.0e-4);
+        assert!(
+            (summary.upper_arm_direction_max_step_radians - std::f32::consts::PI).abs() < 1.0e-4
+        );
     }
 }
