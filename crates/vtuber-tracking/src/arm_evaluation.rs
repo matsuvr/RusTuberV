@@ -137,16 +137,16 @@ fn stationary_wrist_rms(samples: &[ArmEvaluationSample]) -> f32 {
             < STATIONARY_EPSILON;
         if stationary {
             start.get_or_insert(index);
-        } else if let Some(segment_start) = start.take() {
-            if let Some(segment) = samples.get(segment_start..=index) {
-                accumulate_segment(segment, &mut sum_squared, &mut frame_count);
-            }
-        }
-    }
-    if let Some(segment_start) = start {
-        if let Some(segment) = samples.get(segment_start..) {
+        } else if let Some(segment_start) = start.take()
+            && let Some(segment) = samples.get(segment_start..=index)
+        {
             accumulate_segment(segment, &mut sum_squared, &mut frame_count);
         }
+    }
+    if let Some(segment_start) = start
+        && let Some(segment) = samples.get(segment_start..)
+    {
+        accumulate_segment(segment, &mut sum_squared, &mut frame_count);
     }
     if frame_count == 0 {
         0.0
@@ -268,8 +268,24 @@ mod tests {
             sample(1, [0.0; 3], [0.001, 0.0, 0.0]),
         ];
         assert!(
-            (evaluate_arm_sequence(&samples).stationary_wrist_rms_meters - 0.001).abs()
-                < 1.0e-7
+            (evaluate_arm_sequence(&samples).stationary_wrist_rms_meters - 0.001).abs() < 1.0e-7
+        );
+    }
+
+    #[test]
+    fn stationary_rms_weights_segments_by_frame_count_and_excludes_motion() {
+        let samples = [
+            sample(0, [0.0; 3], [-0.001, 0.0, 0.0]),
+            sample(1, [0.0; 3], [0.001, 0.0, 0.0]),
+            sample(2, [0.5, 0.0, 0.0], [100.0, 0.0, 0.0]),
+            sample(3, [1.0, 0.0, 0.0], [1.0, -0.003, 0.0]),
+            sample(4, [1.0, 0.0, 0.0], [1.0, 0.003, 0.0]),
+            sample(5, [1.0, 0.0, 0.0], [1.0, -0.003, 0.0]),
+            sample(6, [1.0, 0.0, 0.0], [1.0, 0.003, 0.0]),
+        ];
+        let expected = ((2.0_f32 * 0.001_f32.powi(2) + 4.0 * 0.003_f32.powi(2)) / 6.0).sqrt();
+        assert!(
+            (evaluate_arm_sequence(&samples).stationary_wrist_rms_meters - expected).abs() < 1.0e-7
         );
     }
 
@@ -286,12 +302,14 @@ mod tests {
     }
 
     #[test]
-    fn pole_step_reports_a_flip() {
+    fn upper_arm_direction_step_reports_a_flip() {
         let mut first = sample(0, [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]);
         first.elbow = [0.0, 0.5, 0.0];
         let mut second = sample(1, [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]);
         second.elbow = [0.0, -0.5, 0.0];
         let summary = evaluate_arm_sequence(&[first, second]);
-        assert!((summary.upper_arm_direction_max_step_radians - std::f32::consts::PI).abs() < 1.0e-4);
+        assert!(
+            (summary.upper_arm_direction_max_step_radians - std::f32::consts::PI).abs() < 1.0e-4
+        );
     }
 }

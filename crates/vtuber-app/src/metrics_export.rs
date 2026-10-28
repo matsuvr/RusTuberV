@@ -241,7 +241,9 @@ fn measurement_ready(snapshot: &DiagnosticsSnapshot) -> bool {
         && snapshot.capture_rate > 0.0
         && snapshot.inference_rate > 0.0
         && snapshot.tracking_rate > 0.0
-        && snapshot.frame_received_to_apply_p95_ms.is_some_and(f32::is_finite)
+        && snapshot
+            .frame_received_to_apply_p95_ms
+            .is_some_and(f32::is_finite)
 }
 
 fn create_output(path: &Path) -> io::Result<File> {
@@ -308,6 +310,38 @@ mod tests {
     fn csv_names_distinguish_publish_rejections_from_reader_skips() {
         assert!(HEADER.contains("capture_publish_rejected_frames,inference_input_skipped_frames"));
         assert!(!HEADER.contains("overwrites"));
+    }
+
+    #[test]
+    fn csv_exports_frame_received_to_apply_percentiles() {
+        let temp = tempfile::tempdir().expect("temporary directory must be created");
+        let path = temp.path().join("metrics.csv");
+        let mut exporter = MetricsExportState::for_path(path.clone());
+        let mut snapshot = ready_snapshot();
+        snapshot.frame_received_to_apply_p50_ms = Some(30.0);
+        exporter.tick(0.0, &snapshot);
+        exporter.tick(WARMUP_SECONDS, &snapshot);
+        let written = fs::read_to_string(path).expect("metrics csv must be written");
+        let header = written.lines().next().expect("header row");
+        let row = written.lines().nth(1).expect("sample row");
+        assert!(!header.contains("capture_to_apply"));
+        for (name, expected) in [
+            ("frame_received_to_apply_p50_ms", 30.0_f32),
+            ("frame_received_to_apply_p95_ms", 48.0_f32),
+        ] {
+            let column = header
+                .split(',')
+                .position(|value| value == name)
+                .expect("latency column");
+            let actual = row
+                .split(',')
+                .nth(column)
+                .expect("latency value")
+                .parse::<f32>()
+                .expect("numeric latency");
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(row.split(',').count(), header.split(',').count());
     }
 
     #[test]
