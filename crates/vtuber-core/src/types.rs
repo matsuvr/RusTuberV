@@ -28,7 +28,9 @@ pub enum PixelFormat {
 pub struct VideoFrame {
     /// Sequence number assigned by the capture pipeline.
     pub seq: FrameSeq,
-    /// When the frame was captured, in monotonic nanoseconds.
+    /// Frame timestamp in monotonic nanoseconds. Live camera backends timestamp
+    /// after receiving the frame; replay and mock sources may use synthetic times.
+    /// This is not the sensor exposure time and excludes upstream buffering.
     pub captured_at: MonoTimeNs,
     /// Width in pixels.
     pub width: u32,

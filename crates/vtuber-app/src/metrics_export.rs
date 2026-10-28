@@ -18,7 +18,9 @@ pub const SAMPLE_INTERVAL_SECONDS: f64 = 60.0;
 /// Start plus 30 one-minute intervals, covering 0 through 1,800 seconds.
 pub const MAX_SAMPLES: usize = 31;
 
-const HEADER: &str = "sample,measurement_elapsed_s,render_fps,process_cpu_pct,process_memory_gib,capture_hz,inference_hz,detector_hz,landmark_hz,tracking_hz,capture_to_apply_p50_ms,capture_to_apply_p95_ms,capture_publish_rejected_frames,inference_input_skipped_frames,no_face_frames,avatar_frames_applied,avatar_frames_skipped,capture_worker,capture_format,inference_worker,tracking_state,stage_percentiles";
+// Frame receipt is timestamped after the camera backend returns a frame;
+// these latency columns exclude sensor/driver and render/display delays.
+const HEADER: &str = "sample,measurement_elapsed_s,render_fps,process_cpu_pct,process_memory_gib,capture_hz,inference_hz,detector_hz,landmark_hz,tracking_hz,frame_received_to_apply_p50_ms,frame_received_to_apply_p95_ms,capture_publish_rejected_frames,inference_input_skipped_frames,no_face_frames,avatar_frames_applied,avatar_frames_skipped,capture_worker,capture_format,inference_worker,tracking_state,stage_percentiles";
 
 /// Runtime state for the opt-in bounded metrics exporter.
 #[derive(Resource, Debug)]
@@ -141,8 +143,8 @@ impl MetricsExportState {
             snapshot.detector_rate,
             snapshot.landmark_rate,
             snapshot.tracking_rate,
-            option_number(snapshot.capture_to_apply_p50_ms),
-            option_number(snapshot.capture_to_apply_p95_ms),
+            option_number(snapshot.frame_received_to_apply_p50_ms),
+            option_number(snapshot.frame_received_to_apply_p95_ms),
             snapshot.capture_publish_rejected_frames,
             snapshot.inference_input_skipped_frames,
             snapshot.inference_no_face_frames,
@@ -239,7 +241,7 @@ fn measurement_ready(snapshot: &DiagnosticsSnapshot) -> bool {
         && snapshot.capture_rate > 0.0
         && snapshot.inference_rate > 0.0
         && snapshot.tracking_rate > 0.0
-        && snapshot.capture_to_apply_p95_ms.is_some_and(f32::is_finite)
+        && snapshot.frame_received_to_apply_p95_ms.is_some_and(f32::is_finite)
 }
 
 fn create_output(path: &Path) -> io::Result<File> {
@@ -297,7 +299,7 @@ mod tests {
             capture_rate: 30.0,
             inference_rate: 30.0,
             tracking_rate: 30.0,
-            capture_to_apply_p95_ms: Some(48.0),
+            frame_received_to_apply_p95_ms: Some(48.0),
             ..Default::default()
         }
     }

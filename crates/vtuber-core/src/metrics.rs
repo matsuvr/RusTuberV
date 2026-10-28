@@ -138,9 +138,9 @@ pub struct StageTimestamps {
 }
 
 impl StageTimestamps {
-    /// Capture-to-apply latency in milliseconds.
+    /// Frame-receipt-to-apply latency in milliseconds; excludes sensor and display delays.
     #[must_use]
-    pub fn capture_to_apply_ms(&self) -> f64 {
+    pub fn frame_received_to_apply_ms(&self) -> f64 {
         self.applied_ns.saturating_sub(self.captured_ns) as f64 / 1_000_000.0
     }
 
@@ -309,7 +309,7 @@ mod tests {
             control_frame_ns: 1_025_000_000,
             applied_ns: 1_030_000_000,
         };
-        assert!((ts.capture_to_apply_ms() - 30.0).abs() < 0.01);
+        assert!((ts.frame_received_to_apply_ms() - 30.0).abs() < 0.01);
         assert!((ts.capture_to_inference_ms() - 20.0).abs() < 0.01);
         assert!((ts.apply_delay_ms() - 5.0).abs() < 0.01);
     }
