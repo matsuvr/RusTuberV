@@ -489,6 +489,7 @@ pub struct TrackingPipeline {
     expression_filter: ExpressionFilter,
     detailed_expression_filter: DetailedExpressionFilter,
     head_filter: HeadRotationFilter,
+    last_head_source_seq: Option<FrameSeq>,
     translation_filter: TranslationFilter,
     gaze_filter: GazeFilter,
     confidence_gate: ConfidenceGate,
@@ -525,6 +526,7 @@ impl TrackingPipeline {
             expression_filter,
             detailed_expression_filter,
             head_filter,
+            last_head_source_seq: None,
             translation_filter,
             gaze_filter,
             confidence_gate,
@@ -617,6 +619,7 @@ impl TrackingPipeline {
 
     fn reset_temporal_filters(&mut self) {
         self.head_filter.reset();
+        self.last_head_source_seq = None;
         self.reset_face_detail_filters();
     }
 
@@ -711,6 +714,11 @@ impl TrackingPipeline {
             _ => false,
         };
         if !cache_valid {
+            if cache.as_ref().is_none_or(|prior| prior.neutral != neutral) {
+                // A new reference changes the relative pose even for a held sample.
+                self.last_head_source_seq = None;
+                self.head_filter.interrupt_recovery();
+            }
             cache =
                 sample.map(|sample| MediapipeSampleCache::build(sample, neutral, gaze_baseline));
             if let (Some(cached), Some(sample)) = (cache.as_mut(), sample) {
@@ -924,19 +932,30 @@ impl TrackingPipeline {
         reconnect: bool,
     ) -> HeadPose {
         if let Some(pose_frame) = pose_frame {
-            let q = semantic_pose_to_quaternion(pose_frame.pose);
-            let filtered_q = if reconnect {
-                self.head_filter.reconnect(q, now)
-            } else {
-                self.head_filter.update(q, now)
-            };
-            quaternion_to_semantic_pose(filtered_q)
+            // A held sample advances the spring, but is not another observation
+            // supporting recovery from a rejected heading. Both input APIs use
+            // the source sequence, not the render timestamp, for this decision.
+            if reconnect
+                || (self.last_head_source_seq != Some(pose_frame.source_seq)
+                    && self.head_filter.can_observe_at(now))
+            {
+                self.last_head_source_seq = Some(pose_frame.source_seq);
+                let q = semantic_pose_to_quaternion(pose_frame.pose);
+                let filtered_q = if reconnect {
+                    self.head_filter.reconnect(q, now)
+                } else {
+                    self.head_filter.update(q, now)
+                };
+                return quaternion_to_semantic_pose(filtered_q);
+            }
         } else {
-            self.head_filter
-                .advance(now)
-                .map(quaternion_to_semantic_pose)
-                .unwrap_or_default()
+            self.last_head_source_seq = None;
+            self.head_filter.interrupt_recovery();
         }
+        self.head_filter
+            .advance(now)
+            .map(quaternion_to_semantic_pose)
+            .unwrap_or_default()
     }
 }
 
@@ -2080,6 +2099,275 @@ mod assembly {
             second.head,
             third.head
         );
+    }
+
+    #[test]
+    fn a_new_neutral_reference_updates_a_held_head_pose() {
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
+        let neutral = rotated_mediapipe_sample(0, 0.0);
+        let target = rotated_mediapipe_sample(1, 10.0);
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(0));
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(1_000_000_000));
+        let _ = track_mediapipe(&mut pipeline, &target, MonoTimeNs(1_100_000_000));
+        let updated = pipeline.update_mediapipe(
+            Some(&target),
+            Some(target.camera_to_face),
+            None,
+            MonoTimeNs(1_600_000_000),
+            Duration::from_millis(500),
+        );
+        assert!(updated.frame.unwrap().head.yaw_rad.abs() < 0.001);
+    }
+
+    #[test]
+    fn a_held_observation_is_applied_once_the_render_clock_advances() {
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
+        let neutral = rotated_mediapipe_sample(0, 0.0);
+        let target = rotated_mediapipe_sample(1, 10.0);
+        let now = MonoTimeNs(1_000_000_000);
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(0));
+        let _ = track_mediapipe(&mut pipeline, &neutral, now);
+        let same_tick = track_mediapipe(&mut pipeline, &target, now).unwrap();
+        assert!(same_tick.head.yaw_rad.abs() < 1e-6);
+        let next_tick =
+            track_mediapipe(&mut pipeline, &target, MonoTimeNs(now.0 + 16_000_000)).unwrap();
+        assert!(next_tick.head.yaw_rad > 0.0);
+    }
+
+    #[test]
+    fn large_head_steps_recover_only_from_fresh_consistent_observations() {
+        for observation_hz in [15u64, 30] {
+            for render_hz in [30u64, 60, 120] {
+                for case in ["sustained", "single", "alternating", "held"] {
+                    let mut pipeline = TrackingPipeline::try_new(PipelineConfig {
+                        head_filter: HeadFilterParams::default(),
+                        ..config()
+                    })
+                    .unwrap();
+                    let neutral = rotated_mediapipe_sample(0, 0.0);
+                    let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(0));
+                    let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(1_000_000_000));
+                    let ticks_per_observation = render_hz / observation_hz;
+                    let target_yaw = 1.5_f32;
+                    let mut previous = 0.0_f32;
+                    let mut previous_seq = 0;
+                    let mut first_motion_seq = None;
+                    let mut recovered_at_ms = None;
+                    let mut max_frame_step = 0.0_f32;
+                    let mut false_acceptances = 0;
+
+                    for tick in 1..=2 * render_hz {
+                        let observation = 1 + (tick - 1) / ticks_per_observation;
+                        let seq = if case == "held" { 1 } else { observation };
+                        let yaw = match case {
+                            "single" if observation > 1 => 0.0,
+                            "alternating" if observation % 2 == 0 => -target_yaw,
+                            _ => target_yaw,
+                        };
+                        let mut sample = rotated_mediapipe_sample(seq, yaw.to_degrees());
+                        sample.captured_at =
+                            MonoTimeNs(1_000_000_000 + (seq - 1) * 1_000_000_000 / observation_hz);
+                        let before = pipeline.head_filter.quarantined_samples();
+                        let update = pipeline.update_mediapipe(
+                            Some(&sample),
+                            Some(CameraFaceTransform::identity()),
+                            None,
+                            MonoTimeNs(1_000_000_000 + tick * 1_000_000_000 / render_hz),
+                            Duration::from_secs_f64(1.0 / render_hz as f64),
+                        );
+                        assert_eq!(update.state, TrackingState::Tracking);
+                        let output = update.frame.unwrap().head.yaw_rad;
+                        if case != "sustained"
+                            && seq != previous_seq
+                            && yaw.abs() > 1.25
+                            && pipeline.head_filter.quarantined_samples() == before
+                        {
+                            false_acceptances += 1;
+                        }
+                        if output.abs() > 1e-6 && first_motion_seq.is_none() {
+                            first_motion_seq = Some(seq);
+                        }
+                        if case == "sustained"
+                            && (output - target_yaw).abs() < 1.0_f32.to_radians()
+                            && recovered_at_ms.is_none()
+                        {
+                            // Time from the first large observation, not startup.
+                            recovered_at_ms = Some((tick - 1) as f64 * 1000.0 / render_hz as f64);
+                        }
+                        max_frame_step = max_frame_step.max((output - previous).abs());
+                        previous = output;
+                        previous_seq = seq;
+                    }
+
+                    assert_eq!(
+                        false_acceptances, 0,
+                        "{case}, {observation_hz}/{render_hz} Hz"
+                    );
+                    if case == "sustained" {
+                        assert_eq!(first_motion_seq, Some(3));
+                        assert!(recovered_at_ms.unwrap() < 350.0);
+                        assert!((previous - target_yaw).abs() < 1e-4);
+                        assert!(max_frame_step < target_yaw * 0.5, "recovery must not snap");
+                        assert_eq!(pipeline.head_filter.quarantined_samples(), 2);
+                    } else {
+                        assert_eq!(first_motion_seq, None, "{case}");
+                        let rejected = if case == "alternating" {
+                            2 * observation_hz
+                        } else {
+                            1
+                        };
+                        assert_eq!(pipeline.head_filter.quarantined_samples(), rejected);
+                    }
+                    eprintln!(
+                        "head recovery {case}, observation={observation_hz} Hz, \
+                         render={render_hz} Hz: within_1_deg_ms={recovered_at_ms:?}, \
+                         false_acceptances={false_acceptances}, \
+                         max_frame_step_deg={}",
+                        max_frame_step.to_degrees()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stationary_head_noise_keeps_the_existing_render_clock_response() {
+        for observation_hz in [15u64, 30] {
+            for render_hz in [30u64, 60, 120] {
+                let params = HeadFilterParams::default();
+                let mut pipeline = TrackingPipeline::try_new(PipelineConfig {
+                    head_filter: params,
+                    ..config()
+                })
+                .unwrap();
+                let neutral = rotated_mediapipe_sample(0, 0.0);
+                let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(0));
+                let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(1_000_000_000));
+                // Before this change the pipeline updated the head filter on
+                // every render tick, even when the observation was held.
+                let mut reference = HeadRotationFilter::new(params);
+                let _ = reference.update(
+                    nalgebra::UnitQuaternion::identity(),
+                    MonoTimeNs(1_000_000_000),
+                );
+                let mut input_energy = 0.0_f64;
+                let mut output_energy = 0.0_f64;
+
+                for tick in 1..=3 * render_hz {
+                    let seq = 1 + (tick - 1) / (render_hz / observation_hz);
+                    // Two superposed noise sources, followed by a settling tail.
+                    let yaw = if seq <= 2 * observation_hz {
+                        0.013 * (seq as f32 * 2.3).sin() + 0.007 * (seq as f32 * 0.7).cos()
+                    } else {
+                        0.0
+                    };
+                    let sample = rotated_mediapipe_sample(seq, yaw.to_degrees());
+                    let now = MonoTimeNs(1_000_000_000 + tick * 1_000_000_000 / render_hz);
+                    let pose = media_pipe_pose_frame(&sample, CameraFaceTransform::identity(), now)
+                        .unwrap();
+                    let expected = reference.update(semantic_pose_to_quaternion(pose.pose), now);
+                    let actual = pipeline
+                        .update_mediapipe(
+                            Some(&sample),
+                            Some(CameraFaceTransform::identity()),
+                            None,
+                            now,
+                            Duration::from_secs_f64(1.0 / render_hz as f64),
+                        )
+                        .frame
+                        .unwrap()
+                        .head;
+                    assert!(semantic_pose_to_quaternion(actual).angle_to(&expected) < 1e-5);
+                    input_energy += f64::from(yaw).powi(2);
+                    output_energy += f64::from(actual.yaw_rad).powi(2);
+                }
+                assert!(
+                    output_energy < input_energy,
+                    "mixed noise must not gain energy"
+                );
+                assert_eq!(pipeline.head_filter.quarantined_samples(), 0);
+                let ticks = (3 * render_hz) as f64;
+                eprintln!(
+                    "head stationary noise, observation={observation_hz} Hz, \
+                     render={render_hz} Hz: input_rms_deg={}, output_rms_deg={}",
+                    (input_energy / ticks).sqrt().to_degrees(),
+                    (output_energy / ticks).sqrt().to_degrees()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_observations_also_recover_without_counting_held_samples() {
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
+        let profile = neutral_profile();
+        pipeline.apply_calibration(profile.clone()).unwrap();
+        let neutral = observation(0, profile.landmarks.clone(), relaxed_expression());
+        let _ = pipeline.update(Some(&neutral), MonoTimeNs(0), Duration::from_millis(33));
+        let _ = pipeline.update(
+            Some(&neutral),
+            MonoTimeNs(1_000_000_000),
+            Duration::from_millis(33),
+        );
+        let target = semantic_pose_to_quaternion(HeadPose {
+            yaw_rad: 1.5,
+            ..HeadPose::default()
+        });
+        let landmarks: Vec<_> = profile
+            .landmarks
+            .iter()
+            .map(|landmark| {
+                let point = target * nalgebra::Vector3::new(landmark.x, landmark.y, landmark.z);
+                Landmark3 {
+                    x: point.x,
+                    y: point.y,
+                    z: point.z,
+                    visibility: 1.0,
+                }
+            })
+            .collect();
+        let mut last = 0.0;
+        for tick in 1..=120 {
+            let seq = 1 + (tick - 1) / 4;
+            let sample = observation(seq, landmarks.clone(), relaxed_expression());
+            let update = pipeline.update(
+                Some(&sample),
+                MonoTimeNs(1_000_000_000 + tick * 1_000_000_000 / 120),
+                Duration::from_secs_f64(1.0 / 120.0),
+            );
+            assert_eq!(update.state, TrackingState::Tracking);
+            last = update.frame.unwrap().head.yaw_rad;
+            if seq < 3 {
+                assert!(last.abs() < 1e-5);
+            } else {
+                assert!(last > 0.0);
+            }
+        }
+        assert!((last - 1.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_missing_pose_interrupts_recovery_even_without_a_tracking_state_change() {
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
+        let mut pose = HeadPoseFrame {
+            source_seq: FrameSeq(0),
+            captured_at: MonoTimeNs(0),
+            produced_at: MonoTimeNs(0),
+            pose: HeadPose::default(),
+            translation: HeadTranslationSignal::UNAVAILABLE,
+            confidence: 1.0,
+        };
+        let _ = pipeline.update_head_filter(Some(&pose), MonoTimeNs(0), false);
+        pose.pose.yaw_rad = 1.5;
+        for seq in 1..=2 {
+            pose.source_seq = FrameSeq(seq);
+            let _ = pipeline.update_head_filter(Some(&pose), MonoTimeNs(seq * 16_000_000), false);
+        }
+        let _ = pipeline.update_head_filter(None, MonoTimeNs(48_000_000), false);
+        pose.source_seq = FrameSeq(3);
+        let output = pipeline.update_head_filter(Some(&pose), MonoTimeNs(64_000_000), false);
+        assert!(output.yaw_rad.abs() < 1e-6);
+        assert_eq!(pipeline.head_filter.quarantined_samples(), 3);
     }
 
     #[test]

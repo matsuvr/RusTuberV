@@ -29,13 +29,15 @@ pub struct HeadFilterParams {
     /// Larger gaps are clamped to this value so that a stale observation
     /// cannot fully snap the output.
     pub max_dt_sec: f32,
-    /// Maximum accepted angular departure from the filtered rotation, in radians.
+    /// Angular departure from the filtered rotation that requires confirmation.
+    /// Measured in radians.
     ///
     /// A target farther from the current smoothed rotation is rejected while
     /// the previous accepted response continues. The comparison uses the
     /// filtered state, not the preceding raw observation. A later
-    /// target is accepted once it falls within this limit. Reconnection after
-    /// an absence explicitly accepts the new heading.
+    /// target is accepted once it falls within this limit, or after three
+    /// consecutive observations stay within 0.15 radians of the first rejected
+    /// heading. Reconnection after an absence explicitly accepts the new heading.
     pub max_step_rad: f32,
 }
 
@@ -67,6 +69,35 @@ struct FilterState {
     last_time: MonoTimeNs,
 }
 
+const RECOVERY_OBSERVATIONS: u8 = 3;
+const RECOVERY_SPREAD_RAD: f32 = 0.15;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RejectedHeading {
+    anchor: UnitQuaternion<f32>,
+    observations: u8,
+}
+
+/// Keeps a fixed anchor so a sequence of drifting outliers cannot accumulate
+/// agreement merely by staying close to the preceding outlier.
+fn observe_rejected_heading(
+    previous: Option<RejectedHeading>,
+    target: UnitQuaternion<f32>,
+) -> RejectedHeading {
+    match previous {
+        Some(previous) if previous.anchor.angle_to(&target) <= RECOVERY_SPREAD_RAD => {
+            RejectedHeading {
+                observations: previous.observations.saturating_add(1),
+                ..previous
+            }
+        }
+        _ => RejectedHeading {
+            anchor: target,
+            observations: 1,
+        },
+    }
+}
+
 /// Quaternion-centered critically damped second-order filter for head rotation.
 ///
 /// The filter maintains an internal quaternion state and a tangent-space
@@ -83,6 +114,7 @@ struct FilterState {
 pub struct HeadRotationFilter {
     params: HeadFilterParams,
     state: Option<FilterState>,
+    rejected_heading: Option<RejectedHeading>,
     quarantined_samples: u64,
 }
 
@@ -93,6 +125,7 @@ impl HeadRotationFilter {
         Self {
             params,
             state: None,
+            rejected_heading: None,
             quarantined_samples: 0,
         }
     }
@@ -103,12 +136,18 @@ impl HeadRotationFilter {
         self.state.is_some()
     }
 
+    /// A new observation can initialize the spring or advance its render clock.
+    pub(crate) fn can_observe_at(&self, timestamp: MonoTimeNs) -> bool {
+        self.state.is_none_or(|state| timestamp > state.last_time)
+    }
+
     /// Resets the filter, discarding all state.
     ///
     /// The next call to [`update`](Self::update) initializes the filter with
     /// that observation.
     pub fn reset(&mut self) {
         self.state = None;
+        self.rejected_heading = None;
         self.quarantined_samples = 0;
     }
 
@@ -127,7 +166,10 @@ impl HeadRotationFilter {
         self.quarantined_samples
     }
 
-    /// Updates the filter with a new target rotation.
+    /// Updates the filter with a new observed target rotation.
+    ///
+    /// Call this once per observation. Use [`advance`](Self::advance) on render
+    /// ticks that reuse an observation so it cannot count toward recovery again.
     ///
     /// `timestamp` is expected to be monotonically non-decreasing. If it is
     /// older than the previous observation the elapsed time is treated as
@@ -137,7 +179,7 @@ impl HeadRotationFilter {
     /// # Arguments
     ///
     /// * `target` - Desired rotation in the canonical tracking basis.
-    /// * `timestamp` - Monotonic timestamp of the observation.
+    /// * `timestamp` - Monotonic time at which to advance the filter.
     ///
     /// # Returns
     ///
@@ -180,9 +222,17 @@ impl HeadRotationFilter {
             f32::MAX
         };
         if error.norm() > max_step {
+            let rejected = observe_rejected_heading(self.rejected_heading, signed_target);
+            if rejected.observations >= RECOVERY_OBSERVATIONS {
+                // Use the existing smooth reconnection path, preserving both
+                // rotation and angular velocity instead of reseeding the spring.
+                return self.reconnect(signed_target, timestamp);
+            }
+            self.rejected_heading = Some(rejected);
             self.quarantined_samples = self.quarantined_samples.saturating_add(1);
             return self.advance(timestamp).unwrap_or(state.spring.value);
         }
+        self.rejected_heading = None;
 
         // A critically damped second-order response in the local rotation
         // vector is the SO(3) equivalent of a biquad. The quaternion remains
@@ -211,13 +261,19 @@ impl HeadRotationFilter {
         Some(state.spring.value)
     }
 
-    /// Accepts the first usable pose after loss without discarding momentum.
-    /// A long absence may contain a real rotation beyond the per-frame limit.
+    /// Ends an interrupted run of rejected observations without stopping motion.
+    pub(crate) fn interrupt_recovery(&mut self) {
+        self.rejected_heading = None;
+    }
+
+    /// Accepts a recovered heading without discarding momentum.
+    /// Used after a tracking absence or confirmation of a large new heading.
     pub fn reconnect(
         &mut self,
         target: UnitQuaternion<f32>,
         timestamp: MonoTimeNs,
     ) -> UnitQuaternion<f32> {
+        self.rejected_heading = None;
         if let Some(state) = self.state.as_mut() {
             state.target = target;
             self.advance(timestamp).unwrap_or(target)
@@ -360,6 +416,105 @@ mod tests {
         );
         assert_relative_eq!(out1.angle_to(&out2), 0.0, epsilon = 1e-6);
         assert_eq!(filter.quarantined_samples(), 1);
+    }
+
+    #[test]
+    fn stable_rejected_headings_reconnect_without_discarding_momentum() {
+        let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+        let _ = filter.update(UnitQuaternion::identity(), ts(0));
+        let _ = filter.update(
+            UnitQuaternion::from_euler_angles(0.0, 0.5, 0.0),
+            ts(16_000_000),
+        );
+        for (time, yaw) in [(32_000_000, -1.5), (48_000_000, -1.55)] {
+            let _ = filter.update(UnitQuaternion::from_euler_angles(0.0, yaw, 0.0), ts(time));
+        }
+        assert_eq!(filter.quarantined_samples(), 2);
+
+        let target = UnitQuaternion::from_euler_angles(0.0, -1.48, 0.0);
+        // The sign of a quaternion must not break agreement about a heading.
+        let signed_target = UnitQuaternion::from_quaternion(-*target.quaternion());
+        let mut expected = filter.clone();
+        let expected = expected.reconnect(signed_target, ts(64_000_000));
+        let recovered = filter.update(signed_target, ts(64_000_000));
+        assert!(recovered.angle_to(&expected) < 1e-6);
+        assert!(recovered.angle_to(&target) > 0.5, "recovery must not snap");
+        assert_eq!(filter.quarantined_samples(), 2);
+
+        let settled = filter.advance(ts(564_000_000)).unwrap();
+        assert!(settled.angle_to(&target) < 1e-5);
+    }
+
+    #[test]
+    fn drifting_outliers_cannot_confirm_a_heading_by_following_each_other() {
+        let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+        let _ = filter.update(UnitQuaternion::identity(), ts(0));
+        for sample in 0..8 {
+            // Adjacent observations agree, but no three agree with one anchor.
+            let yaw = 1.5 + sample as f32 * 0.12;
+            let out = filter.update(
+                UnitQuaternion::from_euler_angles(0.0, yaw, 0.0),
+                ts((sample + 1) * 33_333_333),
+            );
+            assert!(out.angle() < 1e-6);
+        }
+        assert_eq!(filter.quarantined_samples(), 8);
+    }
+
+    #[test]
+    fn a_normal_observation_interrupts_a_rejected_run() {
+        let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+        let identity = UnitQuaternion::identity();
+        let outlier = UnitQuaternion::from_euler_angles(0.0, 1.5, 0.0);
+        let _ = filter.update(identity, ts(0));
+        let _ = filter.update(outlier, ts(16_000_000));
+        let _ = filter.update(outlier, ts(32_000_000));
+        let _ = filter.update(identity, ts(48_000_000));
+        let out = filter.update(outlier, ts(64_000_000));
+        assert!(out.angle() < 1e-6);
+        assert_eq!(filter.quarantined_samples(), 3);
+    }
+
+    #[test]
+    fn interruption_reset_and_reconnect_discard_pending_agreement() {
+        let identity = UnitQuaternion::identity();
+        let outlier = UnitQuaternion::from_euler_angles(0.0, 1.5, 0.0);
+        let mut pending = HeadRotationFilter::new(HeadFilterParams::default());
+        let _ = pending.update(identity, ts(0));
+        let _ = pending.update(outlier, ts(16_000_000));
+        let _ = pending.update(outlier, ts(32_000_000));
+
+        let mut interrupted = pending.clone();
+        interrupted.interrupt_recovery();
+        assert!(interrupted.update(outlier, ts(48_000_000)).angle() < 1e-6);
+
+        for reset in [HeadRotationFilter::reset, HeadRotationFilter::reacquire] {
+            let mut filter = pending.clone();
+            reset(&mut filter);
+            let _ = filter.update(identity, ts(48_000_000));
+            assert!(filter.update(outlier, ts(64_000_000)).angle() < 1e-6);
+            assert_eq!(filter.quarantined_samples(), 1);
+        }
+
+        let _ = pending.reconnect(identity, ts(48_000_000));
+        assert!(pending.update(outlier, ts(64_000_000)).angle() < 1e-6);
+    }
+
+    #[test]
+    fn duplicate_and_backwards_timestamps_do_not_confirm_a_rejected_heading() {
+        let identity = UnitQuaternion::identity();
+        let target = UnitQuaternion::from_euler_angles(0.0, 1.5, 0.0);
+        let mut filter = HeadRotationFilter::new(HeadFilterParams::default());
+        let _ = filter.update(identity, ts(0));
+        let _ = filter.update(target, ts(33_333_333));
+        for _ in 0..30 {
+            assert!(filter.update(target, ts(33_333_333)).angle() < 1e-6);
+            assert!(filter.update(target, ts(16_666_667)).angle() < 1e-6);
+        }
+        assert_eq!(filter.quarantined_samples(), 1);
+        assert!(filter.update(target, ts(66_666_666)).angle() < 1e-6);
+        assert!(filter.update(target, ts(99_999_999)).angle() > 0.0);
+        assert_eq!(filter.quarantined_samples(), 2);
     }
 
     #[test]
