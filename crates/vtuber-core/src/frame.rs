@@ -145,9 +145,9 @@ impl FramePixels<'_> {
         }
         staging.resize(length, 0);
         for (y, row) in staging.chunks_exact_mut(row_bytes).enumerate() {
-            for (x, destination) in row.chunks_exact_mut(3).enumerate() {
+            for (x, destination) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let [r, g, b, _] = self.rgba(x, y)?;
-                destination.copy_from_slice(&[r, g, b]);
+                *destination = [r, g, b];
             }
         }
         Ok(staging)

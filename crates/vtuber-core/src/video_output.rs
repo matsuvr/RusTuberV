@@ -249,22 +249,19 @@ impl std::error::Error for VideoOutputFrameError {}
 /// `A == 0` clears RGB, `A == 255` is unchanged, and intermediate values use
 /// nearest-integer rounding with a bounded result. This function is safe to
 /// apply to a complete packed frame exactly once.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "`chunks_exact_mut(4)` yields exactly four-element slices, so every per-pixel read and write is in bounds"
-)]
 pub fn unpremultiply_bgra8_in_place(data: &mut [u8]) -> Result<(), VideoOutputFrameError> {
-    if !data.len().is_multiple_of(4) {
+    let (pixels, remainder) = data.as_chunks_mut::<4>();
+    if !remainder.is_empty() {
         return Err(VideoOutputFrameError::PixelDataNotAligned);
     }
-    for pixel in data.chunks_exact_mut(4) {
-        let alpha = u16::from(pixel[3]);
+    for [blue, green, red, alpha] in pixels {
+        let alpha = u16::from(*alpha);
         if alpha == 0 {
-            pixel[0] = 0;
-            pixel[1] = 0;
-            pixel[2] = 0;
+            *blue = 0;
+            *green = 0;
+            *red = 0;
         } else if alpha != u16::from(u8::MAX) {
-            for channel in &mut pixel[..3] {
+            for channel in [blue, green, red] {
                 let value = (u16::from(*channel) * u16::from(u8::MAX) + alpha / 2) / alpha;
                 *channel = value.min(u16::from(u8::MAX)) as u8;
             }
