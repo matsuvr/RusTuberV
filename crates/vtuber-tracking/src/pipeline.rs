@@ -714,6 +714,11 @@ impl TrackingPipeline {
             _ => false,
         };
         if !cache_valid {
+            if cache.as_ref().is_none_or(|prior| prior.neutral != neutral) {
+                // A new reference changes the relative pose even for a held sample.
+                self.last_head_source_seq = None;
+                self.head_filter.interrupt_recovery();
+            }
             cache =
                 sample.map(|sample| MediapipeSampleCache::build(sample, neutral, gaze_baseline));
             if let (Some(cached), Some(sample)) = (cache.as_mut(), sample) {
@@ -930,7 +935,10 @@ impl TrackingPipeline {
             // A held sample advances the spring, but is not another observation
             // supporting recovery from a rejected heading. Both input APIs use
             // the source sequence, not the render timestamp, for this decision.
-            if reconnect || self.last_head_source_seq != Some(pose_frame.source_seq) {
+            if reconnect
+                || (self.last_head_source_seq != Some(pose_frame.source_seq)
+                    && self.head_filter.can_observe_at(now))
+            {
                 self.last_head_source_seq = Some(pose_frame.source_seq);
                 let q = semantic_pose_to_quaternion(pose_frame.pose);
                 let filtered_q = if reconnect {
@@ -941,6 +949,7 @@ impl TrackingPipeline {
                 return quaternion_to_semantic_pose(filtered_q);
             }
         } else {
+            self.last_head_source_seq = None;
             self.head_filter.interrupt_recovery();
         }
         self.head_filter
@@ -2093,6 +2102,39 @@ mod assembly {
     }
 
     #[test]
+    fn a_new_neutral_reference_updates_a_held_head_pose() {
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
+        let neutral = rotated_mediapipe_sample(0, 0.0);
+        let target = rotated_mediapipe_sample(1, 10.0);
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(0));
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(1_000_000_000));
+        let _ = track_mediapipe(&mut pipeline, &target, MonoTimeNs(1_100_000_000));
+        let updated = pipeline.update_mediapipe(
+            Some(&target),
+            Some(target.camera_to_face),
+            None,
+            MonoTimeNs(1_600_000_000),
+            Duration::from_millis(500),
+        );
+        assert!(updated.frame.unwrap().head.yaw_rad.abs() < 0.001);
+    }
+
+    #[test]
+    fn a_held_observation_is_applied_once_the_render_clock_advances() {
+        let mut pipeline = TrackingPipeline::try_new(config()).unwrap();
+        let neutral = rotated_mediapipe_sample(0, 0.0);
+        let target = rotated_mediapipe_sample(1, 10.0);
+        let now = MonoTimeNs(1_000_000_000);
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(0));
+        let _ = track_mediapipe(&mut pipeline, &neutral, now);
+        let same_tick = track_mediapipe(&mut pipeline, &target, now).unwrap();
+        assert!(same_tick.head.yaw_rad.abs() < 1e-6);
+        let next_tick =
+            track_mediapipe(&mut pipeline, &target, MonoTimeNs(now.0 + 16_000_000)).unwrap();
+        assert!(next_tick.head.yaw_rad > 0.0);
+    }
+
+    #[test]
     fn large_head_steps_recover_only_from_fresh_consistent_observations() {
         for observation_hz in [15u64, 30] {
             for render_hz in [30u64, 60, 120] {
@@ -2157,7 +2199,10 @@ mod assembly {
                         previous_seq = seq;
                     }
 
-                    assert_eq!(false_acceptances, 0, "{case}, {observation_hz}/{render_hz} Hz");
+                    assert_eq!(
+                        false_acceptances, 0,
+                        "{case}, {observation_hz}/{render_hz} Hz"
+                    );
                     if case == "sustained" {
                         assert_eq!(first_motion_seq, Some(3));
                         assert!(recovered_at_ms.unwrap() < 350.0);
@@ -2236,7 +2281,10 @@ mod assembly {
                     input_energy += f64::from(yaw).powi(2);
                     output_energy += f64::from(actual.yaw_rad).powi(2);
                 }
-                assert!(output_energy < input_energy, "mixed noise must not gain energy");
+                assert!(
+                    output_energy < input_energy,
+                    "mixed noise must not gain energy"
+                );
                 assert_eq!(pipeline.head_filter.quarantined_samples(), 0);
                 let ticks = (3 * render_hz) as f64;
                 eprintln!(

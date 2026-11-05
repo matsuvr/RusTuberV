@@ -136,6 +136,11 @@ impl HeadRotationFilter {
         self.state.is_some()
     }
 
+    /// A new observation can initialize the spring or advance its render clock.
+    pub(crate) fn can_observe_at(&self, timestamp: MonoTimeNs) -> bool {
+        self.state.is_none_or(|state| timestamp > state.last_time)
+    }
+
     /// Resets the filter, discarding all state.
     ///
     /// The next call to [`update`](Self::update) initializes the filter with
