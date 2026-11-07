@@ -1,10 +1,11 @@
 //! Shared critically damped second-order step for tracked-channel smoothing.
 //!
-//! Head rotation and observed-arm positions run on the same render-clock
-//! integrator so every tracked channel reconstructs a continuous signal from a
-//! held observation with one dynamic response.
+//! These primitives reconstruct a continuous signal from a held observation
+//! on the render clock. The arm position cascade has the same response at a
+//! fixed tau; it stores both pole positions to also permit a changing planar
+//! bandwidth without carrying velocity from a different time constant.
 //!
-//! The response is a fixed per-channel time constant. It is deliberately not
+//! Callers of these primitives use a fixed per-channel time constant. It is not
 //! stretched by how fast the observations move: a hand that really is moving
 //! fast is not an outlier, and treating its speed as evidence of a jump slowed
 //! exactly the motion that needed to follow. Discontinuities are handled where

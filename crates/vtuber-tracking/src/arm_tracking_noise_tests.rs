@@ -3,6 +3,8 @@
 //! All coordinates are shoulder-relative positions divided by the same arm
 //! length, so their input/output energy ratios have the same units. Small
 //! perturbations of this bent pose leave the bend-plane speed cap inactive.
+//! They also stay inside the planar filter's quiet response, where the fixed
+//! linear transfer matrix applies. Large-motion timing is tested separately.
 //! The nonlinear IK/bone-output regressions live in vtuber-avatar.
 #![allow(clippy::indexing_slicing)]
 
