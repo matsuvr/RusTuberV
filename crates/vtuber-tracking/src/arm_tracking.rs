@@ -28,10 +28,14 @@ use vtuber_core::arm_tracking::{
 };
 use vtuber_core::{FrameSeq, MonoTimeNs};
 
-use crate::filter::damped::{DEFAULT_MAX_DT_SEC, RotationSpring, VectorSpring};
+use crate::filter::damped::{DEFAULT_MAX_DT_SEC, RotationSpring};
 use crate::filter::time::bounded_dt;
 use crate::hand_poses::{FingerSmootherState, HandPoseSelector};
 use crate::loss_blend::{LossBlend, LossBlendProfile};
+
+#[path = "arm_tracking_position.rs"]
+mod position;
+use position::ArmPositionSmoother;
 
 /// A fixed subject arm length measured at calibration, never remeasured per tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -239,19 +243,21 @@ fn palm_rotation(target: ArmTrackingTarget) -> Option<UnitQuaternion<f32>> {
     ))
 }
 
-/// Time constant of the observed wrist position, in seconds.
+/// Quiet/depth time constant of the observed wrist position, in seconds.
 ///
 /// Attenuate depth noise before it becomes elbow flexion, including when the
 /// elbow observation itself is quiet. The recorded stationary-camera regression
-/// bounds the final bone motion, not just this filter's Cartesian output. This remains
-/// a fixed response, including for a fast hand. A detection teleport is rejected by
-/// [`ArmTrackingProfile::max_wrist_step`] instead, and a real loss is eased back
-/// by the shared loss blend.
+/// bounds the final bone motion, not just this filter's Cartesian output. Large
+/// planar movement gets a faster response in [`ArmPositionSmoother`], while
+/// depth and small planar errors retain this response. A detection teleport is
+/// rejected by [`ArmTrackingProfile::max_wrist_step`], and a real loss is eased
+/// back by the shared loss blend.
 const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.125;
 
-/// Independently damp the shoulder-relative elbow observation. Splitting it
-/// into a fast wrist midpoint and a slower residual creates elbow motion from
-/// wrist-only noise: the two filters cannot cancel at different bandwidths.
+/// Quiet/depth response of the independent shoulder-relative elbow observation.
+/// Large planar elbow motion accelerates without borrowing wrist movement.
+/// Splitting it into a fast wrist midpoint and a slower residual creates elbow
+/// motion from wrist-only noise: the filters cannot cancel at different bandwidths.
 /// Fixed bone lengths and coupled motion belong to the downstream FK solver.
 const ARM_ELBOW_TIME_CONSTANT_SEC: f32 = 0.15;
 
@@ -369,8 +375,8 @@ mod noise_tests;
 /// palm plane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ArmSmootherState {
-    wrist: VectorSpring,
-    elbow: VectorSpring,
+    wrist: ArmPositionSmoother,
+    elbow: ArmPositionSmoother,
     palm: Option<RotationSpring>,
     fingers: Option<FingerSmootherState>,
     /// Bend-plane direction emitted on the previous tick, used to rate-limit
@@ -382,8 +388,8 @@ impl ArmSmootherState {
     /// Seeds the smoother at the first adopted target; later ticks advance it.
     fn new(target: ArmTrackingTarget) -> Self {
         Self {
-            wrist: VectorSpring::new(vector(target.wrist)),
-            elbow: VectorSpring::new(vector(target.elbow_pole)),
+            wrist: ArmPositionSmoother::new(vector(target.wrist)),
+            elbow: ArmPositionSmoother::new(vector(target.elbow_pole)),
             palm: palm_rotation(target).map(RotationSpring::new),
             fingers: target.fingers.map(FingerSmootherState::new),
             last_plane: None,
@@ -1566,11 +1572,9 @@ mod tests {
     }
 
     #[test]
-    fn a_fast_hand_is_followed_at_the_same_rate_as_a_slow_one() {
-        // The response is a fixed time constant, so the fraction of the
-        // remaining distance covered per render tick does not depend on how far
-        // the observation moved. A hand crossing the body is motion, not a jump,
-        // and must not be slowed for being quick.
+    fn a_fast_hand_is_not_slowed_by_its_distance() {
+        // A hand crossing the body is motion, not a jump. Its planar response
+        // may accelerate, but must never follow a smaller fraction than a drift.
         let target = |value: f32| ArmTrackingTarget {
             wrist: [value, 0.0, 0.0],
             elbow_pole: [value, 0.0, 0.0],
@@ -1587,14 +1591,14 @@ mod tests {
         let slow = followed(0.05);
         let fast = followed(1.5);
         assert!(
-            (slow - fast).abs() < 1.0e-5,
-            "the followed fraction must not depend on the step: {slow} vs {fast}"
+            fast >= slow,
+            "a faster motion must not get a slower response: {slow} vs {fast}"
         );
     }
 
     #[test]
     fn a_teleport_is_rejected_before_it_reaches_the_smoother() {
-        // The fixed response above follows any step, so the discontinuity guard
+        // The position response follows adopted targets, so the discontinuity guard
         // is `max_wrist_step` rather than a stiffer filter. A wrist more than
         // one calibrated arm length away in a single observation is dropped and
         // never becomes a target; a plausible step is followed.
