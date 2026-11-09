@@ -19,6 +19,8 @@ const FAST_TIME_CONSTANT_SEC: f32 = 0.04;
 pub(super) struct ArmPositionSmoother {
     pub(super) position: Vector3<f32>,
     first_stage: Vector3<f32>,
+    /// Remaining quiet response after observed control takes over from the virtual arm.
+    settling_sec: f32,
 }
 
 impl ArmPositionSmoother {
@@ -26,15 +28,33 @@ impl ArmPositionSmoother {
         Self {
             position,
             first_stage: position,
+            settling_sec: 0.0,
         }
     }
 
-    pub(super) fn step(&mut self, target: Vector3<f32>, dt_sec: f32, quiet_tau: f32) {
+    pub(super) fn step(&mut self, target: Vector3<f32>, dt_sec: f32, quiet_tau: f32, weight: f32) {
+        if weight < 1.0 {
+            // Six time constants leave less than 2% of a held step in the
+            // two-pole quiet filter. Bound takeover even for continuous motion.
+            self.settling_sec = 6.0 * quiet_tau;
+        }
         if dt_sec == 0.0 {
             return;
         }
         let error = target - self.position;
-        let planar_tau = planar_time_constant(error.x.hypot(error.y), quiet_tau);
+        let distance = error.x.hypot(error.y);
+        if weight >= 1.0 {
+            self.settling_sec = if distance <= QUIET_PLANAR_ERROR {
+                0.0
+            } else {
+                (self.settling_sec - dt_sec).max(0.0)
+            };
+        }
+        let planar_tau = if self.settling_sec > 0.0 {
+            quiet_tau
+        } else {
+            planar_time_constant(distance, quiet_tau)
+        };
         let time_constants = Vector3::new(planar_tau, planar_tau, quiet_tau);
         for (((position, first), target), tau) in self
             .position
@@ -95,7 +115,7 @@ mod tests {
                             + 0.003 * (std::f32::consts::TAU * 7.0 * t + phase).sin()
                     };
                     let target = initial + Vector3::new(offset(0.0), offset(0.7), offset(1.4));
-                    actual.step(target, 1.0 / fps as f32, tau);
+                    actual.step(target, 1.0 / fps as f32, tau, 1.0);
                     reference.step(target, 1.0 / fps as f32, tau);
                     assert!((actual.position - reference.position).norm() < 2.0e-6);
                 }
@@ -115,7 +135,7 @@ mod tests {
                     0.2 * (std::f32::consts::TAU * t).cos(),
                     0.03 * (std::f32::consts::TAU * 3.0 * t).sin(),
                 );
-                actual.step(target, 1.0 / fps as f32, 0.125);
+                actual.step(target, 1.0 / fps as f32, 0.125, 1.0);
                 reference.step(target, 1.0 / fps as f32, 0.125);
                 assert!((actual.position.z - reference.position.z).abs() < 2.0e-6);
             }
@@ -130,7 +150,7 @@ mod tests {
             let target = Vector3::new(0.4, 0.0, 0.0);
             let mut previous = 0.0;
             for tick in 1..=fps * 3 {
-                actual.step(target, 1.0 / fps as f32, 0.125);
+                actual.step(target, 1.0 / fps as f32, 0.125, 1.0);
                 reference.step(target, 1.0 / fps as f32, 0.125);
                 assert!(actual.position.x >= previous);
                 assert!(actual.position.x <= target.x);
@@ -153,7 +173,7 @@ mod tests {
             let mut actual = ArmPositionSmoother::new(Vector3::zeros());
             for target in [0.4, -0.4, 0.0] {
                 for _ in 0..fps {
-                    actual.step(Vector3::new(target, 0.0, 0.0), 1.0 / fps as f32, 0.125);
+                    actual.step(Vector3::new(target, 0.0, 0.0), 1.0 / fps as f32, 0.125, 1.0);
                     assert!((-0.4..=0.4).contains(&actual.position.x));
                     assert_eq!(actual.position.y, 0.0);
                     assert_eq!(actual.position.z, 0.0);
@@ -164,10 +184,51 @@ mod tests {
     }
 
     #[test]
+    fn takeover_keeps_the_quiet_response_until_the_position_catches_up() {
+        for tau in [0.125, 0.15] {
+            let mut actual = ArmPositionSmoother::new(Vector3::zeros());
+            let mut reference = VectorSpring::new(Vector3::zeros());
+            let target = Vector3::new(0.4, 0.2, 0.1);
+            for weight in [0.0, 0.5, 0.99, 1.0, 1.0] {
+                actual.step(target, 1.0 / 60.0, tau, weight);
+                reference.step(target, 1.0 / 60.0, tau);
+                assert!((actual.position - reference.position).norm() < 2.0e-6);
+            }
+            // The two responses diverge as soon as a settled, fully observed
+            // arm begins a new movement, before the settling timeout expires.
+            let near = actual.position;
+            actual.step(near, 1.0 / 60.0, tau, 1.0);
+            reference.step(near, 1.0 / 60.0, tau);
+            for _ in 0..6 {
+                actual.step(target, 1.0 / 60.0, tau, 1.0);
+                reference.step(target, 1.0 / 60.0, tau);
+            }
+            assert!(actual.position.x > reference.position.x + 0.03);
+        }
+    }
+
+    #[test]
+    fn continuous_motion_can_accelerate_after_takeover_without_a_pause() {
+        let mut actual = ArmPositionSmoother::new(Vector3::zeros());
+        let mut reference = VectorSpring::new(Vector3::zeros());
+        let dt = 1.0 / 60.0;
+        for tick in 1..=60 {
+            let target = Vector3::new(0.2 + tick as f32 * 0.02, 0.0, 0.0);
+            let weight = if tick <= 4 { 0.5 } else { 1.0 };
+            actual.step(target, dt, 0.125, weight);
+            reference.step(target, dt, 0.125);
+            if tick == 30 {
+                assert!((actual.position - reference.position).norm() < 2.0e-6);
+            }
+        }
+        assert!(actual.position.x > reference.position.x + 0.05);
+    }
+
+    #[test]
     fn zero_elapsed_time_keeps_both_poles_unchanged() {
         let mut actual = ArmPositionSmoother::new(Vector3::new(0.3, -0.2, 0.4));
         let previous = actual;
-        actual.step(Vector3::new(-0.2, 0.3, 0.4), 0.0, 0.125);
+        actual.step(Vector3::new(-0.2, 0.3, 0.4), 0.0, 0.125, 1.0);
         assert_eq!(actual, previous);
     }
 }

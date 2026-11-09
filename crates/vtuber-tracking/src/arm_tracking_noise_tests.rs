@@ -65,7 +65,11 @@ fn six_channel_frequency_gain_bounds_every_combination_of_noise_phases() {
                     let mut offset = [0.0; 6];
                     offset[input] = AMPLITUDE * phase.sin() as f32;
                     for matrix in &mut transfer {
-                        let output = smoother.advance(offset_target(offset), 1.0 / fps as f32);
+                        let output = smoother.advance(
+                            offset_target(offset),
+                            1.0 / fps as f32,
+                            ArmBlendWeight::ONE,
+                        );
                         if sample < SAMPLES {
                             continue; // Let initial conditions settle for four seconds.
                         }
@@ -144,7 +148,7 @@ fn simultaneous_multitone_noise_cannot_gain_energy_or_step_energy() {
                     AMPLITUDE * signal as f32
                 });
                 let observed = offset_target(offset);
-                let output = smoother.advance(observed, 1.0 / fps as f32);
+                let output = smoother.advance(observed, 1.0 / fps as f32, ArmBlendWeight::ONE);
                 let input = coordinates(observed) - coordinates(BASE);
                 let output = coordinates(output) - coordinates(BASE);
                 let input_step = input - previous_input;
