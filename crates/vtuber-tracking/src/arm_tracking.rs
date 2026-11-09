@@ -28,10 +28,14 @@ use vtuber_core::arm_tracking::{
 };
 use vtuber_core::{FrameSeq, MonoTimeNs};
 
-use crate::filter::damped::{DEFAULT_MAX_DT_SEC, RotationSpring, VectorSpring};
+use crate::filter::damped::{DEFAULT_MAX_DT_SEC, RotationSpring};
 use crate::filter::time::bounded_dt;
 use crate::hand_poses::{FingerSmootherState, HandPoseSelector};
 use crate::loss_blend::{LossBlend, LossBlendProfile};
+
+#[path = "arm_tracking_position.rs"]
+mod position;
+use position::ArmPositionSmoother;
 
 /// A fixed subject arm length measured at calibration, never remeasured per tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -239,19 +243,21 @@ fn palm_rotation(target: ArmTrackingTarget) -> Option<UnitQuaternion<f32>> {
     ))
 }
 
-/// Time constant of the observed wrist position, in seconds.
+/// Quiet/depth time constant of the observed wrist position, in seconds.
 ///
 /// Attenuate depth noise before it becomes elbow flexion, including when the
 /// elbow observation itself is quiet. The recorded stationary-camera regression
-/// bounds the final bone motion, not just this filter's Cartesian output. This remains
-/// a fixed response, including for a fast hand. A detection teleport is rejected by
-/// [`ArmTrackingProfile::max_wrist_step`] instead, and a real loss is eased back
-/// by the shared loss blend.
+/// bounds the final bone motion, not just this filter's Cartesian output. Large
+/// planar movement gets a faster response in [`ArmPositionSmoother`], while
+/// depth and small planar errors retain this response. A detection teleport is
+/// rejected by [`ArmTrackingProfile::max_wrist_step`], and a real loss is eased
+/// back by the shared loss blend.
 const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.125;
 
-/// Independently damp the shoulder-relative elbow observation. Splitting it
-/// into a fast wrist midpoint and a slower residual creates elbow motion from
-/// wrist-only noise: the two filters cannot cancel at different bandwidths.
+/// Quiet/depth response of the independent shoulder-relative elbow observation.
+/// Large planar elbow motion accelerates without borrowing wrist movement.
+/// Splitting it into a fast wrist midpoint and a slower residual creates elbow
+/// motion from wrist-only noise: the filters cannot cancel at different bandwidths.
 /// Fixed bone lengths and coupled motion belong to the downstream FK solver.
 const ARM_ELBOW_TIME_CONSTANT_SEC: f32 = 0.15;
 
@@ -369,8 +375,8 @@ mod noise_tests;
 /// palm plane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ArmSmootherState {
-    wrist: VectorSpring,
-    elbow: VectorSpring,
+    wrist: ArmPositionSmoother,
+    elbow: ArmPositionSmoother,
     palm: Option<RotationSpring>,
     fingers: Option<FingerSmootherState>,
     /// Bend-plane direction emitted on the previous tick, used to rate-limit
@@ -382,22 +388,32 @@ impl ArmSmootherState {
     /// Seeds the smoother at the first adopted target; later ticks advance it.
     fn new(target: ArmTrackingTarget) -> Self {
         Self {
-            wrist: VectorSpring::new(vector(target.wrist)),
-            elbow: VectorSpring::new(vector(target.elbow_pole)),
+            wrist: ArmPositionSmoother::new(vector(target.wrist)),
+            elbow: ArmPositionSmoother::new(vector(target.elbow_pole)),
             palm: palm_rotation(target).map(RotationSpring::new),
             fingers: target.fingers.map(FingerSmootherState::new),
             last_plane: None,
         }
     }
 
-    fn advance(&mut self, target: ArmTrackingTarget, dt_sec: f32) -> ArmTrackingTarget {
+    fn advance(
+        &mut self,
+        target: ArmTrackingTarget,
+        dt_sec: f32,
+        weight: ArmBlendWeight,
+    ) -> ArmTrackingTarget {
         let dt_sec = bounded_dt(dt_sec, DEFAULT_MAX_DT_SEC);
-        self.wrist
-            .step(vector(target.wrist), dt_sec, ARM_POSITION_TIME_CONSTANT_SEC);
+        self.wrist.step(
+            vector(target.wrist),
+            dt_sec,
+            ARM_POSITION_TIME_CONSTANT_SEC,
+            weight.wrist,
+        );
         self.elbow.step(
             vector(target.elbow_pole),
             dt_sec,
             ARM_ELBOW_TIME_CONSTANT_SEC,
+            weight.pole,
         );
         if let Some(rotation) = palm_rotation(target) {
             self.palm
@@ -939,9 +955,10 @@ impl ArmSideState {
             .advance(now, self.presence.palm, &profile.blend);
         self.fingers_blend
             .advance(now, self.presence.fingers, &profile.blend);
+        let weight = self.weights();
         if let (Some(source), Some(smoother)) = (self.source, self.smoother.as_mut()) {
             let dt_sec = render_dt_ns.unwrap_or(0) as f32 * 1.0e-9;
-            self.output = Some(smoother.advance(source, dt_sec));
+            self.output = Some(smoother.advance(source, dt_sec, weight));
         }
     }
 
@@ -1415,7 +1432,7 @@ mod tests {
                 (initial, 120),
             ] {
                 for _ in 0..ticks {
-                    let output = smoother.advance(goal, dt);
+                    let output = smoother.advance(goal, dt, ArmBlendWeight::ONE);
                     let normal = vector(output.palm_normal.unwrap());
                     let forward = vector(output.palm_forward.unwrap());
                     assert!(
@@ -1436,7 +1453,7 @@ mod tests {
             let mut smoother = ArmSmootherState::new(target);
             let mut value = target;
             for _ in 0..120 {
-                value = smoother.advance(target, step_sec);
+                value = smoother.advance(target, step_sec, ArmBlendWeight::ONE);
             }
             assert_eq!(value, target);
         }
@@ -1447,7 +1464,7 @@ mod tests {
         let mut smoother = ArmSmootherState::new(target(0.0));
         let mut previous = 0.0;
         for _ in 0..120 {
-            let value = smoother.advance(target(1.0), RENDER_STEP_SEC);
+            let value = smoother.advance(target(1.0), RENDER_STEP_SEC, ArmBlendWeight::ONE);
             assert!(value.wrist[0] >= previous);
             assert!(value.wrist[0] <= 1.0);
             previous = value.wrist[0];
@@ -1462,8 +1479,11 @@ mod tests {
         for frame in 0..240 {
             let raw = target(if frame % 2 == 0 { 0.01 } else { -0.01 });
             let mut copy = smoother;
-            let value = smoother.advance(raw, RENDER_STEP_SEC);
-            assert_eq!(value, copy.advance(raw, RENDER_STEP_SEC));
+            let value = smoother.advance(raw, RENDER_STEP_SEC, ArmBlendWeight::ONE);
+            assert_eq!(
+                value,
+                copy.advance(raw, RENDER_STEP_SEC, ArmBlendWeight::ONE)
+            );
             squared += value.wrist[0].powi(2);
         }
         assert!((squared / 240.0).sqrt() < 0.005);
@@ -1486,7 +1506,7 @@ mod tests {
                 let phase = sample as f32 * std::f32::consts::TAU * 3.0 / 30.0;
                 let mut observed = initial;
                 observed.elbow_pole[1] += 0.03 * phase.sin();
-                let output = smoother.advance(observed, 1.0 / fps as f32);
+                let output = smoother.advance(observed, 1.0 / fps as f32, ArmBlendWeight::ONE);
                 assert_eq!(output.wrist, initial.wrist);
                 if tick >= fps {
                     squared += (output.elbow_pole[1] - initial.elbow_pole[1]).powi(2);
@@ -1496,7 +1516,7 @@ mod tests {
             assert!(rms < 0.003, "{fps} Hz: elbow jitter RMS {rms}");
             let mut output = initial;
             for _ in 0..fps * 4 {
-                output = smoother.advance(initial, 1.0 / fps as f32);
+                output = smoother.advance(initial, 1.0 / fps as f32, ArmBlendWeight::ONE);
             }
             near(output.elbow_pole, initial.elbow_pole);
         }
@@ -1521,7 +1541,7 @@ mod tests {
                 // A stationary elbow with noisy wrist depth is also a valid
                 // forearm motion. The elbow observation did not move.
                 observed.wrist[2] += 0.03 * phase.sin();
-                let output = smoother.advance(observed, 1.0 / fps as f32);
+                let output = smoother.advance(observed, 1.0 / fps as f32, ArmBlendWeight::ONE);
                 largest =
                     largest.max((vector(output.elbow_pole) - vector(initial.elbow_pole)).norm());
             }
@@ -1547,7 +1567,7 @@ mod tests {
         moved.elbow_pole[0] += 0.2;
         let mut previous = initial;
         for tick in 0..180 {
-            let output = smoother.advance(moved, 1.0 / 60.0);
+            let output = smoother.advance(moved, 1.0 / 60.0, ArmBlendWeight::ONE);
             assert!(output.wrist[0] >= previous.wrist[0]);
             assert!(output.elbow_pole[0] >= previous.elbow_pole[0]);
             assert!(output.wrist[0] <= moved.wrist[0] + 1.0e-6);
@@ -1560,17 +1580,15 @@ mod tests {
             }
             previous = output;
         }
-        let output = smoother.advance(moved, 1.0 / 60.0);
+        let output = smoother.advance(moved, 1.0 / 60.0, ArmBlendWeight::ONE);
         near(output.wrist, moved.wrist);
         near(output.elbow_pole, moved.elbow_pole);
     }
 
     #[test]
-    fn a_fast_hand_is_followed_at_the_same_rate_as_a_slow_one() {
-        // The response is a fixed time constant, so the fraction of the
-        // remaining distance covered per render tick does not depend on how far
-        // the observation moved. A hand crossing the body is motion, not a jump,
-        // and must not be slowed for being quick.
+    fn a_fast_hand_is_not_slowed_by_its_distance() {
+        // A hand crossing the body is motion, not a jump. Its planar response
+        // may accelerate, but must never follow a smaller fraction than a drift.
         let target = |value: f32| ArmTrackingTarget {
             wrist: [value, 0.0, 0.0],
             elbow_pole: [value, 0.0, 0.0],
@@ -1581,20 +1599,23 @@ mod tests {
         let dt = 1.0 / 60.0;
         let followed = |distance: f32| {
             let mut smoother = ArmSmootherState::new(target(0.0));
-            smoother.advance(target(distance), dt).wrist[0] / distance
+            smoother
+                .advance(target(distance), dt, ArmBlendWeight::ONE)
+                .wrist[0]
+                / distance
         };
         // A slow drift and a hand thrown across the body in one observation.
         let slow = followed(0.05);
         let fast = followed(1.5);
         assert!(
-            (slow - fast).abs() < 1.0e-5,
-            "the followed fraction must not depend on the step: {slow} vs {fast}"
+            fast >= slow,
+            "a faster motion must not get a slower response: {slow} vs {fast}"
         );
     }
 
     #[test]
     fn a_teleport_is_rejected_before_it_reaches_the_smoother() {
-        // The fixed response above follows any step, so the discontinuity guard
+        // The position response follows adopted targets, so the discontinuity guard
         // is `max_wrist_step` rather than a stiffer filter. A wrist more than
         // one calibrated arm length away in a single observation is dropped and
         // never becomes a target; a plausible step is followed.
@@ -1881,12 +1902,16 @@ mod tests {
         let dt = 1.0 / 60.0;
         let mut smoother = ArmSmootherState::new(target([1.0, 0.0, 0.0]));
         let axis = vector([0.0, 0.0, 1.0]);
-        let mut previous = smoother.advance(target([1.0, 0.0, 0.0]), dt).elbow_pole;
+        let mut previous = smoother
+            .advance(target([1.0, 0.0, 0.0]), dt, ArmBlendWeight::ONE)
+            .elbow_pole;
 
         // A one-observation quarter turn is paced out at the capped rate.
         let mut turned = 0.0;
         for _ in 0..240 {
-            let value = smoother.advance(target([0.0, 1.0, 0.0]), dt).elbow_pole;
+            let value = smoother
+                .advance(target([0.0, 1.0, 0.0]), dt, ArmBlendWeight::ONE)
+                .elbow_pole;
             let before = perpendicular(vector(previous), axis).normalize();
             let after = perpendicular(vector(value), axis).normalize();
             let step = before.dot(&after).clamp(-1.0, 1.0).acos();
@@ -2656,7 +2681,7 @@ mod tests {
         let mut axis = Vector3::zeros();
         for _ in 0..300 {
             let current = vector(
-                palm.advance(palm_target(array(-start)), dt)
+                palm.advance(palm_target(array(-start)), dt, ArmBlendWeight::ONE)
                     .palm_normal
                     .unwrap(),
             );
@@ -2693,7 +2718,7 @@ mod tests {
         let mut palm = ArmSmootherState::new(palm_target(array(from)));
         for _ in 0..300 {
             let current = vector(
-                palm.advance(palm_target(array(to)), dt)
+                palm.advance(palm_target(array(to)), dt, ArmBlendWeight::ONE)
                     .palm_normal
                     .unwrap(),
             );
@@ -2722,6 +2747,7 @@ mod tests {
                     ..initial
                 },
                 RENDER_STEP_SEC,
+                ArmBlendWeight::ONE,
             );
             near(output.palm_normal.unwrap(), initial.palm_normal.unwrap());
             near(output.palm_forward.unwrap(), initial.palm_forward.unwrap());
@@ -2758,8 +2784,8 @@ mod tests {
                 palm_forward: Some(array(turn * Vector3::y())),
                 ..initial
             };
-            let expected = mirror(left.advance(target, RENDER_STEP_SEC));
-            let actual = right.advance(mirror(target), RENDER_STEP_SEC);
+            let expected = mirror(left.advance(target, RENDER_STEP_SEC, ArmBlendWeight::ONE));
+            let actual = right.advance(mirror(target), RENDER_STEP_SEC, ArmBlendWeight::ONE);
             near(actual.palm_normal.unwrap(), expected.palm_normal.unwrap());
             near(actual.palm_forward.unwrap(), expected.palm_forward.unwrap());
         }
@@ -2775,7 +2801,7 @@ mod tests {
         let mut ticks = 0u32;
         loop {
             let current = vector(
-                palm.advance(palm_target(target), RENDER_STEP_SEC)
+                palm.advance(palm_target(target), RENDER_STEP_SEC, ArmBlendWeight::ONE)
                     .palm_normal
                     .unwrap(),
             );
