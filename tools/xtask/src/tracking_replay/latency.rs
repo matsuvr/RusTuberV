@@ -21,11 +21,19 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         [cmd, clip, before, after] if cmd == "compare" => {
             let base = read_rows(before)?;
             let changed = read_rows(after)?;
-            if base.len() != changed.len() || base.iter().zip(&changed).any(|(a,b)| a.video_seconds != b.video_seconds) {
+            let same_ticks = base.len() == changed.len() && base.iter().zip(&changed).all(|(a, b)| {
+                a.video_seconds == b.video_seconds && a.frame_ms == b.frame_ms
+            });
+            if !same_ticks {
                 return Err("comparison requires the same recorded ticks".into());
             }
             let lag = bilateral_lag(&base, &changed);
-            println!("{}", json!({"baseline":summarize(clip,&base)?,"candidate":summarize(clip,&changed)?,"lag":lag}));
+            let summary = json!({
+                "baseline": summarize(clip, &base)?,
+                "candidate": summarize(clip, &changed)?,
+                "lag": lag,
+            });
+            println!("{summary}");
             Ok(())
         }
         _ => Err("hand-latency stages <live-run> | compare <raise|cross|return> <baseline-run> <candidate-run> | make-return <observations.json> <new-tape.json>".into()),

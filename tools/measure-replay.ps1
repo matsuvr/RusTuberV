@@ -18,6 +18,11 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $repo
 $modelPath = (Resolve-Path -LiteralPath $Model).Path
+if ($RecordObservations -and $PlayObservations) { throw 'Choose either recording or playback of pre-filter observations.' }
+$playback = if ($PlayObservations) {
+    $path = (Resolve-Path -LiteralPath $PlayObservations).Path
+    @{ path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+}
 $presentation = if ($Uncapped) { 'uncapped' } else { 'vsync' }
 if ($PresentMon) { $PresentMon = (Resolve-Path -LiteralPath $PresentMon).Path }
 if (!$Ffmpeg) {
@@ -72,6 +77,7 @@ foreach ($clip in $Video) {
     $runRoot = Join-Path $repo ('data/performance/{0}-{1}-{2}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), ($Tag -replace '[^a-zA-Z0-9_-]', '_'), [IO.Path]::GetFileNameWithoutExtension($videoPath))
     New-Item -ItemType Directory -Path $runRoot | Out-Null
     $metadata = [ordered]@{
+        record_observations = [bool]$RecordObservations; observation_playback = $playback
         video = $videoPath; video_sha256 = $videoHash; model = $modelPath; model_sha256 = $modelHash
         executable_sha256 = $exeHash; git_head = (& git rev-parse HEAD); git_status = @(& git status --short)
         input = 'RGB8 640x360 30fps'; runs = $Runs; adapter_request = $env:WGPU_ADAPTER_NAME
@@ -115,7 +121,7 @@ foreach ($clip in $Video) {
             $hostProcess.ProcessorAffinity = [IntPtr]$measurementAffinity
             $cargoArguments = @('run', '--release', '--package', 'xtask', '-j', '1', '--',
                 'tracking-replay', $rgb, $modelPath, $out, "$LogicalProcessors", $presentation)
-            if ($PlayObservations) { $cargoArguments += @('--play-observations', (Resolve-Path -LiteralPath $PlayObservations).Path) }
+            if ($playback) { $cargoArguments += @('--play-observations', $playback.path) }
             elseif ($RecordObservations) { $cargoArguments += '--record-observations' }
             if ($Rich) { $cargoArguments += '--rich' }
             & "$PSScriptRoot/cargo-windows.ps1" -CargoArguments $cargoArguments *> $log
