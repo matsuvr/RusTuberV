@@ -101,6 +101,7 @@ impl MediaPipePoseRuntime {
     /// shares the same image and only runs when the Pose found a person, since
     /// its landmarks are attached to the Pose arms.
     pub fn infer(&mut self, frame: &VideoFrame) -> Result<PoseArmFrame> {
+        let started_at = vtuber_core::monotonic_now();
         let timestamp_ms = video_timestamp_ms(frame.captured_at, &mut self.last_timestamp_ms)?;
         let image_data = frame.pixels()?.packed_rgb(&mut self.staging)?;
         let image = Image::from_rgb(
@@ -111,21 +112,37 @@ impl MediaPipePoseRuntime {
             image_data,
         )
         .map_err(|error| InferenceError::MediaPipeFrameConversion(error.to_string()))?;
+        let pose_started = vtuber_core::monotonic_now();
         let result = self
             .landmarker
             .detect_for_video(&image, Timestamp::from_millis(timestamp_ms))
             .map_err(|error| InferenceError::MediaPipeFrameInference(error.to_string()))?;
+        let pose_finished = vtuber_core::monotonic_now();
         let mut decoded = decode_pose_result(&result)
             .map_err(|error| InferenceError::MediaPipeOutputContract(error.to_string()))?;
+        let mut trace = vtuber_core::arm_tracking::PoseInferenceTrace {
+            image_size: [frame.width, frame.height],
+            started_at,
+            pose_interval: [pose_started, pose_finished],
+            hand_interval: None,
+            detected_hands: None,
+            pose_image: decoded.image,
+            hand_image: [None; 2],
+        };
         if let Some(observation) = decoded.observation.as_mut() {
             let hand_timestamp_ms =
                 video_timestamp_ms(frame.captured_at, &mut self.last_hand_timestamp_ms)?;
+            let hand_started = vtuber_core::monotonic_now();
             let hand_result = self
                 .hand_landmarker
                 .detect_for_video(&image, Timestamp::from_millis(hand_timestamp_ms))
                 .map_err(|error| InferenceError::MediaPipeFrameInference(error.to_string()))?;
-            let [left, right] = decode_hand_result(&hand_result, &decoded.wrist_xy)
+            trace.hand_interval = Some([hand_started, vtuber_core::monotonic_now()]);
+            trace.detected_hands = Some(hand_result.hand_landmarks.len());
+            let hands = decode_hand_result(&hand_result, &decoded.wrist_xy)
                 .map_err(|error| InferenceError::MediaPipeOutputContract(error.to_string()))?;
+            trace.hand_image = hands.map(|hand| hand.map(|h| h.wrist_image));
+            let [left, right] = hands.map(|hand| hand.map(|h| h.world));
             observation.left.hand = left;
             observation.right.hand = right;
         }
@@ -134,6 +151,7 @@ impl MediaPipePoseRuntime {
             source_seq: frame.seq,
             captured_at: frame.captured_at,
             inference_finished_at,
+            trace: Some(trace),
             observation: decoded.observation,
         })
     }

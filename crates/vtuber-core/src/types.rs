@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 /// Monotonic timestamp in nanoseconds from a process-local epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MonoTimeNs(pub u64);
 
 /// Monotonically increasing frame sequence number.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FrameSeq(pub u64);
 
 /// Pixel formats supported for decoded camera frames.
@@ -129,6 +131,7 @@ pub struct RawFaceObservation {
 
 /// Semantic head pose in radians.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HeadPose {
     /// Positive when turning right in the unmirrored image.
     pub yaw_rad: f32,
@@ -140,6 +143,7 @@ pub struct HeadPose {
 
 /// Availability and reliability of a neutral-relative head translation observation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum HeadTranslationState {
     /// A reliable neutral-relative translation estimate is available.
     Tracked,
@@ -302,6 +306,7 @@ impl HeadTranslationSignal {
 
 /// Availability and reliability of an eye-in-head gaze observation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GazeTrackingState {
     /// Both eyes provide a reliable common gaze estimate.
     Tracked,
@@ -404,6 +409,7 @@ impl GazeSignal {
 
 /// Expression coefficients applied to the avatar.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExpressionCoefficients {
     /// Left eye blink.
     pub blink_left: f32,
@@ -441,6 +447,7 @@ pub struct ExpressionCoefficients {
 
 /// Tracking state machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrackingState {
     /// Pipeline is starting.
     #[default]

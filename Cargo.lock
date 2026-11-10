@@ -7286,6 +7286,9 @@ dependencies = [
 [[package]]
 name = "vtuber-core"
 version = "0.1.5"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "vtuber-desktop"

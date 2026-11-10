@@ -89,6 +89,15 @@ impl Drop for PendingSolve {
     }
 }
 
+/// Join the preceding solve before advancing a fixed-observation replay tick.
+pub fn finish_replay_solve(mut state: ResMut<UpperLimbState>) {
+    if let Some(mut pending) = state.pending.take() {
+        state.queued = Some(bevy::tasks::futures_lite::future::block_on(
+            &mut pending.task,
+        ));
+    }
+}
+
 /// Restore the upstream body result before animation/base detection. The
 /// admitted path is a display result, never a new additive animation base.
 pub(crate) fn restore_body_inputs(

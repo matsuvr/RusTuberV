@@ -51,6 +51,11 @@ pub struct PoseRuntime {
 }
 
 impl PoseRuntime {
+    /// Last input presented to the tracking filter, including held and absent frames.
+    pub fn tracking_sample(&self) -> (&ArmTrackingState, Option<&PoseArmFrame>) {
+        (&self.tracking, self.held_frame.as_ref())
+    }
+
     /// Creates the runtime with the camera-facing frame slot.
     #[must_use]
     pub fn new(project_root: std::path::PathBuf) -> Self {
@@ -621,6 +626,7 @@ mod tests {
             source_seq: vtuber_core::FrameSeq(1),
             captured_at: MonoTimeNs(100),
             inference_finished_at: MonoTimeNs(110),
+            trace: None,
             observation: None,
         };
         pose.held_frame = Some(frame);
@@ -686,6 +692,7 @@ mod tests {
             source_seq: vtuber_core::FrameSeq(7),
             captured_at: MonoTimeNs(11),
             inference_finished_at: MonoTimeNs(12),
+            trace: None,
             observation: None,
         };
         assert!(pose.output_slot.publish(frame).expect("slot access"));

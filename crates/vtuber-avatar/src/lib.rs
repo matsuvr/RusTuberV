@@ -55,7 +55,7 @@ mod upper_limb_body;
 mod upper_limb_path;
 mod upper_limb_planner;
 mod upper_limb_runtime;
-pub use upper_limb_runtime::update_upper_limb_targets;
+pub use upper_limb_runtime::{finish_replay_solve, update_upper_limb_targets};
 mod upper_limb_solver;
 pub use collision::CollisionError as UpperLimbCollisionError;
 pub use upper_limb_solver::SolveStatus as UpperLimbSolveStatus;

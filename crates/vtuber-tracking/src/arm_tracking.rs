@@ -971,6 +971,18 @@ impl ArmSideState {
     }
 }
 
+/// Tracking decisions for one side of the most recently consumed image.
+pub struct ArmObservationStatus {
+    /// Current visibility/hand gate.
+    pub adopted: bool,
+    /// Number of arm length calibration samples.
+    pub calibration_samples: usize,
+    /// Confirmed arm length in metres.
+    pub reference_m: Option<f32>,
+    /// Adopted shoulder-relative wrist before position filtering, absent during loss.
+    pub wrist: Option<[f32; 3]>,
+}
+
 /// Pure temporal state for observed arm tracking. It owns no clock or ECS.
 ///
 /// `now` is supplied by the caller on every render tick while the latest
@@ -998,6 +1010,24 @@ impl ArmTrackingState {
             last_consumed: None,
             last_now: None,
         }
+    }
+
+    /// Render-clock timestamp supplied to the most recent filter step.
+    pub fn sampled_at(&self) -> Option<MonoTimeNs> {
+        self.last_now
+    }
+
+    /// Gate, calibration and currently accepted position per anatomical side.
+    pub fn observation_status(&self) -> [ArmObservationStatus; 2] {
+        [&self.left, &self.right].map(|side| ArmObservationStatus {
+            adopted: side.adoption.adopted,
+            calibration_samples: side.calibration.sample_count(),
+            reference_m: side
+                .calibration
+                .confirmed_length()
+                .map(ArmReferenceLength::meters),
+            wrist: side.source.filter(|_| side.presence.wrist).map(|s| s.wrist),
+        })
     }
 
     /// Drops calibration and observation state after recalibration or capture stop.
@@ -1680,6 +1710,7 @@ mod tests {
             source_seq: FrameSeq(seq),
             captured_at: MonoTimeNs(captured_ns),
             inference_finished_at: MonoTimeNs(captured_ns),
+            trace: None,
             observation,
         }
     }

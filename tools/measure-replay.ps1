@@ -9,6 +9,8 @@ param(
     [string]$PresentMon,
     [switch]$Uncapped,
     [switch]$Rich,
+    [switch]$RecordObservations,
+    [string]$PlayObservations,
     [switch]$NoBuild
 )
 
@@ -113,6 +115,8 @@ foreach ($clip in $Video) {
             $hostProcess.ProcessorAffinity = [IntPtr]$measurementAffinity
             $cargoArguments = @('run', '--release', '--package', 'xtask', '-j', '1', '--',
                 'tracking-replay', $rgb, $modelPath, $out, "$LogicalProcessors", $presentation)
+            if ($PlayObservations) { $cargoArguments += @('--play-observations', (Resolve-Path -LiteralPath $PlayObservations).Path) }
+            elseif ($RecordObservations) { $cargoArguments += '--record-observations' }
             if ($Rich) { $cargoArguments += '--rich' }
             & "$PSScriptRoot/cargo-windows.ps1" -CargoArguments $cargoArguments *> $log
             $hostProcess.ProcessorAffinity = $originalAffinity
