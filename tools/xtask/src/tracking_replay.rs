@@ -30,6 +30,7 @@ use vtuber_avatar::{
 use vtuber_camera::{device::CameraBackend, replay::ReplaySource};
 use vtuber_core::{MonoTimeNs, monotonic_now};
 
+pub(crate) mod latency;
 mod observations;
 use observations::{ObservationTick, RecordedFace};
 use vtuber_tracking::arm_tracking::{ArmTrackingState, step_arm_tracking};
@@ -397,7 +398,7 @@ fn paired_controls(world: &mut World) {
     });
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct BonePose {
     name: String,
     position: [f32; 3],
@@ -476,7 +477,7 @@ fn bone_poses(world: &World, binding: AvatarBinding) -> Vec<BonePose> {
         .collect()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct Row {
     video_seconds: f64,
     frame_ms: f64,
@@ -685,20 +686,30 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
     let (live_tracking, raw) = world.resource::<PoseRuntime>().tracking_sample();
     let (tracking, raw) = if m.fixed {
         (
-            &m.tracking,
+            Some(&m.tracking),
             m.cursor
                 .checked_sub(1)
                 .and_then(|i| m.tape.get(i))
                 .and_then(|t| t.raw.as_ref()),
         )
+    } else if m.playing {
+        // The paired-model mode replays controls that have already been filtered.
+        (None, None)
     } else {
-        (live_tracking, raw)
+        (Some(live_tracking), raw)
     };
-    let sampled_at = tracking.sampled_at();
+    let sampled_at = tracking.and_then(ArmTrackingState::sampled_at);
     let raw = raw.copied();
-    let status = tracking.observation_status().map(|s| json!({
-                "adopted":s.adopted, "calibration_samples":s.calibration_samples, "reference_m":s.reference_m, "accepted_wrist":s.wrist
-            }));
+    let status = tracking.map(|state| {
+        state.observation_status().map(|side| {
+            json!({
+                "adopted": side.adopted,
+                "calibration_samples": side.calibration_samples,
+                "reference_m": side.reference_m,
+                "accepted_wrist": side.wrist,
+            })
+        })
+    });
     let face = world.resource::<InferenceRuntime>().status();
     let pose = world.resource::<PoseRuntime>().status();
     if let Some(e) = face.last_failure.as_ref().or(pose.last_failure.as_ref()) {
@@ -769,7 +780,13 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
         face_no_face_frames: face.no_face_frames,
         pose_hand_frames: pose.frames_processed,
         arm_source_seq: arm_seq,
-        displayed_path_seq: world.resource::<vtuber_avatar::UpperLimbState>().displayed_path_seq().map(|seq| seq.0),
+        displayed_path_seq: current
+            .and_then(|_| {
+                world
+                    .resource::<vtuber_avatar::UpperLimbState>()
+                    .displayed_path_seq()
+            })
+            .map(|seq| seq.0),
         arm_first_apply_ms: new_arm.then_some(age).flatten(),
         arm_displayed_age_ms: age,
         solver: current
@@ -795,10 +812,15 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
                 })
             })
             .collect();
-            json!({"source_seq": frame.source_seq.0, "sides": sides, "status": status,
-                "sampled_at":sampled_at, "captured_at": raw.map(|f| f.captured_at),
-                "inference_finished_at":raw.map(|f| f.inference_finished_at), "trace":raw.and_then(|f| f.trace)})
-
+            json!({
+                "source_seq": frame.source_seq.0,
+                "sides": sides,
+                "status": status,
+                "sampled_at": sampled_at,
+                "captured_at": raw.map(|f| f.captured_at),
+                "inference_finished_at": raw.map(|f| f.inference_finished_at),
+                "trace": raw.and_then(|f| f.trace),
+            })
         }),
         process_cpu_percent: diagnostics.process_cpu_usage,
         process_memory_gib: diagnostics.process_memory_gib,

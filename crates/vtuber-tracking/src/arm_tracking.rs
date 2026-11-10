@@ -243,8 +243,8 @@ fn palm_rotation(target: ArmTrackingTarget) -> Option<UnitQuaternion<f32>> {
 /// Attenuate depth noise before it becomes elbow flexion, including when the
 /// elbow observation itself is quiet. The recorded stationary-camera regression
 /// bounds the final bone motion, not just this filter's Cartesian output. Large
-/// planar movement gets a faster response in [`ArmPositionSmoother`], while
-/// depth and small planar errors retain this response. A detection teleport is
+/// planar velocity increases the bandwidth in [`ArmPositionSmoother`]; depth
+/// always uses this time constant. A detection teleport is
 /// rejected by [`ArmTrackingProfile::max_wrist_step`], and a real loss is eased
 /// back by the shared loss blend.
 const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.125;
@@ -485,8 +485,8 @@ fn array(value: Vector3<f32>) -> [f32; 3] {
 /// 5/5 video evaluation: a hand must return to the virtual arm slowly enough to
 /// read as a relaxed drop rather than a snap, and a reacquired hand must not fly
 /// to the observation. Reacquisition continues from the current authority, so
-/// [`LossBlendProfile::acquire`] is the time a fully abandoned hand takes to
-/// return to full observation.
+/// [`ArmTrackingProfile::reacquire_position`] sets the wrist/elbow ramp after
+/// the adoption gate has registered a loss.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmTrackingProfile {
     /// Minimum shoulder visibility to use the arm at all.
@@ -3181,10 +3181,13 @@ mod tests {
 
     #[test]
     fn a_returned_arm_still_ramps_its_authority_back_in() {
-        // The shortened wait must not turn into a snap: the channel's weight
-        // still comes back over the profile's acquire time.
+        // Reacquisition starts at the current authority and reaches full weight
+        // after the two-frame confirmation and the position ramp.
         let profile = ArmTrackingProfile::default();
-        let base = arm();
+        let base = ArmLandmarks {
+            hand: Some(hand_toward_camera([0.0; 3])),
+            ..arm()
+        };
         let mut state = tracked_state(base, &profile);
         let hidden = hidden_arm(base);
         for seq in 0..FULL_RETURN_FRAMES {
@@ -3198,14 +3201,15 @@ mod tests {
         let mut reached_full_after = None;
         for step in 0..40u64 {
             let now = start + step * OBSERVATION_STEP_NS;
-            let weight = feed(&mut state, base, 1000 + step, now, &profile)
+            let weights = feed(&mut state, base, 1000 + step, now, &profile)
                 .unwrap()
                 .weights
-                .left
-                .wrist;
+                .left;
+            let weight = weights.wrist;
             assert!(weight >= previous, "the acquire ramp must not reverse");
             assert!(weight <= 1.0);
             if weight >= 1.0 {
+                assert!(weights.palm > 0.0 && weights.palm < 1.0);
                 reached_full_after = Some(step);
                 break;
             }
@@ -3215,7 +3219,9 @@ mod tests {
             * OBSERVATION_STEP_NS as f32
             * 1.0e-9;
         assert!(
-            (profile.reacquire_position.as_secs_f32()..=profile.reacquire_position.as_secs_f32() + 0.07).contains(&elapsed_sec),
+            (profile.reacquire_position.as_secs_f32()
+                ..=profile.reacquire_position.as_secs_f32() + 0.07)
+                .contains(&elapsed_sec),
             "the authority must still ramp over the acquire time: {elapsed_sec}"
         );
     }

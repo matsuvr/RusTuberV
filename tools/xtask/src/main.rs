@@ -35,6 +35,7 @@ fn main() {
 
 fn print_help() {
     println!("usage: cargo xtask <task>");
+    println!("  hand-latency stages|compare|make-return    Analyze arm latency replay recordings");
     println!("tasks:");
     println!("  vrm-compat [fixture-dir]   run bevy_vrm1 compatibility gate");
     println!("  vrm-managed-compat <path> run the managed user:// lifecycle gate");
@@ -111,6 +112,7 @@ fn run_task(args: &[String]) -> TaskResult {
         "mediapipe-face-smoke" => completed(mediapipe_face_smoke::run(args)),
         "mediapipe-pose-probe" => completed(mediapipe_pose_probe::run(args)),
         "vrm-render" => vrm_render::run(args),
+        "hand-latency" => completed(tracking_replay::latency::run(args)),
         "tracking-replay" => completed(tracking_replay::run(args)),
         "ndi" => ndi::run(args),
         other => Err(TaskError::new(format!("unknown task: {other}"), 1)),

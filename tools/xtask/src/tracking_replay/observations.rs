@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use vtuber_core::{Arkit52Coefficients, arm_tracking::PoseArmFrame, types::*};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(super) struct ObservationTick {
     pub seconds: f64,
     pub delta: std::time::Duration,
@@ -16,7 +16,7 @@ pub(super) struct ObservationTick {
     pub tracked: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(super) struct RecordedFace(#[serde(with = "Face")] pub AvatarControlFrame);
 

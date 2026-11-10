@@ -2415,10 +2415,24 @@ mod tests {
         let output = output_slot
             .wait_read_after(0, Duration::from_secs(30))
             .expect("slot access");
-        assert!(
-            matches!(output, Some(ReadResult::New { .. })),
-            "pose worker should publish one completed frame"
+        let Some(ReadResult::New { value: frame, .. }) = output else {
+            panic!("pose worker should publish one completed frame");
+        };
+        let trace = frame.trace.expect("native inference timing");
+        let [start, end] = trace.pose_interval;
+        assert!(trace.started_at <= start && start <= end && end <= frame.inference_finished_at);
+        assert_eq!(trace.hand_interval.is_some(), frame.observation.is_some());
+        assert_eq!(
+            trace.detected_hands.is_some(),
+            trace.hand_interval.is_some()
         );
+        if let Some([hand_start, hand_end]) = trace.hand_interval {
+            assert!(
+                end <= hand_start
+                    && hand_start <= hand_end
+                    && hand_end <= frame.inference_finished_at
+            );
+        }
 
         handle.stop();
         let _ = handle.join();
