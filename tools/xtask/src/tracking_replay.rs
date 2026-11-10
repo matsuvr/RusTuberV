@@ -488,6 +488,7 @@ struct Row {
     face_no_face_frames: u64,
     pose_hand_frames: u64,
     arm_source_seq: Option<u64>,
+    displayed_path_seq: Option<u64>,
     arm_first_apply_ms: Option<f64>,
     arm_displayed_age_ms: Option<f64>,
     solver: String,
@@ -667,7 +668,7 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
         return Ok(true);
     }
     // Fixed playback uses the recorded epoch for source ages, including held IK paths.
-    let now = if m.fixed {
+    let source_clock = if m.fixed {
         let Some(tick) = m.cursor.checked_sub(1).and_then(|i| m.tape.get(i)) else {
             return Ok(false);
         };
@@ -706,7 +707,7 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
     let arm_seq = current.and_then(|(_, a, _)| a.source_seq.map(|s| s.0));
     let age = arm_seq
         .and_then(|s| m.timestamps.get(&s))
-        .map(|t| now.0.saturating_sub(t.0) as f64 / 1e6);
+        .map(|t| source_clock.0.saturating_sub(t.0) as f64 / 1e6);
     let new_arm = arm_seq != m.previous_arm;
     m.previous_arm = arm_seq;
     // A completed no-face result is still an inference, not a skipped image.
@@ -768,6 +769,7 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
         face_no_face_frames: face.no_face_frames,
         pose_hand_frames: pose.frames_processed,
         arm_source_seq: arm_seq,
+        displayed_path_seq: world.resource::<vtuber_avatar::UpperLimbState>().displayed_path_seq().map(|seq| seq.0),
         arm_first_apply_ms: new_arm.then_some(age).flatten(),
         arm_displayed_age_ms: age,
         solver: current

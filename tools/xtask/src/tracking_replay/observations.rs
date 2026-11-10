@@ -109,9 +109,7 @@ impl Face {
             state: value.state(),
         }
     }
-}
 
-impl Face {
     fn gaze(frame: &AvatarControlFrame) -> Gaze {
         let value = frame.gaze;
         Gaze {
