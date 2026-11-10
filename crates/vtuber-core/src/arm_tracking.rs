@@ -10,6 +10,7 @@ use crate::{FrameSeq, MonoTimeNs};
 /// one result are comparable across tasks. Missing quality scores remain
 /// missing; they are not replaced with confidence 1.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PoseWorldLandmark {
     /// World coordinates in meters. Never populate these from normalized landmarks.
     pub meters: [f32; 3],
@@ -35,6 +36,7 @@ pub const HAND_LANDMARK_COUNT: usize = 21;
 /// absent. See [`Self::handedness_score`] for what is deliberately not a
 /// quality signal.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HandWorldLandmarks {
     /// 21 world landmarks of one hand, in meters.
     pub landmarks: [PoseWorldLandmark; HAND_LANDMARK_COUNT],
@@ -51,6 +53,7 @@ pub struct HandWorldLandmarks {
 
 /// Three observations belonging to the same anatomical arm and source image.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ArmLandmarks {
     /// Upper-arm origin; this is not the clavicle's origin in the avatar rig.
     pub shoulder: PoseWorldLandmark,
@@ -66,6 +69,7 @@ pub struct ArmLandmarks {
 
 /// Both anatomical arms from one pose. Left/right are not preview-mirror labels.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PoseArmObservation {
     /// Anatomical left/right hips from the same Pose result. Missing hips
     /// make thorax orientation unavailable, without invalidating the arms.
@@ -76,11 +80,44 @@ pub struct PoseArmObservation {
     pub right: ArmLandmarks,
 }
 
+/// Unmirrored normalized image coordinates. Origin is top left, X right and Y down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ArmImageLandmarks {
+    /// Pose shoulder.
+    pub shoulder: [f32; 2],
+    /// Pose elbow.
+    pub elbow: [f32; 2],
+    /// Pose wrist.
+    pub wrist: [f32; 2],
+}
+
+/// Same-image measurements at the native inference boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PoseInferenceTrace {
+    /// Source width and height in pixels.
+    pub image_size: [u32; 2],
+    /// Entry into the arm backend, before pixel conversion.
+    pub started_at: MonoTimeNs,
+    /// Immediately before and after the Pose VIDEO call.
+    pub pose_interval: [MonoTimeNs; 2],
+    /// Immediately before and after the optional Hand VIDEO call.
+    pub hand_interval: Option<[MonoTimeNs; 2]>,
+    /// Number of hands before pairing. None when Hand was skipped.
+    pub detected_hands: Option<usize>,
+    /// Pose image landmarks for anatomical left and right.
+    pub pose_image: [Option<ArmImageLandmarks>; 2],
+    /// Wrist from the same candidate as each assigned hand's world points.
+    pub hand_image: [Option<[f32; 2]>; 2],
+}
+
 /// A completed pose inference, including an explicit no-person result.
 ///
 /// Keep this separate from the face result: a slow pose task must not hold up
 /// face publication. The camera assigns the sequence and capture timestamp.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PoseArmFrame {
     /// Sequence of the camera image, not an independent pose counter.
     pub source_seq: FrameSeq,
@@ -88,6 +125,8 @@ pub struct PoseArmFrame {
     pub captured_at: MonoTimeNs,
     /// Time inference completed, for measurement rather than filter integration.
     pub inference_finished_at: MonoTimeNs,
+    /// Native image observations and timing, absent from world-only fixtures.
+    pub trace: Option<PoseInferenceTrace>,
     /// None means a completed inference found no person, not that no new frame arrived.
     pub observation: Option<PoseArmObservation>,
 }
@@ -372,6 +411,7 @@ mod tests {
             source_seq: FrameSeq(7),
             captured_at: MonoTimeNs(10),
             inference_finished_at: MonoTimeNs(20),
+            trace: None,
             observation: Some(PoseArmObservation {
                 hips: None,
                 left: arm,

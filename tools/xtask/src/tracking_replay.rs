@@ -30,6 +30,11 @@ use vtuber_avatar::{
 use vtuber_camera::{device::CameraBackend, replay::ReplaySource};
 use vtuber_core::{MonoTimeNs, monotonic_now};
 
+pub(crate) mod latency;
+mod observations;
+use observations::{ObservationTick, RecordedFace};
+use vtuber_tracking::arm_tracking::{ArmTrackingState, step_arm_tracking};
+
 const WARMUP_SECONDS: f64 = 5.0;
 
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
@@ -37,10 +42,26 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         Some((flag, rest)) if flag == "--rich" => (rest, true),
         _ => (args, false),
     };
-    let Some([rgb, model, out, threads, presentation]) = args.get(..5) else {
-        return Err("usage: cargo xtask tracking-replay <640x360-30fps.rgb> <model.vrm> <new-output-directory> <logical-cpus> <vsync|uncapped> [same-input-model.vrm] [--rich]".into());
+    let (args, record, playback) = match args {
+        [rest @ .., flag] if flag == "--record-observations" => (rest, true, None),
+        [rest @ .., flag, path] if flag == "--play-observations" => (rest, false, Some(path)),
+        _ => (args, false, None),
     };
-    if args.len() > 6 {
+    let tape: Vec<ObservationTick> = if let Some(path) = playback {
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        let ticks: Vec<_> =
+            serde_json::from_reader(std::io::BufReader::new(file)).map_err(|e| e.to_string())?;
+        if ticks.is_empty() {
+            return Err("empty observation recording".into());
+        }
+        ticks
+    } else {
+        Vec::new()
+    };
+    let Some([rgb, model, out, threads, presentation]) = args.get(..5) else {
+        return Err("usage: cargo xtask tracking-replay <640x360-30fps.rgb> <model.vrm> <new-output-directory> <logical-cpus> <vsync|uncapped> [same-input-model.vrm | --record-observations | --play-observations <file>] [--rich]".into());
+    };
+    if args.len() > 6 || (args.len() == 6 && (record || playback.is_some())) {
         return Err("at most one same-input comparison model is supported".into());
     }
     let present_mode = match presentation.as_str() {
@@ -171,7 +192,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             second_model,
             playback_out: playback_out.clone(),
             controls: Vec::new(),
-            playing: false,
+            tape, record, fixed: playback.is_some(), tracking: Default::default(),
+            playing: playback.is_some(),
             cursor: 0,
             playback_seconds: 0.0,
             playback_complete: false,
@@ -180,6 +202,15 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         .add_systems(First, |mut m: ResMut<Measurement>| m.frame_started = Instant::now())
         // Exit is published before the shell's ordered Last-stage shutdown.
         .add_systems(Last, measure.before(vtuber_app::diagnostics::sync_engine_diagnostics));
+    if playback.is_some() {
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_nanos(16_666_667),
+        ))
+        .add_systems(
+            PostUpdate,
+            vtuber_avatar::finish_replay_solve.before(vtuber_avatar::update_upper_limb_targets),
+        );
+    }
     configure_execution_schedules(&mut app);
     let exit = app.run();
     let summary = if paired {
@@ -222,6 +253,10 @@ struct Measurement {
     second_model: Option<vtuber_app::import::ImportedModel>,
     playback_out: PathBuf,
     controls: Vec<RecordedControl>,
+    tape: Vec<ObservationTick>,
+    record: bool,
+    fixed: bool,
+    tracking: ArmTrackingState,
     playing: bool,
     cursor: usize,
     playback_seconds: f64,
@@ -245,14 +280,75 @@ fn paired_controls(world: &mut World) {
         // Idle sway has a generation-dependent seed. Freeze it for the static
         // initial photograph and for a comparison driven by identical input;
         // otherwise a reload introduces a different procedural body target.
-        if !m.selected || m.second_model.is_some() || m.playing {
+        if !m.selected || m.second_model.is_some() || m.playing || m.record {
             world.resource_mut::<vtuber_avatar::LossIdleState>().reset();
         }
         if !m.selected {
             return;
         }
         let now = monotonic_now();
+        if m.fixed {
+            let Some(tick) = m.tape.get(m.cursor) else {
+                m.playback_complete = true;
+                return;
+            };
+            let generation = world
+                .resource::<vtuber_avatar::AvatarLifecycle>()
+                .current_generation();
+            let (tracking, frame) = if let Some(time) = tick.pose_now.filter(|_| tick.tracked) {
+                step_arm_tracking(&m.tracking, tick.raw.as_ref(), time, &Default::default())
+            } else {
+                (m.tracking, None)
+            };
+            let frame =
+                frame.map(vtuber_tracking::gesture_safety::suppress_isolated_middle_extension);
+            *world.resource_mut::<TrackedArmControl>() = TrackedArmControl {
+                generation: frame.as_ref().map(|_| generation),
+                frame,
+                view_to_model: Quat::from_array(tick.basis),
+            };
+            *world.resource_mut::<vtuber_avatar::ActiveControlFrame>() =
+                vtuber_avatar::ActiveControlFrame {
+                    generation,
+                    frame: tick.face.as_ref().map(|f| f.0.clone()),
+                };
+            world.resource_mut::<ArmSourceSelection>().mode = if tick.tracked {
+                ArmPoseSourceKind::TrackedPose
+            } else {
+                ArmPoseSourceKind::VirtualHandAnchor
+            };
+            m.playback_seconds = tick.seconds;
+            m.tracking = tracking;
+            m.cursor += 1;
+            if let Some(next) = m.tape.get(m.cursor) {
+                world.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(next.delta));
+            }
+            return;
+        }
         if !m.playing {
+            if m.record
+                && let Some(start) = m.source.started_at()
+            {
+                let (tracking, raw) = world.resource::<PoseRuntime>().tracking_sample();
+                m.tape.push(ObservationTick {
+                    seconds: now.0.saturating_sub(start.0) as f64 / 1e9,
+                    now,
+                    pose_now: tracking.sampled_at(),
+                    raw: raw.copied(),
+                    delta: world.resource::<Time<Real>>().delta(),
+                    basis: world
+                        .resource::<TrackedArmControl>()
+                        .view_to_model
+                        .to_array(),
+                    face: world
+                        .resource::<vtuber_avatar::ActiveControlFrame>()
+                        .frame
+                        .clone()
+                        .map(RecordedFace),
+                    tracked: world.resource::<ArmSourceSelection>().mode
+                        == ArmPoseSourceKind::TrackedPose,
+                });
+            }
             if m.second_model.is_some()
                 && let Some(start) = m.source.started_at()
             {
@@ -302,7 +398,7 @@ fn paired_controls(world: &mut World) {
     });
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct BonePose {
     name: String,
     position: [f32; 3],
@@ -381,7 +477,7 @@ fn bone_poses(world: &World, binding: AvatarBinding) -> Vec<BonePose> {
         .collect()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct Row {
     video_seconds: f64,
     frame_ms: f64,
@@ -393,6 +489,7 @@ struct Row {
     face_no_face_frames: u64,
     pose_hand_frames: u64,
     arm_source_seq: Option<u64>,
+    displayed_path_seq: Option<u64>,
     arm_first_apply_ms: Option<f64>,
     arm_displayed_age_ms: Option<f64>,
     solver: String,
@@ -536,6 +633,8 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
             world
                 .resource_mut::<Orchestrator>()
                 .process_action(&UiAction::SelectCamera { index: 0 });
+        } else if let Some(first) = m.tape.first() {
+            world.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(first.delta));
         } else if let Some(first) = m.controls.first() {
             world.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(first.delta));
         }
@@ -569,12 +668,48 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
     if seconds >= m.source.duration().as_secs_f64() {
         return Ok(true);
     }
+    // Fixed playback uses the recorded epoch for source ages, including held IK paths.
+    let source_clock = if m.fixed {
+        let Some(tick) = m.cursor.checked_sub(1).and_then(|i| m.tape.get(i)) else {
+            return Ok(false);
+        };
+        tick.now
+    } else {
+        now
+    };
     let Some(previous) = m.previous.replace(now) else {
         return Ok(false);
     };
     if let Some(frame) = world.resource::<TrackedArmControl>().frame.as_ref() {
         m.timestamps.insert(frame.source_seq.0, frame.captured_at);
     }
+    let (live_tracking, raw) = world.resource::<PoseRuntime>().tracking_sample();
+    let (tracking, raw) = if m.fixed {
+        (
+            Some(&m.tracking),
+            m.cursor
+                .checked_sub(1)
+                .and_then(|i| m.tape.get(i))
+                .and_then(|t| t.raw.as_ref()),
+        )
+    } else if m.playing {
+        // The paired-model mode replays controls that have already been filtered.
+        (None, None)
+    } else {
+        (Some(live_tracking), raw)
+    };
+    let sampled_at = tracking.and_then(ArmTrackingState::sampled_at);
+    let raw = raw.copied();
+    let status = tracking.map(|state| {
+        state.observation_status().map(|side| {
+            json!({
+                "adopted": side.adopted,
+                "calibration_samples": side.calibration_samples,
+                "reference_m": side.reference_m,
+                "accepted_wrist": side.wrist,
+            })
+        })
+    });
     let face = world.resource::<InferenceRuntime>().status();
     let pose = world.resource::<PoseRuntime>().status();
     if let Some(e) = face.last_failure.as_ref().or(pose.last_failure.as_ref()) {
@@ -583,7 +718,7 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
     let arm_seq = current.and_then(|(_, a, _)| a.source_seq.map(|s| s.0));
     let age = arm_seq
         .and_then(|s| m.timestamps.get(&s))
-        .map(|t| now.0.saturating_sub(t.0) as f64 / 1e6);
+        .map(|t| source_clock.0.saturating_sub(t.0) as f64 / 1e6);
     let new_arm = arm_seq != m.previous_arm;
     m.previous_arm = arm_seq;
     // A completed no-face result is still an inference, not a skipped image.
@@ -645,6 +780,13 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
         face_no_face_frames: face.no_face_frames,
         pose_hand_frames: pose.frames_processed,
         arm_source_seq: arm_seq,
+        displayed_path_seq: current
+            .and_then(|_| {
+                world
+                    .resource::<vtuber_avatar::UpperLimbState>()
+                    .displayed_path_seq()
+            })
+            .map(|seq| seq.0),
         arm_first_apply_ms: new_arm.then_some(age).flatten(),
         arm_displayed_age_ms: age,
         solver: current
@@ -670,7 +812,15 @@ fn advance_replay_measurement(world: &mut World, m: &mut Measurement) -> Result<
                 })
             })
             .collect();
-            json!({"source_seq": frame.source_seq.0, "sides": sides})
+            json!({
+                "source_seq": frame.source_seq.0,
+                "sides": sides,
+                "status": status,
+                "sampled_at": sampled_at,
+                "captured_at": raw.map(|f| f.captured_at),
+                "inference_finished_at": raw.map(|f| f.inference_finished_at),
+                "trace": raw.and_then(|f| f.trace),
+            })
         }),
         process_cpu_percent: diagnostics.process_cpu_usage,
         process_memory_gib: diagnostics.process_memory_gib,
@@ -694,6 +844,12 @@ fn distribution(values: impl Iterator<Item = f64>) -> serde_json::Value {
 }
 
 fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
+    if m.record {
+        let file = fs::File::create(m.out.join("observations.json")).map_err(|e| e.to_string())?;
+        let mut buffer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut buffer, &m.tape).map_err(|e| e.to_string())?;
+        buffer.flush().map_err(|e| e.to_string())?;
+    }
     let look = world
         .resource::<vtuber_avatar::look::AvatarLookSettings>()
         .0;
@@ -770,8 +926,8 @@ fn finish(world: &mut World, m: &Measurement) -> Result<(), String> {
             "async_compute": bevy::tasks::AsyncComputeTaskPool::get().thread_num(),
             "io": bevy::tasks::IoTaskPool::get().thread_num(),
         },
-        "input": if m.playing { "exact face/arm/thorax/finger controls and time steps from the live video run; no repeated inference" } else { "640x360 RGB8 30fps; paced file source; sensor/driver and NDI excluded" },
-        "procedural_idle_frozen": !m.controls.is_empty() || m.playing,
+        "input": if m.fixed { "fixed pre-filter arm observations, recorded face control and render intervals; IK joined on next tick" } else if m.playing { "exact face/arm/thorax/finger controls and time steps from the live video run; no repeated inference" } else { "640x360 RGB8 30fps; paced file source; sensor/driver and NDI excluded" },
+        "procedural_idle_frozen": !m.controls.is_empty() || m.playing || m.record,
         "latency_scope": "scheduled video capture to main-world admitted arm pose; not GPU presentation or photon latency",
         "fps": rows.len() as f64 * 1000.0 / if m.playing { rows.iter().map(|r| r.main_interval_ms).sum::<f64>() } else { frames_ms },
         "frame_ms": distribution(rows.iter().map(|r| r.frame_ms)),

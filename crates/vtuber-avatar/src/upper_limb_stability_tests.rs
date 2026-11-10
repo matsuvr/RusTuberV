@@ -190,6 +190,7 @@ fn arm_noise_response(fps: u32, with_body: bool, noise: &[[[f32; 3]; 2]]) -> (f6
             source_seq: vtuber_core::FrameSeq(tick as u64 / (fps as u64 / 30) + 1),
             captured_at: captured,
             inference_finished_at: captured,
+            trace: None,
             observation: Some(PoseArmObservation {
                 hips: None,
                 left: observed,

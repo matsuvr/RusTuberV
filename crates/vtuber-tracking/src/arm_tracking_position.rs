@@ -1,26 +1,47 @@
-//! Position response for an observed wrist or elbow, in calibrated arm lengths.
-//!
-//! Quiet motion keeps the existing two-pole response. A larger planar tracking
-//! error increases the bandwidth continuously; depth keeps its fixed response
-//! so wrist depth noise does not turn into elbow flexion. This is a response
-//! curve, not an observation gate: every adopted target is still followed.
+//! Shoulder-relative position response. Estimate planar velocity once per
+//! accepted camera sample; integrate both position poles on the render clock.
 
-use nalgebra::Vector3;
+use nalgebra::{Vector2, Vector3};
+use vtuber_core::MonoTimeNs;
 
-/// Errors within five percent of the calibrated arm length keep the quiet
-/// response, including the existing stationary-camera noise fixtures.
-const QUIET_PLANAR_ERROR: f32 = 0.05;
-/// The response reaches its fastest setting at twenty percent of arm length.
-const FAST_PLANAR_ERROR: f32 = 0.20;
-/// Fast planar response; palm, depth and shoulder responses are independent.
-const FAST_TIME_CONSTANT_SEC: f32 = 0.04;
+const FAST_TAU_SEC: f32 = 0.040;
+const VELOCITY_TAU_SEC: f32 = 0.060;
+/// Seconds squared per squared calibrated arm length.
+const SPEED_GAIN: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PlanarMotion {
+    previous: Option<(Vector2<f32>, MonoTimeNs)>,
+    velocity: Vector2<f32>,
+}
+
+impl PlanarMotion {
+    fn observed(self, xy: Vector2<f32>, time: MonoTimeNs) -> Self {
+        let velocity = match self.previous {
+            Some((previous, captured)) if time > captured => {
+                let dt = (time.0 - captured.0) as f32 * 1e-9;
+                let alpha = -(-dt / VELOCITY_TAU_SEC).exp_m1();
+                self.velocity + alpha * ((xy - previous) / dt - self.velocity)
+            }
+            Some(_) => return self,
+            None => Vector2::zeros(),
+        };
+        Self {
+            previous: Some((xy, time)),
+            velocity,
+        }
+    }
+
+    fn time_constant(self, quiet_tau: f32) -> f32 {
+        (quiet_tau / (1.0 + SPEED_GAIN * self.velocity.norm_squared())).max(FAST_TAU_SEC)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ArmPositionSmoother {
     pub(super) position: Vector3<f32>,
     first_stage: Vector3<f32>,
-    /// Remaining quiet response after observed control takes over from the virtual arm.
-    settling_sec: f32,
+    motion: PlanarMotion,
 }
 
 impl ArmPositionSmoother {
@@ -28,33 +49,21 @@ impl ArmPositionSmoother {
         Self {
             position,
             first_stage: position,
-            settling_sec: 0.0,
+            motion: PlanarMotion::default(),
         }
     }
 
-    pub(super) fn step(&mut self, target: Vector3<f32>, dt_sec: f32, quiet_tau: f32, weight: f32) {
-        if weight < 1.0 {
-            // Six time constants leave less than 2% of a held step in the
-            // two-pole quiet filter. Bound takeover even for continuous motion.
-            self.settling_sec = 6.0 * quiet_tau;
-        }
+    pub(super) fn observe(&mut self, target: Option<[f32; 3]>, time: MonoTimeNs) {
+        self.motion = target.map_or_else(PlanarMotion::default, |[x, y, _]| {
+            self.motion.observed(Vector2::new(x, y), time)
+        });
+    }
+
+    pub(super) fn step(&mut self, target: Vector3<f32>, dt_sec: f32, quiet_tau: f32) {
         if dt_sec == 0.0 {
             return;
         }
-        let error = target - self.position;
-        let distance = error.x.hypot(error.y);
-        if weight >= 1.0 {
-            self.settling_sec = if distance <= QUIET_PLANAR_ERROR {
-                0.0
-            } else {
-                (self.settling_sec - dt_sec).max(0.0)
-            };
-        }
-        let planar_tau = if self.settling_sec > 0.0 {
-            quiet_tau
-        } else {
-            planar_time_constant(distance, quiet_tau)
-        };
+        let planar_tau = self.motion.time_constant(quiet_tau);
         let time_constants = Vector3::new(planar_tau, planar_tau, quiet_tau);
         for (((position, first), target), tau) in self
             .position
@@ -66,15 +75,6 @@ impl ArmPositionSmoother {
             (*position, *first) = cascade_step(*position, *first, *target, dt_sec, *tau);
         }
     }
-}
-
-/// Smoothly increases the planar bandwidth as the accepted target moves away.
-/// X/Y share a response, so rotating the camera-plane axes cannot change it.
-fn planar_time_constant(distance: f32, quiet_tau: f32) -> f32 {
-    let amount = ((distance - QUIET_PLANAR_ERROR) / (FAST_PLANAR_ERROR - QUIET_PLANAR_ERROR))
-        .clamp(0.0, 1.0);
-    let amount = amount * amount * (3.0 - 2.0 * amount);
-    quiet_tau + (FAST_TIME_CONSTANT_SEC - quiet_tau) * amount
 }
 
 /// Exact held-target step of two equal first-order poles in series.
@@ -100,135 +100,92 @@ mod tests {
     use crate::filter::damped::VectorSpring;
 
     #[test]
-    fn quiet_motion_matches_the_existing_response_at_each_render_rate() {
+    fn onset_stop_and_reversal_follow_camera_samples_at_each_render_rate() {
         for fps in [30, 60, 120] {
-            for tau in [0.125, 0.15] {
-                let initial = Vector3::new(0.3, -0.2, 0.4);
-                let mut actual = ArmPositionSmoother::new(initial);
-                let mut reference = VectorSpring::new(initial);
-                for tick in 0..fps * 8 {
+            for amplitude in [0.04, 0.4] {
+                let mut actual = ArmPositionSmoother::new(Vector3::zeros());
+                let mut quiet = VectorSpring::new(Vector3::zeros());
+                for tick in 0..fps * 3 {
                     let sample = tick / (fps / 30);
-                    let t = sample as f32 / 30.0;
-                    let offset = |phase: f32| {
-                        0.006 * (std::f32::consts::TAU * 0.5 * t + phase).sin()
-                            + 0.004 * (std::f32::consts::TAU * 3.0 * t + phase).sin()
-                            + 0.003 * (std::f32::consts::TAU * 7.0 * t + phase).sin()
+                    let x = match sample {
+                        0..=2 => 0.0,
+                        3..=29 => amplitude,
+                        _ => -amplitude,
                     };
-                    let target = initial + Vector3::new(offset(0.0), offset(0.7), offset(1.4));
-                    actual.step(target, 1.0 / fps as f32, tau, 1.0);
-                    reference.step(target, 1.0 / fps as f32, tau);
-                    assert!((actual.position - reference.position).norm() < 2.0e-6);
+                    let target = Vector3::new(x, 0.0, 0.02 * (sample as f32).sin());
+                    if tick % (fps / 30) == 0 {
+                        actual.observe(
+                            Some(target.into()),
+                            MonoTimeNs(sample as u64 * 1_000_000_000 / 30),
+                        );
+                    }
+                    actual.step(target, 1.0 / fps as f32, 0.125);
+                    quiet.step(target, 1.0 / fps as f32, 0.125);
+                    if sample == 3 {
+                        assert!(actual.position.x > 1.25 * quiet.position.x);
+                    }
+                    assert!(actual.position.x.abs() <= amplitude + 1e-6);
+                    assert!((actual.position.z - quiet.position.z).abs() < 2e-6);
                 }
+                assert!((actual.position.x + amplitude).abs() < 1e-5);
             }
         }
     }
 
     #[test]
-    fn moving_in_the_plane_does_not_release_depth_noise() {
+    fn loss_breaks_velocity_but_retaining_a_sample_preserves_it() {
+        let mut smoother = ArmPositionSmoother::new(Vector3::zeros());
+        smoother.observe(Some([0.0; 3]), MonoTimeNs(0));
+        smoother.observe(Some([0.1; 3]), MonoTimeNs(33_333_333));
+        let moving = smoother.motion;
+        assert!(moving.time_constant(0.125) < 0.125);
+        smoother.step(Vector3::repeat(0.1), 1.0 / 60.0, 0.125);
+        assert_eq!(smoother.motion, moving);
+        smoother.observe(None, MonoTimeNs(66_666_667));
+        smoother.observe(Some([-0.4; 3]), MonoTimeNs(99_999_999));
+        assert_eq!(smoother.motion.time_constant(0.125), 0.125);
+        smoother.observe(Some([-0.3; 3]), MonoTimeNs(133_333_333));
+        assert!(smoother.motion.time_constant(0.125) < 0.125);
+    }
+
+    #[test]
+    fn noise_during_sustained_motion_is_attenuated() {
         for fps in [30, 60, 120] {
-            let mut actual = ArmPositionSmoother::new(Vector3::zeros());
-            let mut reference = VectorSpring::new(Vector3::zeros());
-            for tick in 0..fps * 4 {
-                let t = (tick / (fps / 30)) as f32 / 30.0;
-                let target = Vector3::new(
-                    0.4 * (std::f32::consts::TAU * t).sin(),
-                    0.2 * (std::f32::consts::TAU * t).cos(),
-                    0.03 * (std::f32::consts::TAU * 3.0 * t).sin(),
-                );
-                actual.step(target, 1.0 / fps as f32, 0.125, 1.0);
-                reference.step(target, 1.0 / fps as f32, 0.125);
-                assert!((actual.position.z - reference.position.z).abs() < 2.0e-6);
-            }
-        }
-    }
-
-    #[test]
-    fn a_large_planar_step_arrives_earlier_without_overshooting() {
-        for fps in [30, 60, 120] {
-            let mut actual = ArmPositionSmoother::new(Vector3::zeros());
-            let mut reference = VectorSpring::new(Vector3::zeros());
-            let target = Vector3::new(0.4, 0.0, 0.0);
-            let mut previous = 0.0;
-            for tick in 1..=fps * 3 {
-                actual.step(target, 1.0 / fps as f32, 0.125, 1.0);
-                reference.step(target, 1.0 / fps as f32, 0.125);
-                assert!(actual.position.x >= previous);
-                assert!(actual.position.x <= target.x);
-                previous = actual.position.x;
-                if tick == fps / 10 {
-                    assert!(actual.position.x >= 0.2, "{fps} Hz: halfway within 100 ms");
-                    assert!(reference.position.x < 0.1);
+            let mut clean = ArmPositionSmoother::new(Vector3::zeros());
+            let mut noisy = clean;
+            let mut input_energy = 0.0;
+            let mut output_energy = 0.0;
+            for tick in 0..fps * 2 {
+                let sample = tick / (fps / 30);
+                let t = sample as f32 / 30.0;
+                let target = Vector3::new(0.6 * t, 0.0, 0.0);
+                let noise = 0.008 * (std::f32::consts::TAU * 6.0 * t).sin()
+                    + 0.004 * (std::f32::consts::TAU * 3.0 * t).cos();
+                let measured = target + Vector3::new(noise, noise, 0.0);
+                if tick % (fps / 30) == 0 {
+                    let captured = MonoTimeNs(sample as u64 * 1_000_000_000 / 30);
+                    clean.observe(Some(target.into()), captured);
+                    noisy.observe(Some(measured.into()), captured);
                 }
-                if tick == fps * 3 / 10 {
-                    assert!(actual.position.x >= 0.36, "{fps} Hz: 90% within 300 ms");
+                clean.step(target, 1.0 / fps as f32, 0.125);
+                noisy.step(measured, 1.0 / fps as f32, 0.125);
+                if tick >= fps {
+                    input_energy += (measured - target).norm_squared();
+                    output_energy += (noisy.position - clean.position).norm_squared();
                 }
             }
-            assert!((actual.position - target).norm() < 1.0e-6);
+            assert!(
+                output_energy < input_energy,
+                "{fps} Hz: {output_energy} / {input_energy}"
+            );
         }
-    }
-
-    #[test]
-    fn stopping_and_reversing_stays_inside_the_observed_range() {
-        for fps in [30, 60, 120] {
-            let mut actual = ArmPositionSmoother::new(Vector3::zeros());
-            for target in [0.4, -0.4, 0.0] {
-                for _ in 0..fps {
-                    actual.step(Vector3::new(target, 0.0, 0.0), 1.0 / fps as f32, 0.125, 1.0);
-                    assert!((-0.4..=0.4).contains(&actual.position.x));
-                    assert_eq!(actual.position.y, 0.0);
-                    assert_eq!(actual.position.z, 0.0);
-                }
-            }
-            assert!(actual.position.x.abs() < 0.001);
-        }
-    }
-
-    #[test]
-    fn takeover_keeps_the_quiet_response_until_the_position_catches_up() {
-        for tau in [0.125, 0.15] {
-            let mut actual = ArmPositionSmoother::new(Vector3::zeros());
-            let mut reference = VectorSpring::new(Vector3::zeros());
-            let target = Vector3::new(0.4, 0.2, 0.1);
-            for weight in [0.0, 0.5, 0.99, 1.0, 1.0] {
-                actual.step(target, 1.0 / 60.0, tau, weight);
-                reference.step(target, 1.0 / 60.0, tau);
-                assert!((actual.position - reference.position).norm() < 2.0e-6);
-            }
-            // The two responses diverge as soon as a settled, fully observed
-            // arm begins a new movement, before the settling timeout expires.
-            let near = actual.position;
-            actual.step(near, 1.0 / 60.0, tau, 1.0);
-            reference.step(near, 1.0 / 60.0, tau);
-            for _ in 0..6 {
-                actual.step(target, 1.0 / 60.0, tau, 1.0);
-                reference.step(target, 1.0 / 60.0, tau);
-            }
-            assert!(actual.position.x > reference.position.x + 0.03);
-        }
-    }
-
-    #[test]
-    fn continuous_motion_can_accelerate_after_takeover_without_a_pause() {
-        let mut actual = ArmPositionSmoother::new(Vector3::zeros());
-        let mut reference = VectorSpring::new(Vector3::zeros());
-        let dt = 1.0 / 60.0;
-        for tick in 1..=60 {
-            let target = Vector3::new(0.2 + tick as f32 * 0.02, 0.0, 0.0);
-            let weight = if tick <= 4 { 0.5 } else { 1.0 };
-            actual.step(target, dt, 0.125, weight);
-            reference.step(target, dt, 0.125);
-            if tick == 30 {
-                assert!((actual.position - reference.position).norm() < 2.0e-6);
-            }
-        }
-        assert!(actual.position.x > reference.position.x + 0.05);
     }
 
     #[test]
     fn zero_elapsed_time_keeps_both_poles_unchanged() {
         let mut actual = ArmPositionSmoother::new(Vector3::new(0.3, -0.2, 0.4));
-        let previous = actual;
-        actual.step(Vector3::new(-0.2, 0.3, 0.4), 0.0, 0.125, 1.0);
-        assert_eq!(actual, previous);
+        let before = actual;
+        actual.step(Vector3::new(-0.2, 0.3, 0.4), 0.0, 0.125);
+        assert_eq!(actual, before);
     }
 }

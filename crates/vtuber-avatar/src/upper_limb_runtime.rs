@@ -22,6 +22,7 @@ const SOLVE_INTERVAL_SECONDS: f32 = 1.0 / 30.0;
 pub struct UpperLimbState {
     generation: Option<crate::lifecycle::AvatarGeneration>,
     path: JointPath,
+    displayed_path_seq: Option<vtuber_core::FrameSeq>,
     status: Option<SolveStatus>,
     solved_goals: Option<[Option<ArmGoal>; 2]>,
     refine: bool,
@@ -42,6 +43,11 @@ pub struct UpperLimbState {
 }
 
 impl UpperLimbState {
+    /// Observation that produced the interpolated path last written to the compositor.
+    pub fn displayed_path_seq(&self) -> Option<vtuber_core::FrameSeq> {
+        self.displayed_path_seq
+    }
+
     /// Coordinates of the admitted path, independent of render-only skin roll.
     pub(crate) fn joint_angles(
         &self,
@@ -86,6 +92,15 @@ impl Drop for PendingSolve {
     fn drop(&mut self) {
         self.obsolete
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Join the preceding solve before advancing a fixed-observation replay tick.
+pub fn finish_replay_solve(mut state: ResMut<UpperLimbState>) {
+    if let Some(mut pending) = state.pending.take() {
+        state.queued = Some(bevy::tasks::futures_lite::future::block_on(
+            &mut pending.task,
+        ));
     }
 }
 
@@ -761,6 +776,7 @@ fn apply_arm_targets(
                     let chain = chains.get(side).copied().flatten()?;
                     Some(joints.display_pose(chain, arm.resolved))
                 });
+                state.displayed_path_seq = state.path.current_seq;
                 *targets = DynamicArmTargets {
                     generation: Some(generation),
                     source_seq: state.source_seq,
@@ -947,6 +963,7 @@ fn prepare_step(input: SolveInput) -> PreparedStep {
     if matches!(status, SolveStatus::Feasible { .. })
         && (next != path.current || body_curve.as_ref().is_some_and(|c| !c.from.same(&c.to)))
     {
+        path.route_seq = source_seq;
         let admitted = path.plan(&problem, next, &search_obsolete);
         match admitted {
             Err(error) => {

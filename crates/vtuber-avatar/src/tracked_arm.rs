@@ -1291,6 +1291,7 @@ mod tests {
                     source_seq: FrameSeq(seq),
                     captured_at: now,
                     inference_finished_at: now,
+                    trace: None,
                     observation: Some(PoseArmObservation {
                         hips: None,
                         left: arm,

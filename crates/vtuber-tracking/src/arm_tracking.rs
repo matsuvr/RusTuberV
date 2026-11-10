@@ -15,11 +15,6 @@
 //! is accepted as a reacquisition so a hand that moved while hidden can be
 //! picked up again.
 //!
-//! Reacquisition is therefore delayed by exactly one thing: the adoption gate
-//! waiting for consecutive good camera frames. Nothing else is tuned against it
-//! — the channel's authority comes back on the shared acquire ramp, and the
-//! smoother no longer stiffens after a loss, so a second delay on the same
-//! timeline would only delay the return twice.
 
 use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 use vtuber_core::arm_tracking::{
@@ -248,8 +243,8 @@ fn palm_rotation(target: ArmTrackingTarget) -> Option<UnitQuaternion<f32>> {
 /// Attenuate depth noise before it becomes elbow flexion, including when the
 /// elbow observation itself is quiet. The recorded stationary-camera regression
 /// bounds the final bone motion, not just this filter's Cartesian output. Large
-/// planar movement gets a faster response in [`ArmPositionSmoother`], while
-/// depth and small planar errors retain this response. A detection teleport is
+/// planar velocity increases the bandwidth in [`ArmPositionSmoother`]; depth
+/// always uses this time constant. A detection teleport is
 /// rejected by [`ArmTrackingProfile::max_wrist_step`], and a real loss is eased
 /// back by the shared loss blend.
 const ARM_POSITION_TIME_CONSTANT_SEC: f32 = 0.125;
@@ -396,24 +391,14 @@ impl ArmSmootherState {
         }
     }
 
-    fn advance(
-        &mut self,
-        target: ArmTrackingTarget,
-        dt_sec: f32,
-        weight: ArmBlendWeight,
-    ) -> ArmTrackingTarget {
+    fn advance(&mut self, target: ArmTrackingTarget, dt_sec: f32) -> ArmTrackingTarget {
         let dt_sec = bounded_dt(dt_sec, DEFAULT_MAX_DT_SEC);
-        self.wrist.step(
-            vector(target.wrist),
-            dt_sec,
-            ARM_POSITION_TIME_CONSTANT_SEC,
-            weight.wrist,
-        );
+        self.wrist
+            .step(vector(target.wrist), dt_sec, ARM_POSITION_TIME_CONSTANT_SEC);
         self.elbow.step(
             vector(target.elbow_pole),
             dt_sec,
             ARM_ELBOW_TIME_CONSTANT_SEC,
-            weight.pole,
         );
         if let Some(rotation) = palm_rotation(target) {
             self.palm
@@ -500,8 +485,8 @@ fn array(value: Vector3<f32>) -> [f32; 3] {
 /// 5/5 video evaluation: a hand must return to the virtual arm slowly enough to
 /// read as a relaxed drop rather than a snap, and a reacquired hand must not fly
 /// to the observation. Reacquisition continues from the current authority, so
-/// [`LossBlendProfile::acquire`] is the time a fully abandoned hand takes to
-/// return to full observation.
+/// [`ArmTrackingProfile::reacquire_position`] sets the wrist/elbow ramp after
+/// the adoption gate has registered a loss.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArmTrackingProfile {
     /// Minimum shoulder visibility to use the arm at all.
@@ -512,6 +497,8 @@ pub struct ArmTrackingProfile {
     pub elbow_visibility: f32,
     /// Unified hold / return / acquire timing shared with the face pipeline.
     pub blend: LossBlendProfile,
+    /// Time to restore wrist/elbow authority after an adopted arm was lost.
+    pub reacquire_position: std::time::Duration,
     /// Largest accepted wrist displacement between two observations, in units
     /// of the calibrated arm length.
     ///
@@ -528,6 +515,7 @@ impl Default for ArmTrackingProfile {
             wrist_visibility: 0.5,
             elbow_visibility: 0.5,
             blend: LossBlendProfile::default(),
+            reacquire_position: std::time::Duration::from_millis(200),
             max_wrist_step: 0.75,
         }
     }
@@ -935,6 +923,19 @@ impl ArmSideState {
         };
     }
 
+    fn observe_motion(&mut self, presence: ChannelPresence, captured_at: MonoTimeNs) {
+        if let Some(smoother) = &mut self.smoother {
+            smoother.wrist.observe(
+                self.source.filter(|_| presence.wrist).map(|t| t.wrist),
+                captured_at,
+            );
+            smoother.elbow.observe(
+                self.source.filter(|_| presence.elbow).map(|t| t.elbow_pole),
+                captured_at,
+            );
+        }
+    }
+
     /// Advances the observed blends and the render-clock smoothing by one tick.
     ///
     /// The latest consumed presence is reused so a retained observation keeps
@@ -947,28 +948,48 @@ impl ArmSideState {
         render_dt_ns: Option<u64>,
         profile: &ArmTrackingProfile,
     ) {
+        let position_blend = LossBlendProfile {
+            acquire: if self.adoption.returned {
+                profile.reacquire_position
+            } else {
+                profile.blend.acquire
+            },
+            ..profile.blend
+        };
         self.wrist_blend
-            .advance(now, self.presence.wrist, &profile.blend);
+            .advance(now, self.presence.wrist, &position_blend);
         self.pole_blend
-            .advance(now, self.presence.elbow, &profile.blend);
+            .advance(now, self.presence.elbow, &position_blend);
         self.palm_blend
             .advance(now, self.presence.palm, &profile.blend);
         self.fingers_blend
             .advance(now, self.presence.fingers, &profile.blend);
-        let weight = self.weights();
         if let (Some(source), Some(smoother)) = (self.source, self.smoother.as_mut()) {
             let dt_sec = render_dt_ns.unwrap_or(0) as f32 * 1.0e-9;
-            self.output = Some(smoother.advance(source, dt_sec, weight));
+            self.output = Some(smoother.advance(source, dt_sec));
         }
     }
 
     fn advance_without_observation(&mut self, now: MonoTimeNs, profile: &ArmTrackingProfile) {
+        self.observe_motion(ChannelPresence::NONE, now);
         self.finger_poses.interrupt();
         self.wrist_blend.advance(now, false, &profile.blend);
         self.pole_blend.advance(now, false, &profile.blend);
         self.palm_blend.advance(now, false, &profile.blend);
         self.fingers_blend.advance(now, false, &profile.blend);
     }
+}
+
+/// Tracking decisions for one side of the most recently consumed image.
+pub struct ArmObservationStatus {
+    /// Current visibility/hand gate.
+    pub adopted: bool,
+    /// Number of arm length calibration samples.
+    pub calibration_samples: usize,
+    /// Confirmed arm length in metres.
+    pub reference_m: Option<f32>,
+    /// Adopted shoulder-relative wrist before position filtering, absent during loss.
+    pub wrist: Option<[f32; 3]>,
 }
 
 /// Pure temporal state for observed arm tracking. It owns no clock or ECS.
@@ -998,6 +1019,24 @@ impl ArmTrackingState {
             last_consumed: None,
             last_now: None,
         }
+    }
+
+    /// Render-clock timestamp supplied to the most recent filter step.
+    pub fn sampled_at(&self) -> Option<MonoTimeNs> {
+        self.last_now
+    }
+
+    /// Gate, calibration and currently accepted position per anatomical side.
+    pub fn observation_status(&self) -> [ArmObservationStatus; 2] {
+        [&self.left, &self.right].map(|side| ArmObservationStatus {
+            adopted: side.adoption.adopted,
+            calibration_samples: side.calibration.sample_count(),
+            reference_m: side
+                .calibration
+                .confirmed_length()
+                .map(ArmReferenceLength::meters),
+            wrist: side.source.filter(|_| side.presence.wrist).map(|s| s.wrist),
+        })
     }
 
     /// Drops calibration and observation state after recalibration or capture stop.
@@ -1074,6 +1113,7 @@ pub fn step_arm_tracking(
             (&mut state.right, right, 1.0),
         ] {
             side.consume(arm, profile, flexion_sign);
+            side.observe_motion(side.presence, frame.captured_at);
         }
     }
     for side in [&mut state.left, &mut state.right] {
@@ -1432,7 +1472,7 @@ mod tests {
                 (initial, 120),
             ] {
                 for _ in 0..ticks {
-                    let output = smoother.advance(goal, dt, ArmBlendWeight::ONE);
+                    let output = smoother.advance(goal, dt);
                     let normal = vector(output.palm_normal.unwrap());
                     let forward = vector(output.palm_forward.unwrap());
                     assert!(
@@ -1453,7 +1493,7 @@ mod tests {
             let mut smoother = ArmSmootherState::new(target);
             let mut value = target;
             for _ in 0..120 {
-                value = smoother.advance(target, step_sec, ArmBlendWeight::ONE);
+                value = smoother.advance(target, step_sec);
             }
             assert_eq!(value, target);
         }
@@ -1464,7 +1504,7 @@ mod tests {
         let mut smoother = ArmSmootherState::new(target(0.0));
         let mut previous = 0.0;
         for _ in 0..120 {
-            let value = smoother.advance(target(1.0), RENDER_STEP_SEC, ArmBlendWeight::ONE);
+            let value = smoother.advance(target(1.0), RENDER_STEP_SEC);
             assert!(value.wrist[0] >= previous);
             assert!(value.wrist[0] <= 1.0);
             previous = value.wrist[0];
@@ -1479,11 +1519,8 @@ mod tests {
         for frame in 0..240 {
             let raw = target(if frame % 2 == 0 { 0.01 } else { -0.01 });
             let mut copy = smoother;
-            let value = smoother.advance(raw, RENDER_STEP_SEC, ArmBlendWeight::ONE);
-            assert_eq!(
-                value,
-                copy.advance(raw, RENDER_STEP_SEC, ArmBlendWeight::ONE)
-            );
+            let value = smoother.advance(raw, RENDER_STEP_SEC);
+            assert_eq!(value, copy.advance(raw, RENDER_STEP_SEC));
             squared += value.wrist[0].powi(2);
         }
         assert!((squared / 240.0).sqrt() < 0.005);
@@ -1506,7 +1543,12 @@ mod tests {
                 let phase = sample as f32 * std::f32::consts::TAU * 3.0 / 30.0;
                 let mut observed = initial;
                 observed.elbow_pole[1] += 0.03 * phase.sin();
-                let output = smoother.advance(observed, 1.0 / fps as f32, ArmBlendWeight::ONE);
+                if tick % (fps / 30) == 0 {
+                    let time = MonoTimeNs(sample as u64 * 1_000_000_000 / 30);
+                    smoother.wrist.observe(Some(observed.wrist), time);
+                    smoother.elbow.observe(Some(observed.elbow_pole), time);
+                }
+                let output = smoother.advance(observed, 1.0 / fps as f32);
                 assert_eq!(output.wrist, initial.wrist);
                 if tick >= fps {
                     squared += (output.elbow_pole[1] - initial.elbow_pole[1]).powi(2);
@@ -1516,7 +1558,7 @@ mod tests {
             assert!(rms < 0.003, "{fps} Hz: elbow jitter RMS {rms}");
             let mut output = initial;
             for _ in 0..fps * 4 {
-                output = smoother.advance(initial, 1.0 / fps as f32, ArmBlendWeight::ONE);
+                output = smoother.advance(initial, 1.0 / fps as f32);
             }
             near(output.elbow_pole, initial.elbow_pole);
         }
@@ -1541,7 +1583,12 @@ mod tests {
                 // A stationary elbow with noisy wrist depth is also a valid
                 // forearm motion. The elbow observation did not move.
                 observed.wrist[2] += 0.03 * phase.sin();
-                let output = smoother.advance(observed, 1.0 / fps as f32, ArmBlendWeight::ONE);
+                if tick % (fps / 30) == 0 {
+                    let time = MonoTimeNs(sample as u64 * 1_000_000_000 / 30);
+                    smoother.wrist.observe(Some(observed.wrist), time);
+                    smoother.elbow.observe(Some(observed.elbow_pole), time);
+                }
+                let output = smoother.advance(observed, 1.0 / fps as f32);
                 largest =
                     largest.max((vector(output.elbow_pole) - vector(initial.elbow_pole)).norm());
             }
@@ -1566,8 +1613,17 @@ mod tests {
         moved.wrist[0] += 0.4;
         moved.elbow_pole[0] += 0.2;
         let mut previous = initial;
+        smoother.wrist.observe(Some(initial.wrist), MonoTimeNs(0));
+        smoother
+            .elbow
+            .observe(Some(initial.elbow_pole), MonoTimeNs(0));
         for tick in 0..180 {
-            let output = smoother.advance(moved, 1.0 / 60.0, ArmBlendWeight::ONE);
+            if tick % 2 == 0 {
+                let time = MonoTimeNs((tick / 2 + 1) * 1_000_000_000 / 30);
+                smoother.wrist.observe(Some(moved.wrist), time);
+                smoother.elbow.observe(Some(moved.elbow_pole), time);
+            }
+            let output = smoother.advance(moved, 1.0 / 60.0);
             assert!(output.wrist[0] >= previous.wrist[0]);
             assert!(output.elbow_pole[0] >= previous.elbow_pole[0]);
             assert!(output.wrist[0] <= moved.wrist[0] + 1.0e-6);
@@ -1580,7 +1636,7 @@ mod tests {
             }
             previous = output;
         }
-        let output = smoother.advance(moved, 1.0 / 60.0, ArmBlendWeight::ONE);
+        let output = smoother.advance(moved, 1.0 / 60.0);
         near(output.wrist, moved.wrist);
         near(output.elbow_pole, moved.elbow_pole);
     }
@@ -1600,9 +1656,12 @@ mod tests {
         let followed = |distance: f32| {
             let mut smoother = ArmSmootherState::new(target(0.0));
             smoother
-                .advance(target(distance), dt, ArmBlendWeight::ONE)
-                .wrist[0]
-                / distance
+                .wrist
+                .observe(Some(target(0.0).wrist), MonoTimeNs(0));
+            smoother
+                .wrist
+                .observe(Some(target(distance).wrist), MonoTimeNs(33_333_333));
+            smoother.advance(target(distance), dt).wrist[0] / distance
         };
         // A slow drift and a hand thrown across the body in one observation.
         let slow = followed(0.05);
@@ -1680,6 +1739,7 @@ mod tests {
             source_seq: FrameSeq(seq),
             captured_at: MonoTimeNs(captured_ns),
             inference_finished_at: MonoTimeNs(captured_ns),
+            trace: None,
             observation,
         }
     }
@@ -1902,16 +1962,12 @@ mod tests {
         let dt = 1.0 / 60.0;
         let mut smoother = ArmSmootherState::new(target([1.0, 0.0, 0.0]));
         let axis = vector([0.0, 0.0, 1.0]);
-        let mut previous = smoother
-            .advance(target([1.0, 0.0, 0.0]), dt, ArmBlendWeight::ONE)
-            .elbow_pole;
+        let mut previous = smoother.advance(target([1.0, 0.0, 0.0]), dt).elbow_pole;
 
         // A one-observation quarter turn is paced out at the capped rate.
         let mut turned = 0.0;
         for _ in 0..240 {
-            let value = smoother
-                .advance(target([0.0, 1.0, 0.0]), dt, ArmBlendWeight::ONE)
-                .elbow_pole;
+            let value = smoother.advance(target([0.0, 1.0, 0.0]), dt).elbow_pole;
             let before = perpendicular(vector(previous), axis).normalize();
             let after = perpendicular(vector(value), axis).normalize();
             let step = before.dot(&after).clamp(-1.0, 1.0).acos();
@@ -2681,7 +2737,7 @@ mod tests {
         let mut axis = Vector3::zeros();
         for _ in 0..300 {
             let current = vector(
-                palm.advance(palm_target(array(-start)), dt, ArmBlendWeight::ONE)
+                palm.advance(palm_target(array(-start)), dt)
                     .palm_normal
                     .unwrap(),
             );
@@ -2718,7 +2774,7 @@ mod tests {
         let mut palm = ArmSmootherState::new(palm_target(array(from)));
         for _ in 0..300 {
             let current = vector(
-                palm.advance(palm_target(array(to)), dt, ArmBlendWeight::ONE)
+                palm.advance(palm_target(array(to)), dt)
                     .palm_normal
                     .unwrap(),
             );
@@ -2747,7 +2803,6 @@ mod tests {
                     ..initial
                 },
                 RENDER_STEP_SEC,
-                ArmBlendWeight::ONE,
             );
             near(output.palm_normal.unwrap(), initial.palm_normal.unwrap());
             near(output.palm_forward.unwrap(), initial.palm_forward.unwrap());
@@ -2784,8 +2839,8 @@ mod tests {
                 palm_forward: Some(array(turn * Vector3::y())),
                 ..initial
             };
-            let expected = mirror(left.advance(target, RENDER_STEP_SEC, ArmBlendWeight::ONE));
-            let actual = right.advance(mirror(target), RENDER_STEP_SEC, ArmBlendWeight::ONE);
+            let expected = mirror(left.advance(target, RENDER_STEP_SEC));
+            let actual = right.advance(mirror(target), RENDER_STEP_SEC);
             near(actual.palm_normal.unwrap(), expected.palm_normal.unwrap());
             near(actual.palm_forward.unwrap(), expected.palm_forward.unwrap());
         }
@@ -2801,7 +2856,7 @@ mod tests {
         let mut ticks = 0u32;
         loop {
             let current = vector(
-                palm.advance(palm_target(target), RENDER_STEP_SEC, ArmBlendWeight::ONE)
+                palm.advance(palm_target(target), RENDER_STEP_SEC)
                     .palm_normal
                     .unwrap(),
             );
@@ -3126,10 +3181,13 @@ mod tests {
 
     #[test]
     fn a_returned_arm_still_ramps_its_authority_back_in() {
-        // The shortened wait must not turn into a snap: the channel's weight
-        // still comes back over the profile's acquire time.
+        // Reacquisition starts at the current authority and reaches full weight
+        // after the two-frame confirmation and the position ramp.
         let profile = ArmTrackingProfile::default();
-        let base = arm();
+        let base = ArmLandmarks {
+            hand: Some(hand_toward_camera([0.0; 3])),
+            ..arm()
+        };
         let mut state = tracked_state(base, &profile);
         let hidden = hidden_arm(base);
         for seq in 0..FULL_RETURN_FRAMES {
@@ -3143,14 +3201,15 @@ mod tests {
         let mut reached_full_after = None;
         for step in 0..40u64 {
             let now = start + step * OBSERVATION_STEP_NS;
-            let weight = feed(&mut state, base, 1000 + step, now, &profile)
+            let weights = feed(&mut state, base, 1000 + step, now, &profile)
                 .unwrap()
                 .weights
-                .left
-                .wrist;
+                .left;
+            let weight = weights.wrist;
             assert!(weight >= previous, "the acquire ramp must not reverse");
             assert!(weight <= 1.0);
             if weight >= 1.0 {
+                assert!(weights.palm > 0.0 && weights.palm < 1.0);
                 reached_full_after = Some(step);
                 break;
             }
@@ -3160,7 +3219,9 @@ mod tests {
             * OBSERVATION_STEP_NS as f32
             * 1.0e-9;
         assert!(
-            elapsed_sec > profile.blend.acquire.as_secs_f32() * 0.5,
+            (profile.reacquire_position.as_secs_f32()
+                ..=profile.reacquire_position.as_secs_f32() + 0.07)
+                .contains(&elapsed_sec),
             "the authority must still ramp over the acquire time: {elapsed_sec}"
         );
     }

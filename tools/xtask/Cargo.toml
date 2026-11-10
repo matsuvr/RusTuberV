@@ -18,7 +18,7 @@ bevy = { workspace = true }
 bevy_egui = { workspace = true }
 bevy_vrm1 = { workspace = true, features = ["log"] }
 vtuber-ndi = { path = "../../crates/vtuber-ndi" }
-vtuber-core = { path = "../../crates/vtuber-core" }
+vtuber-core = { path = "../../crates/vtuber-core", features = ["serde"] }
 vtuber-camera = { path = "../../crates/vtuber-camera" }
 vtuber-app = { path = "../../crates/vtuber-app" }
 vtuber-avatar = { path = "../../crates/vtuber-avatar" }

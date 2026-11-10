@@ -21,6 +21,10 @@ struct Segment {
 #[derive(Clone, Default)]
 pub(crate) struct JointPath {
     pub current: [Option<ArmJoints>; 2],
+    /// Source of the path actually sampled at the current position.
+    pub current_seq: Option<vtuber_core::FrameSeq>,
+    /// Source of the route from the last admitted anchor.
+    pub route_seq: Option<vtuber_core::FrameSeq>,
     pub body: Option<BodyPose>,
     segment: Option<Segment>,
     queued: std::collections::VecDeque<Segment>,
@@ -34,6 +38,12 @@ impl JointPath {
     pub fn after_current_segment(&self) -> Self {
         let last = self.queued.back().or(self.segment.as_ref());
         Self {
+            current_seq: if last.is_some() {
+                self.route_seq
+            } else {
+                self.current_seq
+            },
+            route_seq: None,
             current: last.map_or(self.current, |s| s.to),
             body: last
                 .and_then(|s| s.body.as_ref().map(|b| b.to.clone()))
@@ -171,6 +181,9 @@ impl JointPath {
             // Rendering only advances its parameter; it cannot introduce a new
             // candidate. Repeating convex clipping here would block every tick.
             self.current = next;
+            if t > 0.0 {
+                self.current_seq = self.route_seq;
+            }
             if next_body.is_some() {
                 self.body = next_body;
             }
@@ -712,6 +725,10 @@ mod tests {
             ..Default::default()
         };
         path.advance(&problem, start, 0.0).unwrap();
+        path.route_seq = Some(vtuber_core::FrameSeq(7));
+        path.advance(&problem, target, 0.0).unwrap();
+        assert_eq!(path.current_seq, None);
+        assert_eq!(path.after_current_segment().current_seq, path.route_seq);
         let h = 0.15 / 100.0;
         let mut positions = vec![path.current[0].unwrap().angles[0]];
         for _ in 0..101 {
@@ -719,6 +736,7 @@ mod tests {
             assert!(problem.feasible(&problem.evaluate(path.current).unwrap()));
             positions.push(path.current[0].unwrap().angles[0]);
         }
+        assert_eq!(path.current_seq, Some(vtuber_core::FrameSeq(7)));
         let start_velocity = (positions[1] - positions[0]) / h;
         let end_velocity = (positions[100] - positions[99]) / h;
         // Quintic starts with 10*t^3: finite differences decay as h^2.

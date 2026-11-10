@@ -8,7 +8,8 @@ use mediapipe::HandLandmarkerResult;
 use mediapipe::PoseLandmarkerResult;
 use mediapipe::WorldLandmark;
 use vtuber_core::arm_tracking::{
-    ArmLandmarks, HAND_LANDMARK_COUNT, HandWorldLandmarks, PoseArmObservation, PoseWorldLandmark,
+    ArmImageLandmarks, ArmLandmarks, HAND_LANDMARK_COUNT, HandWorldLandmarks, PoseArmObservation,
+    PoseWorldLandmark,
 };
 
 /// MediaPipe Pose's fixed world-landmark count.
@@ -83,6 +84,8 @@ pub enum PoseDecodeError {
 pub struct DecodedPose {
     /// The arm chain observation, or `None` for a completed no-person result.
     pub observation: Option<PoseArmObservation>,
+    /// Pose image chain from the same result.
+    pub image: [Option<ArmImageLandmarks>; 2],
     /// Normalized image wrist position per side, `[left, right]`.
     pub wrist_xy: [Option<[f32; 2]>; 2],
 }
@@ -98,6 +101,7 @@ pub fn decode_pose_result(result: &PoseLandmarkerResult) -> Result<DecodedPose, 
             return Ok(DecodedPose {
                 observation: None,
                 wrist_xy: [None, None],
+                image: [None, None],
             });
         }
         [person] => person,
@@ -119,9 +123,17 @@ pub fn decode_pose_result(result: &PoseLandmarkerResult) -> Result<DecodedPose, 
     let wrist_xy = result
         .pose_landmarks
         .first()
-        .map(|normalized| [15, 16].map(|index| normalized_wrist_xy(normalized, index)))
+        .map(|normalized| [15, 16].map(|index| normalized_xy(normalized, index)))
         .unwrap_or([None, None]);
     Ok(DecodedPose {
+        image: [[11, 13, 15], [12, 14, 16]].map(|[shoulder, elbow, wrist]| {
+            let normalized = result.pose_landmarks.first()?;
+            Some(ArmImageLandmarks {
+                shoulder: normalized_xy(normalized, shoulder)?,
+                elbow: normalized_xy(normalized, elbow)?,
+                wrist: normalized_xy(normalized, wrist)?,
+            })
+        }),
         observation: Some(observation),
         wrist_xy,
     })
@@ -231,13 +243,22 @@ pub fn decode_hand_world(
     })
 }
 
+/// One assigned candidate in its two original coordinate systems.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandObservation {
+    /// Palm and finger points in the hand-centred world frame.
+    pub world: HandWorldLandmarks,
+    /// Normalized wrist XY in the source image.
+    pub wrist_image: [f32; 2],
+}
+
 /// Pairs detected hands with Pose wrists jointly and returns one unambiguous
 /// hand observation per anatomical side.
 ///
 /// Pairing uses the normalized image positions of the Pose wrists and the
 /// hand's own wrist, so it does not depend on MediaPipe's handedness label being
-/// computed for mirrored input. Each hand claims its nearest free side in the
-/// order the task reported it; a hand farther than [`HAND_WRIST_PAIR_DISTANCE`]
+/// computed for mirrored input. Maximum-cardinality, minimum-distance matching assigns both sides
+/// jointly; a hand farther than [`HAND_WRIST_PAIR_DISTANCE`]
 /// from every free wrist is ignored rather than assigned to a side it does not
 /// belong to. Handedness is deliberately not consulted: it is a left/right
 /// label confidence, not a statement about coordinate accuracy, so ranking
@@ -252,7 +273,7 @@ pub fn decode_hand_world(
 pub fn decode_hand_result(
     result: &HandLandmarkerResult,
     wrist_xy: &[Option<[f32; 2]>; 2],
-) -> Result<[Option<HandWorldLandmarks>; 2], PoseDecodeError> {
+) -> Result<[Option<HandObservation>; 2], PoseDecodeError> {
     if result.hand_landmarks.is_empty()
         && result.hand_world_landmarks.is_empty()
         && result.handedness.is_empty()
@@ -303,7 +324,10 @@ pub fn decode_hand_result(
         });
         candidates.push(HandCandidate {
             distances,
-            hand: hand_observation,
+            hand: HandObservation {
+                world: hand_observation,
+                wrist_image: wrist,
+            },
         });
     }
 
@@ -314,10 +338,7 @@ pub fn decode_hand_result(
 /// Neither detection order nor anatomical side breaks a tie: only assignments
 /// shared by all optimal pairings are observed. Existing tracking loss handling
 /// owns the ambiguous side until a later observation resolves it.
-fn assign_hands(
-    candidates: Vec<HandCandidate>,
-    max_distance: f32,
-) -> [Option<HandWorldLandmarks>; 2] {
+fn assign_hands(candidates: Vec<HandCandidate>, max_distance: f32) -> [Option<HandObservation>; 2] {
     let choices = |side| {
         std::iter::once(None).chain(candidates.iter().enumerate().filter_map(
             move |(index, candidate)| {
@@ -362,13 +383,10 @@ fn assign_hands(
 
 struct HandCandidate {
     distances: [Option<f32>; 2],
-    hand: HandWorldLandmarks,
+    hand: HandObservation,
 }
 
-fn normalized_wrist_xy(
-    normalized: &[mediapipe::NormalizedLandmark],
-    index: usize,
-) -> Option<[f32; 2]> {
+fn normalized_xy(normalized: &[mediapipe::NormalizedLandmark], index: usize) -> Option<[f32; 2]> {
     let landmark = normalized.get(index)?;
     let xy = [landmark.point.x(), landmark.point.y()];
     xy.iter().all(|value| value.is_finite()).then_some(xy)
@@ -566,7 +584,10 @@ mod tests {
     fn candidate(distances: [Option<f32>; 2], handedness: f32) -> HandCandidate {
         HandCandidate {
             distances,
-            hand: decode_hand_world(0, &hand_world(handedness), Some(handedness)).unwrap(),
+            hand: HandObservation {
+                world: decode_hand_world(0, &hand_world(handedness), Some(handedness)).unwrap(),
+                wrist_image: [handedness, -0.1],
+            },
         }
     }
 
@@ -583,9 +604,13 @@ mod tests {
         assert!(hands[1].is_some());
         // The minimum total distance assigns the second hand to the right,
         // even though that hand alone is closer to the left wrist.
-        assert_eq!(hands[0].unwrap().handedness_score, Some(0.9));
-        assert_eq!(hands[1].unwrap().handedness_score, Some(0.8));
+        assert_eq!(hands[0].unwrap().world.handedness_score, Some(0.9));
+        assert_eq!(hands[1].unwrap().world.handedness_score, Some(0.8));
 
+        assert_eq!(
+            hands.map(|h| h.map(|h| (h.wrist_image, h.world.landmarks[0].meters[1]))),
+            [Some(([0.9, -0.1], 0.9)), Some(([0.8, -0.1], 0.8))]
+        );
         let far = assign_hands(vec![candidate([Some(0.60), Some(0.70)], 0.9)], 0.15);
         assert_eq!(far, [None, None]);
     }
@@ -602,7 +627,7 @@ mod tests {
             ],
             0.15,
         );
-        assert_eq!(hands[0].unwrap().handedness_score, Some(0.4));
+        assert_eq!(hands[0].unwrap().world.handedness_score, Some(0.4));
         assert_eq!(hands[1], None);
     }
 
@@ -660,7 +685,7 @@ mod tests {
                         candidates.reverse();
                     }
                     let actual = assign_hands(candidates, 0.15)
-                        .map(|hand| hand.and_then(|hand| hand.handedness_score));
+                        .map(|hand| hand.and_then(|hand| hand.world.handedness_score));
                     let [left, right] = expected;
                     assert_eq!(
                         actual,

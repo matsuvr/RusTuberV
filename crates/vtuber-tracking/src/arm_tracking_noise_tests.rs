@@ -3,8 +3,8 @@
 //! All coordinates are shoulder-relative positions divided by the same arm
 //! length, so their input/output energy ratios have the same units. Small
 //! perturbations of this bent pose leave the bend-plane speed cap inactive.
-//! They also stay inside the planar filter's quiet response, where the fixed
-//! linear transfer matrix applies. Large-motion timing is tested separately.
+//! Basis gains characterize these probes; simultaneous inputs below exercise
+//! the nonlinear velocity-dependent response.
 //! The nonlinear IK/bone-output regressions live in vtuber-avatar.
 #![allow(clippy::indexing_slicing)]
 
@@ -47,11 +47,11 @@ fn offset_target(offset: [f32; 6]) -> ArmTrackingTarget {
 }
 
 #[test]
-fn six_channel_frequency_gain_bounds_every_combination_of_noise_phases() {
+fn six_channel_frequency_gain_at_stationary_noise_amplitude() {
     // Excite each input independently and measure the COMPLEX transfer matrix:
     // retaining phase is essential, since two sources can reinforce/cancel.
-    // The largest singular value is the worst gain over all six input
-    // amplitudes/phases, not merely the gain for one chosen noisy trace.
+    // The singular value summarizes these basis probes. The simultaneous
+    // multitone test below measures interactions in the adaptive filter.
     // Measure every render subframe of a held 30 Hz observation separately;
     // checking only its fundamental at render Hz would miss hold harmonics.
     for fps in [30, 60, 120] {
@@ -64,12 +64,12 @@ fn six_channel_frequency_gain_bounds_every_combination_of_noise_phases() {
                     let phase = std::f64::consts::TAU * hz * sample as f64 / CAMERA_HZ as f64;
                     let mut offset = [0.0; 6];
                     offset[input] = AMPLITUDE * phase.sin() as f32;
+                    let observed = offset_target(offset);
+                    let time = MonoTimeNs(sample as u64 * 1_000_000_000 / 30);
+                    smoother.wrist.observe(Some(observed.wrist), time);
+                    smoother.elbow.observe(Some(observed.elbow_pole), time);
                     for matrix in &mut transfer {
-                        let output = smoother.advance(
-                            offset_target(offset),
-                            1.0 / fps as f32,
-                            ArmBlendWeight::ONE,
-                        );
+                        let output = smoother.advance(observed, 1.0 / fps as f32);
                         if sample < SAMPLES {
                             continue; // Let initial conditions settle for four seconds.
                         }
@@ -148,7 +148,12 @@ fn simultaneous_multitone_noise_cannot_gain_energy_or_step_energy() {
                     AMPLITUDE * signal as f32
                 });
                 let observed = offset_target(offset);
-                let output = smoother.advance(observed, 1.0 / fps as f32, ArmBlendWeight::ONE);
+                if tick % (fps / CAMERA_HZ) == 0 {
+                    let time = MonoTimeNs(sample as u64 * 1_000_000_000 / 30);
+                    smoother.wrist.observe(Some(observed.wrist), time);
+                    smoother.elbow.observe(Some(observed.elbow_pole), time);
+                }
+                let output = smoother.advance(observed, 1.0 / fps as f32);
                 let input = coordinates(observed) - coordinates(BASE);
                 let output = coordinates(output) - coordinates(BASE);
                 let input_step = input - previous_input;

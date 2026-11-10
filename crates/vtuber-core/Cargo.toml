@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Platform- and engine-independent data and synchronization contracts for RusTuberV."
 
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 
