@@ -26,14 +26,14 @@ use vtuber_core::types::{
     LandmarkSchemaId, MonoTimeNs, NamedCoefficient, RawFaceObservation, TrackingState,
 };
 use vtuber_core::{
-    Arkit52Coefficients, ArkitBlendshape, CameraFaceTransform, FaceTrackingSample,
-    MediaPipeBlendshape, NormalizedRect,
+    Arkit52Coefficients, ArkitBlendshape, CameraFaceTransform, FaceTrackingOutcome,
+    FaceTrackingSample, MediaPipeBlendshape, NormalizedRect,
 };
 
 use crate::calibration::{GazeNeutralBaseline, NeutralProfile, NeutralValidationSettings};
 use crate::confidence::{
     ConfidenceAssessment, ConfidenceGate, ConfidenceGateParams, ConfidenceInputs,
-    ConfidencePolicies, synthesize,
+    ConfidencePolicies, ConfidenceSignal, synthesize,
 };
 use crate::expressions::{
     fuse_binocular_gaze, map_mediapipe_perfect_sync, map_mediapipe_raw_expressions,
@@ -493,6 +493,7 @@ pub struct TrackingPipeline {
     translation_filter: TranslationFilter,
     gaze_filter: GazeFilter,
     confidence_gate: ConfidenceGate,
+    last_confidence_source_seq: Option<FrameSeq>,
     state_machine: TrackingStateMachine,
     loss_recovery: LossRecovery,
     mediapipe_cache: Option<MediapipeSampleCache>,
@@ -530,6 +531,7 @@ impl TrackingPipeline {
             translation_filter,
             gaze_filter,
             confidence_gate,
+            last_confidence_source_seq: None,
             state_machine,
             loss_recovery,
             mediapipe_cache: None,
@@ -611,6 +613,7 @@ impl TrackingPipeline {
         self.reset_temporal_filters();
         // A new session also drops confidence, availability and held output.
         self.confidence_gate.reset();
+        self.last_confidence_source_seq = None;
         self.state_machine = TrackingStateMachine::new(self.config.state_machine)
             .expect("config was validated in constructor");
         self.loss_recovery = LossRecovery::new(self.config.loss_recovery)
@@ -647,8 +650,11 @@ impl TrackingPipeline {
 
     /// Runs one frame through the pipeline.
     ///
-    /// `observation` is the latest inference output, or `None` when no face
-    /// was detected. `now` is the monotonic timestamp to stamp on the
+    /// `observation` is the latest inference output. Its source sequence is
+    /// counted once, even when held across render ticks. `None` means the
+    /// input is unavailable and starts loss recovery without counting misses.
+    /// Use [`Self::update_mediapipe_outcome`] for numbered `NoFace` results.
+    /// `now` is the monotonic timestamp to stamp on the
     /// produced frame. `dt` is the elapsed wall time since the previous
     /// update and is used by the state machine and loss recovery.
     ///
@@ -672,6 +678,7 @@ impl TrackingPipeline {
 
         self.update_with_pose(
             observation,
+            observation.map(|obs| obs.source_seq),
             None,
             None,
             None,
@@ -682,12 +689,43 @@ impl TrackingPipeline {
         )
     }
 
+    /// Advances tracking with the latest numbered face or no-face result.
+    ///
+    /// Re-feed the held outcome on render ticks: confidence evidence changes
+    /// only when its source sequence changes, while filters and timers advance
+    /// every call. `None` means unavailable input (for example, the caller's
+    /// silence watchdog expired), and starts loss recovery immediately without
+    /// fabricating inference results. Reset the pipeline between capture sessions.
+    #[must_use]
+    pub fn update_mediapipe_outcome(
+        &mut self,
+        outcome: Option<&FaceTrackingOutcome>,
+        neutral: Option<CameraFaceTransform>,
+        gaze_baseline: Option<GazeNeutralBaseline>,
+        now: MonoTimeNs,
+        dt: Duration,
+    ) -> PipelineUpdate {
+        let sample = match outcome {
+            Some(FaceTrackingOutcome::Face(sample)) => Some(sample),
+            _ => None,
+        };
+        self.update_mediapipe_input(
+            sample,
+            outcome.map(FaceTrackingOutcome::source_seq),
+            neutral,
+            gaze_baseline,
+            now,
+            dt,
+        )
+    }
+
     /// Runs one canonical MediaPipe sample through the existing tracking
     /// state, filter, and recovery pipeline.
     ///
     /// `neutral` is the latest auto-neutral transform.  The method accepts an
-    /// optional sample so face loss follows the same hold/return path as the
-    /// legacy observation API without fabricating a face.
+    /// optional sample; `None` denotes unavailable input, as in the legacy
+    /// observation API. Call [`Self::update_mediapipe_outcome`] when an explicit
+    /// numbered `NoFace` result is available.
     ///
     /// The method is safe and cheap to call on every consumer tick, including
     /// between observation arrivals: the per-sample conversion is memoized on
@@ -700,6 +738,25 @@ impl TrackingPipeline {
     pub fn update_mediapipe(
         &mut self,
         sample: Option<&FaceTrackingSample>,
+        neutral: Option<CameraFaceTransform>,
+        gaze_baseline: Option<GazeNeutralBaseline>,
+        now: MonoTimeNs,
+        dt: Duration,
+    ) -> PipelineUpdate {
+        self.update_mediapipe_input(
+            sample,
+            sample.map(|sample| sample.source_seq),
+            neutral,
+            gaze_baseline,
+            now,
+            dt,
+        )
+    }
+
+    fn update_mediapipe_input(
+        &mut self,
+        sample: Option<&FaceTrackingSample>,
+        source_seq: Option<FrameSeq>,
         neutral: Option<CameraFaceTransform>,
         gaze_baseline: Option<GazeNeutralBaseline>,
         now: MonoTimeNs,
@@ -769,6 +826,7 @@ impl TrackingPipeline {
                 });
                 self.update_with_pose(
                     Some(&cached.observation),
+                    source_seq,
                     Some(cached.gaze),
                     Some(detailed),
                     cached.closure,
@@ -778,7 +836,9 @@ impl TrackingPipeline {
                     neutral.is_some(),
                 )
             }
-            None => self.update_with_pose(None, None, None, None, now, dt, None, neutral.is_some()),
+            None => self.update_with_pose(
+                None, source_seq, None, None, None, now, dt, None, neutral.is_some(),
+            ),
         };
         self.mediapipe_cache = cache;
         update
@@ -791,6 +851,7 @@ impl TrackingPipeline {
     fn update_with_pose(
         &mut self,
         observation: Option<&RawFaceObservation>,
+        source_seq: Option<FrameSeq>,
         direct_gaze: Option<GazeSignal>,
         detailed_face: Option<Arkit52Coefficients>,
         closure: Option<EyeClosureState>,
@@ -803,8 +864,9 @@ impl TrackingPipeline {
         let pose_frame = pose_result.as_ref().and_then(|result| result.as_ref().ok());
         let frame_confidence = self.synthesize_confidence(observation, pose_frame);
 
-        // 3. Hysteresis gate.
-        let confidence_assessment = self.confidence_gate.update(frame_confidence);
+        // 3. Count inference outcomes, not the render ticks reusing them.
+        let confidence_assessment =
+            self.assess_outcome(source_seq, frame_confidence, observation.is_some());
 
         // 4. Tracking state machine. A usable observation is one that
         // carries at least minimal quality: it may reconnect tracking after
@@ -891,6 +953,38 @@ impl TrackingPipeline {
             confidence: confidence_assessment,
             state: transition.current,
         }
+    }
+
+    fn assess_outcome(
+        &mut self,
+        source_seq: Option<FrameSeq>,
+        frame_confidence: f32,
+        has_face: bool,
+    ) -> ConfidenceAssessment {
+        let Some(source_seq) = source_seq else {
+            // Unavailable input is a watchdog/fault, not another bad inference.
+            // Also leave Tracking if a dim face never made the gate confident.
+            self.confidence_gate.reset();
+            self.last_confidence_source_seq = None;
+            return ConfidenceAssessment {
+                signal: ConfidenceSignal::Degrade,
+                ..self.confidence_gate.assess(0.0)
+            };
+        };
+        if self.last_confidence_source_seq == Some(source_seq) {
+            return self.confidence_gate.assess(frame_confidence);
+        }
+        self.last_confidence_source_seq = Some(source_seq);
+        let mut assessment = self.confidence_gate.update(frame_confidence);
+        // Usable faces may reconnect below the enter threshold. In that case
+        // the gate was never confident, but distinct NoFace results must still
+        // end tracking after the same configured number of misses.
+        if !has_face
+            && assessment.consecutive_bad >= self.config.confidence_gate.required_consecutive_bad
+        {
+            assessment.signal = ConfidenceSignal::Degrade;
+        }
+        assessment
     }
 
     fn synthesize_confidence(
@@ -2550,5 +2644,169 @@ mod assembly {
         assert_relative_eq!(gaze.horizontal(), 0.2, epsilon = 1.0e-6);
         assert_relative_eq!(gaze.vertical(), 0.2, epsilon = 1.0e-6);
         assert!(gaze.is_available());
+    }
+
+    fn numbered_no_face(seq: u64) -> FaceTrackingOutcome {
+        FaceTrackingOutcome::NoFace {
+            source_seq: FrameSeq(seq),
+            captured_at: MonoTimeNs(seq * 33_333_333),
+            inference_started_at: MonoTimeNs(seq * 33_333_333),
+            inference_finished_at: MonoTimeNs(seq * 33_333_333),
+        }
+    }
+
+    #[test]
+    fn confidence_counts_fresh_results_while_held_face_filters_advance() {
+        let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).unwrap();
+        let neutral = mediapipe_sample(&[]);
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(0));
+        let _ = track_mediapipe(&mut pipeline, &neutral, MonoTimeNs(100_000_000));
+        assert_eq!(pipeline.confidence_gate.assess(1.0).consecutive_good, 1);
+        let target = rotated_mediapipe_sample(2, 10.0);
+        let first = track_mediapipe(&mut pipeline, &target, MonoTimeNs(133_333_333)).unwrap();
+        let second = track_mediapipe(&mut pipeline, &target, MonoTimeNs(150_000_000)).unwrap();
+        let third = track_mediapipe(&mut pipeline, &target, MonoTimeNs(166_666_666)).unwrap();
+        assert!(first.head.yaw_rad < second.head.yaw_rad);
+        assert!(second.head.yaw_rad < third.head.yaw_rad);
+        let assessment = pipeline.confidence_gate.assess(1.0);
+        assert_eq!(assessment.consecutive_good, 2);
+        assert!(!assessment.is_confident);
+        assert_eq!(assessment.signal, ConfidenceSignal::None);
+    }
+
+    #[test]
+    fn held_no_face_keeps_loss_timers_and_facial_release_advancing() {
+        for render_hz in [30u64, 60, 120] {
+            let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).unwrap();
+            let mut face = mediapipe_sample(&[(MediaPipeBlendshape::JawOpen, 0.8)]);
+            for seq in 1..=3 {
+                face.source_seq = FrameSeq(seq);
+                let _ = track_mediapipe(&mut pipeline, &face, MonoTimeNs(seq * 33_333_333));
+            }
+            let mut last = None;
+            for seq in 4..=8 {
+                last = Some(pipeline.update_mediapipe_outcome(
+                    Some(&numbered_no_face(seq)),
+                    Some(CameraFaceTransform::identity()),
+                    None,
+                    MonoTimeNs(seq * 33_333_333),
+                    Duration::from_nanos(33_333_333),
+                ));
+            }
+            let lost = last.unwrap();
+            assert_eq!(lost.state, TrackingState::LostHold);
+            assert_eq!(lost.confidence.signal, ConfidenceSignal::Degrade);
+            let initial = lost.frame.unwrap();
+            assert!(initial.expressions.mouth_open > 0.1);
+            let held = numbered_no_face(8);
+            let start = 8 * 33_333_333;
+            let mut previous_time = start;
+            let mut final_update = None;
+            let mut saw_return = false;
+            for tick in 1..=render_hz {
+                let now = start + tick * 1_000_000_000 / render_hz;
+                let update = pipeline.update_mediapipe_outcome(
+                    Some(&held),
+                    Some(CameraFaceTransform::identity()),
+                    None,
+                    MonoTimeNs(now),
+                    Duration::from_nanos(now - previous_time),
+                );
+                assert_eq!(update.confidence.signal, ConfidenceSignal::None);
+                assert_eq!(update.confidence.consecutive_bad, 0);
+                let frame = update.frame.as_ref().unwrap();
+                assert_eq!(frame.source_seq, initial.source_seq);
+                assert_eq!(frame.captured_at, initial.captured_at);
+                assert_eq!(frame.produced_at, MonoTimeNs(now));
+                saw_return |= update.state == TrackingState::ReturningNeutral;
+                previous_time = now;
+                final_update = Some(update);
+            }
+            let finished = final_update.unwrap();
+            assert!(saw_return);
+            assert_eq!(finished.state, TrackingState::Searching);
+            assert!(finished.frame.unwrap().expressions.mouth_open < 1e-5);
+        }
+    }
+
+    #[test]
+    fn explicit_misses_end_tracking_even_before_confidence_acquisition() {
+        let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).unwrap();
+        let face = mediapipe_sample(&[]);
+        let _ = track_mediapipe(&mut pipeline, &face, MonoTimeNs(33_333_333));
+        let _ = track_mediapipe(&mut pipeline, &face, MonoTimeNs(50_000_000));
+        assert!(!pipeline.confidence_gate.is_confident());
+        for seq in 2..=6 {
+            let update = pipeline.update_mediapipe_outcome(
+                Some(&numbered_no_face(seq)),
+                Some(CameraFaceTransform::identity()),
+                None,
+                MonoTimeNs(seq * 33_333_333),
+                Duration::from_nanos(33_333_333),
+            );
+            assert_eq!(
+                update.state,
+                if seq == 6 {
+                    TrackingState::LostHold
+                } else {
+                    TrackingState::Tracking
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn confidence_identity_resets_with_session_not_calibration() {
+        let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).unwrap();
+        let face = mediapipe_sample(&[]);
+        let _ = track_mediapipe(&mut pipeline, &face, MonoTimeNs(33_333_333));
+        pipeline.reset_calibration();
+        let _ = track_mediapipe(&mut pipeline, &face, MonoTimeNs(50_000_000));
+        assert_eq!(pipeline.confidence_gate.assess(1.0).consecutive_good, 1);
+        pipeline.reset();
+        let _ = track_mediapipe(&mut pipeline, &face, MonoTimeNs(66_666_666));
+        assert_eq!(pipeline.confidence_gate.assess(1.0).consecutive_good, 1);
+        let missed = numbered_no_face(2);
+        let _ = pipeline.update_mediapipe_outcome(
+            Some(&missed),
+            None,
+            None,
+            MonoTimeNs(100_000_000),
+            Duration::from_millis(33),
+        );
+        let held = pipeline.update_mediapipe_outcome(
+            Some(&missed),
+            None,
+            None,
+            MonoTimeNs(116_666_666),
+            Duration::from_millis(16),
+        );
+        assert_eq!(held.confidence.consecutive_bad, 1);
+        pipeline.reset();
+        let reset = pipeline.update_mediapipe_outcome(
+            Some(&missed),
+            None,
+            None,
+            MonoTimeNs(133_333_333),
+            Duration::from_millis(16),
+        );
+        assert_eq!(reset.confidence.consecutive_bad, 1);
+        assert!(reset.frame.is_none());
+    }
+
+    #[test]
+    fn legacy_observation_identity_also_counts_confidence_once() {
+        let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).unwrap();
+        pipeline.apply_calibration(neutral_profile()).unwrap();
+        let obs = observation(1, neutral_profile().landmarks.clone(), relaxed_expression());
+        for tick in 1..=10 {
+            let update = pipeline.update(
+                Some(&obs),
+                MonoTimeNs(tick * 16_666_667),
+                Duration::from_nanos(16_666_667),
+            );
+            assert_eq!(update.confidence.consecutive_good, 1);
+            assert_eq!(update.confidence.signal, ConfidenceSignal::None);
+        }
     }
 }

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use vtuber_core::metrics::RateCounter;
-use vtuber_core::{AvatarControlFrame, FaceTrackingSample, FrameSeq, MonoTimeNs, TrackingState};
+use vtuber_core::{AvatarControlFrame, FaceTrackingOutcome, FrameSeq, MonoTimeNs, TrackingState};
 use vtuber_tracking::{AutoNeutralCollector, AutoNeutralState, PipelineConfig, TrackingPipeline};
 
 use crate::diagnostics::DiagnosticsSnapshot;
@@ -12,24 +12,21 @@ use crate::inference_runtime::InferenceRuntime;
 use crate::orchestrator::{CalibrationRequest, Orchestrator};
 use crate::ui_model::{CalibrationViewModel, TrackingState as UiTrackingState, UiViewModel};
 
-/// Maximum age of an inference result before it is treated as face-lost.
+/// Maximum capture age of either a face or a no-face inference result.
 ///
-/// The current inference slot carries successful face observations only. If a
-/// detector reports no face without publishing an explicit `InferenceOutput`,
-/// this watchdog converts the absence of a fresh result into the tracking
-/// pipeline's normal `None` input. It prevents a last face observation from
-/// being replayed forever while keeping normal 15 Hz inference output from
-/// being mistaken for a loss.
+/// Distinct `NoFace` outcomes drive confidence at inference cadence. This
+/// independent watchdog handles a stalled worker, including one whose last
+/// result was `NoFace`, without inventing further inference outcomes.
 pub(crate) const INFERENCE_SILENCE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq)]
 enum ObservationDispatch<'a> {
     /// No new inference result and the last result is still fresh.
     NoUpdate,
-    /// A new, fresh face observation is ready for tracking.
-    Face(&'a FaceTrackingSample),
-    /// The current inference result is absent or stale.
-    NoFace,
+    /// A new, fresh face or no-face result is ready for tracking.
+    Outcome(&'a FaceTrackingOutcome),
+    /// No result is available for this session, or the watchdog expired.
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -51,36 +48,32 @@ impl ObservationGate {
 
     fn dispatch<'a>(
         &mut self,
-        latest: Option<&'a FaceTrackingSample>,
+        latest: Option<&'a FaceTrackingOutcome>,
         now: MonoTimeNs,
     ) -> ObservationDispatch<'a> {
-        let Some(observation) = latest else {
-            return ObservationDispatch::NoFace;
+        let Some(outcome) = latest else {
+            return ObservationDispatch::Unavailable;
+        };
+        let captured_at = match outcome {
+            FaceTrackingOutcome::Face(sample) => sample.captured_at,
+            FaceTrackingOutcome::NoFace { captured_at, .. } => *captured_at,
         };
         if self
             .observations_after
-            .is_some_and(|boundary| observation.captured_at < boundary)
+            .is_some_and(|boundary| captured_at < boundary)
         {
-            return ObservationDispatch::NoFace;
+            return ObservationDispatch::Unavailable;
         }
 
-        let age = Duration::from_nanos(now.0.saturating_sub(observation.captured_at.0));
-        let fresh = age <= INFERENCE_SILENCE_TIMEOUT;
-        let is_new = self.last_source_seq != Some(observation.source_seq);
-        if is_new {
-            self.last_source_seq = Some(observation.source_seq);
-            return if fresh {
-                ObservationDispatch::Face(observation)
-            } else {
-                ObservationDispatch::NoFace
-            };
+        let age = Duration::from_nanos(now.0.saturating_sub(captured_at.0));
+        if age > INFERENCE_SILENCE_TIMEOUT {
+            return ObservationDispatch::Unavailable;
         }
-
-        if fresh {
-            ObservationDispatch::NoUpdate
-        } else {
-            ObservationDispatch::NoFace
+        if self.last_source_seq == Some(outcome.source_seq()) {
+            return ObservationDispatch::NoUpdate;
         }
+        self.last_source_seq = Some(outcome.source_seq());
+        ObservationDispatch::Outcome(outcome)
     }
 }
 
@@ -95,13 +88,9 @@ pub struct TrackingRuntime {
     last_avatar_generation: vtuber_avatar::AvatarGeneration,
     last_recenter_error: Option<String>,
     observation_gate: ObservationGate,
-    /// Last face observation dispatched into the pipeline.
-    ///
-    /// The pipeline is advanced on every main-thread frame with this sample
-    /// so the emitted control frames form a continuous signal at the render
-    /// rate. It is replaced when a new observation arrives and cleared on
-    /// face loss.
-    held_sample: Option<FaceTrackingSample>,
+    /// Last numbered result, re-fed on render ticks without adding evidence.
+    /// Cleared only when unavailable; explicit `NoFace` retains its identity.
+    held_outcome: Option<FaceTrackingOutcome>,
     /// Whether the avatar bridge may retain the most recently published
     /// control frame for the current capture session.
     pub control_active: bool,
@@ -129,7 +118,7 @@ impl Default for TrackingRuntime {
             last_avatar_generation: vtuber_avatar::AvatarGeneration::default(),
             last_recenter_error: None,
             observation_gate: ObservationGate::default(),
-            held_sample: None,
+            held_outcome: None,
             control_active: false,
             latest_control: None,
             diagnostics_cache: TrackingDiagnosticsCache::default(),
@@ -149,7 +138,7 @@ impl TrackingRuntime {
     /// spring state. A retry must supply a newly captured observation.
     fn discard_pending_observations(&mut self, now: MonoTimeNs) {
         self.observation_gate.reset(now);
-        self.held_sample = None;
+        self.held_outcome = None;
     }
 
     // A changed neutral keeps the newly accepted observation, but old controls
@@ -323,20 +312,16 @@ pub fn tracking_bridge_system(
         if input_failed {
             None
         } else {
-            inference.latest_face_sample.as_ref()
+            inference.latest_face_outcome.as_ref()
         },
         now,
     );
     let neutral_sample = match dispatch {
-        ObservationDispatch::Face(sample) => Some(sample),
-        // The held observation keeps feeding the pipeline between inference
-        // results so the filters advance at the render rate. Re-running the
-        // same sample through the filters is what reconstructs a continuous
-        // motion signal; the pipeline memoizes the per-sample conversion.
-        ObservationDispatch::NoUpdate | ObservationDispatch::NoFace => None,
+        ObservationDispatch::Outcome(FaceTrackingOutcome::Face(sample)) => Some(sample),
+        _ => None,
     };
-    if dispatch == ObservationDispatch::NoFace {
-        tracking.held_sample = None;
+    if dispatch == ObservationDispatch::Unavailable {
+        tracking.held_outcome = None;
     }
 
     if let Some(sample) = neutral_sample {
@@ -360,17 +345,17 @@ pub fn tracking_bridge_system(
             }
         }
     }
-    if let Some(sample) = neutral_sample {
-        tracking.held_sample = Some(sample.clone());
+    if let ObservationDispatch::Outcome(outcome) = dispatch {
+        tracking.held_outcome = Some(outcome.clone());
     }
 
     let neutral = tracking.auto_neutral.reference();
     let gaze_baseline = tracking.auto_neutral.gaze_baseline();
-    let held = tracking.held_sample.take();
+    let held = tracking.held_outcome.take();
     let update = tracking
         .pipeline
-        .update_mediapipe(held.as_ref(), neutral, gaze_baseline, now, dt);
-    tracking.held_sample = held;
+        .update_mediapipe_outcome(held.as_ref(), neutral, gaze_baseline, now, dt);
+    tracking.held_outcome = held;
     if let Some(frame) = update.frame {
         tracking.latest_control = Some((lifecycle.current_generation(), frame));
         tracking.control_active = true;
@@ -451,9 +436,10 @@ fn tracking_view(state: TrackingState, confidence: f32) -> crate::ui_model::Trac
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use vtuber_core::FaceTrackingSample;
     use vtuber_core::face_tracking::{
         FaceBlendshapeSet, FaceLandmark, FaceTrackingQuality, MEDIAPIPE_FACE_LANDMARK_COUNT,
     };
@@ -483,8 +469,11 @@ mod tests {
         let mut face = sample(7, 5_000_000_000);
         face.captured_at = MonoTimeNs(1_000_000_000);
         assert_eq!(
-            gate.dispatch(Some(&face), MonoTimeNs(5_010_000_000)),
-            ObservationDispatch::NoFace
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(5_010_000_000),
+            ),
+            ObservationDispatch::Unavailable
         );
     }
 
@@ -494,11 +483,17 @@ mod tests {
         let face = sample(7, 1_000_000_000);
 
         assert!(matches!(
-            gate.dispatch(Some(&face), MonoTimeNs(1_050_000_000)),
-            ObservationDispatch::Face(_)
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_050_000_000),
+            ),
+            ObservationDispatch::Outcome(FaceTrackingOutcome::Face(_))
         ));
         assert_eq!(
-            gate.dispatch(Some(&face), MonoTimeNs(1_100_000_000)),
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_100_000_000),
+            ),
             ObservationDispatch::NoUpdate
         );
     }
@@ -508,10 +503,16 @@ mod tests {
         let mut gate = ObservationGate::default();
         let face = sample(7, 1_000_000_000);
 
-        let _ = gate.dispatch(Some(&face), MonoTimeNs(1_050_000_000));
+        let _ = gate.dispatch(
+            Some(&FaceTrackingOutcome::Face(face.clone())),
+            MonoTimeNs(1_050_000_000),
+        );
         assert_eq!(
-            gate.dispatch(Some(&face), MonoTimeNs(1_251_000_000)),
-            ObservationDispatch::NoFace
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_251_000_000),
+            ),
+            ObservationDispatch::Unavailable
         );
     }
 
@@ -521,11 +522,20 @@ mod tests {
         let first = sample(7, 1_000_000_000);
         let second = sample(8, 1_300_000_000);
 
-        let _ = gate.dispatch(Some(&first), MonoTimeNs(1_050_000_000));
-        let _ = gate.dispatch(Some(&first), MonoTimeNs(1_251_000_000));
+        let _ = gate.dispatch(
+            Some(&FaceTrackingOutcome::Face(first.clone())),
+            MonoTimeNs(1_050_000_000),
+        );
+        let _ = gate.dispatch(
+            Some(&FaceTrackingOutcome::Face(first.clone())),
+            MonoTimeNs(1_251_000_000),
+        );
         assert!(matches!(
-            gate.dispatch(Some(&second), MonoTimeNs(1_350_000_000)),
-            ObservationDispatch::Face(_)
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(second.clone())),
+                MonoTimeNs(1_350_000_000),
+            ),
+            ObservationDispatch::Outcome(FaceTrackingOutcome::Face(_))
         ));
     }
 
@@ -534,7 +544,7 @@ mod tests {
         let mut gate = ObservationGate::default();
         assert_eq!(
             gate.dispatch(None, MonoTimeNs(1)),
-            ObservationDispatch::NoFace
+            ObservationDispatch::Unavailable
         );
     }
 
@@ -544,18 +554,27 @@ mod tests {
         let face = sample(7, 1_000_000_000);
 
         assert!(matches!(
-            gate.dispatch(Some(&face), MonoTimeNs(1_050_000_000)),
-            ObservationDispatch::Face(_)
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_050_000_000),
+            ),
+            ObservationDispatch::Outcome(FaceTrackingOutcome::Face(_))
         ));
         gate.reset(MonoTimeNs(1_050_000_000));
         assert_eq!(
-            gate.dispatch(Some(&face), MonoTimeNs(1_100_000_000)),
-            ObservationDispatch::NoFace
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_100_000_000),
+            ),
+            ObservationDispatch::Unavailable
         );
         let face = sample(7, 1_100_000_000);
         assert!(matches!(
-            gate.dispatch(Some(&face), MonoTimeNs(1_150_000_000)),
-            ObservationDispatch::Face(_)
+            gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_150_000_000),
+            ),
+            ObservationDispatch::Outcome(FaceTrackingOutcome::Face(_))
         ));
     }
 
@@ -565,13 +584,13 @@ mod tests {
         let mut face = sample(7, 1_000_000_000);
         assert!(runtime.auto_neutral.recenter(&face).is_ok());
         let neutral = runtime.auto_neutral.reference();
-        runtime.held_sample = Some(face.clone());
+        runtime.held_outcome = Some(FaceTrackingOutcome::Face(face.clone()));
         runtime.control_active = true;
         runtime.last_update = Some(MonoTimeNs(1_000_000_000));
 
         runtime.invalidate_session(MonoTimeNs(1_050_000_000));
         assert_eq!(runtime.auto_neutral.reference(), neutral);
-        assert!(runtime.held_sample.is_none());
+        assert!(runtime.held_outcome.is_none());
         assert!(runtime.latest_control.is_none());
         assert!(!runtime.control_active);
         assert!(runtime.last_update.is_none());
@@ -579,8 +598,11 @@ mod tests {
         assert_eq!(
             runtime
                 .observation_gate
-                .dispatch(Some(&face), MonoTimeNs(1_150_000_000)),
-            ObservationDispatch::NoFace
+                .dispatch(
+                    Some(&FaceTrackingOutcome::Face(face.clone())),
+                    MonoTimeNs(1_150_000_000),
+                ),
+            ObservationDispatch::Unavailable
         );
     }
 
@@ -604,7 +626,7 @@ mod tests {
         }
         let tracked = tracked.expect("tracked head before input failure");
         runtime.latest_control = Some((vtuber_avatar::AvatarGeneration(1), tracked.clone()));
-        runtime.held_sample = Some(face.clone());
+        runtime.held_outcome = Some(FaceTrackingOutcome::Face(face.clone()));
         runtime.control_active = true;
         runtime.discard_pending_observations(MonoTimeNs(1_200_000_000));
         assert!(runtime.control_active);
@@ -612,12 +634,15 @@ mod tests {
             runtime.latest_control.as_ref().map(|(_, frame)| frame),
             Some(&tracked)
         );
-        assert!(runtime.held_sample.is_none());
+        assert!(runtime.held_outcome.is_none());
         assert_eq!(
             runtime
                 .observation_gate
-                .dispatch(Some(&face), MonoTimeNs(1_210_000_000)),
-            ObservationDispatch::NoFace
+                .dispatch(
+                    Some(&FaceTrackingOutcome::Face(face.clone())),
+                    MonoTimeNs(1_210_000_000),
+                ),
+            ObservationDispatch::Unavailable
         );
         let held = runtime
             .pipeline
@@ -637,8 +662,11 @@ mod tests {
         assert!(matches!(
             runtime
                 .observation_gate
-                .dispatch(Some(&face), MonoTimeNs(1_240_000_000)),
-            ObservationDispatch::Face(_)
+                .dispatch(
+                    Some(&FaceTrackingOutcome::Face(face.clone())),
+                    MonoTimeNs(1_240_000_000),
+                ),
+            ObservationDispatch::Outcome(FaceTrackingOutcome::Face(_))
         ));
     }
 
@@ -664,5 +692,225 @@ mod tests {
         assert_eq!(view.state, UiTrackingState::WaitingForFace);
         assert!(!view.face_detected);
         assert!(!calibration_view(&TrackingRuntime::default()).is_calibrating);
+    }
+
+    fn no_face(seq: u64, captured_at: u64) -> FaceTrackingOutcome {
+        FaceTrackingOutcome::NoFace {
+            source_seq: FrameSeq(seq),
+            captured_at: MonoTimeNs(captured_at),
+            inference_started_at: MonoTimeNs(captured_at),
+            inference_finished_at: MonoTimeNs(captured_at),
+        }
+    }
+
+    // A fixed synthetic outcome recording, replayed without rerunning inference. All
+    // render rates consume the same source identities and capture timestamps.
+    fn recorded_outcomes(faces: &[bool], inference_hz: u64) -> Vec<FaceTrackingOutcome> {
+        faces
+            .iter()
+            .enumerate()
+            .map(|(index, &has_face)| {
+                let seq = index as u64 + 1;
+                let captured_at = 1_000_000_000 + index as u64 * 1_000_000_000 / inference_hz;
+                if has_face {
+                    let mut face = sample(seq, captured_at);
+                    face.captured_at = MonoTimeNs(captured_at);
+                    face.inference_started_at = MonoTimeNs(captured_at);
+                    FaceTrackingOutcome::Face(face)
+                } else {
+                    no_face(seq, captured_at)
+                }
+            })
+            .collect()
+    }
+
+    fn replay_outcomes(
+        outcomes: &[FaceTrackingOutcome],
+        inference_hz: u64,
+        render_hz: u64,
+    ) -> Vec<vtuber_tracking::confidence::ConfidenceAssessment> {
+        use vtuber_tracking::confidence::ConfidenceSignal;
+        let mut gate = ObservationGate::default();
+        let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default()).expect("config");
+        let mut held = None;
+        let mut assessments = Vec::new();
+        let mut previous: Option<vtuber_tracking::confidence::ConfidenceAssessment> = None;
+        let mut last_now = 1_000_000_000;
+        let ticks_per_outcome = render_hz / inference_hz;
+        for tick in 0..outcomes.len() as u64 * ticks_per_outcome {
+            let now = 1_000_000_000 + tick * 1_000_000_000 / render_hz;
+            let latest = outcomes.get((tick / ticks_per_outcome) as usize);
+            let dispatch = gate.dispatch(latest, MonoTimeNs(now));
+            let fresh = matches!(dispatch, ObservationDispatch::Outcome(_));
+            match dispatch {
+                ObservationDispatch::Outcome(outcome) => held = Some(outcome.clone()),
+                ObservationDispatch::Unavailable => panic!("live outcome stream timed out"),
+                ObservationDispatch::NoUpdate => {}
+            }
+            let update = pipeline.update_mediapipe_outcome(
+                held.as_ref(),
+                Some(vtuber_core::CameraFaceTransform::identity()),
+                None,
+                MonoTimeNs(now),
+                Duration::from_nanos(now - last_now),
+            );
+            if fresh {
+                assessments.push(update.confidence);
+            } else {
+                let mut expected = previous.expect("prior tick");
+                expected.signal = ConfidenceSignal::None;
+                assert_eq!(update.confidence, expected, "held tick {tick} at {render_hz} Hz");
+            }
+            previous = Some(update.confidence);
+            last_now = now;
+        }
+        assessments
+    }
+
+    #[test]
+    fn confidence_replay_is_independent_of_render_rate() {
+        use vtuber_tracking::confidence::ConfidenceSignal;
+        for misses in [1, 4, 5, 8] {
+            let faces: Vec<_> = std::iter::repeat_n(true, 3)
+                .chain(std::iter::repeat_n(false, misses))
+                .chain(std::iter::repeat_n(true, 3))
+                .collect();
+            let mut reference = None;
+            for inference_hz in [15, 30] {
+                let outcomes = recorded_outcomes(&faces, inference_hz);
+                for render_hz in [30, 60, 120] {
+                    let assessments = replay_outcomes(&outcomes, inference_hz, render_hz);
+                    if let Some(reference) = &reference {
+                        assert_eq!(&assessments, reference);
+                    } else {
+                        reference = Some(assessments.clone());
+                    }
+                    let first_loss = assessments
+                        .iter()
+                        .position(|a| a.signal == ConfidenceSignal::Degrade);
+                    assert_eq!(first_loss, (misses >= 5).then_some(7));
+                    assert_eq!(
+                        assessments.get(2).map(|a| a.signal),
+                        Some(ConfidenceSignal::Acquire),
+                    );
+                    assert!(assessments.last().expect("recovered face").is_confident);
+                    eprintln!(
+                        "misses={misses} inference={inference_hz} render={render_hz} first_loss_seq={:?}",
+                        first_loss.map(|index| index + 1),
+                    );
+                }
+            }
+        }
+        let alternating = [true, true, true, false, true, false, true, false, true];
+        for inference_hz in [15, 30] {
+            for render_hz in [30, 60, 120] {
+                assert!(
+                    replay_outcomes(
+                        &recorded_outcomes(&alternating, inference_hz),
+                        inference_hz,
+                        render_hz,
+                    )
+                    .iter()
+                    .all(|a| a.signal != ConfidenceSignal::Degrade)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_face_identity_is_held_and_reused_sequences_work_after_reset() {
+        let mut gate = ObservationGate::default();
+        let missed = no_face(7, 1_000_000_000);
+        assert_eq!(
+            gate.dispatch(Some(&missed), MonoTimeNs(1_010_000_000)),
+            ObservationDispatch::Outcome(&missed),
+        );
+        assert_eq!(
+            gate.dispatch(Some(&missed), MonoTimeNs(1_020_000_000)),
+            ObservationDispatch::NoUpdate,
+        );
+        gate.reset(MonoTimeNs(1_030_000_000));
+        assert_eq!(
+            gate.dispatch(Some(&missed), MonoTimeNs(1_040_000_000)),
+            ObservationDispatch::Unavailable,
+        );
+        let fresh = no_face(7, 1_050_000_000);
+        assert_eq!(
+            gate.dispatch(Some(&fresh), MonoTimeNs(1_060_000_000)),
+            ObservationDispatch::Outcome(&fresh),
+        );
+    }
+
+    #[test]
+    fn watchdog_expires_after_face_or_no_face_without_counting_render_ticks() {
+        use vtuber_tracking::confidence::ConfidenceSignal;
+        for inference_hz in [15, 30] {
+            for render_hz in [30, 60, 120] {
+                for last_has_face in [true, false] {
+                    // One face can reconnect before the gate becomes confident.
+                    // Silence must still leave Tracking/Acquiring in this case.
+                    for warm_faces in [1, 3] {
+                        let faces: Vec<_> = std::iter::repeat_n(true, warm_faces)
+                            .chain((!last_has_face).then_some(false))
+                            .collect();
+                        let outcomes = recorded_outcomes(&faces, inference_hz);
+                        let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default())
+                            .expect("config");
+                        let mut gate = ObservationGate::default();
+                        let last_capture =
+                            1_000_000_000 + (outcomes.len() as u64 - 1) * 1_000_000_000 / inference_hz;
+                        for (index, outcome) in outcomes.iter().enumerate() {
+                            let now = 1_000_000_000 + index as u64 * 1_000_000_000 / inference_hz;
+                            let _ = gate.dispatch(Some(outcome), MonoTimeNs(now));
+                            let _ = pipeline.update_mediapipe_outcome(
+                                Some(outcome),
+                                Some(vtuber_core::CameraFaceTransform::identity()),
+                                None,
+                                MonoTimeNs(now),
+                                Duration::from_secs_f64(1.0 / inference_hz as f64),
+                            );
+                        }
+                        let last = outcomes.last().expect("last outcome");
+                        assert_eq!(
+                            gate.dispatch(Some(last), MonoTimeNs(last_capture + 250_000_000)),
+                            ObservationDispatch::NoUpdate,
+                        );
+                        let late = last_capture + 250_000_000 + 1_000_000_000 / render_hz;
+                        assert_eq!(
+                            gate.dispatch(Some(last), MonoTimeNs(late)),
+                            ObservationDispatch::Unavailable,
+                        );
+                        let update = pipeline.update_mediapipe_outcome(
+                            None,
+                            Some(vtuber_core::CameraFaceTransform::identity()),
+                            None,
+                            MonoTimeNs(late),
+                            Duration::from_millis(250),
+                        );
+                        assert_eq!(update.state, TrackingState::LostHold);
+                        assert_eq!(update.confidence.signal, ConfidenceSignal::Degrade);
+                        assert_eq!(update.confidence.consecutive_bad, 0);
+                        assert!(!update.confidence.is_confident);
+                        let mut recovered = sample(100, late + 1);
+                        recovered.captured_at = MonoTimeNs(late + 1);
+                        recovered.inference_started_at = recovered.captured_at;
+                        let recovered = FaceTrackingOutcome::Face(recovered);
+                        assert!(matches!(
+                            gate.dispatch(Some(&recovered), MonoTimeNs(late + 1)),
+                            ObservationDispatch::Outcome(_)
+                        ));
+                        let update = pipeline.update_mediapipe_outcome(
+                            Some(&recovered),
+                            Some(vtuber_core::CameraFaceTransform::identity()),
+                            None,
+                            MonoTimeNs(late + 1),
+                            Duration::from_nanos(1),
+                        );
+                        assert_eq!(update.state, TrackingState::Acquiring);
+                        assert_eq!(update.confidence.consecutive_good, 1);
+                    }
+                }
+            }
+        }
     }
 }
