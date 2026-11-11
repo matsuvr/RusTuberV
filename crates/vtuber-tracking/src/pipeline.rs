@@ -837,7 +837,15 @@ impl TrackingPipeline {
                 )
             }
             None => self.update_with_pose(
-                None, source_seq, None, None, None, now, dt, None, neutral.is_some(),
+                None,
+                source_seq,
+                None,
+                None,
+                None,
+                now,
+                dt,
+                None,
+                neutral.is_some(),
             ),
         };
         self.mediapipe_cache = cache;
@@ -2697,13 +2705,14 @@ mod assembly {
             assert_eq!(lost.state, TrackingState::LostHold);
             assert_eq!(lost.confidence.signal, ConfidenceSignal::Degrade);
             let initial = lost.frame.unwrap();
-            assert!(initial.expressions.mouth_open > 0.1);
+            assert!(initial.expressions.aa > 0.1);
             let held = numbered_no_face(8);
             let start = 8 * 33_333_333;
             let mut previous_time = start;
             let mut final_update = None;
             let mut saw_return = false;
-            for tick in 1..=render_hz {
+            // The default loss return takes 2 s, so observe the release for 3 s.
+            for tick in 1..=render_hz * 3 {
                 let now = start + tick * 1_000_000_000 / render_hz;
                 let update = pipeline.update_mediapipe_outcome(
                     Some(&held),
@@ -2725,7 +2734,7 @@ mod assembly {
             let finished = final_update.unwrap();
             assert!(saw_return);
             assert_eq!(finished.state, TrackingState::Searching);
-            assert!(finished.frame.unwrap().expressions.mouth_open < 1e-5);
+            assert!(finished.frame.unwrap().expressions.aa < 1e-5);
         }
     }
 

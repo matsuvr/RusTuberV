@@ -352,9 +352,10 @@ pub fn tracking_bridge_system(
     let neutral = tracking.auto_neutral.reference();
     let gaze_baseline = tracking.auto_neutral.gaze_baseline();
     let held = tracking.held_outcome.take();
-    let update = tracking
-        .pipeline
-        .update_mediapipe_outcome(held.as_ref(), neutral, gaze_baseline, now, dt);
+    let update =
+        tracking
+            .pipeline
+            .update_mediapipe_outcome(held.as_ref(), neutral, gaze_baseline, now, dt);
     tracking.held_outcome = held;
     if let Some(frame) = update.frame {
         tracking.latest_control = Some((lifecycle.current_generation(), frame));
@@ -596,12 +597,10 @@ mod tests {
         assert!(runtime.last_update.is_none());
         face.inference_finished_at = MonoTimeNs(1_100_000_000);
         assert_eq!(
-            runtime
-                .observation_gate
-                .dispatch(
-                    Some(&FaceTrackingOutcome::Face(face.clone())),
-                    MonoTimeNs(1_150_000_000),
-                ),
+            runtime.observation_gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_150_000_000),
+            ),
             ObservationDispatch::Unavailable
         );
     }
@@ -636,12 +635,10 @@ mod tests {
         );
         assert!(runtime.held_outcome.is_none());
         assert_eq!(
-            runtime
-                .observation_gate
-                .dispatch(
-                    Some(&FaceTrackingOutcome::Face(face.clone())),
-                    MonoTimeNs(1_210_000_000),
-                ),
+            runtime.observation_gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_210_000_000),
+            ),
             ObservationDispatch::Unavailable
         );
         let held = runtime
@@ -660,12 +657,10 @@ mod tests {
         assert_eq!(held.captured_at, tracked.captured_at);
         face.captured_at = MonoTimeNs(1_230_000_000);
         assert!(matches!(
-            runtime
-                .observation_gate
-                .dispatch(
-                    Some(&FaceTrackingOutcome::Face(face.clone())),
-                    MonoTimeNs(1_240_000_000),
-                ),
+            runtime.observation_gate.dispatch(
+                Some(&FaceTrackingOutcome::Face(face.clone())),
+                MonoTimeNs(1_240_000_000),
+            ),
             ObservationDispatch::Outcome(FaceTrackingOutcome::Face(_))
         ));
     }
@@ -759,7 +754,10 @@ mod tests {
             } else {
                 let mut expected = previous.expect("prior tick");
                 expected.signal = ConfidenceSignal::None;
-                assert_eq!(update.confidence, expected, "held tick {tick} at {render_hz} Hz");
+                assert_eq!(
+                    update.confidence, expected,
+                    "held tick {tick} at {render_hz} Hz"
+                );
             }
             previous = Some(update.confidence);
             last_now = now;
@@ -854,11 +852,11 @@ mod tests {
                             .chain((!last_has_face).then_some(false))
                             .collect();
                         let outcomes = recorded_outcomes(&faces, inference_hz);
-                        let mut pipeline = TrackingPipeline::try_new(PipelineConfig::default())
-                            .expect("config");
+                        let mut pipeline =
+                            TrackingPipeline::try_new(PipelineConfig::default()).expect("config");
                         let mut gate = ObservationGate::default();
-                        let last_capture =
-                            1_000_000_000 + (outcomes.len() as u64 - 1) * 1_000_000_000 / inference_hz;
+                        let last_capture = 1_000_000_000
+                            + (outcomes.len() as u64 - 1) * 1_000_000_000 / inference_hz;
                         for (index, outcome) in outcomes.iter().enumerate() {
                             let now = 1_000_000_000 + index as u64 * 1_000_000_000 / inference_hz;
                             let _ = gate.dispatch(Some(outcome), MonoTimeNs(now));
