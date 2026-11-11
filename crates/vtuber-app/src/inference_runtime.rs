@@ -32,8 +32,8 @@ pub struct InferenceRuntime {
     worker_started: bool,
     model_requested: bool,
     canonical_outcome_generation: u64,
-    /// Latest canonical MediaPipe sample made available to tracking.
-    pub latest_face_sample: Option<FaceTrackingSample>,
+    /// Latest canonical result, including the source identity of `NoFace`.
+    pub latest_face_outcome: Option<FaceTrackingOutcome>,
     /// Deprecated legacy observation retained for compatibility diagnostics.
     pub latest_observation: Option<RawFaceObservation>,
 }
@@ -50,8 +50,17 @@ impl InferenceRuntime {
             worker_started: false,
             model_requested: false,
             canonical_outcome_generation: 0,
-            latest_face_sample: None,
+            latest_face_outcome: None,
             latest_observation: None,
+        }
+    }
+
+    /// Returns the face sample only when the latest result contains a face.
+    #[must_use]
+    pub fn latest_face_sample(&self) -> Option<&FaceTrackingSample> {
+        match self.latest_face_outcome.as_ref() {
+            Some(FaceTrackingOutcome::Face(sample)) => Some(sample),
+            _ => None,
         }
     }
 
@@ -105,7 +114,7 @@ impl InferenceRuntime {
         };
         self.model_requested = false;
         self.canonical_outcome_generation = 0;
-        self.latest_face_sample = None;
+        self.latest_face_outcome = None;
         self.latest_observation = None;
         result
     }
@@ -119,15 +128,10 @@ impl InferenceRuntime {
         }) = outcome_slot.try_read_after(self.canonical_outcome_generation)?
         {
             self.canonical_outcome_generation = generation;
-            match outcome {
-                FaceTrackingOutcome::Face(sample) => {
-                    self.latest_face_sample = Some(sample);
-                }
-                FaceTrackingOutcome::NoFace { .. } => {
-                    self.latest_face_sample = None;
-                    self.latest_observation = None;
-                }
+            if matches!(outcome, FaceTrackingOutcome::NoFace { .. }) {
+                self.latest_observation = None;
             }
+            self.latest_face_outcome = Some(outcome);
         }
         Ok(())
     }
@@ -229,7 +233,7 @@ pub(crate) fn read_inference_output_system(
     mut rates: Local<InferenceRateState>,
 ) {
     if let Err(error) = inference.poll_latest() {
-        inference.latest_face_sample = None;
+        inference.latest_face_outcome = None;
         inference.latest_observation = None;
         orchestrator.fail_inference(error.to_string());
     }
@@ -266,8 +270,7 @@ pub(crate) fn read_inference_output_system(
     diagnostics.roi_state = status.roi_state.clone();
     diagnostics.pipeline_id = status.pipeline_id.clone().or_else(|| {
         inference
-            .latest_face_sample
-            .as_ref()
+            .latest_face_sample()
             .map(|_| "mediapipe-face-landmarker".to_string())
     });
     diagnostics.model_hash = model_hash_summary(
@@ -457,5 +460,28 @@ mod tests {
             )),
             "INFERENCE_MALFORMED_OUTPUT"
         );
+    }
+
+    #[test]
+    fn poll_retains_no_face_identity_until_stop() {
+        let mut runtime = InferenceRuntime::new(Arc::new(LatestSlot::new()), PathBuf::new());
+        let outcome = FaceTrackingOutcome::NoFace {
+            source_seq: FrameSeq(7),
+            captured_at: MonoTimeNs(100),
+            inference_started_at: MonoTimeNs(200),
+            inference_finished_at: MonoTimeNs(300),
+        };
+        let slot = runtime.controller.canonical_outcome_slot();
+        assert!(slot.publish(outcome.clone()).is_ok());
+        assert!(runtime.poll_latest().is_ok());
+        assert_eq!(runtime.latest_face_outcome.as_ref(), Some(&outcome));
+        assert!(runtime.latest_face_sample().is_none());
+        assert!(runtime.poll_latest().is_ok());
+        assert_eq!(runtime.latest_face_outcome.as_ref(), Some(&outcome));
+        assert!(runtime.stop_model().is_ok());
+        assert!(runtime.latest_face_outcome.is_none());
+        assert!(slot.publish(outcome.clone()).is_ok());
+        assert!(runtime.poll_latest().is_ok());
+        assert_eq!(runtime.latest_face_outcome.as_ref(), Some(&outcome));
     }
 }

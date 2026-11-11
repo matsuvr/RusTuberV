@@ -109,7 +109,7 @@ pub(crate) fn sync_preview_landmark_system(
     inference: Res<crate::inference_runtime::InferenceRuntime>,
     mut landmarks: ResMut<PreviewLandmarkState>,
 ) {
-    match inference.latest_face_sample.as_ref() {
+    match inference.latest_face_sample() {
         Some(sample) => {
             let _ = landmarks.update_from_sample(sample, monotonic_now());
         }
@@ -205,7 +205,7 @@ mod tests {
             .add_systems(Update, sync_preview_landmark_system);
         app.world_mut()
             .resource_mut::<crate::inference_runtime::InferenceRuntime>()
-            .latest_face_sample = Some(sample.clone());
+            .latest_face_outcome = Some(vtuber_core::FaceTrackingOutcome::Face(sample.clone()));
         app.update();
         assert!(
             app.world()
@@ -214,11 +214,16 @@ mod tests {
                 .is_some()
         );
 
-        // NoFace clears the canonical latest sample and the display state in
+        // NoFace retains its source identity and clears the display state in
         // the same synchronization path.
         app.world_mut()
             .resource_mut::<crate::inference_runtime::InferenceRuntime>()
-            .latest_face_sample = None;
+            .latest_face_outcome = Some(vtuber_core::FaceTrackingOutcome::NoFace {
+            source_seq: FrameSeq(2),
+            captured_at: MonoTimeNs(2),
+            inference_started_at: MonoTimeNs(2),
+            inference_finished_at: MonoTimeNs(2),
+        });
         app.update();
         assert!(
             app.world()
@@ -231,7 +236,7 @@ mod tests {
         // the runtime's canonical sample before this display sync runs.
         app.world_mut()
             .resource_mut::<crate::inference_runtime::InferenceRuntime>()
-            .latest_face_sample = Some(sample);
+            .latest_face_outcome = Some(vtuber_core::FaceTrackingOutcome::Face(sample));
         app.update();
         assert!(
             app.world()

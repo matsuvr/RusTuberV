@@ -263,8 +263,8 @@ impl Default for ConfidenceGateParams {
             enter_threshold: 0.75,
             exit_threshold: 0.50,
             required_consecutive_good: 3,
-            // Five misses at the normal 15 Hz tracking cadence is roughly
-            // 300 ms. A separate watchdog still handles a stalled worker.
+            // Five distinct misses span 267 ms at 15 Hz or 133 ms at 30 Hz
+            // from the first miss. A separate watchdog handles a stalled worker.
             required_consecutive_bad: 5,
             max_count: u32::MAX,
         }
@@ -372,7 +372,10 @@ impl ConfidenceGate {
         self.bad_count = 0;
     }
 
-    /// Updates the gate with a new frame confidence.
+    /// Updates the gate with a new inference result's confidence.
+    ///
+    /// Call once per distinct result, not once per render tick. Use
+    /// [`Self::assess`] while rendering a held result.
     ///
     /// `frame_confidence` should normally be the result of
     /// [`synthesize`]. Non-finite values are rejected: the update is treated
@@ -425,11 +428,23 @@ impl ConfidenceGate {
         }
 
         ConfidenceAssessment {
-            frame_confidence: c,
+            signal,
+            ..self.assess(frame_confidence)
+        }
+    }
+
+    /// Reports current confidence without counting another inference result.
+    ///
+    /// Held render ticks use this method; it never repeats an edge signal.
+    #[must_use]
+    pub fn assess(&self, frame_confidence: f32) -> ConfidenceAssessment {
+        let valid = frame_confidence.is_finite() && (0.0..=1.0).contains(&frame_confidence);
+        ConfidenceAssessment {
+            frame_confidence: if valid { frame_confidence } else { 0.0 },
             consecutive_good: self.good_count,
             consecutive_bad: self.bad_count,
             is_confident: self.is_confident,
-            signal,
+            signal: ConfidenceSignal::None,
             valid,
         }
     }
