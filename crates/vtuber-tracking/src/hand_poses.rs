@@ -101,14 +101,17 @@ fn priority_penalty(name: &str) -> f32 {
 }
 
 /// Total positive flexion distinguishes an extended finger from a folded one.
-/// Once folded, how the bend divides between PIP and DIP must not hide a V sign.
+/// Once folded, how the bend divides between joints must not hide a sign.
 fn curl(joints: impl IntoIterator<Item = f32>, folded: f32) -> f32 {
     (joints.into_iter().map(|v| v.max(0.0)).sum::<f32>() / folded).clamp(0.0, 1.0)
 }
 
 fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
-    let curls_a = a.fingers.map(|joints| curl(joints, 2.4));
-    let curls_b = b.fingers.map(|joints| curl(joints, 2.4));
+    // Keep partially folded fingers distinct from a closed fist. Saturating at
+    // 2.4 radians made half-heart fingers look as closed as a thumbs-up, leaving
+    // the noisier MCP estimate to decide between them.
+    let curls_a = a.fingers.map(|joints| curl(joints, 3.0));
+    let curls_b = b.fingers.map(|joints| curl(joints, 3.0));
     let mut result = priority_penalty(name);
     for ((a, b), (curl_a, curl_b)) in a
         .fingers
@@ -118,14 +121,17 @@ fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
     {
         let [knuckle_a, _, _] = a;
         let [knuckle_b, _, _] = b;
-        // The MCP keeps a hooked/claw hand distinct from a fist.
-        result += (curl_a - curl_b).powi(2) + (knuckle_a - knuckle_b).powi(2);
+        // The MCP keeps a hooked/claw hand distinct from a fist, but is a
+        // secondary cue. The palm-plane estimate changes how the same total
+        // bend divides between MCP and PIP, including between mirrored inputs.
+        result += (curl_a - curl_b).powi(2) + 0.1 * (knuckle_a - knuckle_b).powi(2);
     }
     // Every candidate with extended neighbours must explain their observed
     // opening, even when a noisy bend estimate calls one finger folded.
     // Otherwise a V can become crossed fingers without comparing the gap
     // that distinguishes them. Candidate-folded ring/little gaps stay unused.
-    let extended = curls_b.into_iter().map(|curl| curl < 0.5);
+    // Keep the 1.2-radian spread gate independent of the curl score's scale.
+    let extended = b.fingers.into_iter().map(|joints| curl(joints, 2.4) < 0.5);
     for ((a, b), pair) in a
         .spread
         .windows(2)
@@ -136,12 +142,11 @@ fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
             result += 2.0 * ((a0 - a1) - (b0 - b1)).powi(2);
         }
     }
-    // A thumb is often occluded behind a V/fist; rank the four visible fingers
-    // first, retaining enough thumb evidence to distinguish a thumbs-up/shaka.
+    // Thumb flexion distinguishes thumbs-up/shaka from other folded hands.
+    // Its in-plane opening is less stable when occluded, so it stays weaker.
     result
-        + 0.25
-            * ((curl(a.thumb, 2.1) - curl(b.thumb, 2.1)).powi(2)
-                + (a.thumb_spread - b.thumb_spread).powi(2))
+        + 0.5 * (curl(a.thumb, 2.1) - curl(b.thumb, 2.1)).powi(2)
+        + 0.25 * (a.thumb_spread - b.thumb_spread).powi(2)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -300,6 +305,123 @@ mod tests {
                     "peace",
                     "PIP {pip}, hand sign {sign}: an open V must not become crossed fingers"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn native_left_and_right_observations_recognize_the_same_sign() {
+        // Features from MediaPipe 0.10.35, the bundled hand_landmarker.task,
+        // and Google's thumb_up.jpg / victory.jpg test images and reflections.
+        // https://storage.googleapis.com/mediapipe-assets/thumb_up.jpg
+        // https://storage.googleapis.com/mediapipe-assets/victory.jpg
+        // These are independent model predictions, not a sign-flipped copy of
+        // one prediction: the estimated MCP and distal bends differ by hand.
+        for (name, fingers, spread, thumb, thumb_spread) in [
+            (
+                "thumbs_up",
+                [
+                    [0.681731, 1.51051, 1.05],
+                    [0.783752, 1.623488, 1.05],
+                    [0.911441, 1.559305, 1.05],
+                    [0.549006, 1.224707, 1.05],
+                ],
+                [-0.131394, 0.083423, 0.105371, 0.108227],
+                [-0.087472, -0.179561],
+                0.674066,
+            ),
+            (
+                "thumbs_up",
+                [
+                    [0.635825, 1.6962, 0.778160],
+                    [0.853576, 1.62273, 1.05],
+                    [0.969630, 1.410504, 1.05],
+                    [0.650021, 1.339349, 1.05],
+                ],
+                [-0.195102, -0.253954, -0.272879, -0.299930],
+                [-0.116946, -0.245747],
+                0.846118,
+            ),
+            (
+                "peace",
+                [
+                    [0.113893, -0.020865, 0.603163],
+                    [-0.032353, 0.357552, 0.014910],
+                    [0.805441, 1.534018, 0.421264],
+                    [0.723121, 1.370764, 0.747690],
+                ],
+                [0.333606, 0.102163, -0.122506, -0.077124],
+                [0.319804, -0.619174],
+                -0.498211,
+            ),
+            (
+                "peace",
+                [
+                    [-0.021583, 0.019723, 0.662764],
+                    [-0.055820, 0.334034, 0.029652],
+                    [0.933395, 1.362046, 0.634308],
+                    [0.724971, 1.1883, 1.015948],
+                ],
+                [0.277230, 0.015615, 0.009066, 0.079103],
+                [0.340934, -0.548893],
+                -0.381891,
+            ),
+            // First two left-hand predictions with victory.jpg resized to
+            // 180 px high, rotated 30 degrees, and placed in a 640x480 frame.
+            // The right-hand clip already recognized peace on these frames;
+            // the old MCP-heavy score called the left hand elegant, then claw.
+            (
+                "peace",
+                [
+                    [-0.598043, 0.044170, 0.387805],
+                    [0.368448, 0.507000, 0.204420],
+                    [0.715721, 1.253063, 0.662475],
+                    [0.207965, 1.571466, 1.05],
+                ],
+                [0.294378, 0.071158, -0.264067, -0.557776],
+                [0.453891, -0.354656],
+                -0.291026,
+            ),
+            (
+                "peace",
+                [
+                    [-0.548864, 0.200486, 0.382508],
+                    [-0.588154, 0.101136, 0.128873],
+                    [0.333663, 1.302241, 0.621724],
+                    [0.195939, 1.291574, 1.05],
+                ],
+                [0.320954, 0.162180, 0.004788, -0.096815],
+                [0.131309, -0.340132],
+                -0.350138,
+            ),
+        ] {
+            let canonical = HandFingerPose {
+                fingers,
+                spread,
+                thumb,
+                thumb_spread,
+                thumb_cmc: [0.0; 2],
+            };
+            for finger in 0..4 {
+                for delta in [-0.1, 0.0, 0.1] {
+                    // The same total bend can move between MCP and PIP as
+                    // MediaPipe's palm-plane estimate varies.
+                    let mut observed = canonical;
+                    observed.fingers[finger][0] += delta;
+                    observed.fingers[finger][1] -= delta;
+                    for sign in [-1.0, 1.0] {
+                        let mut selector = HandPoseSelector::new();
+                        let input = with_flexion_sign(observed, sign);
+                        for _ in 1..CONFIRM_FRAMES {
+                            assert_eq!(selector.observe(Some(input), sign), None);
+                        }
+                        assert_eq!(
+                            selector.observe(Some(input), sign),
+                            Some(with_flexion_sign(pose(name), sign)),
+                            "{name}, hand sign {sign}, finger {finger}, delta {delta}, features {canonical:?}"
+                        );
+                    }
+                }
             }
         }
     }
