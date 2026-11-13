@@ -11,7 +11,7 @@ WebカメラでVRMアバターを動かすデスクトップアプリです。�
 | ダウンロード | 対応環境 |
 | --- | --- |
 | [Windows版](https://github.com/matsuvr/RusTuberV/releases/tag/v0.2.1) | Windows x64 |
-| [Mac版](https://github.com/matsuvr/RusTuberV/releases/tag/v0.2.2) | Apple Silicon、macOS 14以降 |
+| [Mac版](https://github.com/matsuvr/RusTuberV/releases/tag/v0.2.3) | Apple Silicon、macOS 14以降 |
 
 配布ZIPには、推論モデル、必要なランタイム、利用マニュアルを同梱しています。
 

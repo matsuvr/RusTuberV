@@ -4414,7 +4414,7 @@ dependencies = [
 
 [[package]]
 name = "looking-glass-device"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bevy_looking_glass",
 ]
@@ -7226,7 +7226,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vtuber-app"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -7254,7 +7254,7 @@ dependencies = [
 
 [[package]]
 name = "vtuber-avatar"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "bevy",
@@ -7273,7 +7273,7 @@ dependencies = [
 
 [[package]]
 name = "vtuber-camera"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "nokhwa",
  "nokhwa-bindings-macos",
@@ -7284,14 +7284,14 @@ dependencies = [
 
 [[package]]
 name = "vtuber-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "vtuber-desktop"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -7305,7 +7305,7 @@ dependencies = [
 
 [[package]]
 name = "vtuber-inference"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "hex",
@@ -7321,7 +7321,7 @@ dependencies = [
 
 [[package]]
 name = "vtuber-ndi"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "grafton-ndi",
  "vtuber-core",
@@ -7330,7 +7330,7 @@ dependencies = [
 
 [[package]]
 name = "vtuber-platform"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
@@ -7341,7 +7341,7 @@ dependencies = [
 
 [[package]]
 name = "vtuber-tracking"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "approx",
  "nalgebra",
@@ -8411,7 +8411,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bevy",
  "bevy_egui",
