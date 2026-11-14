@@ -63,7 +63,7 @@ fn page_title(pane: Pane, lang: UiLanguage) -> &'static str {
             "자세·카메라 조정",
         ),
         Pane::ExpressionKeys => lang.pick("表情設定", "Expressions", "表情设置", "표정 설정"),
-        Pane::NdiOutput => lang.pick("NDI出力", "NDI output", "NDI输出", "NDI 출력"),
+        Pane::NdiOutput => lang.pick("映像出力", "Video output", "视频输出", "영상 출력"),
         Pane::LookingGlassOutput => lang.pick(
             "Looking Glass出力",
             "Looking Glass output",

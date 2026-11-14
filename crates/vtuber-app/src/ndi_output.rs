@@ -16,6 +16,8 @@ use crate::ui_model::{NdiOutputUiState, UiViewModel};
 pub struct NdiOutputIntent {
     requested: bool,
     generation: u64,
+    /// Independent, session-local Spout2 start/stop intent.
+    pub spout_requested: bool,
 }
 
 impl NdiOutputIntent {
@@ -43,6 +45,50 @@ impl NdiOutputIntent {
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+}
+
+/// Windows sender state; native handles never enter the UI or Bevy world.
+#[derive(Resource, Default)]
+pub struct SpoutOutputRuntime {
+    controller: vtuber_spout::Controller,
+    power: Option<vtuber_platform::PowerState>,
+    attempted: bool,
+}
+
+impl SpoutOutputRuntime {
+    /// Stop without joining the native worker on the UI thread.
+    pub fn stop(&mut self) {
+        self.controller.stop();
+    }
+    fn update(&mut self, requested: &mut bool, has_model: bool, ready: bool) -> bool {
+        self.controller.poll();
+        let power = vtuber_platform::power_state();
+        let changed = self.power.is_some_and(|previous| previous != power);
+        self.power = Some(power);
+        if !has_model {
+            *requested = false;
+        }
+        if changed || power.sleeping || !ready || !*requested {
+            self.controller.stop();
+            self.attempted = false;
+            return false;
+        }
+        if self.controller.is_stopping() {
+            return false;
+        }
+        if !self.attempted {
+            self.controller.start();
+            self.attempted = true;
+        }
+        if matches!(self.controller.status(), vtuber_spout::Status::Error(_)) {
+            *requested = false;
+            return false;
+        }
+        matches!(
+            self.controller.status(),
+            vtuber_spout::Status::Starting | vtuber_spout::Status::Live
+        )
     }
 }
 
@@ -125,8 +171,13 @@ impl NdiOutputRuntime {
 /// Converts backend state and small metrics into the UI-only snapshot.
 pub fn sync_ndi_output_view_model_system(
     runtime: Res<NdiOutputRuntime>,
+    spout: Option<Res<SpoutOutputRuntime>>,
     mut view_model: ResMut<UiViewModel>,
 ) {
+    if let Some(spout) = spout {
+        view_model.spout_status = spout.controller.status();
+        view_model.spout_replaced_frames = spout.controller.replaced_frames();
+    }
     let status = runtime.status();
     let metrics = runtime.metrics();
     let default_source = NdiOutputConfig::default().source_name;
@@ -163,6 +214,7 @@ pub fn sync_ndi_output_view_model_system(
 pub fn ndi_output_bridge_system(
     mut runtime: ResMut<NdiOutputRuntime>,
     mut intent: ResMut<NdiOutputIntent>,
+    mut spout: Option<ResMut<SpoutOutputRuntime>>,
     orchestrator: Res<Orchestrator>,
     lifecycle: Option<Res<vtuber_avatar::AvatarLifecycle>>,
     mut output_state: Option<ResMut<AvatarOutputState>>,
@@ -179,6 +231,15 @@ pub fn ndi_output_bridge_system(
     let suspended = runtime.sync_power(vtuber_platform::power_state());
     let ready = lifecycle.state() == vtuber_avatar::AvatarLifecycleState::Ready;
     let has_model = orchestrator.has_imported_model();
+    let spout_active = spout
+        .as_deref_mut()
+        .is_some_and(|spout| spout.update(&mut intent.spout_requested, has_model, ready));
+    // Consume one readback once. Cloning only shares the pixel Arc; it does not
+    // allocate a second 1080p buffer when both transports are active.
+    let frame = frame_slot.take_latest();
+    if spout_active && let (Some(spout), Some(frame)) = (spout.as_deref(), frame.as_ref()) {
+        spout.controller.submit(frame.clone());
+    }
     let status = runtime.status();
 
     // An explicit unload leaves no avatar to publish and therefore performs
@@ -186,35 +247,31 @@ pub fn ndi_output_bridge_system(
     // sender but deactivates readback until the new generation is ready.
     if !has_model {
         intent.request_stop();
-        output_state.deactivate();
+        output_state.set_active(spout_active);
         runtime.stop();
-        let _ = frame_slot.take_latest();
         return;
     }
 
     if !intent.is_requested() {
-        output_state.deactivate();
+        output_state.set_active(spout_active);
         if matches!(
             status,
             NdiOutputStatus::Starting | NdiOutputStatus::Live { .. }
         ) {
             runtime.stop();
         }
-        let _ = frame_slot.take_latest();
         return;
     }
 
     if suspended {
-        output_state.deactivate();
-        let _ = frame_slot.take_latest();
+        output_state.set_active(spout_active);
         return;
     }
 
     if !ready {
         // Keep a live session across VRM replacement, but never forward a
         // frame from the old generation while the replacement is loading.
-        output_state.deactivate();
-        let _ = frame_slot.take_latest();
+        output_state.set_active(spout_active);
         if matches!(status, NdiOutputStatus::Off) {
             intent.request_stop();
         }
@@ -235,17 +292,16 @@ pub fn ndi_output_bridge_system(
     match runtime.status() {
         NdiOutputStatus::Live { .. } => {
             output_state.activate();
-            if let Some(frame) = frame_slot.take_latest() {
+            if let Some(frame) = frame {
                 runtime.submit_frame(frame);
             }
         }
-        NdiOutputStatus::Starting => output_state.deactivate(),
+        NdiOutputStatus::Starting => output_state.set_active(spout_active),
         NdiOutputStatus::Error { .. } => {
-            output_state.deactivate();
+            output_state.set_active(spout_active);
             intent.request_stop();
-            let _ = frame_slot.take_latest();
         }
-        NdiOutputStatus::Off => output_state.deactivate(),
+        NdiOutputStatus::Off => output_state.set_active(spout_active),
     }
 }
 

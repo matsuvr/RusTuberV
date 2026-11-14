@@ -115,4 +115,69 @@ pub(super) fn output_page(
             }
         },
     );
+    section(ui, "Spout2 — Windows", |ui| {
+        if !vtuber_spout::available() {
+            ui.label(lang.pick(
+                "Spout2はWindows専用です。",
+                "Spout2 is Windows only.",
+                "Spout2仅支持Windows。",
+                "Spout2는 Windows 전용입니다.",
+            ));
+            return;
+        }
+        let active = matches!(
+            vm.spout_status,
+            vtuber_spout::Status::Starting | vtuber_spout::Status::Live
+        );
+        let status = match &vm.spout_status {
+            vtuber_spout::Status::Off => lang.pick("停止", "Off", "已停止", "중지"),
+            vtuber_spout::Status::Starting => {
+                lang.pick("開始中…", "Starting…", "正在启动…", "시작 중…")
+            }
+            vtuber_spout::Status::Live => lang.pick("送信中", "Sending", "发送中", "전송 중"),
+            vtuber_spout::Status::Error(_) => lang.pick("エラー", "Error", "错误", "오류"),
+        };
+        ui.label(format!("RusTuberV: {status}"));
+        ui.small(lang.pick(
+            "アバターのみ・透過BGRA。OBS等でSpout2受信を追加してください。",
+            "Avatar only, transparent BGRA. Add a Spout2 receiver in OBS or another app.",
+            "仅虚拟形象，透明BGRA。请在OBS等应用中添加Spout2接收端。",
+            "아바타만 투명 BGRA로 출력합니다. OBS 등에 Spout2 수신기를 추가하세요.",
+        ));
+        ui.horizontal_wrapped(|ui| {
+            if primary_button(
+                ui,
+                lang.pick(
+                    "Spout2送信を開始",
+                    "Start Spout2",
+                    "开始Spout2发送",
+                    "Spout2 전송 시작",
+                ),
+                !active
+                    && vm.avatar.is_ready
+                    && vm.avatar.lifecycle == crate::ui_model::AvatarLifecycleState::Ready,
+            )
+            .clicked()
+            {
+                state.emit(actions, UiAction::StartSpoutOutput);
+            }
+            if ui
+                .add_enabled(
+                    active,
+                    egui::Button::new(lang.pick(
+                        "Spout2送信を停止",
+                        "Stop Spout2",
+                        "停止Spout2发送",
+                        "Spout2 전송 중지",
+                    )),
+                )
+                .clicked()
+            {
+                state.emit(actions, UiAction::StopSpoutOutput);
+            }
+        });
+        if let vtuber_spout::Status::Error(message) = &vm.spout_status {
+            ui.label(message);
+        }
+    });
 }

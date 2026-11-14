@@ -216,3 +216,18 @@ the wrist target nor skeletal translations. Joint limits and collision checks
 remain authoritative in the existing solver. Straight arms and circles with no
 clear sampled target are left to that solver; a sampled target is not a proof
 of anatomical or path feasibility. No extra contact clearance is imposed.
+
+## Spout2 output (Windows)
+
+`spout2-rs` 0.1.1 and `spout2-sys` 0.1.1: BSD-2-Clause, copyright
+2026 Jaden Hills. The native package contains Spout 2.007.017 by Lynn Jarvis,
+also BSD-2-Clause. Source and provenance: https://docs.rs/crate/spout2-rs/0.1.1/source/
+and https://github.com/leadedge/Spout2 . The patched native source is retained in
+`vendor/spout2-sys`; see its NOTICE for CLANG64 portability changes.
+The Windows package includes all three license notices under `licenses/`.
+The SDK is statically linked; no Spout DLL or SDK installation is required by
+users. OBS's optional Spout receiver plugin is a separate application component,
+not bundled or relicensed by RusTuberV.
+
+The CLANG64 build also bundles MSYS2 libc++.dll (Apache-2.0 WITH LLVM-exception);
+its license is included as licenses/LLVM-libcxx-LICENSE.txt.

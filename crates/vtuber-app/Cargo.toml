@@ -17,6 +17,7 @@ vtuber-inference = { path = "../vtuber-inference", default-features = false }
 vtuber-tracking = { path = "../vtuber-tracking" }
 vtuber-avatar = { path = "../vtuber-avatar" }
 vtuber-ndi = { path = "../vtuber-ndi" }
+vtuber-spout = { path = "../vtuber-spout" }
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
 rfd = { workspace = true }

@@ -2352,3 +2352,36 @@ fn view_model_exposes_review_and_acceptance_state() {
     assert!(vm.avatar_import_review.review.is_none());
     assert!(!vm.avatar_import_review.accepted);
 }
+
+#[test]
+fn spout_actions_are_independent_of_ndi_and_tracking() {
+    let mut app = App::new();
+    app.init_resource::<Orchestrator>()
+        .init_resource::<ActionQueue>()
+        .init_resource::<UiViewModel>()
+        .init_resource::<crate::ndi_output::NdiOutputIntent>()
+        .init_resource::<PreviewState>()
+        .init_resource::<AvatarMotionMirror>()
+        .add_systems(Update, process_ui_actions_system);
+    app.world_mut()
+        .resource_mut::<ActionQueue>()
+        .emit(UiAction::StartSpoutOutput);
+    app.update();
+    let intent = app.world().resource::<crate::ndi_output::NdiOutputIntent>();
+    assert!(intent.spout_requested);
+    assert!(!intent.is_requested());
+    assert_eq!(
+        app.world().resource::<Orchestrator>().pipeline_state(),
+        PipelineState::Idle
+    );
+    app.world_mut()
+        .resource_mut::<ActionQueue>()
+        .emit(UiAction::StartNdiOutput);
+    app.world_mut()
+        .resource_mut::<ActionQueue>()
+        .emit(UiAction::StopSpoutOutput);
+    app.update();
+    let intent = app.world().resource::<crate::ndi_output::NdiOutputIntent>();
+    assert!(!intent.spout_requested);
+    assert!(intent.is_requested());
+}

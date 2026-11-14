@@ -35,10 +35,15 @@ Copy-Item -LiteralPath 'vendor/bevy_vrm1/LICENSE-MIT' -Destination "$package/lic
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/LICENSE-APACHE2' -Destination "$package/licenses/bevy_vrm1-Apache-2.0.txt"
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/NOTICE' -Destination "$package/licenses/bevy_vrm1-NOTICE.txt"
 Copy-Item -LiteralPath 'vendor/nokhwa/LICENSE' -Destination "$package/licenses/nokhwa-Apache-2.0.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/LICENSE' -Destination "$package/licenses/spout2-sys-BSD-2-Clause.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/LICENSE.spout2-rs' -Destination "$package/licenses/spout2-rs-BSD-2-Clause.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/vendor/Spout2/LICENSE' -Destination "$package/licenses/Spout2-BSD-2-Clause.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/NOTICE' -Destination "$package/licenses/Spout2-NOTICE.txt"
 Copy-Item -LiteralPath 'manual' -Destination $package -Recurse
 Copy-Item -LiteralPath "$NdiSdk/Bin/x64/Processing.NDI.Lib.x64.dll", "$NdiSdk/Bin/x64/Processing.NDI.Lib.Licenses.txt" -Destination $package
 Copy-Item -LiteralPath "$NdiSdk/NDI SDK License Agreement.pdf" -Destination "$package/NDI_SDK_LICENSE_AGREEMENT.pdf"
-Copy-Item -LiteralPath "$MsysRoot/clang64/bin/libunwind.dll" -Destination $package
+Copy-Item -LiteralPath "$MsysRoot/clang64/bin/libunwind.dll", "$MsysRoot/clang64/bin/libc++.dll" -Destination $package
+Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/libc++/LICENSE" -Destination "$package/licenses/LLVM-libcxx-LICENSE.txt"
 Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/libunwind/LICENSE" -Destination "$package/licenses/LLVM-libunwind-LICENSE.txt"
 Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/crt" -Destination "$package/licenses/MinGW-w64-CRT" -Recurse
 Copy-Item -LiteralPath 'tools/windows-runtime-terms.txt' -Destination "$package/RUNTIME-TERMS.txt"
