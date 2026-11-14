@@ -27,6 +27,8 @@ impl ActionQueue {
                 | UiAction::DismissError
                 | UiAction::StartNdiOutput
                 | UiAction::StopNdiOutput
+                | UiAction::StartSpoutOutput
+                | UiAction::StopSpoutOutput
         ) && self.pending_actions.contains(&action)
         {
             return;
@@ -122,6 +124,10 @@ pub enum UiAction {
     // --- NDI output actions ---
     /// Start the optional transparent avatar NDI output.
     StartNdiOutput,
+    /// Start Windows-local Spout2 output.
+    StartSpoutOutput,
+    /// Stop Windows-local Spout2 output.
+    StopSpoutOutput,
     /// Stop the optional transparent avatar NDI output.
     StopNdiOutput,
     /// Start the selected Looking Glass output.

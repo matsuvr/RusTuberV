@@ -126,6 +126,16 @@ pub fn process_ui_actions_system(
                 // only restoring the viewport orbit.
                 orchestrator.process_action(&UiAction::BeginCalibration);
             }
+            UiAction::StartSpoutOutput => {
+                if let Some(intent) = ndi_intent.as_deref_mut() {
+                    intent.spout_requested = true;
+                }
+            }
+            UiAction::StopSpoutOutput => {
+                if let Some(intent) = ndi_intent.as_deref_mut() {
+                    intent.spout_requested = false;
+                }
+            }
             UiAction::StartNdiOutput => {
                 if let Some(intent) = ndi_intent.as_deref_mut() {
                     intent.request_start();

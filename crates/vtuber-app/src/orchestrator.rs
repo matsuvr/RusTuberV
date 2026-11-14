@@ -312,6 +312,8 @@ impl Orchestrator {
             UiAction::SwitchPane(_)
             | UiAction::ResetAvatarCamera
             | UiAction::StartNdiOutput
+            | UiAction::StartSpoutOutput
+            | UiAction::StopSpoutOutput
             | UiAction::StartLookingGlass(_)
             | UiAction::RefreshLookingGlass
             | UiAction::StopLookingGlass

@@ -1,0 +1,48 @@
+name: Spout2 Windows CLANG64
+on:
+  pull_request:
+    paths:
+      - 'crates/vtuber-spout/**'
+      - 'crates/vtuber-app/**'
+      - 'vendor/spout2-sys/**'
+      - 'Cargo.*'
+      - '.github/workflows/spout-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  spout:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-rust
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+      - name: Test controller and link native Spout backend
+        shell: pwsh
+        run: ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('test', '--locked', '-p', 'vtuber-spout', '--all-targets')
+      - name: Fetch approved inference models for embedded assets
+        shell: pwsh
+        run: |
+          $models = @(
+            @('pose_landmarker_full.task', 'pose_landmarker/pose_landmarker_full', '4EAA5EB7A98365221087693FCC286334CF0858E2EB6E15B506AA4A7ECDCEC4AD'),
+            @('hand_landmarker.task', 'hand_landmarker/hand_landmarker', 'FBC2A30080C3C557093B5DDFC334698132EB341044CCEE322CCF8BCF3607CDE1'),
+            @('face_landmarker.task', 'face_landmarker/face_landmarker', '64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF')
+          )
+          foreach ($model in $models) {
+            $path = "assets/models/$($model[0])"
+            Invoke-WebRequest "https://storage.googleapis.com/mediapipe-models/$($model[1])/float16/latest/$($model[0])" -OutFile $path
+            if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $model[2]) { throw "Model hash mismatch: $path" }
+          }
+      - name: Check application integration (NDI SDK not required)
+        shell: pwsh
+        run: ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('check', '--locked', '-p', 'vtuber-app', '--tests', '-j', '2')
