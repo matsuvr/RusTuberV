@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="RusTuberVは、Webカメラで顔や手の動きをVRMアバターに反映するデスクトップアプリ。Windows・Macに対応し、NDIやSpout2でOBSへ背景透過映像を送れます。">
+  <meta name="description" content="RusTuberVはWebカメラで取得した顔や手の動きをVRMアバターに反映させるデスクトップアプリです。WindowsとMacの両方に対応し、NDIやSpout2を利用して背景が透明な映像をOBSへ送信できます。">
   <meta name="theme-color" content="#f7f7f2">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="RusTuberV — Webカメラから、アバターへ。">
-  <meta property="og:description" content="顔も、表情も、手の動きも。VRMアバターを動かして、OBSで配信しよう。">
+  <meta property="og:title" content="RusTuberV | VRMアバター用トラッキングアプリ">
+  <meta property="og:description" content="WebカメラでVRMアバターを操作し、背景が透明な映像をOBSへ送信できるアプリです。顔や手のトラッキングに加え、表情や画角の調整にも対応しています。">
   <meta property="og:image" content="https://matsuvr.github.io/RusTuberV/assets/app-icon.png">
   <link rel="icon" href="assets/app-icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="assets/site.css">
-  <title>RusTuberV — Webカメラから、アバターへ。</title>
+  <link rel="stylesheet" href="assets/site.css?v=2">
+  <title>RusTuberV | VRMアバター用トラッキングアプリ</title>
 </head>
 <body>
   <a class="skip-link" href="#main">本文へ移動</a>
@@ -29,9 +29,9 @@
   <main id="main">
     <section class="hero section-wrap">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="accent-square" aria-hidden="true"></span> WEBCAM → VRM → OBS</p>
-        <h1>Webカメラから、<br><span>アバターへ。</span></h1>
-        <p class="hero-description">まばたきも、表情も、手の動きも。<br>いつものカメラでVRMアバターを動かす<br class="desktop-break">デスクトップアプリ、RusTuberV。</p>
+        <p class="eyebrow"><span class="accent-square" aria-hidden="true"></span> VRMアバター用デスクトップアプリ</p>
+        <h1><span class="hero-term">Webカメラ</span>で<span class="hero-term">VRMアバター</span>を動かすアプリ</h1>
+        <p class="hero-description">RusTuberVはWebカメラで取得した顔や手の動きをVRMアバターに反映させるデスクトップアプリです。NDIやSpout2を利用して背景が透明な映像をOBSへ送信できます。</p>
         <div class="button-row">
           <a class="button button-primary" href="https://github.com/matsuvr/RusTuberV/releases/latest">ダウンロード <span aria-hidden="true">↗</span></a>
           <a class="text-link" href="manual/ja/">使い方を見る <span aria-hidden="true">→</span></a>
@@ -40,8 +40,8 @@
       </div>
       <figure class="hero-figure">
         <div class="figure-topline"><span>RusTuberV / ワークスペース</span><span aria-hidden="true">↗</span></div>
-        <img src="manual/ja/images/16-workspace.png" width="1200" height="907" alt="RusTuberVの操作画面。左でページを選び、中央で設定し、右でアバターを確認します。" fetchpriority="high">
-        <figcaption>アバターを選んで、カメラに向かう。それが最初の一歩。</figcaption>
+        <img src="manual/ja/images/16-workspace.png" width="1200" height="907" alt="RusTuberVの操作画面では、左側に設定ページの一覧、中央に各種設定項目、右側にアバターのプレビューが表示されます。" fetchpriority="high">
+        <figcaption>左側の一覧から設定ページを選択し、中央で操作を行います。右側のプレビューでアバターの状態を確認できます。</figcaption>
       </figure>
     </section>
 
@@ -50,44 +50,44 @@
     </div>
 
     <section class="section-wrap feature-section" id="features" aria-labelledby="features-title">
-      <div class="section-heading"><p class="eyebrow">01 / EXPRESSION</p><h2 id="features-title">あなたの動きを、<br>アバターの表現に。</h2></div>
+      <div class="section-heading"><p class="eyebrow">01 / 主な機能</p><h2 id="features-title">トラッキングとアバターの調整機能</h2></div>
       <div class="feature-layout">
         <figure class="feature-figure">
-          <img src="manual/ja/images/08-expression.png" width="1200" height="675" alt="表情設定でキーに笑顔を割り当て、アバターの表情を切り替える画面例" loading="lazy">
-          <figcaption>モデルに用意された表情を、キーで切り替え。</figcaption>
+          <img src="manual/ja/images/08-expression.png" width="1200" height="675" alt="キーに笑顔を割り当ててアバターの表情を切り替えた画面例です。" loading="lazy">
+          <figcaption>割り当てたキーを押すと、対応する表情に切り替わります。</figcaption>
         </figure>
         <div class="feature-list">
-          <div><span class="feature-number">01</span><h3>顔も、手も、Webカメラで。</h3><p>顔の向き、まばたき、視線、口の動きに加えて、上半身・腕・手の動きを反映。パソコン内蔵のカメラも使えます。</p></div>
-          <div><span class="feature-number">02</span><h3>お気に入りのVRMで。</h3><p>VRM 0.xと1.0に対応。モデルに保存されたマテリアルや表情を使って、アバターを表示します。</p></div>
-          <div><span class="feature-number">03</span><h3>表情も、構図も、自分らしく。</h3><p>キーによる表情切り替え、左右反転、画角の調整に対応。表情のキー割り当ては、アバターごとに保存できます。</p></div>
+          <div><span class="feature-number">01</span><h3>顔と上半身・腕・手のトラッキング</h3><p>Webカメラで取得した顔の向き、まばたき、視線、口の動きをアバターに反映します。さらに上半身・腕・手の追跡にも対応し、パソコン内蔵のカメラでも利用可能です。</p></div>
+          <div><span class="feature-number">02</span><h3>VRM 0.xと1.0の読み込み</h3><p>VRM 0.xおよび1.0のアバターを読み込むことができます。モデルに保存されたマテリアルや表情を使って表示します。</p></div>
+          <div><span class="feature-number">03</span><h3>表情と画角の調整</h3><p>キー操作で表情を切り替えることができます。また、アバターの左右反転や画角の調整にも対応しており、表情のキー割り当てはアバターごとに保存できます。</p></div>
         </div>
       </div>
     </section>
 
     <section class="start-section" aria-labelledby="start-title">
       <div class="section-wrap">
-        <div class="section-heading"><p class="eyebrow">02 / GET STARTED</p><h2 id="start-title">用意するのは、<br>アバターとカメラ。</h2><p>アプリ一式をダウンロードしたら、まずは動かしてみましょう。</p></div>
+        <div class="section-heading"><p class="eyebrow">02 / 初期設定</p><h2 id="start-title">アバターとWebカメラの設定</h2><p>使用するVRMアバターとWebカメラを準備し、配布ZIPを展開したうえでアプリを起動します。</p></div>
         <ol class="steps">
-          <li><span class="step-number">1</span><h3>アバターを選ぶ</h3><p>「VRMを読み込む…」から.vrmファイルを選択。モデルの利用条件を確認して、読み込みます。</p><a href="manual/ja/#1-アバターを選ぶ">読み込みの手順 <span aria-hidden="true">→</span></a></li>
-          <li><span class="step-number">2</span><h3>カメラを選ぶ</h3><p>「入力カメラ」で使うカメラを選んで、顔を向けます。手も動かすときは、肩から手まで画面に入れます。</p><a href="manual/ja/#2-カメラを選ぶ">カメラの設定 <span aria-hidden="true">→</span></a></li>
-          <li><span class="step-number">3</span><h3>映り方を整える</h3><p>ホイールで拡大縮小、右ドラッグで移動、左ドラッグで回転。配信に合わせて構図を決めます。</p><a href="manual/ja/#映り方を整える">画角・姿勢の調整 <span aria-hidden="true">→</span></a></li>
+          <li><span class="step-number">1</span><h3>アバターを選ぶ</h3><p>「VRMを読み込む…」ボタンから.vrmファイルを選びます。モデルの利用条件を確認して読み込みます。</p><a href="manual/ja/#1-アバターを選ぶ">読み込みの手順 <span aria-hidden="true">→</span></a></li>
+          <li><span class="step-number">2</span><h3>カメラを選ぶ</h3><p>「入力カメラ」で使用するカメラを選び、顔を向けます。腕と手も追跡するときは、肩・肘・手首・手が映る位置にカメラを置きます。</p><a href="manual/ja/#2-カメラを選ぶ">カメラの設定 <span aria-hidden="true">→</span></a></li>
+          <li><span class="step-number">3</span><h3>映り方を整える</h3><p>プレビュー上でマウスホイールを回すと拡大縮小できます。右ドラッグで位置を移動し、左ドラッグで向きを変更できます。</p><a href="manual/ja/#映り方を整える">画角・姿勢の調整 <span aria-hidden="true">→</span></a></li>
         </ol>
       </div>
     </section>
 
     <section class="output-section section-wrap" aria-labelledby="output-title">
       <div class="output-panel">
-        <div class="output-intro"><p class="eyebrow">03 / ON AIR</p><h2 id="output-title">動いたら、<br>OBSへ。</h2><p>背景が透明なアバター映像を送信。<br>ゲーム画面や好きな背景に重ねて配信できます。</p><p class="output-note">プレビューの構図が出力にも反映されます。<br>声はOBSでマイクを設定します。</p></div>
+        <div class="output-intro"><p class="eyebrow">03 / OBSへの出力</p><h2 id="output-title">OBSへの映像送信</h2><p>背景が透明なアバター映像をOBSへ送信でき、OBS上でゲーム画面や背景画像と重ねて配信や録画に使えます。</p><p class="output-note">プレビューで調整した構図が出力にも反映されます。音声はOBSでマイクを設定して取り込みます。</p></div>
         <div class="output-options">
-          <article><p class="output-platform">WINDOWS</p><h3>Spout2 <span aria-hidden="true">↗</span></h3><p>同じWindows PCのOBSへ。OBS Spout2 pluginを使って、背景透過で受け取れます。</p><a href="manual/SPOUT2.html">Spout2の接続手順 <span aria-hidden="true">→</span></a></article>
-          <article><p class="output-platform">WINDOWS / MAC</p><h3>NDI® <span aria-hidden="true">↗</span></h3><p>同じPCや、同じネットワーク上のOBSへ。OBSにはDistroAVと対応するNDI Runtimeを用意します。</p><a href="manual/ja/#ndiで送るwindowsmac">NDIの接続手順 <span aria-hidden="true">→</span></a></article>
+          <article><p class="output-platform">WINDOWS</p><h3>Spout2 <span aria-hidden="true">↗</span></h3><p>同じWindows PC上で動作するOBSへ映像を送信し、OBS Spout2 pluginを導入すれば背景が透明な映像を受け取れます。</p><a href="manual/SPOUT2.html">Spout2の接続手順 <span aria-hidden="true">→</span></a></article>
+          <article><p class="output-platform">WINDOWS / MAC</p><h3>NDI® <span aria-hidden="true">↗</span></h3><p>同じPCや同一ネットワーク上のOBSへ映像を送信でき、WindowsとMacの両方で利用可能です。OBS側ではDistroAVと対応するNDI Runtimeを準備してください。</p><a href="manual/ja/#ndiで送るwindowsmac">NDIの接続手順 <span aria-hidden="true">→</span></a></article>
         </div>
       </div>
-      <div class="looking-glass"><div><p class="eyebrow">ANOTHER VIEW</p><h3>Looking Glassにも、アバターを。</h3><p>Looking Glass Bridgeで接続した機器を選んで、アバターを表示できます。</p></div><a class="text-link" href="manual/ja/#looking-glassに映す">表示の手順 <span aria-hidden="true">→</span></a></div>
+      <div class="looking-glass"><div><p class="eyebrow">Looking Glassへの出力</p><h3>Looking Glassでのアバター表示</h3><p>Looking Glass Bridgeで接続した機器を選択すれば、アバターを表示できます。</p></div><a class="text-link" href="manual/ja/#looking-glassに映す">表示の手順 <span aria-hidden="true">→</span></a></div>
     </section>
 
     <section class="manual-section section-wrap" id="manual" aria-labelledby="manual-title">
-      <div class="section-heading"><p class="eyebrow">04 / USER GUIDE</p><h2 id="manual-title">はじめの一歩から、<br>配信まで。</h2><p>画像付きのマニュアルで、操作をひとつずつ。<br>アプリのUIも、4つの言語に対応しています。</p></div>
+      <div class="section-heading"><p class="eyebrow">04 / 操作手順</p><h2 id="manual-title">画像付きの利用マニュアル</h2><p>マニュアルではアプリの起動から各機能の設定、OBSとの接続までを画像付きで説明しています。マニュアルとアプリのUIは日本語・英語・中国語・韓国語に対応しています。</p></div>
       <div class="language-guides">
         <a href="manual/ja/" lang="ja"><span class="language-code">JA</span><span><strong>日本語</strong><small>利用マニュアル</small></span><span aria-hidden="true">↗</span></a>
         <a href="manual/en/" lang="en"><span class="language-code">EN</span><span><strong>English</strong><small>User guide</small></span><span aria-hidden="true">↗</span></a>
@@ -97,10 +97,10 @@
     </section>
 
     <section class="download-section" id="download" aria-labelledby="download-title">
-      <div class="section-wrap download-inner"><div><p class="eyebrow">READY WHEN YOU ARE</p><h2 id="download-title">あなたのアバターで、<br>はじめよう。</h2><p>Windows x64 / Apple Silicon・macOS 14以降<br>配布ZIPに推論モデル・必要なランタイム・マニュアルを同梱。</p></div><div><a class="button button-primary" href="https://github.com/matsuvr/RusTuberV/releases/latest">最新版をダウンロード <span aria-hidden="true">↗</span></a><p class="download-caption">GitHub Releasesで、お使いのOSのZIPを選んでください。</p></div></div>
+      <div class="section-wrap download-inner"><div><p class="eyebrow">対応OSと配布ファイル</p><h2 id="download-title">ダウンロードと対応環境</h2><p>Windows x64およびApple Silicon搭載Macに対応しています。Macの場合はmacOS 14以降が必要です。配布ZIPには推論モデル、必要なランタイム、マニュアルを同梱しています。</p></div><div><a class="button button-primary" href="https://github.com/matsuvr/RusTuberV/releases/latest">最新版をダウンロード <span aria-hidden="true">↗</span></a><p class="download-caption">GitHub Releasesからご利用のOSに対応したZIPファイルを選択してください。</p></div></div>
     </section>
   </main>
 
-  <footer class="site-footer section-wrap"><div class="footer-main"><a class="brand" href="./"><img src="assets/app-icon.svg" width="28" height="28" alt=""><span>RusTuberV</span></a><nav aria-label="関連リンク"><a href="manual/ja/">マニュアル</a><a href="https://github.com/matsuvr/RusTuberV">GitHub</a><a href="https://github.com/matsuvr/RusTuberV/issues">お問い合わせ・不具合報告</a><a href="https://github.com/matsuvr/RusTuberV/blob/main/LICENSE">MIT License</a></nav></div><p>アバターや配信素材は、各権利者の利用条件に沿ってご利用ください。画面例のアバター：AvatarSample_C（pixiv VRoid Project）。</p><p>NDI® is a registered trademark of Vizrt NDI AB.</p></footer>
+  <footer class="site-footer section-wrap"><div class="footer-main"><a class="brand" href="./"><img src="assets/app-icon.svg" width="28" height="28" alt=""><span>RusTuberV</span></a><nav aria-label="関連リンク"><a href="manual/ja/">マニュアル</a><a href="https://github.com/matsuvr/RusTuberV">GitHub</a><a href="https://github.com/matsuvr/RusTuberV/issues">お問い合わせ・不具合報告</a><a href="https://github.com/matsuvr/RusTuberV/blob/main/LICENSE">MIT License</a></nav></div><p>アバターや配信素材は各権利者の利用条件に従ってご利用ください。画面例に使用しているアバターはAvatarSample_C（pixiv VRoid Project）です。</p><p>NDI® is a registered trademark of Vizrt NDI AB.</p></footer>
 </body>
 </html>

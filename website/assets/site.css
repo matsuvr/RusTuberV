@@ -24,7 +24,7 @@ img { display: block; max-width: 100%; height: auto; }
 figure { margin: 0; }
 h1, h2, h3, p { margin-top: 0; }
 h1, h2, h3 { line-height: 1.4; letter-spacing: -.045em; text-wrap: balance; }
-h2 { font-size: clamp(2rem, 3.8vw, 3.25rem); font-weight: 750; }
+h2 { font-size: clamp(1.7rem, 3vw, 2.6rem); font-weight: 750; }
 h3 { font-size: 1.2rem; }
 .section-wrap { width: min(1200px, calc(100% - 96px)); margin-inline: auto; }
 .skip-link { position: fixed; top: -100px; left: 16px; padding: 10px 18px; z-index: 100; background: var(--ink); color: white; }
@@ -41,8 +41,8 @@ h3 { font-size: 1.2rem; }
 .eyebrow { display: flex; gap: 10px; align-items: center; margin-bottom: 24px; font-family: ui-monospace, "Cascadia Code", monospace; font-size: .72rem; font-weight: 600; letter-spacing: .12em; line-height: 1.5; }
 .accent-square { width: 8px; height: 8px; background: var(--accent); }
 .hero { display: grid; grid-template-columns: 1fr 1.18fr; gap: 48px; align-items: center; padding-block: 80px 84px; }
-.hero h1 { font-size: clamp(2.8rem, 4.3vw, 4.1rem); font-weight: 850; margin-bottom: 26px; line-height: 1.38; letter-spacing: -.06em; }
-.hero h1 span { color: var(--accent); }
+.hero h1 { font-size: clamp(2rem, 3.2vw, 2.8rem); font-weight: 750; margin-bottom: 24px; line-height: 1.5; letter-spacing: -.035em; text-wrap: wrap; }
+.hero-term { white-space: nowrap; }
 .hero-description { font-size: 1rem; line-height: 2.1; color: var(--muted); margin-bottom: 30px; }
 .button-row { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; }
 .button { display: inline-flex; min-height: 52px; justify-content: center; align-items: center; gap: 25px; padding: 14px 24px; text-decoration: none; font-size: .9rem; font-weight: 650; line-height: 1.5; }
@@ -159,7 +159,7 @@ figcaption { font-size: .72rem; color: var(--muted); margin-top: 12px; line-heig
 @media (max-width: 1050px) {
   .section-wrap { width: calc(100% - 64px); }
   .hero { gap: 28px; }
-  .hero h1 { font-size: clamp(2.4rem, 4.5vw, 3.5rem); }
+  .hero h1 { font-size: clamp(2rem, 3.5vw, 2.6rem); }
   .hero-description { font-size: .9rem; }
   .button-row { gap: 18px; }
   .feature-layout { gap: 36px; }
@@ -176,7 +176,7 @@ figcaption { font-size: .72rem; color: var(--muted); margin-top: 12px; line-heig
   .site-header .nav-download { border: 0; padding: 0; }
   .nav-download span { margin-left: 2px; }
   .hero { grid-template-columns: 1fr; padding-block: 48px 52px; gap: 40px; }
-  .hero h1 { font-size: clamp(1.7rem, 8vw, 3.5rem); }
+  .hero h1 { font-size: clamp(1.5rem, 6.5vw, 2.3rem); }
   .hero-description { font-size: .96rem; }
   .hero-figure { margin: 0 5px; padding: 12px; box-shadow: 6px 6px 0 #e9ece4; }
   .capability-strip > div { display: grid; grid-template-columns: 1fr 1fr; font-size: .65rem; gap: 12px; padding-block: 18px; }

@@ -1,37 +1,35 @@
 # Spout2でOBSに映す（Windows）
 
-Spout2は、同じWindows PCで動いているOBSなどへ、背景が透明なアバター映像を送ります。プレビューで調整した大きさ・位置・向きが出力にも反映されます。NDIとそれぞれ開始・停止でき、同時に使えます。Macでの映像送信は[NDIの手順](ja/README.md#ndiで送るwindowsmac)を参照してください。
+Spout2は同じWindows PCで動作しているOBSなどへ背景が透明なアバター映像を送信します。プレビューで調整した大きさ・位置・向きが出力に反映されます。NDIとSpout2はそれぞれ開始と停止を個別に操作でき、同時に利用することも可能です。Macでの映像送信については、[NDIの手順](ja/README.md#ndiで送るwindowsmac)をご覧ください。
 
 [English](#english) · [简体中文](#简体中文) · [한국어](#한국어)
 
 ## 準備
 
-OBSを閉じ、[公式配布ページ](https://github.com/Off-World-Live/obs-spout2-plugin/releases)からOBSのバージョンに対応したOBS Spout2 pluginをインストールして、OBSを開き直します。RusTuberVのSpout2送信機能はWindows版に同梱しています。
+OBSを終了し、[公式配布ページ](https://github.com/Off-World-Live/obs-spout2-plugin/releases)からご利用のOBSバージョンに対応した`OBS Spout2 plugin`をインストールしてください。インストールが完了したら、再度OBSを起動します。RusTuberVのSpout2送信機能はWindows版に同梱しています。
 
-OBSとRusTuberVは同じGPUで実行します。GPUが複数あるPCでは、Windowsの「設定」→「システム」→「ディスプレイ」→「グラフィックス」で両方のアプリに同じGPUを指定します。
+OBSとRusTuberVは同一のGPU上で実行してください。PCに複数のGPUが搭載されている場合は、Windowsの「設定」→「システム」→「ディスプレイ」→「グラフィックス」から、両アプリケーションに同じGPUを割り当てるよう設定してください。
 
 ## 送信する
 
-1. RusTuberVでアバターを読み込み、「NDI・Spout2出力」を開きます。
-2. 「Spout2送信を開始」を押し、「RusTuberV: 送信中」と表示されることを確認します。
-3. OBSの「ソース」で「Spout2 Capture」を追加し、送信元に `RusTuberV` を選びます。
-4. Spout2 Captureの「Composite Mode」で「Premultiplied Alpha」を選びます。映像は1920×1080、乗算済みアルファです。
-5. OBSの「ソース」でアバターを背景画像やゲーム画面より上に並べます。声はOBSでマイクを設定します。
+1. RusTuberVでアバターを読み込み、「NDI・Spout2出力」画面を開きます。
+2. 「Spout2送信を開始」ボタンをクリックし、「RusTuberV: 送信中」と表示されることを確認します。
+3. OBSの「ソース」パネルで「Spout2 Capture」を追加し、送信元に `RusTuberV` を選択します。
+4. Spout2 Captureの「Composite Mode」設定で「Premultiplied Alpha」を選択します。映像は1920×1080の乗算済みアルファです。
+5. OBSの「ソース」リストで、アバターを背景画像やゲーム画面より上に配置します。音声はOBS側でマイク設定を行ってください。
 
 ## 終了と再開
 
-配信・録画を終えるときは、OBSで停止してからRusTuberVの「Spout2送信を停止」を押します。アバターを閉じた場合も送信が停止します。
-
-送信中にアバターを変更した場合やPCのスリープから戻った後は、アバターの準備ができると送信を再開します。エラーが表示された場合は、内容を確認してから改めて開始してください。
+配信や録画を終了する際は、まずOBSで停止操作を行い、続いてRusTuberVの「Spout2送信を停止」ボタンを押してください。アバターを閉じた場合も送信は自動的に停止します。送信中にアバターを変更した場合やPCのスリープから戻った後は、アバターの準備ができると送信を再開します。エラーが表示された場合は、内容を確認した上で再度開始してください。
 
 ## 受信と透過の確認
 
 | 確認する項目 | 操作 |
 | --- | --- |
-| Spout2 Captureの追加 | OBSとプラグインの対応バージョンを確認してインストールし、OBSを開き直す |
-| GPUの選択 | OBSとRusTuberVを同じGPUで実行する |
-| 背景の透過 | Composite ModeをPremultiplied Alphaに設定する |
-| 送信元の選択 | RusTuberVの送信中表示を確認し、OBSで使用する送信元を選ぶ。複数起動時は名前に番号が付くことがある |
+| Spout2 Captureの追加 | OBSとプラグインの対応バージョンを確認し、インストール後にOBSを再起動します |
+| GPUの選択 | OBSとRusTuberVを同一GPUで実行します |
+| 背景の透過 | Composite ModeをPremultiplied Alphaに設定します |
+| 送信元の選択 | RusTuberVの送信中表示を確認し、OBSで使用する送信元を選択します。複数起動時は名前に番号が付くことがあります |
 
 ## English
 
