@@ -1,0 +1,47 @@
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main, docs/github-pages]
+    paths:
+      - 'website/**'
+      - 'manual/**'
+      - 'assets/icons/rustuberv-app-icon*'
+      - 'tools/build-website.ps1'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build product page and manuals
+        shell: pwsh
+        run: ./tools/build-website.ps1
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/website
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/docs/github-pages'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
