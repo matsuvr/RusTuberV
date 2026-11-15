@@ -9,6 +9,13 @@ authors.workspace = true
 repository.workspace = true
 description = "Desktop executable for RusTuberV."
 
+# Windows displays these values in Task Manager and permission dialogs.
+[package.metadata.winres]
+ProductName = "RusTuberV"
+FileDescription = "RusTuberV"
+InternalName = "RusTuberV"
+OriginalFilename = "RusTuberV.exe"
+
 [[bin]]
 name = "RusTuberV"
 path = "src/main.rs"
