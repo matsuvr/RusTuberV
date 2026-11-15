@@ -49,6 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn embed_app_icon() -> Result<(), Box<dyn std::error::Error>> {
+    // winres reads the Windows product identity from package.metadata.winres.
+    println!("cargo:rerun-if-changed=Cargo.toml");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let icon_path = manifest_dir.join("../../assets/icons/rustuberv-app.ico");
     println!("cargo:rerun-if-changed={}", icon_path.display());

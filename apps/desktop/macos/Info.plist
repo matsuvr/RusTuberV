@@ -8,6 +8,8 @@
     <string>io.github.matsuvr.RusTuberV</string>
     <key>CFBundleName</key>
     <string>RusTuberV</string>
+    <key>CFBundleDisplayName</key>
+    <string>RusTuberV</string>
     <key>CFBundleIconFile</key>
     <string>rustuberv-app.icns</string>
     <key>CFBundlePackageType</key>
