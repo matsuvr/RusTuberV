@@ -22,6 +22,6 @@ python -m http.server 4173 --bind 127.0.0.1 --directory target/website
 
 GitHubのSettings → Pages → Sourceで **GitHub Actions** を選びます。
 `main` またはサイト用の `docs/github-pages` ブランチで、サイト・マニュアル・アイコン・生成スクリプトを更新すると、`.github/workflows/pages.yml` が生成して公開します。
-手動実行も同じワークフローを使います。`github-pages` environmentにブランチ制限がある場合は、公開するブランチを許可します。
+GitHub Actionsからの手動実行は、ワークフローを`main`にも追加した後に利用できます。`github-pages` environmentにブランチ制限がある場合は、公開するブランチを許可します。
 
 マニュアルはMarkdownからHTMLに変換し、相対リンクとUnicodeの見出しアンカーを引き継ぎます。GitHubで本文を読むリンクは、ビルド元のコミットを参照します。
