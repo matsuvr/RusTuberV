@@ -47,8 +47,7 @@ nokhwa = { path = "vendor/nokhwa" }
 nokhwa-bindings-windows = { path = "vendor/nokhwa-bindings-windows" }
 bevy_window = { path = "vendor/bevy_window" }
 
-# Bevy 0.20/WESL port plus the outline extraction fix required when switching
-# to an ExtendedMaterial with additional bindings. See vendor/bevy_vrm1/NOTICE.
+# Bevy 0.20 compatibility port. See vendor/bevy_vrm1/NOTICE.
 [patch."https://github.com/not-elm/bevy_vrm1"]
 bevy_vrm1 = { path = "vendor/bevy_vrm1" }
 

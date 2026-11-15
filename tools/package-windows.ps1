@@ -30,7 +30,6 @@ Copy-Item -LiteralPath $executable, 'tracking_profile.toml', 'LICENSE', 'THIRD_P
 Copy-Item -LiteralPath 'assets/models/manifest.toml', 'assets/models/LICENSE.mediapipe.txt' -Destination "$package/assets/models"
 Copy-Item -LiteralPath 'assets/models/face_landmarker.task', 'assets/models/pose_landmarker_full.task', 'assets/models/hand_landmarker.task' -Destination "$package/assets/models"
 Copy-Item -LiteralPath 'assets/fonts/LICENSE-LINESeed.txt', 'assets/fonts/LICENSE-NotoSansCJK.txt', 'vendor/mediapipe-rs/NOTICE' -Destination "$package/licenses"
-Copy-Item -LiteralPath 'crates/vtuber-avatar/src/look/LICENSE-NiloToon.txt' -Destination "$package/licenses"
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/LICENSE-MIT' -Destination "$package/licenses/bevy_vrm1-MIT.txt"
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/LICENSE-APACHE2' -Destination "$package/licenses/bevy_vrm1-Apache-2.0.txt"
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/NOTICE' -Destination "$package/licenses/bevy_vrm1-NOTICE.txt"

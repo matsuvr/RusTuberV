@@ -137,13 +137,9 @@ pub(crate) fn configure_pipeline(app: &mut App) {
     .add_systems(
         Update,
         (
-            // Look-change messages written by the action processing must
-            // reach the avatar side in the same frame.
-            process_ui_actions_system.before(vtuber_avatar::look::apply_look_settings_changes),
+            process_ui_actions_system,
             prepare_avatar_io_system,
-            sync_avatar_lifecycle_system
-                .after(vtuber_avatar::unload::despawn_unloading_avatar)
-                .before(vtuber_avatar::look::apply_look_settings_changes),
+            sync_avatar_lifecycle_system.after(vtuber_avatar::unload::despawn_unloading_avatar),
         )
             .chain(),
     )

@@ -366,11 +366,11 @@ fn matrix_transform(result: &FaceLandmarkerResult) -> Result<(CameraFaceTransfor
 
 #[expect(
     clippy::indexing_slicing,
-    reason = "`column_major.chunks_exact(4)` yields exactly four values and the loop is bounded by 4"
+    reason = "the fixed 4×4 matrix bounds both row and column indices"
 )]
 fn matrix_from_column_major(column_major: [f32; 16]) -> Result<(CameraFaceTransform, f32, f32)> {
     let mut values = [[0.0; 4]; 4];
-    for (column, column_values) in column_major.chunks_exact(4).enumerate() {
+    for (column, column_values) in column_major.as_chunks::<4>().0.iter().enumerate() {
         for (row, value) in column_values.iter().copied().enumerate() {
             values[row][column] = value;
         }

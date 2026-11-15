@@ -3,8 +3,14 @@ on:
   pull_request:
     paths:
       - 'crates/vtuber-spout/**'
+      - 'crates/vtuber-core/src/video_output.rs'
+      - 'crates/vtuber-ndi/**'
       - 'crates/vtuber-app/**'
+      - 'crates/vtuber-avatar/src/*output*'
+      - 'apps/desktop/src/main.rs'
       - 'vendor/spout2-sys/**'
+      - 'tools/package-windows.ps1'
+      - 'tools/cargo-windows.ps1'
       - 'Cargo.*'
       - '.github/workflows/spout-windows.yml'
   workflow_dispatch:
@@ -27,7 +33,7 @@ jobs:
             mingw-w64-clang-x86_64-llvm
             mingw-w64-clang-x86_64-cmake
             mingw-w64-clang-x86_64-ninja
-      - name: Test controller and link native Spout backend
+      - name: Test session control and link native Spout backend
         shell: pwsh
         run: ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('test', '--locked', '-p', 'vtuber-spout', '--all-targets')
       - name: Fetch approved inference models for embedded assets
@@ -46,3 +52,8 @@ jobs:
       - name: Check application integration (NDI SDK not required)
         shell: pwsh
         run: ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('check', '--locked', '-p', 'vtuber-app', '--tests', '-j', '2')
+      - name: Check frame ownership, pixel values and readback lifecycle
+        shell: pwsh
+        run: |
+          ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('test', '--locked', '-p', 'vtuber-core', '--lib', 'video_output::tests')
+          ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('test', '--locked', '-p', 'vtuber-avatar', '--lib', 'render_output::tests', '-j', '2')

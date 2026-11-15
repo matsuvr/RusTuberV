@@ -13,7 +13,7 @@ use vtuber_avatar::{ArmPoseProfile, ExpressionAvailability, ExpressionKind};
 /// Destination selected by the navigation-only sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
-    /// VRM import, camera selection, and rich look for the loaded model.
+    /// VRM import and camera selection.
     #[default]
     VrmCamera,
     /// Neutral pose calibration, arm tracking, and camera preview status.
@@ -254,25 +254,6 @@ pub struct NdiOutputViewModel {
     pub error_message: Option<String>,
 }
 
-/// Rich look switch and strength for the settings screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RichLookViewModel {
-    /// Whether the rich look is applied.
-    pub enabled: bool,
-    /// Effect strength in `0..=1`.
-    pub strength: f32,
-}
-
-impl Default for RichLookViewModel {
-    fn default() -> Self {
-        // Matches `RichLookSettings`: off, and full strength when switched on.
-        Self {
-            enabled: false,
-            strength: 1.0,
-        }
-    }
-}
-
 /// Complete UI snapshot.
 #[derive(Clone, Debug, Default, Resource)]
 pub struct UiViewModel {
@@ -312,8 +293,6 @@ pub struct UiViewModel {
     pub arm_tracking_enabled: bool,
     /// Camera-preview visibility.
     pub preview_visible: bool,
-    /// Rich look switch and strength.
-    pub look: RichLookViewModel,
 }
 
 impl UiViewModel {

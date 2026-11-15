@@ -123,6 +123,23 @@ impl From<GlbError> for VrmPrepareError {
     }
 }
 
+/// Adds one entry to `extensionsUsed` unless already present.
+pub(crate) fn mark_extension_used(document: &mut Value, key: &str) -> bool {
+    let Some(object) = document.as_object_mut() else {
+        return false;
+    };
+    let used = object
+        .entry("extensionsUsed")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(used) = used.as_array_mut()
+        && !used.iter().any(|entry| entry.as_str() == Some(key))
+    {
+        used.push(Value::String(key.to_string()));
+        return true;
+    }
+    false
+}
+
 /// Converts legacy JSON first, then applies the same VRM 1.0 runtime adaptation.
 /// Returns source metadata and whether the managed document changed.
 pub fn prepare_vrm_document(
@@ -164,6 +181,7 @@ pub fn prepare_vrm_document(
         }
     };
     changed |= crate::vrm1::adapt_vrm1_expressions(document);
+    changed |= crate::vrm1::adapt_mtoon_defaults(document);
     Ok((source, changed))
 }
 

@@ -1,6 +1,5 @@
 //! UI command dispatch and its Bevy resource/message boundary.
 
-use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use vtuber_avatar::{
     ArmPoseOverrideStore, ArmPoseProfileChange, ArmPoseProfileOverride, AvatarAssetId,
@@ -19,14 +18,6 @@ use crate::ndi_output::NdiOutputIntent;
 use crate::preview::PreviewState;
 use crate::settings::AppSettings;
 use crate::ui_model::{ArmPoseViewModel, UiViewModel};
-
-/// The look-related system parameters grouped to stay within the system
-/// parameter limit: the live settings and their change messages.
-#[derive(SystemParam)]
-pub struct LookSystemParams<'w> {
-    look_settings: Option<ResMut<'w, vtuber_avatar::AvatarLookSettings>>,
-    look_changes: Option<MessageWriter<'w, vtuber_avatar::LookSettingsChanged>>,
-}
 
 /// System that processes pending UI actions through the orchestrator.
 #[expect(
@@ -48,7 +39,6 @@ pub fn process_ui_actions_system(
     mut expression_store: Option<ResMut<ExpressionBindingStore>>,
     mut manual_requests: Option<MessageWriter<ManualExpressionRequest>>,
     mut pose_runtime: Option<ResMut<crate::pose_runtime::PoseRuntime>>,
-    mut look: LookSystemParams,
     mut looking_glass: Option<ResMut<crate::looking_glass::LookingGlassControl>>,
 ) {
     let actions = action_queue.take_actions();
@@ -170,41 +160,6 @@ pub fn process_ui_actions_system(
                     )));
                 }
             }
-            UiAction::UnloadAvatar => {
-                orchestrator.process_action(action);
-                if let (Some(look), Some(changes)) = (
-                    look.look_settings.as_deref_mut(),
-                    look.look_changes.as_mut(),
-                ) {
-                    look.0 = vtuber_avatar::RichLookSettings::default();
-                    changes.write(vtuber_avatar::LookSettingsChanged(look.0));
-                }
-            }
-            UiAction::ChangeRichLook { change, .. } => {
-                if let Err(error) = apply_rich_look_action(
-                    look.look_settings.as_deref_mut(),
-                    look.look_changes.as_mut(),
-                    *change,
-                ) {
-                    orchestrator.set_last_error(Some(OrchestratorError::ArmPoseSettingsFailed(
-                        error.to_string(),
-                    )));
-                }
-            }
-            UiAction::SaveRichLook { target } => {
-                if let (Some(persistent), Some(look)) =
-                    (arm_pose_settings.as_deref(), look.look_settings.as_deref())
-                {
-                    let result = persistent
-                        .save_rich_look(target.model_id.clone(), look.0)
-                        .map_err(|error| {
-                            OrchestratorError::ArmPoseSettingsFailed(error.to_string())
-                        });
-                    if let Err(error) = result {
-                        orchestrator.set_last_error(Some(error));
-                    }
-                }
-            }
             UiAction::AssignExpressionKey {
                 target,
                 key,
@@ -248,6 +203,7 @@ pub fn process_ui_actions_system(
             }
             UiAction::SwitchPane(pane) => view_model.pane = *pane,
             UiAction::RefreshCameras
+            | UiAction::UnloadAvatar
             | UiAction::SelectCamera { .. }
             | UiAction::ImportAvatar { .. }
             | UiAction::RequestAvatarImportReview { .. }
@@ -271,31 +227,6 @@ pub fn process_ui_actions_system(
     view_model.mirror_preview = preview.mirrored;
     view_model.mirror_avatar_motion = avatar_motion_mirror.is_enabled();
     view_model.arm_tracking_enabled = pose_runtime.as_deref().is_some_and(|pose| pose.enabled());
-    if let Some(settings) = look.look_settings.as_deref() {
-        view_model.look.enabled = settings.0.enabled();
-        view_model.look.strength = settings.0.strength();
-    }
-}
-
-/// Applies one rich-look edit.
-///
-/// The resource is the immediate state the settings screen renders, and the
-/// message carries the same value so every look listener sees the change.
-fn apply_rich_look_action(
-    settings: Option<&mut vtuber_avatar::AvatarLookSettings>,
-    changes: Option<&mut MessageWriter<vtuber_avatar::LookSettingsChanged>>,
-    change: crate::actions::RichLookChange,
-) -> Result<(), vtuber_avatar::RichLookSettingsError> {
-    let (Some(settings), Some(changes)) = (settings, changes) else {
-        return Ok(());
-    };
-    let next = crate::actions::reduce_rich_look(settings.0, change)?;
-    if next == settings.0 {
-        return Ok(());
-    }
-    settings.0 = next;
-    changes.write(vtuber_avatar::LookSettingsChanged(next));
-    Ok(())
 }
 
 fn edit_arm_pose_profile_action(

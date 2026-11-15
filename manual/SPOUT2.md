@@ -1,55 +1,27 @@
-# Spout2 output / Spout2出力 (Windows)
+# Spout2でOBSに映す（Windows）
 
-「出力」画面の「Spout2送信を開始」で、透過アバターのみを同じPC内の
-Spout2対応アプリへ送信します。ソース名は `RusTuberV`。NDIとは独立して
-開始・停止でき、同時使用も可能です。macOSは従来のNDIを使用してください。
-SDK/DLLの追加インストールは不要です。OBSの場合は別途
-[OBS Spout2 plugin](https://github.com/Off-World-Live/obs-spout2-plugin)を
-導入し、Spout2 Captureでソースを選択してください。
+Spout2は、同じWindows PCで動いているOBSなどへ、背景が透明なアバター映像を送ります。カメラ映像や操作画面は含まれません。NDIとそれぞれ独立して開始・停止できます。MacではNDIを使用してください。
 
-In the Output page, select **Start Spout2**, then select `RusTuberV` in a
-Spout2 receiver on the same Windows PC. The frame contains the avatar, not
-camera images or UI. The current render profile is 1920×1080, nominally 60 Hz,
-BGRA8 with straight alpha. Actual submission rate depends on rendering/readback;
-this is not a guarantee of 60 delivered frames per second. No encoding/network
-transport is involved. The source name may be suffixed by Spout if another
-instance already owns it; avoid multiple RusTuberV senders when selecting it.
+## 準備
 
-Stop, avatar unload, model replacement, sleep and shutdown release the sender.
-Replacement/sleep recovery preserves a requested start, but output waits for a
-ready avatar and native teardown. Initialization/send errors stop automatic
-retries; inspect the message, then explicitly start again. Use a receiver on
-the same graphics adapter if frames are not visible. Device-loss recovery may
-require restarting output or the application. Do not interpret “Sending” as
-proof that OBS received a frame: the SDK may skip a frame when its texture is busy.
+OBSに[OBS Spout2 plugin](https://github.com/Off-World-Live/obs-spout2-plugin/releases)を導入し、OBSを起動し直します。OBSのバージョンに対応したプラグインを選んでください。OBS 32には1.13.0、OBS 33には1.14.0以降が対応します。RusTuberV側へのSpout SDKやDLLの追加インストールは不要です。
 
-## Implementation and cost
+## 送信する
 
-Uses the existing bounded, asynchronous GPU readback and a separate D3D11
-`SendImage` worker. NDI and Spout share the pixel allocation; the Spout mailbox
-retains only the newest pending frame. No UI-thread native send or join occurs.
-This initial path **is not GPU zero-copy**: GPU→CPU readback plus CPU→D3D11
-upload costs bandwidth (~8.3 MB per 1080p frame in each direction). Measure
-with output off, NDI alone, Spout alone and both, using the same avatar/camera,
-GPU, driver and resolution. Record rendering FPS, CPU usage, submission rate,
-and camera-to-receiver latency separately. No performance gain is claimed.
+1. RusTuberVでアバターを読み込み、「出力」を開きます。
+2. 「Spout2送信を開始」を押します。
+3. OBSの「ソース」で「Spout2 Capture」を追加し、送信元に `RusTuberV` を選びます。
+4. 背景を透過させるには、Spout2 Captureの「Composite Mode」で **Premultiplied Alpha** を選びます。映像は1920×1080、乗算済みアルファです。
 
-Native source: Spout 2.007.017 via spout2-rs/sys 0.1.1 (BSD-2-Clause).
-The native crate is patched for CLANG64; no change to the standard Windows
-build toolchain. `tools/package-windows.ps1` includes its license notices.
+終了するときは「Spout2送信を停止」を押します。アバターを閉じた場合も停止します。アバターの変更やPCのスリープから戻った後は、アバターの準備ができると送信を再開します。エラーが表示された場合は、内容を確認してから改めて開始してください。
 
-## Validation on Windows (not a claim of completed hardware testing)
+## 映らないとき
 
-```
-.\tools\cargo-windows.ps1 -CargoArguments @('test', '--locked', '-p', 'vtuber-spout', '--lib')
-.\tools\cargo-windows.ps1 -CargoArguments @('test', '--locked', '-p', 'vtuber-app', '--lib', 'ndi_output')
-.\tools\cargo-windows.ps1 -CargoArguments @('run', '--locked', '-p', 'vtuber-spout', '--bin', 'spout-smoke')
-```
+- OBSとRusTuberVを同じGPUで実行してください。GPUが複数あるPCではWindowsの「グラフィックス」設定で確認できます。
+- OBSに「Spout2 Capture」がない場合は、プラグインがOBSのバージョンに対応しているか確認してください。
+- 背景が黒く塗りつぶされる場合は、Composite Modeを **Premultiplied Alpha** に変更してください。
+- 複数のRusTuberVを起動すると、送信元の名前に番号が付くことがあります。OBSで使用する送信元を選び直してください。
 
-The smoke sender runs about 20 seconds, changes 640→800-pixel width halfway,
-and provides a transparent upper-left quadrant and animated color. Check
-alpha, red/blue order, orientation, resizing, receiver reconnect and source
-removal after exit. Then check the actual app: NDI only, Spout only, both;
-stop one while the other stays active; replace/unload the avatar; sleep/wake;
-repeated Start/Stop; exit with a receiver attached. Hardware tests need a real
-Windows graphics driver and receiver; cross-compilation cannot replace them.
+## English
+
+Install the [Spout2 plugin matching your OBS version](https://github.com/Off-World-Live/obs-spout2-plugin/releases) and restart OBS. In RusTuberV, load an avatar, open **Output**, and select **Start Spout2**. Add **Spout2 Capture** in OBS, select `RusTuberV`, and set **Composite Mode** to **Premultiplied Alpha** for transparency. Output is 1920×1080 BGRA with premultiplied alpha. Run both applications on the same GPU. NDI and Spout2 can be started and stopped independently.

@@ -565,7 +565,7 @@ fn save_snapshot(frame: &VideoFrame, path: &Path) -> Result<(), String> {
         }
         PixelFormat::Bgr8 => {
             let mut rgb = frame.data.to_vec();
-            for pixel in rgb.chunks_exact_mut(3) {
+            for pixel in rgb.as_chunks_mut::<3>().0 {
                 pixel.swap(0, 2);
             }
             ImageBuffer::<Rgb<u8>, _>::from_raw(frame.width, frame.height, rgb)

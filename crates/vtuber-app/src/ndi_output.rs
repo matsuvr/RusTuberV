@@ -234,8 +234,7 @@ pub fn ndi_output_bridge_system(
     let spout_active = spout
         .as_deref_mut()
         .is_some_and(|spout| spout.update(&mut intent.spout_requested, has_model, ready));
-    // Consume one readback once. Cloning only shares the pixel Arc; it does not
-    // allocate a second 1080p buffer when both transports are active.
+    // Fan out one Bevy readback. Only the NDI worker needs straight alpha.
     let frame = frame_slot.take_latest();
     if spout_active && let (Some(spout), Some(frame)) = (spout.as_deref(), frame.as_ref()) {
         spout.controller.submit(frame.clone());
@@ -327,6 +326,9 @@ mod tests {
         clippy::indexing_slicing
     )] // tests may panic (AGENTS.md)
     use super::*;
+
+    #[cfg(windows)]
+    mod spout_render;
 
     fn finish_stop(runtime: &mut NdiOutputRuntime) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);

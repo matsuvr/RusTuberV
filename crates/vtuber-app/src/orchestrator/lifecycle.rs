@@ -31,38 +31,26 @@ pub(super) fn current_model_target(
 ///    [`UnloadAvatarRequest`](vtuber_avatar::lifecycle::UnloadAvatarRequest).
 ///
 /// Runs after UI actions and the engine's load/request/unload systems, so
-/// accepted results commit the model, look, save owner and UI snapshot together.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Bevy injects this system's resources and message streams, so the parameter list is the declared ECS contract and has no call site to restructure"
-)]
+/// accepted results commit the model and UI snapshot together.
 pub fn sync_avatar_lifecycle_system(
     mut orchestrator: ResMut<Orchestrator>,
     lifecycle: Res<vtuber_avatar::lifecycle::AvatarLifecycle>,
     mut load_requests: MessageWriter<vtuber_avatar::LoadImportedAvatarRequest>,
     mut load_results: MessageReader<vtuber_avatar::LoadImportedAvatarResult>,
     mut unload_requests: MessageWriter<vtuber_avatar::lifecycle::UnloadAvatarRequest>,
-    mut look: Option<ResMut<vtuber_avatar::AvatarLookSettings>>,
-    mut changes: Option<MessageWriter<vtuber_avatar::LookSettingsChanged>>,
     mut view_model: Option<ResMut<UiViewModel>>,
 ) {
     // 1. Mirror the lifecycle state into the orchestrator.
     let engine_state = lifecycle.state();
     orchestrator.set_lifecycle_state(engine_state);
 
-    // Only acceptance commits the selected model and its prepared look. A
+    // Only acceptance commits the selected model. A
     // rejection reports the error while the previously accepted model continues.
     for result in load_results.read() {
         match result {
             vtuber_avatar::LoadImportedAvatarResult::Accepted { request_id, .. } => {
                 if let Some(submitted) = orchestrator.submitted_loads.remove(request_id) {
-                    if let (Some(restored), Some(look), Some(changes)) =
-                        (submitted.look, look.as_deref_mut(), changes.as_mut())
-                    {
-                        look.0 = restored;
-                        changes.write(vtuber_avatar::LookSettingsChanged(restored));
-                    }
-                    orchestrator.imported_model = Some(submitted.model);
+                    orchestrator.imported_model = Some(submitted);
                 }
             }
             vtuber_avatar::LoadImportedAvatarResult::Rejected { request_id, error } => {
@@ -111,9 +99,5 @@ pub fn sync_avatar_lifecycle_system(
     if let Some(view_model) = view_model.as_deref_mut() {
         view_model.update_from_orchestrator(&orchestrator);
         view_model.model_target = current_model_target(&orchestrator, &lifecycle);
-        if let Some(look) = look.as_deref() {
-            view_model.look.enabled = look.0.enabled();
-            view_model.look.strength = look.0.strength();
-        }
     }
 }

@@ -1,10 +1,7 @@
 //! App-side material color / UV expression binds (see #91, PR #98 R3).
 //!
-//! The unmodified upstream runtime applies morph binds only; `materialColorBinds`
-//! and `textureTransformBinds` are not part of its expression contract, and the
-//! VRM 0.x `materialValues` equivalent was dropped by the first port of this
-//! PR. This module restores that non-Rich feature on top of upstream's public
-//! APIs without touching upstream shaders or duplicating the morph update:
+//! The upstream expression pass publishes morph weights. Apply the corresponding
+//! material color and UV binds to each native material using those weights.
 //!
 //! - A public glTF loader extension hook
 //!   ([`bevy::gltf::GltfExtensionHandlers`]) tags every spawned mesh entity
@@ -55,6 +52,8 @@ pub struct VrmMaterialBaseValues {
     pub emissive: LinearRgba,
     /// Expression-free MToon shade color (`BLACK` for standard materials).
     pub shade_color: LinearRgba,
+    /// Expression-free MToon matcap factor.
+    pub matcap_color: LinearRgba,
     /// Expression-free MToon parametric rim color (`BLACK` for standard).
     pub rim_color: LinearRgba,
     /// Expression-free MToon outline color (`BLACK` for standard).
@@ -168,6 +167,7 @@ impl VrmMaterialBaseValues {
             base_color: material.base_color.to_linear(),
             emissive: material.emissive,
             shade_color: material.shade.color,
+            matcap_color: material.rim_lighting.mat_cap_color,
             rim_color: material.rim_lighting.color,
             outline_color: material.outline.color,
             uv_transform: material.uv_transform,
@@ -179,6 +179,7 @@ impl VrmMaterialBaseValues {
             base_color: material.base_color.to_linear(),
             emissive: material.emissive,
             shade_color: LinearRgba::BLACK,
+            matcap_color: LinearRgba::WHITE,
             rim_color: LinearRgba::BLACK,
             outline_color: LinearRgba::BLACK,
             uv_transform: material.uv_transform,
@@ -249,8 +250,6 @@ pub fn apply_expression_materials(
         &VrmMaterialIndex,
         Option<&MeshMaterial3d<MToonMaterial>>,
         Option<&MeshMaterial3d<StandardMaterial>>,
-        Option<&crate::look::RichMaterialSwap<crate::look::RichMtoonExtension>>,
-        Option<&crate::look::RichMaterialSwap<crate::look::RichStandardExtension>>,
     )>,
     mtoon_assets: Option<ResMut<Assets<MToonMaterial>>>,
     standard_assets: Option<ResMut<Assets<StandardMaterial>>>,
@@ -280,20 +279,11 @@ pub fn apply_expression_materials(
 
     let mut visited_mtoon: HashSet<AssetId<MToonMaterial>> = HashSet::new();
     let mut visited_standard: HashSet<AssetId<StandardMaterial>> = HashSet::new();
-    for (entity, index, mtoon_handle, standard_handle, rich_mtoon_swap, rich_standard_swap) in
-        meshes.iter()
-    {
+    for (entity, index, mtoon_handle, standard_handle) in &meshes {
         if !is_descendant(entity) {
             continue;
         }
-        // While the look is ON the mesh renders the app-side Rich material,
-        // so only the swap component still carries the native handle. The
-        // native asset stays the owner of the author/current expression
-        // values, so the writer follows that handle too.
-        let mtoon_id = mtoon_handle
-            .map(|handle| handle.id())
-            .or_else(|| rich_mtoon_swap.map(|swap| swap.native.id()));
-        if let Some(id) = mtoon_id {
+        if let Some(id) = mtoon_handle.map(|handle| handle.id()) {
             if !visited_mtoon.insert(id) {
                 continue;
             }
@@ -325,16 +315,14 @@ pub fn apply_expression_materials(
                 material.base_color = Color::LinearRgba(evaluated.base_color);
                 material.emissive = evaluated.emissive;
                 material.shade.color = evaluated.shade_color;
+                material.rim_lighting.mat_cap_color = evaluated.matcap_color;
                 material.rim_lighting.color = evaluated.rim_color;
                 material.outline.color = evaluated.outline_color;
                 material.uv_transform = evaluated.uv_transform;
             }
             material_state.applied = evaluated;
         } else {
-            let standard_id = standard_handle
-                .map(|handle| handle.id())
-                .or_else(|| rich_standard_swap.map(|swap| swap.native.id()));
-            let Some(id) = standard_id else {
+            let Some(id) = standard_handle.map(|handle| handle.id()) else {
                 continue;
             };
             if !visited_standard.insert(id) {
@@ -407,6 +395,7 @@ pub(crate) fn restore_expression_materials_on_unload(
             material.base_color = Color::LinearRgba(material_state.base.base_color);
             material.emissive = material_state.base.emissive;
             material.shade.color = material_state.base.shade_color;
+            material.rim_lighting.mat_cap_color = material_state.base.matcap_color;
             material.rim_lighting.color = material_state.base.rim_color;
             material.outline.color = material_state.base.outline_color;
             material.uv_transform = material_state.base.uv_transform;
@@ -459,6 +448,14 @@ fn evaluate_material_values(
                     result.shade_color = accumulate_linear(
                         result.shade_color,
                         base.shade_color,
+                        bind.target_value,
+                        *weight,
+                    );
+                }
+                MaterialColorTarget::MatcapColor => {
+                    result.matcap_color = accumulate_linear(
+                        result.matcap_color,
+                        base.matcap_color,
                         bind.target_value,
                         *weight,
                     );
@@ -550,6 +547,7 @@ mod tests {
             base_color: LinearRgba::new(0.2, 0.3, 0.4, 1.0),
             emissive: LinearRgba::BLACK,
             shade_color: LinearRgba::new(0.5, 0.5, 0.5, 1.0),
+            matcap_color: LinearRgba::WHITE,
             rim_color: LinearRgba::BLACK,
             outline_color: LinearRgba::new(0.1, 0.1, 0.1, 1.0),
             uv_transform: Affine2::from_scale_angle_translation(Vec2::ONE, 0.0, Vec2::ZERO),
@@ -566,6 +564,22 @@ mod tests {
             target,
             target_value: LinearRgba::new(value[0], value[1], value[2], value[3]),
         }
+    }
+
+    #[test]
+    fn matcap_bind_uses_the_authored_mtoon_factor() {
+        let target = MaterialColorTarget::parse("matcapColor").expect("VRM 1.0 target");
+        let mut material = MToonMaterial::default();
+        material.rim_lighting.mat_cap_color = LinearRgba::rgb(0.25, 0.5, 0.75);
+        let base = VrmMaterialBaseValues::from_mtoon(&material);
+        let binds = ExpressionMaterialBinds {
+            colors: vec![color_bind(0, target, [0.75, 0.5, 0.25, 1.0])],
+            transforms: Vec::new(),
+        };
+        let result = evaluate_material_values(&base, 0, &[(&binds, 0.5)]);
+        assert_eq!(result.matcap_color, LinearRgba::rgb(0.5, 0.5, 0.5));
+        assert_eq!(result.rim_color, base.rim_color);
+        assert_eq!(evaluate_material_values(&base, 0, &[(&binds, 0.0)]), base);
     }
 
     #[test]

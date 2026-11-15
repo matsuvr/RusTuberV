@@ -16,20 +16,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (i, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = i % width as usize;
             let y = i / width as usize;
-            pixel.copy_from_slice(&[
-                255,
-                (seq % 256) as u8,
-                32,
-                if x < width as usize / 2 && y < 180 {
-                    0
-                } else {
-                    255
-                },
-            ]);
+            *pixel = if x < width as usize / 2 && y < 180 {
+                [0; 4]
+            } else {
+                [255, (seq % 256) as u8, 32, 255]
+            };
         }
-        sender.submit(vtuber_core::VideoOutputFrame::new_bgra8(
+        sender.submit(vtuber_core::VideoOutputFrame::from_rendered_bgra8(
             width,
             height,
+            width as usize * 4,
             vtuber_core::FrameSeq(seq),
             vtuber_core::MonoTimeNs(seq * 16_666_667),
             pixels,

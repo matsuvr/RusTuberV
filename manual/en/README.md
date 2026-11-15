@@ -89,11 +89,7 @@ Use your mouse over the avatar image on the right.
 
 ![Use the blue settings button at the top right to leave the expanded avatar view](images/07-fullscreen.png)
 
-### Adjust the appearance
-
-Tick **VRM & camera → Enhanced look** to change the lighting and outlines. Adjust **Effect strength** to your liking. Click **Save for this model** to reuse those settings when you load the same avatar.
-
-![Enable Enhanced look, adjust Effect strength, and save the settings for the model](images/15-look.png)
+### Adjust the resting arm pose
 
 To adjust resting arm positions, use **Arm pose** in **Pose & camera**. **Arm drop** controls how far the arms are lowered and **Finger curl** controls finger bending. Move the sliders a little at a time and check the avatar on the right.
 
@@ -116,6 +112,8 @@ Open the list beside a key to change its expression. Available expressions depen
 Bindings are saved for each avatar. Scroll to the bottom for **Clear Expression** and **Restore Default Bindings**.
 
 ## Show your avatar in OBS
+
+On Windows, you can also use [Spout2 output](../SPOUT2.md#english) to send to OBS on the same PC. NDI and Spout2 have independent start and stop controls.
 
 NDI® sends your avatar video to OBS. See the [official NDI website](https://ndi.video/).
 

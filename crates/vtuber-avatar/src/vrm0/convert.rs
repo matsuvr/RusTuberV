@@ -10,7 +10,9 @@ use super::materials::{
 use super::normalize::{
     normalized_legacy_expressions, normalized_legacy_spring_bone, normalized_legacy_vrm,
 };
-use crate::vrm::{VrmGeneration, VrmParseError, VrmPrepareError, VrmSourceInfo};
+use crate::vrm::{
+    VrmGeneration, VrmParseError, VrmPrepareError, VrmSourceInfo, mark_extension_used,
+};
 use anyhow::Context;
 use serde_json::{Map, Value};
 
@@ -417,21 +419,6 @@ fn remove_root_extension(document: &mut Value, key: &str) {
         if let Some(used) = document.get_mut(list_key).and_then(Value::as_array_mut) {
             used.retain(|entry| entry.as_str() != Some(key));
         }
-    }
-}
-
-/// Adds one entry to `extensionsUsed` unless already present.
-fn mark_extension_used(document: &mut Value, key: &str) {
-    let Some(object) = document.as_object_mut() else {
-        return;
-    };
-    let used = object
-        .entry("extensionsUsed")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if let Some(used) = used.as_array_mut()
-        && !used.iter().any(|entry| entry.as_str() == Some(key))
-    {
-        used.push(Value::String(key.to_string()));
     }
 }
 

@@ -23,8 +23,8 @@ The illustrated guide covers loading an avatar, selecting a camera, adjusting fr
 - Avatar control constrained by bone lengths, skeletal hierarchy, joint axes, degrees of freedom, and ranges of motion
 - Neutral-pose and arm calibration, mirroring, and framing controls
 - Keyboard expression switching and per-model key bindings
-- Enhanced rendering and per-model settings
 - Avatar video output over NDI
+- [Transparent Spout2 output to OBS on the same Windows PC](manual/SPOUT2.md#english)
 - Looking Glass device discovery and output through Looking Glass Bridge
 - Japanese, English, Simplified Chinese, and Korean UI
 

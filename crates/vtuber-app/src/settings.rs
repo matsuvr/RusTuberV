@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::{Res, ResMut, Resource};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use vtuber_avatar::{
-    ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride, RichLookSettings,
-};
+use vtuber_avatar::{ArmPoseOverrideStore, ArmPoseProfileOverride, DynamicArmProfileOverride};
 
 use crate::expression_keys::{ExpressionBindingStore, ExpressionBindings};
 
@@ -176,32 +174,6 @@ impl AppSettings {
             return Err(SettingsError::NoConfigDirectory);
         };
         save_expression_bindings(path, store)
-    }
-
-    /// Returns the selected model's look; a model without an entry starts OFF.
-    pub(crate) fn rich_look_for(&self, model_id: &str) -> Result<RichLookSettings, SettingsError> {
-        let path = self
-            .path
-            .as_deref()
-            .ok_or(SettingsError::NoConfigDirectory)?;
-        Ok(load_rich_look_settings(path)?
-            .get(model_id)
-            .copied()
-            .unwrap_or_default())
-    }
-
-    /// Saves the selected model's look, preserving every other settings
-    /// section, including the model's arm-pose and tracking entries.
-    pub(crate) fn save_rich_look(
-        &self,
-        model_id: String,
-        settings: RichLookSettings,
-    ) -> Result<(), SettingsError> {
-        let path = self
-            .path
-            .as_deref()
-            .ok_or(SettingsError::NoConfigDirectory)?;
-        save_rich_look_settings(path, model_id, settings)
     }
 
     /// Returns the UI language loaded at startup.
@@ -474,23 +446,6 @@ pub fn save_arm_pose_overrides(
         .map_err(SettingsError::Io)
 }
 
-fn load_rich_look_settings(
-    path: &Path,
-) -> Result<BTreeMap<String, RichLookSettings>, SettingsError> {
-    Ok(read_settings_document(path)?.rich_look)
-}
-
-fn save_rich_look_settings(
-    path: &Path,
-    model_id: String,
-    settings: RichLookSettings,
-) -> Result<(), SettingsError> {
-    let mut document = read_settings_document(path)?;
-    document.rich_look.insert(model_id, settings);
-    crate::file_io::replace_file(path, toml::to_string_pretty(&document)?.as_bytes())
-        .map_err(SettingsError::Io)
-}
-
 /// Builds the startup resource from one already-validated document.
 fn restore_settings_document(
     document: SettingsDocument,
@@ -519,7 +474,6 @@ fn empty_settings_document() -> SettingsDocument {
         arm_pose_overrides: BTreeMap::new(),
         dynamic_arm_profiles: BTreeMap::new(),
         expression_bindings: BTreeMap::new(),
-        rich_look: BTreeMap::new(),
         looking_glass: Default::default(),
     }
 }
@@ -607,10 +561,6 @@ struct SettingsDocument {
     /// entry means the model still uses the initial assignment.
     #[serde(default)]
     expression_bindings: BTreeMap<String, ExpressionBindings>,
-    /// Model-specific look switch and strength. A missing entry means the
-    /// model starts OFF at full strength.
-    #[serde(default)]
-    rich_look: BTreeMap<String, RichLookSettings>,
     #[serde(default)]
     looking_glass: crate::looking_glass::OutputPreferences,
 }
@@ -736,100 +686,12 @@ mod tests {
     }
 
     #[test]
-    fn rich_look_and_every_other_writer_preserve_each_other() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join(SETTINGS_FILE_NAME);
-        let id = AvatarAssetId::new("sha256:first");
-        let zero = RichLookSettings::try_new(true, 0.0).unwrap();
-        let half = RichLookSettings::try_new(false, 0.5).unwrap();
-        let mut arms = ArmPoseOverrideStore::default();
-        arms.set(id.0.clone(), profile(0.55)).unwrap();
-        arms.set_dynamic_profile(
-            id.0.clone(),
-            DynamicArmProfileOverride::from_profile(vtuber_avatar::DynamicArmProfile {
-                shoulder_elevation_trim_radians: -0.1,
-                ..Default::default()
-            }),
-        )
-        .unwrap();
-        let mut expressions = ExpressionBindingStore::default();
-        expressions.set(id.0.clone(), bindings(&[(ExpressionKey::KeyA, "smile")]));
-        save_language(&path, UiLanguage::Ko).unwrap();
-        save_arm_pose_overrides(&path, &arms).unwrap();
-        save_arm_tracking_enabled(&path, true).unwrap();
-        save_expression_bindings(&path, &expressions).unwrap();
-        let before: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        save_rich_look_settings(&path, id.0.clone(), zero).unwrap();
-        save_rich_look_settings(&path, "sha256:second".into(), half).unwrap();
-        let mut after: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        after.as_table_mut().unwrap().remove("rich_look");
-        let mut before = before;
-        before.as_table_mut().unwrap().remove("rich_look");
-        assert_eq!(after, before);
-        let expected = load_rich_look_settings(&path).unwrap();
-        save_language(&path, UiLanguage::En).unwrap();
-        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
-        save_arm_pose_overrides(&path, &arms).unwrap();
-        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
-        save_arm_tracking_enabled(&path, false).unwrap();
-        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
-        save_expression_bindings(&path, &expressions).unwrap();
-        assert_eq!(load_rich_look_settings(&path).unwrap(), expected);
-        let restarted = AppSettings::load(&path).unwrap();
-        assert_eq!(restarted.rich_look_for(&id.0).unwrap(), zero);
-        assert_eq!(restarted.rich_look_for("sha256:second").unwrap(), half);
-        assert_eq!(
-            restarted.rich_look_for("sha256:new").unwrap(),
-            RichLookSettings::default()
-        );
-    }
-
-    #[test]
-    fn rich_look_missing_section_defaults_but_invalid_files_return_errors() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join(SETTINGS_FILE_NAME);
-        assert!(load_rich_look_settings(&path).unwrap().is_empty());
-        fs::write(&path, "schema_version = 1\nlanguage = 'en'\n").unwrap();
-        assert!(load_rich_look_settings(&path).unwrap().is_empty());
-        for invalid in [
-            "broken = [",
-            "schema_version = 99",
-            "schema_version = 1\n[rich_look.model]\nenabled = true\nstrength = 'bad'",
-        ] {
-            fs::write(&path, invalid).unwrap();
-            assert!(load_rich_look_settings(&path).is_err());
-            assert!(
-                save_rich_look_settings(&path, "model".into(), RichLookSettings::default())
-                    .is_err()
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
-        }
-        assert!(load_rich_look_settings(directory.path()).is_err());
-    }
-
-    #[test]
-    fn invalid_rich_strength_prevents_load_and_save_without_replacing_bytes() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join(SETTINGS_FILE_NAME);
-        for strength in ["-0.1", "1.1", "nan", "inf", "-inf"] {
-            let text = format!(
-                "schema_version = 1\n[rich_look.model]\nenabled = false\nstrength = {strength}\n"
-            );
-            fs::write(&path, &text).unwrap();
-            assert!(AppSettings::load(&path).is_err());
-            assert!(load_rich_look_settings(&path).is_err());
-            assert!(save_language(&path, UiLanguage::En).is_err());
-            assert_eq!(fs::read_to_string(&path).unwrap(), text);
-        }
-    }
-
-    #[test]
-    fn a_stale_material_roles_section_is_ignored() {
+    fn retired_appearance_settings_are_ignored_on_load_and_dropped_on_save() {
         let directory = tempdir().unwrap();
         let path = directory.path().join(SETTINGS_FILE_NAME);
         fs::write(
             &path,
-            "schema_version = 1\n\
+            "schema_version = 1\nlanguage = 'en'\n\
              [[material_roles.\"sha256:first\"]]\n\
              material_index = 0\n\
              selected = 'face'\n\
@@ -839,10 +701,12 @@ mod tests {
         )
         .unwrap();
         let restarted = AppSettings::load(&path).unwrap();
-        assert_eq!(
-            restarted.rich_look_for("sha256:first").unwrap(),
-            RichLookSettings::try_new(true, 0.5).unwrap()
-        );
+        assert_eq!(restarted.language(), UiLanguage::En);
+        save_arm_tracking_enabled(&path, true).unwrap();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.get("rich_look").is_none());
+        assert!(saved.get("material_roles").is_none());
+        assert_eq!(AppSettings::load(&path).unwrap().language(), UiLanguage::En);
     }
 
     #[test]
@@ -1086,7 +950,6 @@ mod tests {
             save_arm_tracking_enabled(&path, true),
             save_arm_pose_overrides(&path, &arms),
             save_expression_bindings(&path, &expressions),
-            save_rich_look_settings(&path, "sha256:first".into(), RichLookSettings::default()),
         ] {
             assert!(matches!(
                 result,

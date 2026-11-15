@@ -45,7 +45,7 @@ fn print_help() {
     println!("  face-pipeline-smoke      Legacy research detector/crop/landmark probe");
     println!("  mediapipe-face-smoke     Windows MSMF MediaPipe Face Landmarker gate");
     println!("  mediapipe-pose-probe     Guided MediaPipe neutral-relative pose proof");
-    println!("  vrm-render <path> <out>  Render the rich-look switching sequence");
+    println!("  vrm-render <path> <out>  Render the avatar to a PNG");
     println!(
         "  tracking-replay <rgb> <vrm> <out> <cpus> <vsync|uncapped> [paired-vrm]  Measure recorded input; optionally replay identical observations on a second model"
     );
@@ -157,56 +157,6 @@ fn handle_acceptance(args: &[String]) -> TaskResult {
                 format!("unknown acceptance command: {other}"),
                 1,
             ))
-        }
-    }
-}
-
-#[cfg(test)]
-mod cli_tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )] // tests may panic (AGENTS.md)
-    use super::*;
-    #[test]
-    fn absent_missing_and_unknown_arguments_are_typed() {
-        assert_eq!(run_task(&[]).unwrap(), TaskOutcome::Help);
-        assert!(run_task(&["unknown".into()]).is_err());
-        assert!(run_task(&["vrm-managed-compat".into()]).is_err());
-        assert_eq!(handle_acceptance(&[]).unwrap(), TaskOutcome::Help);
-        assert!(handle_acceptance(&["unknown".into()]).is_err());
-        assert_eq!(
-            ndi::run(&["package".into(), "--help".into()]).unwrap(),
-            TaskOutcome::Help
-        );
-    }
-
-    #[test]
-    fn every_top_level_help_spelling_is_help_with_a_zero_exit_code() {
-        for name in ["help", "--help", "-h"] {
-            let result: TaskResult = run_task(&[name.to_owned()]);
-            assert_eq!(result, Ok(TaskOutcome::Help), "{name}");
-            assert_eq!(task_exit_code(&result), 0, "{name}");
-        }
-        // No argument is still help, unchanged.
-        let result: TaskResult = run_task(&[]);
-        assert_eq!(result, Ok(TaskOutcome::Help));
-        assert_eq!(task_exit_code(&result), 0);
-    }
-
-    #[test]
-    fn an_unknown_task_and_a_missing_required_argument_stay_errors() {
-        for args in [
-            vec!["unknown".to_owned()],
-            vec!["--".to_owned()],
-            vec!["vrm-managed-compat".to_owned()],
-            vec!["vrm-render".to_owned()],
-        ] {
-            let result: TaskResult = run_task(&args);
-            assert!(result.is_err(), "{args:?}");
-            assert_ne!(task_exit_code(&result), 0, "{args:?}");
         }
     }
 }
@@ -375,5 +325,55 @@ fn print_result(result: &vrm_compatibility::CompatibilityResult) {
     }
     if let Some(error) = &result.runner_error {
         println!("  runner: FAIL ({error})");
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )] // tests may panic (AGENTS.md)
+    use super::*;
+    #[test]
+    fn absent_missing_and_unknown_arguments_are_typed() {
+        assert_eq!(run_task(&[]).unwrap(), TaskOutcome::Help);
+        assert!(run_task(&["unknown".into()]).is_err());
+        assert!(run_task(&["vrm-managed-compat".into()]).is_err());
+        assert_eq!(handle_acceptance(&[]).unwrap(), TaskOutcome::Help);
+        assert!(handle_acceptance(&["unknown".into()]).is_err());
+        assert_eq!(
+            ndi::run(&["package".into(), "--help".into()]).unwrap(),
+            TaskOutcome::Help
+        );
+    }
+
+    #[test]
+    fn every_top_level_help_spelling_is_help_with_a_zero_exit_code() {
+        for name in ["help", "--help", "-h"] {
+            let result: TaskResult = run_task(&[name.to_owned()]);
+            assert_eq!(result, Ok(TaskOutcome::Help), "{name}");
+            assert_eq!(task_exit_code(&result), 0, "{name}");
+        }
+        // No argument is still help, unchanged.
+        let result: TaskResult = run_task(&[]);
+        assert_eq!(result, Ok(TaskOutcome::Help));
+        assert_eq!(task_exit_code(&result), 0);
+    }
+
+    #[test]
+    fn an_unknown_task_and_a_missing_required_argument_stay_errors() {
+        for args in [
+            vec!["unknown".to_owned()],
+            vec!["--".to_owned()],
+            vec!["vrm-managed-compat".to_owned()],
+            vec!["vrm-render".to_owned()],
+        ] {
+            let result: TaskResult = run_task(&args);
+            assert!(result.is_err(), "{args:?}");
+            assert_ne!(task_exit_code(&result), 0, "{args:?}");
+        }
     }
 }

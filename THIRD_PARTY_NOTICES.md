@@ -36,9 +36,8 @@ licensed under MIT OR Apache-2.0. The source-only copy in `vendor/bevy_vrm1` use
 Bevy 0.20: WESL modules, vertex decompression and morph descriptor indexing,
 outline depth-stencil views, and lifecycle observer syntax.
 The transparency discard fix (upstream PR #68) and final expression weights
-(upstream PR #70) are already included in v0.10.0. The local correction clears
-the native outline material cache every extraction, so switching to an extended
-material cannot draw a stale native outline with incompatible bindings.
+(upstream PR #70) are already included in v0.10.0.
+A local expression patch ignores overrides of the expression's own procedural group.
 See `vendor/bevy_vrm1/NOTICE` and the bundled MIT / Apache-2.0 licenses.
 
 The VRM 0.x import-time normalization, the direct-pose / direct-gaze input
@@ -47,34 +46,6 @@ components and writers, and the expression bind-status records in
 ported from the retired `vendor/bevy_vrm1` patch so the upstream runtime's
 other behavior can stay untouched. They carry no separate upstream license beyond
 the MIT terms of this application.
-
-`crates/vtuber-avatar/src/look/mtoon_rich.wesl` imports the Native MToon
-fragment helpers from the patched dependency instead of copying that base.
-The app-side cel lighting follows the NiloToon example concepts described below.
-`crates/vtuber-avatar/src/look/mtoon_rich_vertex.wesl` adapts the MToon
-vertex path from bevy_vrm1 v0.10.0 and Bevy 0.20's mesh vertex path; it keeps
-the upstream MIT OR Apache-2.0 terms. The shared UV arithmetic in
-`mtoon_uv.wesl` is retained from the MToon implementation under those terms.
-
-`crates/vtuber-avatar/src/look/standard_rich.wesl` adapts the Bevy 0.20.0
-`bevy_pbr` Standard fragment path so the app can add a narrow Rich term to the
-unchanged PBR result. It keeps Bevy's MIT OR Apache-2.0 terms; the app-side
-additive rim is this repository's MIT code.
-
-## NiloToon public shader example (adapted lighting concepts)
-
-`crates/vtuber-avatar/src/look/mtoon_rich.wesl` adapts the soft cel boundary,
-bounded additional lighting and max(indirect, direct) composition from
-[ColinLeung-NiloCat/UnityURPToonLitShaderExample](https://github.com/ColinLeung-NiloCat/UnityURPToonLitShaderExample),
-commit `fbe276e0df1d1f9379e13581c20b6a080a1a6977`, particularly
-`SimpleURPToonLitOutlineExample_LightingEquation.hlsl`.
-Copyright (c) 2020 ColinLeung-NiloCat. Licensed under MIT; the complete notice
-is in `crates/vtuber-avatar/src/look/LICENSE-NiloToon.txt` and distributed in `licenses/`.
-The commercial NiloToonURP shader is not included.
-
-The spot direction and attenuation decoding uses Bevy 0.20 conventions
-(MIT OR Apache-2.0). MToon textures, shade settings, emission, authored rim,
-alpha behavior and outline geometry remain owned by the existing VRM path.
 
 ## NDI® runtime
 

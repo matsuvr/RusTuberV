@@ -20,7 +20,7 @@ use vtuber_avatar::{
     AvatarLifecycle, AvatarMotionMirror,
 };
 
-fn rich_look_app(path: &std::path::Path) -> App {
+fn lifecycle_app() -> App {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
         .init_resource::<ActionQueue>()
@@ -30,11 +30,8 @@ fn rich_look_app(path: &std::path::Path) -> App {
         .init_resource::<NdiOutputIntent>()
         .init_resource::<AvatarLifecycle>()
         .init_resource::<AvatarIoRuntime>()
-        .init_resource::<vtuber_avatar::AvatarLookSettings>()
         .init_resource::<Assets<StandardMaterial>>()
         .init_resource::<Assets<bevy_vrm1::prelude::MToonMaterial>>()
-        .insert_resource(AppSettings::empty_at(path))
-        .add_message::<vtuber_avatar::LookSettingsChanged>()
         .add_message::<vtuber_avatar::LoadImportedAvatarRequest>()
         .add_message::<vtuber_avatar::LoadImportedAvatarResult>()
         .add_message::<vtuber_avatar::lifecycle::UnloadAvatarRequest>()
@@ -44,7 +41,6 @@ fn rich_look_app(path: &std::path::Path) -> App {
                 process_ui_actions_system,
                 prepare_avatar_io_system,
                 sync_avatar_lifecycle_system,
-                vtuber_avatar::look::apply_look_settings_changes,
             )
                 .chain(),
         );
@@ -69,17 +65,6 @@ fn rich_look_app(path: &std::path::Path) -> App {
     app
 }
 
-fn select_look_model(app: &mut App, suffix: char) {
-    let directory = tempfile::tempdir().unwrap();
-    let mut model =
-        stub_imported_model_with_id(&format!("sha256:{}", suffix.to_string().repeat(64)));
-    model.asset_path = write_review_fixture(&directory);
-    app.world_mut()
-        .resource_mut::<Orchestrator>()
-        .queue_imported_model(model);
-    wait_for_avatar_preparation(app); // submitted; next update receives acceptance/rejection.
-}
-
 fn wait_for_avatar_preparation(app: &mut App) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.world().resource::<Orchestrator>().import_state() == &ImportState::InProgress {
@@ -100,184 +85,12 @@ fn model_action_target(app: &App) -> crate::actions::ModelActionTarget {
     .unwrap()
 }
 
-fn look_change(app: &mut App, change: crate::actions::RichLookChange) {
-    let action = UiAction::ChangeRichLook {
-        target: model_action_target(app),
-        change,
-    };
-    look_action(app, action);
-}
-
-fn save_look(app: &mut App) {
-    let action = UiAction::SaveRichLook {
-        target: model_action_target(app),
-    };
-    look_action(app, action);
-}
-
-fn look_action(app: &mut App, action: UiAction) {
-    app.world_mut().resource_mut::<ActionQueue>().emit(action);
-    app.update();
-}
-
 #[test]
 fn orchestrator_error_has_the_standard_error_contract() {
     let error = OrchestratorError::ImportFailed("original detail".into());
     let standard: &dyn std::error::Error = &error;
     assert_eq!(standard.to_string(), "Import failed: original detail");
     assert!(standard.source().is_none());
-}
-
-#[test]
-fn rich_look_live_edits_commit_switch_and_restart_restore_per_model() {
-    use crate::actions::RichLookChange;
-    use vtuber_avatar::{AvatarLookSettings, RichLookSettings};
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("settings.toml");
-    let mut app = rich_look_app(&path);
-    select_look_model(&mut app, 'a');
-    app.update();
-    finish_look_model(&mut app);
-    let preview = app.world().resource::<PreviewState>().visible;
-    let ndi_generation = app.world().resource::<NdiOutputIntent>().generation();
-    look_change(&mut app, RichLookChange::Enabled(true));
-    for strength in [1.0, 0.5, 0.0] {
-        look_change(&mut app, RichLookChange::Strength(strength));
-        assert_eq!(
-            app.world().resource::<AvatarLookSettings>().0,
-            RichLookSettings::try_new(true, strength).unwrap()
-        );
-        assert_eq!(
-            app.world().resource::<UiViewModel>().look.strength,
-            strength
-        );
-        assert!(!path.exists(), "live edits must not write files");
-    }
-    save_look(&mut app);
-    let zero = RichLookSettings::try_new(true, 0.0).unwrap();
-    let saved = std::fs::read_to_string(&path).unwrap();
-    look_change(&mut app, RichLookChange::Strength(0.5));
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
-    look_change(&mut app, RichLookChange::Enabled(false));
-    look_change(&mut app, RichLookChange::Enabled(true));
-    assert_eq!(
-        app.world().resource::<AvatarLookSettings>().0.strength(),
-        0.5
-    );
-    assert_eq!(app.world().resource::<PreviewState>().visible, preview);
-    assert!(!app.world().resource::<NdiOutputIntent>().is_requested());
-    assert_eq!(
-        app.world().resource::<NdiOutputIntent>().generation(),
-        ndi_generation
-    );
-    select_look_model(&mut app, 'b');
-    app.update();
-    finish_look_model(&mut app);
-    assert_eq!(
-        app.world().resource::<AvatarLookSettings>().0,
-        RichLookSettings::default()
-    );
-    look_change(&mut app, RichLookChange::Strength(0.5));
-    save_look(&mut app);
-    select_look_model(&mut app, 'a');
-    app.update();
-    finish_look_model(&mut app);
-    assert_eq!(app.world().resource::<AvatarLookSettings>().0, zero);
-    select_look_model(&mut app, 'b');
-    app.update();
-    finish_look_model(&mut app);
-    assert_eq!(
-        app.world().resource::<AvatarLookSettings>().0,
-        RichLookSettings::try_new(false, 0.5).unwrap()
-    );
-    look_action(&mut app, UiAction::UnloadAvatar);
-    assert_eq!(
-        app.world().resource::<AvatarLookSettings>().0,
-        RichLookSettings::default()
-    );
-    assert!(app.world().resource::<UiViewModel>().model_target.is_none());
-    drop(app);
-    let mut restarted = rich_look_app(&path);
-    select_look_model(&mut restarted, 'a');
-    restarted.update();
-    finish_look_model(&mut restarted);
-    assert_eq!(restarted.world().resource::<AvatarLookSettings>().0, zero);
-}
-
-#[test]
-fn invalid_rich_look_edits_keep_live_state_and_saved_bytes() {
-    use crate::actions::RichLookChange;
-    use vtuber_avatar::AvatarLookSettings;
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("settings.toml");
-    let mut app = rich_look_app(&path);
-    select_look_model(&mut app, 'a');
-    app.update();
-    finish_look_model(&mut app);
-    look_change(&mut app, RichLookChange::Strength(0.5));
-    save_look(&mut app);
-    let previous = app.world().resource::<AvatarLookSettings>().0;
-    let bytes = std::fs::read(&path).unwrap();
-    for strength in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-        look_change(&mut app, RichLookChange::Strength(strength));
-        assert_eq!(app.world().resource::<AvatarLookSettings>().0, previous);
-        assert_eq!(
-            app.world().resource::<UiViewModel>().look.strength,
-            previous.strength()
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert!(matches!(
-            app.world().resource::<Orchestrator>().last_error(),
-            Some(OrchestratorError::ArmPoseSettingsFailed(_))
-        ));
-    }
-}
-
-#[test]
-fn rich_look_load_errors_are_recorded_without_submitting_new_model() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("settings.toml");
-    std::fs::write(&path, "broken = [").unwrap();
-    let mut app = rich_look_app(&path);
-    select_look_model(&mut app, 'a');
-    app.update();
-    assert!(matches!(
-        app.world().resource::<Orchestrator>().last_error(),
-        Some(OrchestratorError::ArmPoseSettingsFailed(_))
-    ));
-    assert!(
-        app.world()
-            .resource::<Messages<vtuber_avatar::LoadImportedAvatarRequest>>()
-            .is_empty()
-    );
-}
-
-#[test]
-fn rich_look_save_errors_are_recorded_and_keep_live_settings() {
-    use crate::actions::RichLookChange;
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("settings.toml");
-    let mut app = rich_look_app(&path);
-    select_look_model(&mut app, 'a');
-    app.update();
-    finish_look_model(&mut app);
-    std::fs::create_dir(&path).unwrap();
-    look_change(&mut app, RichLookChange::Enabled(true));
-    let live_settings = app
-        .world()
-        .resource::<vtuber_avatar::AvatarLookSettings>()
-        .0;
-    save_look(&mut app);
-    assert_eq!(
-        app.world()
-            .resource::<vtuber_avatar::AvatarLookSettings>()
-            .0,
-        live_settings
-    );
-    assert!(matches!(
-        app.world().resource::<Orchestrator>().last_error(),
-        Some(OrchestratorError::ArmPoseSettingsFailed(_))
-    ));
 }
 
 fn import_two_distinct_models(dir: &tempfile::TempDir) -> (ImportedModel, ImportedModel) {
@@ -297,7 +110,7 @@ fn import_two_distinct_models(dir: &tempfile::TempDir) -> (ImportedModel, Import
     )
 }
 
-fn import_look_model(app: &mut App, model: &ImportedModel) {
+fn import_model(app: &mut App, model: &ImportedModel) {
     app.world_mut()
         .resource_mut::<Orchestrator>()
         .import_avatar(&model.original_path);
@@ -305,7 +118,7 @@ fn import_look_model(app: &mut App, model: &ImportedModel) {
     app.update();
 }
 
-fn finish_look_model(app: &mut App) {
+fn finish_model_load(app: &mut App) {
     {
         let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
         let root = lifecycle.active_root().unwrap();
@@ -315,7 +128,7 @@ fn finish_look_model(app: &mut App) {
     app.update();
 }
 
-fn assert_model_look(app: &App, model: &ImportedModel, expected: vtuber_avatar::RichLookSettings) {
+fn assert_selected_model(app: &App, model: &ImportedModel) {
     let world = app.world();
     let root = world.resource::<AvatarLifecycle>().active_root().unwrap();
     assert_eq!(
@@ -328,55 +141,31 @@ fn assert_model_look(app: &App, model: &ImportedModel, expected: vtuber_avatar::
         Some(model.id.as_str()),
         "UI model owner"
     );
-    assert_eq!(
-        world.resource::<vtuber_avatar::AvatarLookSettings>().0,
-        expected,
-        "runtime look"
-    );
     let vm = world.resource::<UiViewModel>();
     assert_eq!(
         vm.avatar.imported_model.as_ref().unwrap().id,
         model.id,
         "UI snapshot model"
     );
-    assert_eq!(vm.look.enabled, expected.enabled());
-    assert_eq!(vm.look.strength, expected.strength());
 }
 
 #[test]
-fn rich_lifecycle_rejected_switch_keeps_loading_model() {
+fn lifecycle_rejected_switch_keeps_loading_model() {
     rejected_switch_keeps_model(false);
 }
 
 #[test]
-fn rich_lifecycle_rejected_switch_keeps_binding_model() {
+fn lifecycle_rejected_switch_keeps_binding_model() {
     rejected_switch_keeps_model(true);
 }
 
-#[test]
-fn rich_lifecycle_parse_failure_keeps_model_and_allows_reselection() {
-    restore_failure_keeps_model(false);
-}
-
-#[test]
-fn rich_lifecycle_read_failure_keeps_model_and_allows_reselection() {
-    restore_failure_keeps_model(true);
-}
-
 fn rejected_switch_keeps_model(binding: bool) {
-    use crate::actions::RichLookChange;
-    use vtuber_avatar::{LoadImportedAvatarResult, RichLookSettings};
+    use vtuber_avatar::LoadImportedAvatarResult;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("settings.toml");
     let (a, b) = import_two_distinct_models(&dir);
-    let a_look = RichLookSettings::try_new(true, 0.25).unwrap();
-    let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
-    let settings = AppSettings::empty_at(&path);
-    settings.save_rich_look(a.id.clone(), a_look).unwrap();
-    settings.save_rich_look(b.id.clone(), b_look).unwrap();
-    let mut app = rich_look_app(&path);
+    let mut app = lifecycle_app();
     app.world_mut().resource_mut::<Orchestrator>().asset_root = dir.path().join("assets");
-    import_look_model(&mut app, &a);
+    import_model(&mut app, &a);
     if binding {
         let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
         let root = lifecycle.active_root().unwrap();
@@ -394,99 +183,32 @@ fn rejected_switch_keeps_model(binding: bool) {
         .resource::<Orchestrator>()
         .active_request_id
         .unwrap();
-    assert_model_look(&app, &a, a_look);
+    assert_selected_model(&app, &a);
     wait_for_avatar_preparation(&mut app); // prepared and submitted, but not accepted
-    assert_model_look(&app, &a, a_look);
+    assert_selected_model(&app, &a);
     app.update(); // production rejection and result handling
-    assert_model_look(&app, &a, a_look);
+    assert_selected_model(&app, &a);
     assert!(
         results
             .read(app.world().resource::<Messages<LoadImportedAvatarResult>>())
             .any(|result| matches!(result, LoadImportedAvatarResult::Rejected { request_id: rejected, .. } if *rejected == request_id))
     );
-    finish_look_model(&mut app);
-    assert_model_look(&app, &a, a_look);
+    finish_model_load(&mut app);
+    assert_selected_model(&app, &a);
     assert!(matches!(
         app.world().resource::<Orchestrator>().last_error(),
         Some(OrchestratorError::AvatarLoadRejected(_))
     ));
-    look_change(&mut app, RichLookChange::Strength(0.5));
-    save_look(&mut app);
-    assert_eq!(settings.rich_look_for(&a.id).unwrap().strength(), 0.5);
-    assert_eq!(settings.rich_look_for(&b.id).unwrap(), b_look);
-}
-
-fn restore_failure_keeps_model(read_error: bool) {
-    use vtuber_avatar::{LoadImportedAvatarRequest, RichLookSettings};
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("settings.toml");
-    let (a, b) = import_two_distinct_models(&dir);
-    let a_look = RichLookSettings::try_new(true, 0.0).unwrap();
-    let b_look = RichLookSettings::try_new(false, 0.75).unwrap();
-    let settings = AppSettings::empty_at(&path);
-    settings.save_rich_look(a.id.clone(), a_look).unwrap();
-    settings.save_rich_look(b.id.clone(), b_look).unwrap();
-    let saved_settings_toml = std::fs::read_to_string(&path).unwrap();
-    let mut app = rich_look_app(&path);
-    app.world_mut().resource_mut::<Orchestrator>().asset_root = dir.path().join("assets");
-    import_look_model(&mut app, &a);
-    finish_look_model(&mut app);
-    if read_error {
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
-    } else {
-        std::fs::write(&path, "broken = [").unwrap();
-    }
-    let mut requests = app
-        .world()
-        .resource::<Messages<LoadImportedAvatarRequest>>()
-        .get_cursor_current();
-    import_look_model(&mut app, &b);
-    assert_eq!(
-        requests
-            .read(
-                app.world()
-                    .resource::<Messages<LoadImportedAvatarRequest>>()
-            )
-            .count(),
-        0
-    );
-    assert_model_look(&app, &a, a_look);
-    assert_eq!(
-        app.world().resource::<AvatarLifecycle>().state(),
-        vtuber_avatar::AvatarLifecycleState::Ready
-    );
-    assert!(matches!(
-        app.world().resource::<Orchestrator>().last_error(),
-        Some(OrchestratorError::ArmPoseSettingsFailed(_))
-    ));
-    if read_error {
-        std::fs::remove_dir(&path).unwrap();
-    } else {
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken = [");
-    }
-    std::fs::write(&path, saved_settings_toml).unwrap();
-    import_look_model(&mut app, &b);
-    finish_look_model(&mut app);
-    assert_model_look(&app, &b, b_look);
 }
 
 #[test]
-fn rich_lifecycle_accepted_switch_restores_and_saves_new_model() {
-    use crate::actions::RichLookChange;
-    use vtuber_avatar::RichLookSettings;
+fn accepted_switch_replaces_the_model() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("settings.toml");
     let (a, b) = import_two_distinct_models(&dir);
-    let a_look = RichLookSettings::try_new(false, 0.25).unwrap();
-    let b_look = RichLookSettings::try_new(true, 0.0).unwrap();
-    let settings = AppSettings::empty_at(&path);
-    settings.save_rich_look(a.id.clone(), a_look).unwrap();
-    settings.save_rich_look(b.id.clone(), b_look).unwrap();
-    let mut app = rich_look_app(&path);
+    let mut app = lifecycle_app();
     app.world_mut().resource_mut::<Orchestrator>().asset_root = dir.path().join("assets");
-    import_look_model(&mut app, &a);
-    finish_look_model(&mut app);
+    import_model(&mut app, &a);
+    finish_model_load(&mut app);
     let old_root = app
         .world()
         .resource::<AvatarLifecycle>()
@@ -495,20 +217,13 @@ fn rich_lifecycle_accepted_switch_restores_and_saves_new_model() {
     app.world_mut()
         .resource_mut::<Orchestrator>()
         .import_avatar(&b.original_path);
-    assert_model_look(&app, &a, a_look);
+    assert_selected_model(&app, &a);
     wait_for_avatar_preparation(&mut app);
-    assert_model_look(&app, &a, a_look);
+    assert_selected_model(&app, &a);
     app.update();
-    finish_look_model(&mut app);
+    finish_model_load(&mut app);
     assert!(app.world().get_entity(old_root).is_err());
-    assert_model_look(&app, &b, b_look);
-    look_change(&mut app, RichLookChange::Strength(0.5));
-    save_look(&mut app);
-    assert_eq!(settings.rich_look_for(&a.id).unwrap(), a_look);
-    assert_eq!(
-        settings.rich_look_for(&b.id).unwrap(),
-        RichLookSettings::try_new(true, 0.5).unwrap()
-    );
+    assert_selected_model(&app, &b);
 }
 
 #[test]
@@ -1559,10 +1274,7 @@ fn cancelled_or_superseded_work_cannot_commit_a_model_or_report_an_error() {
                     request_id: pending.request_id,
                     imported,
                 },
-                SubmittedAvatarLoad {
-                    model: pending.model,
-                    look: None,
-                },
+                pending.model,
             )),
         );
         orch.complete_avatar_work(
@@ -1983,9 +1695,7 @@ fn stale_model_actions_never_reach_the_replacement_model() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settings.toml");
     let mut app = expression_action_app(path.clone());
-    app.init_resource::<ArmPoseOverrideStore>()
-        .init_resource::<vtuber_avatar::AvatarLookSettings>()
-        .add_message::<vtuber_avatar::LookSettingsChanged>();
+    app.init_resource::<ArmPoseOverrideStore>();
     let b_profile = ArmPoseProfileOverride::from_profile(vtuber_avatar::ArmPoseProfile {
         arm_drop_radians: 0.4,
         ..Default::default()
@@ -2036,14 +1746,7 @@ fn stale_model_actions_never_reach_the_replacement_model() {
             target: target_a.clone(),
             profile: ArmPoseProfileOverride::from_profile(vtuber_avatar::ArmPoseProfile::default()),
         },
-        UiAction::ResetArmPoseProfile {
-            target: target_a.clone(),
-        },
-        UiAction::ChangeRichLook {
-            target: target_a.clone(),
-            change: crate::actions::RichLookChange::Enabled(true),
-        },
-        UiAction::SaveRichLook { target: target_a },
+        UiAction::ResetArmPoseProfile { target: target_a },
     ] {
         app.world_mut().resource_mut::<ActionQueue>().emit(action);
     }
@@ -2121,17 +1824,6 @@ fn stale_model_actions_never_reach_the_replacement_model() {
     assert!(
         app.world()
             .resource::<Messages<ArmPoseProfileChange>>()
-            .is_empty()
-    );
-    assert!(
-        !app.world()
-            .resource::<vtuber_avatar::AvatarLookSettings>()
-            .0
-            .enabled()
-    );
-    assert!(
-        app.world()
-            .resource::<Messages<vtuber_avatar::LookSettingsChanged>>()
             .is_empty()
     );
     assert!(

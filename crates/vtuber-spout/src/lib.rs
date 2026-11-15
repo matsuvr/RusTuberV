@@ -236,6 +236,48 @@ mod tests {
         assert_eq!(c.status(), Status::Off);
     }
     #[test]
+    fn native_upload_borrows_the_original_readback_pixels() {
+        let c = active();
+        // Two 2-pixel rows with GPU padding and distinct colors at each corner.
+        let pixels = [
+            11, 32, 73, 128, 5, 7, 9, 0, 255, 255, 255, 255, 101, 93, 28, 255, 17, 51, 30, 64, 255,
+            255, 255, 255,
+        ]
+        .to_vec();
+        let allocation = pixels.as_ptr();
+        let frame = VideoOutputFrame::from_rendered_bgra8(
+            2,
+            2,
+            12,
+            vtuber_core::FrameSeq(3),
+            vtuber_core::MonoTimeNs(9),
+            pixels,
+        )
+        .unwrap();
+        c.submit(frame.clone());
+        // The second consumer must neither change Spout's pixels nor detach its buffer.
+        let ndi = frame.into_straight_alpha();
+        assert_ne!(ndi.data().as_ptr(), allocation);
+        assert_eq!(
+            ndi.data(),
+            &[
+                22, 64, 145, 128, 0, 0, 0, 0, 101, 93, 28, 255, 68, 203, 120, 64
+            ]
+        );
+        send_loop(&c.shared, |frame| {
+            assert_eq!(frame.data().as_ptr(), allocation);
+            assert_eq!(
+                frame.data(),
+                &[
+                    11, 32, 73, 128, 5, 7, 9, 0, 101, 93, 28, 255, 17, 51, 30, 64
+                ]
+            );
+            c.shared.0.lock().unwrap().stop = true;
+            Ok(())
+        })
+        .unwrap();
+    }
+    #[test]
     fn sender_handles_new_dimensions_without_reformatting_bgra() {
         let c = active();
         c.submit(frame(1, 2));

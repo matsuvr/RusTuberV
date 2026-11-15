@@ -40,5 +40,8 @@ ndi-output = ["vtuber-ndi/ndi-sdk"]
 bevy_vrm1 = { workspace = true, features = ["log"] }
 tempfile = "3"
 
+[target.'cfg(windows)'.dev-dependencies]
+spout2-rs = { version = "=0.1.1", default-features = false, features = ["dx"] }
+
 [lints]
 workspace = true

@@ -33,11 +33,27 @@ use vtuber_avatar::lifecycle::{
 };
 use vtuber_avatar::unload::{ActiveControlFrame, despawn_unloading_avatar};
 
+fn prepare_mtoon(properties: serde_json::Value) -> VrmcMaterialsExtensitions {
+    let mut doc = serde_json::json!({
+        "extensions": {"VRMC_vrm": {"specVersion": "1.0"}},
+        "materials": [{"extensions": {"VRMC_materials_mtoon": properties}}]
+    });
+    vtuber_avatar::vrm::prepare_vrm_document(&mut doc).unwrap();
+    if doc.pointer("/materials/0/extensions/VRMC_materials_mtoon/shadeMultiplyTexture/extensions/KHR_texture_transform").is_some() {
+        assert!(doc["extensionsUsed"].as_array().unwrap().iter().any(|key| key == "KHR_texture_transform"));
+    }
+    assert!(
+        !vtuber_avatar::vrm::prepare_vrm_document(&mut doc)
+            .unwrap()
+            .1
+    );
+    serde_json::from_value(doc["materials"][0]["extensions"]["VRMC_materials_mtoon"].clone())
+        .unwrap()
+}
+
 #[test]
 fn mtoon_omitted_material_properties_use_specification_defaults() {
-    let material: VrmcMaterialsExtensitions =
-        serde_json::from_value(serde_json::json!({"specVersion": "1.0"}))
-            .expect("only the specification version is required");
+    let material = prepare_mtoon(serde_json::json!({"specVersion": "1.0"}));
     assert_eq!(material.matcap_factor, [1.0; 3]);
     assert_eq!(material.shade_color_factor, [1.0; 3]);
     assert_eq!(material.shading_toony_factor, 0.9);
@@ -61,13 +77,12 @@ fn mtoon_omitted_material_properties_use_specification_defaults() {
 
 #[test]
 fn mtoon_partial_material_preserves_authored_properties_and_texture_defaults() {
-    let material: VrmcMaterialsExtensitions = serde_json::from_value(serde_json::json!({
+    let material = prepare_mtoon(serde_json::json!({
         "specVersion": "1.0", "shadeColorFactor": [0.5, 0.6, 0.7],
         "shadeMultiplyTexture": {"index": 3}, "shadingToonyFactor": 0.8,
         "outlineWidthMode": "worldCoordinates", "outlineWidthFactor": 0.01,
         "transparentWithZWrite": true, "shadingShiftTexture": {"index": 2}
-    }))
-    .expect("optional properties do not require exporter-specific placeholders");
+    }));
     assert_eq!(material.shade_color_factor, [0.5, 0.6, 0.7]);
     assert_eq!(material.shading_toony_factor, 0.8);
     assert_eq!(material.outline_width_mode, "worldCoordinates");
@@ -95,8 +110,11 @@ fn mtoon_texture_without_optional_uv_transform_uses_identity() {
         serde_json::json!({"index": 7}),
         serde_json::json!({"index": 7, "extensions": {}}),
     ] {
-        let texture: VrmTexture =
-            serde_json::from_value(value).expect("texture transforms are optional");
+        let texture = prepare_mtoon(serde_json::json!({
+            "specVersion": "1.0", "shadeMultiplyTexture": value
+        }))
+        .shade_multiply_texture
+        .unwrap();
         assert_eq!(texture.index, 7);
         assert_eq!(
             texture.extensions.khr_texture_transform,
@@ -119,11 +137,13 @@ fn mtoon_texture_partial_uv_transform_preserves_authored_values() {
             [0.5, 2.0],
         ),
     ] {
-        let texture: VrmTexture = serde_json::from_value(serde_json::json!({
-            "index": 7,
-            "extensions": {"KHR_texture_transform": transform}
+        let texture = prepare_mtoon(serde_json::json!({
+            "specVersion": "1.0", "shadeMultiplyTexture": {
+                "index": 7, "extensions": {"KHR_texture_transform": transform}
+            }
         }))
-        .expect("omitted UV components have identity defaults");
+        .shade_multiply_texture
+        .unwrap();
         assert_eq!(texture.extensions.khr_texture_transform.offset, offset);
         assert_eq!(texture.extensions.khr_texture_transform.scale, scale);
     }

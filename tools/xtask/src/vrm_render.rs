@@ -1,11 +1,4 @@
-//! Renders a VRM with the rich look off and on and records both frames.
-//!
-//! This is the mechanical check for the review requirement that switching the
-//! look off reproduces the plain display and switching it on changes the
-//! pixels: for every model it renders the same pose and camera through
-//! OFF -> ON -> strength 0.5 -> OFF -> ON -> strength 0, then reports the pixel differences.
-//! When no GPU/readback is available the command exits 2 (`NOT RUN`) instead
-//! of reporting success. Look changes use the production UI action/orchestrator path.
+//! Renders each imported VRM through the avatar output camera to a PNG.
 
 use crate::task_result::{TaskOutcome, TaskResult};
 use std::path::{Path, PathBuf};
@@ -28,8 +21,6 @@ const WIDTH: u32 = 256;
 const HEIGHT: u32 = 256;
 /// Frames the renderer needs before the offscreen image contains the avatar.
 const WARMUP_FRAMES: usize = 96;
-/// Frames between the two look states so the readback reflects the change.
-const SETTLE_FRAMES: usize = 120;
 const MAX_LOAD_FRAMES: usize = 1_200;
 /// Exit code used when the GPU/readback path cannot be exercised.
 pub const EXIT_NOT_RUN: i32 = 2;
@@ -99,16 +90,14 @@ enum RenderError {
     Failed(String),
 }
 
-/// Builds the app, loads the model, and captures one frame per look state.
+/// Builds the app, loads the model, and captures the avatar output.
 fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
-    let managed_root =
-        std::env::temp_dir().join(format!("rustuberv-vrm-render-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&managed_root);
-    std::fs::create_dir_all(&managed_root)
+    let temporary = tempfile::tempdir()
         .map_err(|error| RenderError::Failed(format!("cannot create managed root: {error}")))?;
+    let managed_root = temporary.path();
 
     let imported =
-        vtuber_app::import::import_vrm(path, &managed_root, vtuber_app::import::DEFAULT_SIZE_LIMIT)
+        vtuber_app::import::import_vrm(path, managed_root, vtuber_app::import::DEFAULT_SIZE_LIMIT)
             .map_err(|error| RenderError::Failed(format!("import failed: {error}")))?;
     let managed_root_string = managed_root
         .to_str()
@@ -119,7 +108,7 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
         AssetSourceBuilder::platform_default(managed_root_string, None),
     );
 
-    let mut orchestrator = vtuber_app::orchestrator::Orchestrator::new(managed_root.clone());
+    let mut orchestrator = vtuber_app::orchestrator::Orchestrator::new(managed_root.to_path_buf());
     orchestrator.queue_imported_model(imported);
     let mut app = App::new();
     app.insert_resource(sources)
@@ -150,21 +139,13 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
                 .disable::<bevy::winit::WinitPlugin>(),
         )
         .add_plugins(VtuberAvatarPlugin)
-        .init_resource::<vtuber_app::ui::UiState>()
-        .init_resource::<vtuber_app::actions::ActionQueue>()
         .init_resource::<vtuber_app::AvatarIoRuntime>()
-        .init_resource::<vtuber_app::ui_model::UiViewModel>()
-        .init_resource::<vtuber_app::preview::PreviewState>()
-        .init_resource::<vtuber_app::ndi_output::NdiOutputIntent>()
         .add_systems(
             Update,
             (
-                vtuber_app::orchestrator::process_ui_actions_system
-                    .before(vtuber_avatar::look::apply_look_settings_changes),
                 vtuber_app::prepare_avatar_io_system,
                 vtuber_app::orchestrator::sync_avatar_lifecycle_system
-                    .after(vtuber_avatar::unload::despawn_unloading_avatar)
-                    .before(vtuber_avatar::look::apply_look_settings_changes),
+                    .after(vtuber_avatar::unload::despawn_unloading_avatar),
             )
                 .chain(),
         )
@@ -230,122 +211,16 @@ fn render_model(path: &Path, out_dir: &Path) -> Result<String, RenderError> {
     for _ in 0..WARMUP_FRAMES {
         app.update();
     }
-    let off = take_frame(&mut app, deadline)?;
-    write_png(&out_dir.join(format!("{name}.off.png")), &off)?;
+    let frame = take_frame(&mut app, deadline)?;
+    if opaque_pixels(frame.data()) == 0 {
+        return Err(RenderError::Failed("the avatar output is empty".into()));
+    }
+    let image = out_dir.join(format!("{name}.png"));
+    write_png(&image, &frame)?;
     if let Some(error) = arm_failure {
         return Err(RenderError::Failed(error));
     }
-
-    set_look(&mut app, true, 1.0)?;
-    for _ in 0..SETTLE_FRAMES {
-        app.update();
-    }
-    let on = take_frame(&mut app, deadline)?;
-
-    set_look(&mut app, true, 0.5)?;
-    for _ in 0..SETTLE_FRAMES {
-        app.update();
-    }
-    let half = take_frame(&mut app, deadline)?;
-
-    set_look(&mut app, false, 1.0)?;
-    for _ in 0..SETTLE_FRAMES {
-        app.update();
-    }
-    let off_restored = take_frame(&mut app, deadline)?;
-
-    set_look(&mut app, true, 1.0)?;
-    for _ in 0..SETTLE_FRAMES {
-        app.update();
-    }
-    let on_again = take_frame(&mut app, deadline)?;
-
-    set_look(&mut app, true, 0.0)?;
-    for _ in 0..SETTLE_FRAMES {
-        app.update();
-    }
-    let strength_zero = take_frame(&mut app, deadline)?;
-
-    write_frame(&out_dir.join(format!("{name}.off.bgra")), &off)?;
-    write_frame(&out_dir.join(format!("{name}.on.bgra")), &on)?;
-    write_frame(
-        &out_dir.join(format!("{name}.off-restored.bgra")),
-        &off_restored,
-    )?;
-    write_frame(&out_dir.join(format!("{name}.on-again.bgra")), &on_again)?;
-    write_frame(
-        &out_dir.join(format!("{name}.strength-zero.bgra")),
-        &strength_zero,
-    )?;
-    write_png(&out_dir.join(format!("{name}.off.png")), &off)?;
-    write_png(&out_dir.join(format!("{name}.on.png")), &on)?;
-    write_png(&out_dir.join(format!("{name}.half.png")), &half)?;
-    write_png(
-        &out_dir.join(format!("{name}.off-restored.png")),
-        &off_restored,
-    )?;
-    write_png(&out_dir.join(format!("{name}.on-again.png")), &on_again)?;
-    write_png(
-        &out_dir.join(format!("{name}.strength-zero.png")),
-        &strength_zero,
-    )?;
-
-    let difference = mean_absolute_difference(off.data(), on.data());
-    let off_restore_difference = mean_absolute_difference(off.data(), off_restored.data());
-    let on_repeat_difference = mean_absolute_difference(on.data(), on_again.data());
-    let strength_zero_difference = mean_absolute_difference(off.data(), strength_zero.data());
-    let half_difference = mean_absolute_difference(off.data(), half.data());
-    let half_full_difference = mean_absolute_difference(half.data(), on.data());
-    if app
-        .world()
-        .resource::<vtuber_app::ndi_output::NdiOutputIntent>()
-        .is_requested()
-    {
-        return Err(RenderError::Failed(
-            "look edits unexpectedly enabled NDI".into(),
-        ));
-    }
-    if half_difference == 0.0 || half_full_difference == 0.0 {
-        return Err(RenderError::Failed(
-            "strength 0.5 did not produce a distinct image".into(),
-        ));
-    }
-    let summary = format!(
-        "{name}: off_mean={:.2} on_mean={:.2} mean_abs_diff={difference:.3} \
-         off_restore_diff={off_restore_difference:.3} on_repeat_diff={on_repeat_difference:.3} \
-         strength_zero_diff={strength_zero_difference:.3} half_diff={half_difference:.3} half_full_diff={half_full_difference:.3} off_opaque={} on_opaque={}\n  \
-         probes off={:?} on={:?} off_restored={:?} strength_zero={:?}\n",
-        mean(off.data()),
-        mean(on.data()),
-        opaque_pixels(off.data()),
-        opaque_pixels(on.data()),
-        probes(off.data()),
-        probes(on.data()),
-        probes(off_restored.data()),
-        probes(strength_zero.data())
-    );
-    let _ = std::fs::remove_dir_all(&managed_root);
-    if difference < 0.5 {
-        return Err(RenderError::Failed(format!(
-            "switching the look on did not change the rendering (mean_abs_diff={difference:.3})"
-        )));
-    }
-    if off_restore_difference >= 0.5 {
-        return Err(RenderError::Failed(format!(
-            "OFF after ON did not restore the original output (mean_abs_diff={off_restore_difference:.3})"
-        )));
-    }
-    if strength_zero_difference >= 0.5 {
-        return Err(RenderError::Failed(format!(
-            "strength 0 did not restore the original output (mean_abs_diff={strength_zero_difference:.3})"
-        )));
-    }
-    if on_repeat_difference >= 0.5 {
-        return Err(RenderError::Failed(format!(
-            "reapplying ON changed the output again (mean_abs_diff={on_repeat_difference:.3})"
-        )));
-    }
-    Ok(summary)
+    Ok(format!("{}\n", image.display()))
 }
 
 fn place_camera(mut cameras: Query<(&mut Transform, &mut Projection), With<AvatarViewportCamera>>) {
@@ -369,35 +244,6 @@ fn activate_output(
     if !state.is_rendering() && cameras.iter().next().is_some() {
         state.activate();
     }
-}
-
-fn set_look(app: &mut App, enabled: bool, strength: f32) -> Result<(), RenderError> {
-    use vtuber_app::actions::{RichLookChange, UiAction};
-    let target = app
-        .world()
-        .resource::<vtuber_app::ui_model::UiViewModel>()
-        .model_target
-        .clone()
-        .ok_or_else(|| RenderError::Failed("ready avatar has no UI action target".into()))?;
-    app.world_mut()
-        .resource_scope(|world, mut ui: Mut<vtuber_app::ui::UiState>| {
-            let mut actions = world.resource_mut::<vtuber_app::actions::ActionQueue>();
-            ui.emit(
-                &mut actions,
-                UiAction::ChangeRichLook {
-                    target: target.clone(),
-                    change: RichLookChange::Enabled(enabled),
-                },
-            );
-            ui.emit(
-                &mut actions,
-                UiAction::ChangeRichLook {
-                    target,
-                    change: RichLookChange::Strength(strength),
-                },
-            );
-        });
-    Ok(())
 }
 
 fn exited(app: &mut App) -> bool {
@@ -425,11 +271,6 @@ fn take_frame(app: &mut App, deadline: Instant) -> Result<VideoOutputFrame, Rend
     ))
 }
 
-fn write_frame(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
-    std::fs::write(path, frame.data())
-        .map_err(|error| RenderError::Failed(format!("cannot write {}: {error}", path.display())))
-}
-
 /// Writes the frame as a PNG so the render can be inspected as an image.
 fn write_png(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
     let mut rgba = Vec::with_capacity(frame.data().len());
@@ -443,49 +284,10 @@ fn write_png(path: &Path, frame: &VideoOutputFrame) -> Result<(), RenderError> {
         .map_err(|error| RenderError::Failed(format!("cannot write {}: {error}", path.display())))
 }
 
-/// RGBA at the face, jacket and legs so a missing material is visible.
-fn probes(data: &[u8]) -> Vec<[u8; 4]> {
-    // `render_model` inserts the WIDTH×HEIGHT BGRA output profile, so the
-    // frame buffer is exactly WIDTH×HEIGHT×4 bytes and every probe
-    // coordinate below is inside it.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "`render_model` inserts the WIDTH x HEIGHT BGRA output profile, so the frame buffer is exactly WIDTH x HEIGHT x 4 bytes and every probe coordinate is inside it"
-    )]
-    let at = |x: u32, y: u32| {
-        let index = ((y * WIDTH + x) * 4) as usize;
-        [
-            data[index],
-            data[index + 1],
-            data[index + 2],
-            data[index + 3],
-        ]
-    };
-    vec![at(128, 55), at(128, 130), at(128, 215)]
-}
-
 fn opaque_pixels(data: &[u8]) -> usize {
     data.as_chunks::<4>()
         .0
         .iter()
         .filter(|pixel| pixel[3] > 0)
         .count()
-}
-
-fn mean(data: &[u8]) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-    data.iter().map(|value| f64::from(*value)).sum::<f64>() / data.len() as f64
-}
-
-fn mean_absolute_difference(left: &[u8], right: &[u8]) -> f64 {
-    if left.is_empty() || left.len() != right.len() {
-        return f64::INFINITY;
-    }
-    left.iter()
-        .zip(right)
-        .map(|(a, b)| f64::from(a.abs_diff(*b)))
-        .sum::<f64>()
-        / left.len() as f64
 }

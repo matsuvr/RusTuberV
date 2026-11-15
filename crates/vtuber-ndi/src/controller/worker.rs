@@ -50,6 +50,7 @@ pub(super) fn run_scripted_worker(
         let Some(frame) = mailbox.take(|| stop.is_stopped())? else {
             return Ok(WorkerExit::Stopped);
         };
+        let frame = frame.into_straight_alpha();
         let mapping = match map_video_frame(&frame, config.profile) {
             Ok(mapping) => mapping,
             Err(_) => {
@@ -141,11 +142,8 @@ pub(super) fn run_ndi_worker(
         source_name: config.source_name.clone(),
     })?;
     let mut last_connection_poll = std::time::Instant::now();
-    // The validated NDI frame is reused across sends with a stable layout;
-    // only its pixel bytes are rewritten, avoiding a fresh full-frame buffer
-    // allocation on every sent frame.
+    // The session validates every frame against the same fixed profile.
     let mut ndi_frame: Option<VideoFrame> = None;
-    let mut ndi_frame_dims: (i32, i32) = (0, 0);
     loop {
         let Some(frame) = mailbox.take(|| stop.is_stopped())? else {
             return Ok(WorkerExit::Stopped);
@@ -157,6 +155,7 @@ pub(super) fn run_ndi_worker(
         {
             return Ok(WorkerExit::Stopped);
         }
+        let frame = frame.into_straight_alpha();
         let mapping = match map_video_frame(&frame, config.profile) {
             Ok(mapping) => mapping,
             Err(_) => {
@@ -167,10 +166,10 @@ pub(super) fn run_ndi_worker(
                 continue;
             }
         };
-        let dims = (mapping.width, mapping.height);
-        if ndi_frame.is_none() || ndi_frame_dims != dims {
-            let mut built = match build_ndi_video_frame(&mapping) {
-                Ok(frame) => frame,
+        let existing = match ndi_frame.as_mut() {
+            Some(existing) => existing,
+            None => match build_ndi_video_frame(&mapping) {
+                Ok(built) => ndi_frame.insert(built),
                 Err(error) => {
                     let mapped = NdiOutputError::new(
                         NdiErrorCode::SendFailed,
@@ -179,41 +178,23 @@ pub(super) fn run_ndi_worker(
                     shared.replace_status_error(&mapped);
                     return Ok(WorkerExit::StartupFailed);
                 }
-            };
-            if let Err(cause) = built.replace_data(frame.data().to_vec()) {
-                let error = NdiOutputError::new(
-                    NdiErrorCode::SendFailed,
-                    format!("NDI frame storage rejected the validated BGRA frame: {cause}"),
-                );
-                shared.replace_status_error(&error);
-                return Ok(WorkerExit::StartupFailed);
-            }
-            ndi_frame_dims = dims;
-            ndi_frame = Some(built);
-        } else if let Some(existing) = ndi_frame.as_mut()
-            && existing.data().len() == frame.data().len()
-        {
-            existing.data_mut().copy_from_slice(frame.data());
-        } else if let Some(existing) = ndi_frame.as_mut() {
-            // Defensive length fallback: rebuild with a fresh buffer when the
-            // validated frame data no longer matches the reused layout.
-            if let Err(cause) = existing.replace_data(frame.data().to_vec()) {
-                let error = NdiOutputError::new(
-                    NdiErrorCode::SendFailed,
-                    format!("NDI frame storage rejected the validated BGRA frame: {cause}"),
-                );
-                shared.replace_status_error(&error);
-                return Ok(WorkerExit::StartupFailed);
-            }
+            },
+        };
+        let seq = frame.frame_seq();
+        if let Err(cause) = existing.replace_data(frame.into_data()) {
+            let error = NdiOutputError::new(
+                NdiErrorCode::SendFailed,
+                format!("NDI frame storage rejected the validated BGRA frame: {cause}"),
+            );
+            shared.replace_status_error(&error);
+            return Ok(WorkerExit::StartupFailed);
         }
-        if let Some(existing) = &ndi_frame {
-            sender.send_video(existing);
-        }
+        sender.send_video(existing);
         shared.metrics.sent_frames.fetch_add(1, Ordering::Relaxed);
         shared
             .metrics
             .last_frame_seq
-            .store(frame.frame_seq().0, Ordering::Relaxed);
+            .store(seq.0, Ordering::Relaxed);
         if last_connection_poll.elapsed() >= std::time::Duration::from_millis(500) {
             if let Ok(connections) = sender.connection_count(std::time::Duration::from_millis(10)) {
                 shared.set_status(NdiOutputStatus::Live {

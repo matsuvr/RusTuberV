@@ -139,10 +139,10 @@ pub(super) fn output_page(
         };
         ui.label(format!("RusTuberV: {status}"));
         ui.small(lang.pick(
-            "アバターのみ・透過BGRA。OBS等でSpout2受信を追加してください。",
-            "Avatar only, transparent BGRA. Add a Spout2 receiver in OBS or another app.",
-            "仅虚拟形象，透明BGRA。请在OBS等应用中添加Spout2接收端。",
-            "아바타만 투명 BGRA로 출력합니다. OBS 등에 Spout2 수신기를 추가하세요.",
+            "同じPCのOBSへ背景透過で送信します。Spout2 CaptureのComposite ModeはPremultiplied Alphaを選んでください。",
+            "Send a transparent avatar to OBS on this PC. Add Spout2 Capture and set Composite Mode to Premultiplied Alpha.",
+            "向同一台电脑上的OBS发送透明背景虚拟形象。添加Spout2 Capture并将Composite Mode设为Premultiplied Alpha。",
+            "같은 PC의 OBS로 투명 배경 아바타를 보냅니다. Spout2 Capture의 Composite Mode를 Premultiplied Alpha로 설정하세요.",
         ));
         ui.horizontal_wrapped(|ui| {
             if primary_button(
