@@ -2,7 +2,7 @@
 
 [日本語](../ja/README.md) · **English** · [简体中文](../zh-CN/README.md) · [한국어](../ko/README.md)
 
-Talk, smile, and move your hands in front of your webcam. Bring your avatar to life and show it in OBS.
+Animate a VRM avatar with your webcam and send it to OBS through NDI or Spout2. This guide covers face and hand tracking, expressions, and framing.
 
 ![Choose an avatar → Select a camera → Adjust the view → Send to OBS](images/00-flow.png)
 
@@ -24,7 +24,9 @@ For streaming or recording, install [OBS Studio](https://obsproject.com/) as wel
 
 On Windows, double-click **RusTuberV.exe** in the application folder. If you received a ZIP file, right-click it and choose **Extract All** before opening the app.
 
-**Keep the folder's contents together.** Run RusTuberV.exe from that folder rather than moving it elsewhere.
+**Keep the folder's contents together.** Run RusTuberV.exe from the extracted folder.
+
+On Mac, extract the ZIP, move RusTuberV.app to Applications, and open it. For first-launch approval, use System Settings → Privacy & Security → Open Anyway.
 
 Select **ENGLISH** in the language buttons at the bottom left to use the labels shown in this guide.
 
@@ -64,7 +66,7 @@ Open **Pose & camera** on the left and face the camera with a relaxed expression
 
 If your avatar tilts while you face forward, use **Neutral pose → Redo**. Keep your face in view while the app waits to detect it.
 
-**To move your hands, keep your shoulders, elbows, wrists, and hands in frame.** Tick **Track arms from the webcam**. If arm movements no longer line up after moving the camera, click **Recalibrate arm length**.
+**To move your hands, keep your shoulders, elbows, wrists, and hands in frame.** Tick **Track arms from the webcam**. To recalibrate after moving the camera, click **Recalibrate arm length**.
 
 ### Change size, position, and angle
 
@@ -111,34 +113,41 @@ Open the list beside a key to change its expression. Available expressions depen
 
 Bindings are saved for each avatar. Scroll to the bottom for **Clear Expression** and **Restore Default Bindings**.
 
+### Avatar appearance and expressions
+
+Hair, skin colors, and surface appearance use the materials stored in the VRM. Blinks, mouth movements, and keyboard expressions use the expressions provided by the model.
+
 ## Show your avatar in OBS
 
-On Windows, you can also use [Spout2 output](../SPOUT2.md#english) to send to OBS on the same PC. NDI and Spout2 have independent start and stop controls.
+Open **NDI & Spout2 output** to send transparent avatar video. The size, position, and angle set in the preview apply to the output. NDI and Spout2 have separate start and stop controls and can run together.
 
-NDI® sends your avatar video to OBS. See the [official NDI website](https://ndi.video/).
+| Use | Transport | OBS setup |
+| --- | --- | --- |
+| OBS on the same Windows PC | [Spout2](#send-with-spout2-windows) | OBS Spout2 plugin |
+| OBS on the same Windows or Mac computer, or another computer on the same network | [NDI](#send-with-ndi-windows-and-mac) | DistroAV and its required NDI Runtime |
 
-NDI® is a registered trademark of Vizrt NDI AB.
+### Send with Spout2 (Windows)
 
-### One-time setup
+1. Close OBS, install OBS Spout2 plugin for your OBS version from the [official releases](https://github.com/Off-World-Live/obs-spout2-plugin/releases), and reopen OBS.
+2. Load an avatar in RusTuberV and open **NDI & Spout2 output**.
+3. Click **Start Spout2** and check that the status reads **RusTuberV: Sending**.
+4. In OBS, add **Sources → + → Spout2 Capture** and select `RusTuberV` as the sender.
+5. Set Spout2 Capture's **Composite Mode** to **Premultiplied Alpha**.
+6. Place the avatar source above background images or game capture in OBS.
 
-Install **DistroAV** so OBS can receive your avatar video. If OBS already offers **NDI Source**, continue to the next step.
+Run OBS and RusTuberV on the same GPU. Video is 1920×1080. The [Spout2 guide](../SPOUT2.md#english) covers GPU selection and resuming transmission.
 
-1. Close OBS.
-2. Install the version for your OS from the [official DistroAV download page](https://distroav.org/download).
-3. Follow the [official installation instructions](https://github.com/DistroAV/DistroAV/wiki/1.-Installation) to install the required NDI Runtime too.
-4. Open OBS again.
+### Send with NDI (Windows and Mac)
 
-NDI passes your avatar video to OBS. [DistroAV adds NDI video reception to OBS.](https://github.com/DistroAV/DistroAV#distroav-features)
+Install [DistroAV](https://distroav.org/download) and its required NDI Runtime in OBS. Follow the [official installation instructions](https://github.com/DistroAV/DistroAV/wiki/1.-Installation) for your OS and OBS version, then reopen OBS. If **NDI Source** is already available, continue to sending video.
 
-### 1. Send video from RusTuberV
+#### 1. Send video from RusTuberV
 
-Open **NDI output** on the left and click **Start NDI**. Continue once the status reads **Sending**.
+Open **NDI & Spout2 output** and click **Start NDI**. Once the status reads **Sending**, receive the video in OBS.
 
-![Start NDI and check the Sending status; use Stop NDI when finished](images/09-ndi.png)
+NDI® sends transparent avatar video. Set up your microphone in OBS for your voice.
 
-NDI sends the avatar video. Settings panels and the camera image shown for checking your position are not included.
-
-### 2. Receive it in OBS
+#### 2. Receive it in OBS
 
 Click **+** in the OBS **Sources** panel.
 
@@ -154,49 +163,53 @@ In **Source name**, select the entry ending with **(RusTuberV)**. The computer n
 
 When the avatar appears in the preview, click **OK**. Select the source in OBS and drag the corners of the red frame to resize it. Drag inside the frame to move it.
 
-The avatar background is transparent. To add a background image or game capture, place **the avatar above the background** in the OBS Sources list. Set up your microphone in OBS for your voice.
+To add a background image or game capture, place the avatar above the background in the OBS Sources list.
 
 ### Before going live
 
 - Check that the avatar is visible and responds to your face and hands.
-- Check that the OBS microphone meter moves when you talk.
+- Set up your microphone in OBS and check that its meter moves when you talk.
 - Make a short recording in OBS and play it back to check the picture and sound.
 
 Once your streaming destination is configured, click **Start Streaming** in OBS.
 
 ### When you finish
 
-**Stop streaming or recording in OBS → Click Stop NDI in RusTuberV → Close the app.**
+1. Stop streaming or recording in OBS.
+2. Open **NDI & Spout2 output** in RusTuberV and click **Stop Spout2** and **Stop NDI** for the active transports.
+3. Close RusTuberV.
 
-**Stop NDI** stops passing video to OBS. Stop the stream or recording in OBS itself.
+NDI® is a registered trademark of Vizrt NDI AB.
 
 ## Troubleshooting
 
-### If the app does not start
+### Startup checks
 
 Extract the entire ZIP and keep all bundled files together. On Windows, a startup error dialog shows the cause and the affected configuration file or managed folder path.
 
-For a `settings.toml` or `tracking_profile.toml` error, back up the indicated file before inspecting it. Malformed TOML and unsupported schemas are not automatically reset. If a newer app version saved the settings, use a compatible version. For access errors, check read/write permissions at the displayed path. Include the app version and the complete error text when reporting a problem.
+For a `settings.toml` or `tracking_profile.toml` error, back up the indicated file and check its TOML syntax and configuration version. If a newer app version saved the settings, use a compatible app version. For access errors, check read/write permissions at the displayed path. Include the app version and the complete error text when reporting a problem.
 
-If no dialog appears, or for the first launch on Mac, check the requirements and startup instructions in the [release notes](https://github.com/matsuvr/RusTuberV/releases/latest).
+See the [release notes](https://github.com/matsuvr/RusTuberV/releases/latest) for system requirements and first-launch details on Mac.
 
 ### Problems after startup
 
 ![Check the face detection state in Diagnostics](images/13-diagnostics.png)
 
-| Problem | What to try |
+| Check | Action |
 | --- | --- |
-| Camera missing from the list | Check the connection and click Refresh cameras. Close other apps using the camera. Check OS camera permission |
-| Avatar does not move | Select a VRM and camera. Check the face status in Diagnostics and face the camera. Add lighting in front of your face if needed |
-| Face not detected | Adjust your distance from the camera so your face fits in the frame |
+| Camera selection | Check the connection and click Refresh cameras. Close other apps using the camera. Check OS camera permission |
+| Avatar movement | Select a VRM and camera. Check the face status in Diagnostics and face the camera. Add lighting in front of your face if needed |
+| Face detection | Adjust your distance from the camera so your face fits in the frame |
 | Avatar tilts while you face forward | Use Pose & camera → Neutral pose → Redo |
-| Hands do not move correctly | Check Track arms from the webcam. Keep shoulders, elbows, wrists, and hands visible. Use Recalibrate arm length if needed |
+| Arm and hand tracking | Check Track arms from the webcam. Keep shoulders, elbows, wrists, and hands visible. Use Recalibrate arm length if needed |
 | Avatar too small or cut off | Adjust with the wheel or right-drag. Use Reset avatar framing to start again |
-| Expression keys do not respond | Select the RusTuberV window. Close open lists or file dialogs before pressing the key |
-| OBS has no NDI Source | Install DistroAV and the required NDI Runtime, then restart OBS |
-| RusTuberV missing from the OBS list | Check that RusTuberV says Sending. Reopen the Source name list in OBS |
+| Expression keys | Select the RusTuberV window. Close open lists or file dialogs before pressing the key |
+| Spout2 reception | Check plugin compatibility with OBS, run OBS and RusTuberV on the same GPU, and select RusTuberV as the sender |
+| Spout2 transparency | Set Spout2 Capture’s Composite Mode to Premultiplied Alpha |
+| Adding an NDI source | Install DistroAV and the required NDI Runtime, then restart OBS |
+| NDI sender selection | Check that RusTuberV says Sending. Reopen the Source name list in OBS |
 | Receivers reads 0 | Select RusTuberV in OBS and make the source visible. Receivers counts connections receiving the video |
-| NDI runtime not found | Keep the complete app folder together. For NDI, install the runtime specified by the app distributor |
+| NDI runtime | Keep the complete app folder together. For NDI, install the runtime specified by the app distributor |
 | Model loading failed | Check that the file is a `.vrm`, then try Retry load. Try another avatar too |
 
 ### Check your camera image
@@ -216,10 +229,10 @@ If you have a Looking Glass display, you can show your avatar on it too.
 
 ![Select a Looking Glass device and use Refresh devices, Start output, and Stop output](images/14-looking-glass.png)
 
-If no Looking Glass device is found, check the connection and that Bridge is running, then click **Refresh devices**.
+To update the device list, check the connection and that Bridge is running, then click **Refresh devices**.
 
 ---
 
-Screen examples: RusTuberV 0.1.0 for Windows and OBS Studio 32.2.2. Avatar: AvatarSample_C by pixiv VRoid Project. The avatar file is not included in this guide.
+Screen examples: RusTuberV 0.1.0 for Windows and OBS Studio 32.2.2. Avatar: AvatarSample_C by pixiv VRoid Project. Obtain your avatar from its distributor and follow its usage terms.
 
 [Project README](../../README.en.md)
