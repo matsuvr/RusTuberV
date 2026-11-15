@@ -8,7 +8,6 @@ param(
     [string]$Ffmpeg,
     [string]$PresentMon,
     [switch]$Uncapped,
-    [switch]$Rich,
     [switch]$RecordObservations,
     [string]$PlayObservations,
     [switch]$NoBuild
@@ -84,7 +83,6 @@ foreach ($clip in $Video) {
         backend_request = $env:WGPU_BACKEND
         logical_processors = $LogicalProcessors; processor_affinity = $measurementAffinity
         presentation = $presentation
-        rich_look = [ordered]@{ enabled = [bool]$Rich; strength = 1.0 }
         presentmon_sha256 = if ($PresentMon) { (Get-FileHash -LiteralPath $PresentMon -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
         presentmon_clock = if ($PresentMon) { @{
             qpc = [Diagnostics.Stopwatch]::GetTimestamp()
@@ -123,7 +121,6 @@ foreach ($clip in $Video) {
                 'tracking-replay', $rgb, $modelPath, $out, "$LogicalProcessors", $presentation)
             if ($playback) { $cargoArguments += @('--play-observations', $playback.path) }
             elseif ($RecordObservations) { $cargoArguments += '--record-observations' }
-            if ($Rich) { $cargoArguments += '--rich' }
             & "$PSScriptRoot/cargo-windows.ps1" -CargoArguments $cargoArguments *> $log
             $hostProcess.ProcessorAffinity = $originalAffinity
             if ($presentProcess) {

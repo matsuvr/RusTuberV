@@ -7,12 +7,13 @@ members = [
   "crates/vtuber-tracking",
   "crates/vtuber-avatar",
   "crates/vtuber-ndi",
+  "crates/vtuber-spout",
   "crates/vtuber-app",
   "apps/desktop",
   "tools/xtask",
   "tools/looking-glass-device",
 ]
-exclude = ["vendor/mediapipe-rs", "vendor/nokhwa", "vendor/nokhwa-bindings-windows", "vendor/bevy_window", "vendor/bevy_vrm1"]
+exclude = ["vendor/spout2-sys", "vendor/mediapipe-rs", "vendor/nokhwa", "vendor/nokhwa-bindings-windows", "vendor/bevy_window", "vendor/bevy_vrm1"]
 resolver = "2"
 
 [workspace.package]
@@ -41,12 +42,12 @@ mediapipe = { path = "vendor/mediapipe-rs" }
 
 # Local fixes for camera and window lifetime across sleep transitions.
 [patch.crates-io]
+spout2-sys = { path = "vendor/spout2-sys" }
 nokhwa = { path = "vendor/nokhwa" }
 nokhwa-bindings-windows = { path = "vendor/nokhwa-bindings-windows" }
 bevy_window = { path = "vendor/bevy_window" }
 
-# Bevy 0.20/WESL port plus the outline extraction fix required when switching
-# to an ExtendedMaterial with additional bindings. See vendor/bevy_vrm1/NOTICE.
+# Bevy 0.20 compatibility port. See vendor/bevy_vrm1/NOTICE.
 [patch."https://github.com/not-elm/bevy_vrm1"]
 bevy_vrm1 = { path = "vendor/bevy_vrm1" }
 

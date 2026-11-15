@@ -29,27 +29,19 @@ mod action_system;
 mod expressions;
 mod lifecycle;
 
-pub use action_system::{LookSystemParams, process_ui_actions_system};
+pub use action_system::process_ui_actions_system;
 pub use expressions::sync_expression_view_model;
 pub use lifecycle::sync_avatar_lifecycle_system;
 
 /// An already imported model awaiting background load preparation.
 ///
-/// Used for CLI startup and retries. The file worker reads its managed copy
-/// and settings before the lifecycle bridge submits a prepared request.
+/// Used for CLI startup and retries. The file worker prepares the managed copy.
 #[derive(Clone, Debug)]
 pub struct PendingLoadRequest {
     /// Monotonically increasing correlation identifier.
     pub request_id: u64,
     /// The imported model to load.
     pub model: ImportedModel,
-}
-
-/// Model and saved look waiting for the corresponding lifecycle result.
-#[derive(Debug)]
-pub(crate) struct SubmittedAvatarLoad {
-    pub(crate) model: ImportedModel,
-    pub(crate) look: Option<vtuber_avatar::RichLookSettings>,
 }
 
 /// A selected VRM awaiting explicit license acceptance before import.
@@ -84,12 +76,9 @@ pub struct Orchestrator {
     pending_load: Option<PendingLoadRequest>,
     pub(crate) pending_file_work: Option<(u64, AvatarFileWork)>,
     active_request_id: Option<u64>,
-    prepared_load: Option<(
-        vtuber_avatar::LoadImportedAvatarRequest,
-        SubmittedAvatarLoad,
-    )>,
+    prepared_load: Option<(vtuber_avatar::LoadImportedAvatarRequest, ImportedModel)>,
     /// Requests submitted to the engine but not yet confirmed.
-    submitted_loads: BTreeMap<u64, SubmittedAvatarLoad>,
+    submitted_loads: BTreeMap<u64, ImportedModel>,
     /// Selected VRM awaiting license acceptance.
     pub(crate) pending_avatar_import: Option<PendingAvatarImport>,
     /// Next avatar load request correlation identifier.
@@ -312,6 +301,8 @@ impl Orchestrator {
             UiAction::SwitchPane(_)
             | UiAction::ResetAvatarCamera
             | UiAction::StartNdiOutput
+            | UiAction::StartSpoutOutput
+            | UiAction::StopSpoutOutput
             | UiAction::StartLookingGlass(_)
             | UiAction::RefreshLookingGlass
             | UiAction::StopLookingGlass
@@ -327,9 +318,7 @@ impl Orchestrator {
             | UiAction::ResetExpressionBindings { .. }
             | UiAction::ToggleExpressionKey { .. }
             | UiAction::ClearManualExpression { .. }
-            | UiAction::SetLanguage(_)
-            | UiAction::ChangeRichLook { .. }
-            | UiAction::SaveRichLook { .. } => {}
+            | UiAction::SetLanguage(_) => {}
         }
     }
 
@@ -379,7 +368,7 @@ impl Orchestrator {
     }
 
     /// Queues an imported model for background load preparation without replacing
-    /// the accepted model or its look until the engine confirms the request.
+    /// the accepted model until the engine confirms the request.
     pub fn queue_imported_model(&mut self, model: ImportedModel) {
         let request_id = self.begin_avatar_request();
         self.pending_load = Some(PendingLoadRequest { request_id, model });

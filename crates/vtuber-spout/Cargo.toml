@@ -1,0 +1,18 @@
+[package]
+name = "vtuber-spout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Windows Spout2 avatar output with a bounded latest-frame mailbox."
+
+[dependencies]
+vtuber-core = { path = "../vtuber-core" }
+
+[target.'cfg(windows)'.dependencies]
+spout2-rs = { version = "=0.1.1", default-features = false, features = ["dx"] }
+
+[lints]
+workspace = true

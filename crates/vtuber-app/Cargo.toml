@@ -17,6 +17,7 @@ vtuber-inference = { path = "../vtuber-inference", default-features = false }
 vtuber-tracking = { path = "../vtuber-tracking" }
 vtuber-avatar = { path = "../vtuber-avatar" }
 vtuber-ndi = { path = "../vtuber-ndi" }
+vtuber-spout = { path = "../vtuber-spout" }
 bevy = { workspace = true }
 bevy_egui = { workspace = true }
 rfd = { workspace = true }
@@ -38,6 +39,9 @@ ndi-output = ["vtuber-ndi/ndi-sdk"]
 [dev-dependencies]
 bevy_vrm1 = { workspace = true, features = ["log"] }
 tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+spout2-rs = { version = "=0.1.1", default-features = false, features = ["dx"] }
 
 [lints]
 workspace = true

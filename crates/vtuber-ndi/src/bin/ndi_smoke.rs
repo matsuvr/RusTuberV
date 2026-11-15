@@ -64,7 +64,7 @@ fn run() -> Result<(), String> {
     let patterns = [
         ([0, 0, 0, 0], [255, 255, 255, 255]),
         ([0, 255, 0, 255], [0, 0, 255, 255]),
-        ([128, 0, 0, 128], [0, 0, 255, 128]),
+        ([64, 0, 0, 128], [0, 0, 128, 128]),
         ([40, 80, 120, 255], [1, 2, 3, 255]),
     ];
     let mut hashes = BTreeSet::new();
@@ -195,10 +195,7 @@ fn inspect_frame(
         let Some(row_data) = data.get(start..end) else {
             continue;
         };
-        for pixel in row_data.chunks_exact(4) {
-            let [b, g, r, a] = pixel else {
-                continue;
-            };
+        for [b, g, r, a] in row_data.as_chunks::<4>().0 {
             hash = hash.wrapping_mul(16777619) ^ u64::from(*b);
             hash = hash.wrapping_mul(16777619) ^ u64::from(*g);
             hash = hash.wrapping_mul(16777619) ^ u64::from(*r);
@@ -225,9 +222,7 @@ fn submit_pattern(
     foreground: [u8; 4],
 ) -> Result<(), String> {
     let mut data = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
-    for pixel in data.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&background);
-    }
+    data.as_chunks_mut::<4>().0.fill(background);
     let origin = ((HEIGHT / 2) * WIDTH + (WIDTH / 2)) as usize * 4;
     let end = origin
         .checked_add(4)
@@ -236,8 +231,15 @@ fn submit_pattern(
         .get_mut(origin..end)
         .ok_or_else(|| "smoke frame origin is out of bounds".to_owned())?;
     slot.copy_from_slice(&foreground);
-    let frame = VideoOutputFrame::new_bgra8(WIDTH, HEIGHT, FrameSeq(seq), MonoTimeNs(seq), data)
-        .map_err(|error| format!("test frame invalid: {error}"))?;
+    let frame = VideoOutputFrame::from_rendered_bgra8(
+        WIDTH,
+        HEIGHT,
+        WIDTH as usize * 4,
+        FrameSeq(seq),
+        MonoTimeNs(seq),
+        data,
+    )
+    .map_err(|error| format!("test frame invalid: {error}"))?;
     match controller
         .submit_frame(frame)
         .map_err(|error| error.to_string())?

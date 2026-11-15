@@ -94,7 +94,6 @@ pub struct UiShellPlugin;
 
 impl Plugin for UiShellPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(super::avatar_preview::AvatarPreviewPlugin);
         // The first camera may be the offscreen output camera. Never attach
         // egui there: UI pixels must stay on the window-targeting camera only.
         app.world_mut()
@@ -210,7 +209,8 @@ fn ui_render_system(
         .as_ref()
         .and_then(|image| contexts.image_id(image.id()));
     let avatar_texture = target.as_ref().map(|target| {
-        super::avatar_preview::AvatarPreviewTexture::new(target.image().clone(), target.profile())
+        let id = contexts.add_image(bevy_egui::EguiTextureHandle::Weak(target.image().id()));
+        super::avatar_preview::AvatarPreviewTexture::new(id, target.profile())
     });
     let ctx = contexts.ctx_mut()?;
     state.sync_pane(vm.pane);
@@ -403,7 +403,7 @@ mod tests {
                         AvatarMotionMirror::default(),
                         None,
                         Some(super::super::avatar_preview::AvatarPreviewTexture::new(
-                            Handle::default(),
+                            bevy_egui::egui::TextureId::User(1),
                             vtuber_core::VideoOutputProfile::default(),
                         )),
                         false,

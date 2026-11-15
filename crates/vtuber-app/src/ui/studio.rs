@@ -3,9 +3,9 @@
 
 use crate::actions::ActionQueue;
 
-use super::avatar_preview::{AvatarPreviewTexture, paint_avatar_preview, paint_avatar_preview_at};
+use super::avatar_preview::AvatarPreviewTexture;
 use super::shell::UiState;
-use crate::actions::{RichLookChange, UiAction};
+use crate::actions::UiAction;
 use crate::diagnostics::DiagnosticsSnapshot;
 use crate::error_presenter::ErrorPresentation;
 use crate::preview::PreviewState;
@@ -63,7 +63,12 @@ fn page_title(pane: Pane, lang: UiLanguage) -> &'static str {
             "자세·카메라 조정",
         ),
         Pane::ExpressionKeys => lang.pick("表情設定", "Expressions", "表情设置", "표정 설정"),
-        Pane::NdiOutput => lang.pick("NDI出力", "NDI output", "NDI输出", "NDI 출력"),
+        Pane::NdiOutput => lang.pick(
+            "NDI・Spout2出力",
+            "NDI & Spout2 output",
+            "NDI与Spout2输出",
+            "NDI 및 Spout2 출력",
+        ),
         Pane::LookingGlassOutput => lang.pick(
             "Looking Glass出力",
             "Looking Glass output",
@@ -455,7 +460,7 @@ fn avatar_monitor(
     if vm.avatar.is_ready {
         if let Some(texture) = texture {
             let width = ui.available_width().min(max_width);
-            let profile = texture.profile();
+            let profile = texture.profile;
             let height = width * profile.height as f32 / profile.width as f32;
             let attention = (draw_preview && vm.camera.selected_index.is_some())
                 .then(|| attention_style(ui, vm.avatar_import_review.review.is_none()));
@@ -472,11 +477,10 @@ fn avatar_monitor(
                     // workspace collapses; the monitor keeps its layout only,
                     // so the preview is never drawn twice.
                     if draw_preview {
-                        paint_avatar_preview(
-                            ui,
-                            texture.image().clone(),
-                            size,
-                            f32::from(MONITOR_CARD_RADIUS),
+                        ui.add(
+                            texture
+                                .widget(size, MONITOR_CARD_RADIUS)
+                                .sense(egui::Sense::click_and_drag()),
                         )
                     } else {
                         ui.allocate_exact_size(size, egui::Sense::hover()).1
@@ -628,7 +632,7 @@ pub(crate) fn render_studio(
                         ui,
                         vm,
                         state,
-                        avatar_texture.clone(),
+                        avatar_texture,
                         panel - MONITOR_PANEL_PADDING,
                         !transitioning,
                         lang,
@@ -650,7 +654,7 @@ pub(crate) fn render_studio(
                         ui,
                         vm,
                         state,
-                        avatar_texture.clone(),
+                        avatar_texture,
                         MIN_MONITOR_WIDTH,
                         !transitioning,
                         lang,
@@ -710,7 +714,6 @@ pub(crate) fn render_studio(
                                 Pane::VrmCamera => {
                                     vrm_page(actions, ui, vm, state, dialog_active, lang);
                                     camera_select_page(actions, ui, vm, state, dialog_active, lang);
-                                    render_rich_look_controls(actions, ui, vm, state, lang);
                                 }
                                 Pane::PoseCamera => {
                                     calibration_page(actions, ui, vm, state, lang);
@@ -746,7 +749,7 @@ pub(crate) fn render_studio(
             &mut root,
             viewport,
             expand,
-            avatar_texture.clone(),
+            avatar_texture,
             previous_monitor_rect,
         );
         let transform = egui::emath::TSTransform::new(
@@ -807,12 +810,7 @@ fn paint_avatar_transition(
             .id_salt("studio_transition_preview")
             .max_rect(viewport),
     );
-    paint_avatar_preview_at(
-        overlay.painter(),
-        card,
-        texture.image().clone(),
-        f32::from(radius),
-    );
+    texture.widget(card.size(), radius).paint_at(&overlay, card);
 }
 
 /// Swallows pointer input while the workspace is visually transformed away
@@ -1131,70 +1129,6 @@ fn calibration_page(
     arm_pose_section(actions, ui, vm, state, lang);
 }
 
-/// Rich-look switch and lighting/effect strength.
-///
-/// The controls edit the live [`vtuber_avatar::AvatarLookSettings`] the look
-/// systems read, so the change is visible without a reload; the save button
-/// persists the same values for the loaded model.
-fn render_rich_look_controls(
-    actions: &mut ActionQueue,
-    ui: &mut Ui,
-    vm: &UiViewModel,
-    state: &mut UiState,
-    lang: UiLanguage,
-) {
-    let Some(target) = vm.model_target.as_ref() else {
-        return;
-    };
-    let switch = lang.pick("リッチ表示", "Enhanced look", "增强显示", "고급 렌더링");
-    section(ui, switch, |ui| {
-        let mut enabled = vm.look.enabled;
-        if ui.checkbox(&mut enabled, switch).changed() {
-            state.emit(
-                actions,
-                UiAction::ChangeRichLook {
-                    target: target.clone(),
-                    change: RichLookChange::Enabled(enabled),
-                },
-            );
-        }
-        let mut percent = vm.look.strength * 100.0;
-        if ui
-            .add(
-                egui::Slider::new(&mut percent, 0.0..=100.0)
-                    .suffix("%")
-                    .text(lang.pick("効果の強さ", "Effect strength", "效果强度", "효과 강도")),
-            )
-            .changed()
-        {
-            state.emit(
-                actions,
-                UiAction::ChangeRichLook {
-                    target: target.clone(),
-                    change: RichLookChange::Strength(percent / 100.0),
-                },
-            );
-        }
-        if vm.avatar.imported_model.is_some()
-            && ui
-                .button(lang.pick(
-                    "このモデルに設定を保存",
-                    "Save for this model",
-                    "为此模型保存设置",
-                    "이 모델에 설정 저장",
-                ))
-                .clicked()
-        {
-            state.emit(
-                actions,
-                UiAction::SaveRichLook {
-                    target: target.clone(),
-                },
-            );
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1268,7 +1202,7 @@ mod tests {
                 AvatarMotionMirror::default(),
                 None,
                 Some(AvatarPreviewTexture::new(
-                    bevy::asset::Handle::default(),
+                    egui::TextureId::User(1),
                     vtuber_core::VideoOutputProfile::default(),
                 )),
                 false,
@@ -1312,7 +1246,7 @@ mod tests {
                                 AvatarMotionMirror::default(),
                                 None,
                                 Some(AvatarPreviewTexture::new(
-                                    bevy::asset::Handle::default(),
+                                    egui::TextureId::User(1),
                                     vtuber_core::VideoOutputProfile::default(),
                                 )),
                                 dialog_active,
@@ -1499,7 +1433,7 @@ mod tests {
                     AvatarMotionMirror::default(),
                     None,
                     Some(AvatarPreviewTexture::new(
-                        bevy::asset::Handle::default(),
+                        egui::TextureId::User(1),
                         vtuber_core::VideoOutputProfile::default(),
                     )),
                     false,
@@ -1550,53 +1484,6 @@ mod tests {
             ] {
                 assert!(!page_title(pane, lang).is_empty());
             }
-        }
-    }
-
-    fn test_generation() -> vtuber_avatar::AvatarGeneration {
-        vtuber_avatar::AvatarGeneration(1)
-    }
-
-    #[test]
-    fn rich_look_view_model_default_matches_the_look_settings() {
-        let model = crate::ui_model::RichLookViewModel::default();
-        let settings = vtuber_avatar::RichLookSettings::default();
-        assert_eq!(model.enabled, settings.enabled());
-        assert_eq!(model.strength, settings.strength());
-    }
-
-    #[test]
-    fn rich_look_controls_emit_no_actions_without_input_in_any_language() {
-        let mut actions = ActionQueue::default();
-        for lang in [
-            UiLanguage::Ja,
-            UiLanguage::En,
-            UiLanguage::Zh,
-            UiLanguage::Ko,
-        ] {
-            let ctx = egui::Context::default();
-            let mut state = UiState::default();
-            let vm = UiViewModel {
-                model_target: Some(crate::actions::ModelActionTarget {
-                    model_id: "model".into(),
-                    generation: test_generation(),
-                }),
-                look: crate::ui_model::RichLookViewModel {
-                    enabled: true,
-                    strength: 0.5,
-                },
-                ..Default::default()
-            };
-            crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
-                render_rich_look_controls(&mut actions, ui, &vm, &mut state, lang);
-            });
-            let mut off = vm;
-            off.look.enabled = false;
-            crate::ui::run_headless_ui(&ctx, egui::RawInput::default(), |ui| {
-                render_rich_look_controls(&mut actions, ui, &off, &mut state, lang);
-            });
-            // Neither enabled nor disabled controls emit actions without input.
-            assert!(actions.take_actions().is_empty());
         }
     }
 }

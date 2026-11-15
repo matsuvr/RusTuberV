@@ -14,6 +14,8 @@ pub enum VideoOutputPixelFormat {
     /// 8-bit BGRA in straight (non-premultiplied) alpha form.
     #[default]
     Bgra8StraightAlpha,
+    /// The BGRA bytes of Bevy's transparent render target, before unpremultiplication.
+    Bgra8PremultipliedAlpha,
 }
 
 /// The fixed output profile shared by rendering and later transport layers.
@@ -113,6 +115,13 @@ impl VideoOutputFrame {
         &self.data
     }
 
+    /// Moves the packed bytes into an owning transport, retaining the allocation
+    /// when this is the last holder.
+    #[must_use]
+    pub fn into_data(self) -> Vec<u8> {
+        Arc::unwrap_or_clone(self.data)
+    }
+
     /// Creates a validated packed BGRA8 frame, taking ownership of its bytes.
     ///
     /// # Errors
@@ -160,6 +169,27 @@ impl VideoOutputFrame {
         source_stride_bytes: usize,
         frame_seq: FrameSeq,
         captured_at: MonoTimeNs,
+        readback: Vec<u8>,
+    ) -> Result<Self, VideoOutputFrameError> {
+        Ok(Self::from_rendered_bgra8(
+            width,
+            height,
+            source_stride_bytes,
+            frame_seq,
+            captured_at,
+            readback,
+        )?
+        .into_straight_alpha())
+    }
+
+    /// Takes ownership of a Bevy readback, removing only GPU row padding.
+    /// Packed render targets keep every byte and the original allocation.
+    pub fn from_rendered_bgra8(
+        width: u32,
+        height: u32,
+        source_stride_bytes: usize,
+        frame_seq: FrameSeq,
+        captured_at: MonoTimeNs,
         mut readback: Vec<u8>,
     ) -> Result<Self, VideoOutputFrameError> {
         let packed_stride = packed_stride(width)?;
@@ -192,8 +222,27 @@ impl VideoOutputFrame {
             }
             readback.truncate(packed_len);
         }
-        unpremultiply_bgra8_in_place(&mut readback)?;
-        Self::new_bgra8(width, height, frame_seq, captured_at, readback)
+        Ok(Self {
+            width,
+            height,
+            stride_bytes: packed_stride,
+            pixel_format: VideoOutputPixelFormat::Bgra8PremultipliedAlpha,
+            frame_seq,
+            captured_at,
+            data: Arc::new(readback),
+        })
+    }
+
+    /// Converts a rendered frame for a straight-alpha consumer. A retained
+    /// Spout frame keeps its original pixels via copy-on-write.
+    #[must_use]
+    pub fn into_straight_alpha(mut self) -> Self {
+        if self.pixel_format == VideoOutputPixelFormat::Bgra8PremultipliedAlpha {
+            let data = Arc::make_mut(&mut self.data);
+            unpremultiply_pixels(data.as_chunks_mut::<4>().0);
+            self.pixel_format = VideoOutputPixelFormat::Bgra8StraightAlpha;
+        }
+        self
     }
 }
 
@@ -254,6 +303,11 @@ pub fn unpremultiply_bgra8_in_place(data: &mut [u8]) -> Result<(), VideoOutputFr
     if !remainder.is_empty() {
         return Err(VideoOutputFrameError::PixelDataNotAligned);
     }
+    unpremultiply_pixels(pixels);
+    Ok(())
+}
+
+fn unpremultiply_pixels(pixels: &mut [[u8; 4]]) {
     for [blue, green, red, alpha] in pixels {
         let alpha = u16::from(*alpha);
         if alpha == 0 {
@@ -267,7 +321,6 @@ pub fn unpremultiply_bgra8_in_place(data: &mut [u8]) -> Result<(), VideoOutputFr
             }
         }
     }
-    Ok(())
 }
 
 fn packed_stride(width: u32) -> Result<usize, VideoOutputFrameError> {
@@ -333,6 +386,22 @@ mod tests {
             VideoOutputPixelFormat::Bgra8StraightAlpha
         );
         assert_eq!(profile.packed_stride_bytes(), 7680);
+    }
+
+    #[test]
+    fn ndi_alone_converts_and_hands_off_the_original_allocation_once() {
+        let bytes = vec![25, 50, 75, 128, 11, 22, 33, 255];
+        let allocation = bytes.as_ptr();
+        let frame = VideoOutputFrame::from_rendered_bgra8(2, 1, 8, FrameSeq(9), timestamp(), bytes)
+            .unwrap()
+            .into_straight_alpha();
+        assert_eq!(
+            frame.pixel_format(),
+            VideoOutputPixelFormat::Bgra8StraightAlpha
+        );
+        let sdk_bytes = frame.into_straight_alpha().into_data();
+        assert_eq!(sdk_bytes.as_ptr(), allocation);
+        assert_eq!(sdk_bytes, [50, 100, 149, 128, 11, 22, 33, 255]);
     }
 
     fn unpremultiply_channel(channel: u8, alpha: u8) -> u8 {

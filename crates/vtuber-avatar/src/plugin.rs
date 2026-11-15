@@ -95,9 +95,6 @@ impl Plugin for VtuberAvatarPlugin {
             .init_resource::<LossIdleState>()
             .init_resource::<crate::body_motion::BodyFollowFilter>()
             .init_resource::<crate::tracking_profile::GlobalBodyTrackingProfile>()
-            .init_resource::<crate::look::AvatarLookSettings>()
-            .add_message::<crate::look::LookSettingsChanged>()
-            .add_systems(Update, crate::look::apply_look_settings_changes)
             .add_message::<LoadAvatarRequest>()
             .add_message::<LoadAvatarResult>()
             .add_message::<UnloadAvatarRequest>()
@@ -221,9 +218,6 @@ impl Plugin for VtuberAvatarPlugin {
             .add_systems(Update, reset_position_metrics_on_lifecycle_change)
             .add_systems(Update, crate::pose::debug_propagation_probe)
             .add_systems(Update, crate::pose::debug_arm_frame_probe);
-        crate::look::register_look_lighting(app);
-        crate::look::register_rich_mtoon(app);
-        crate::look::register_rich_standard(app);
         register_output_systems(app);
     }
 }
@@ -236,7 +230,7 @@ impl Plugin for VtuberAvatarPlugin {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct StartupModelPath(pub Option<String>);
 
-/// The single, fixed-strength Native directional light; never a Look light.
+/// Directional light aligned with the avatar camera.
 #[derive(Component)]
 struct StandardAvatarLight;
 
@@ -267,9 +261,7 @@ fn setup_scene(
         RenderLayers::layer(VIEWPORT_ONLY_RENDER_LAYER),
     ));
 
-    // Light travels along the camera's forward (-Z) direction. Keep the
-    // existing illuminance rather than retuning the upstream Native look.
-    // Do not spawn zero-lux Fill/Rim lights: upstream MToon still sees them.
+    // Light travels along the camera's forward (-Z) direction.
     commands.spawn((
         DirectionalLight {
             color: Color::WHITE,
@@ -296,12 +288,10 @@ fn setup_scene(
 }
 
 // Both cameras exist after Startup, before the first rendered frame.
-// Apply ordinary display settings once, independently of Look: fixed EV100
+// Apply ordinary display settings once, using fixed EV100
 // 9.7, SDR (no Hdr component), no tone curve or dithering. Both cameras keep
 // Bevy's default sRGB target format; do not set CompositingSpace, which would
 // switch the window pass to Rgba8Unorm and conflict with the egui pipeline.
-// Keep the existing transparent BGRA output and preview alpha/sRGB conversion
-// unchanged. Later Look systems must not rewrite this policy.
 #[expect(
     clippy::type_complexity,
     reason = "Bevy's `Query` filter tuple for the avatar display setup, with no call site to change"
@@ -321,8 +311,7 @@ fn setup_avatar_display(
 
 // Framing writes the camera after transform propagation. Update the root
 // light's GlobalTransform here too, so orbit/reset affect lighting in the same
-// frame. Only the camera is read: head pose and Look strength have no authority
-// over this light's direction, color, illuminance or shadow setting.
+// frame.
 fn align_standard_light_to_camera(
     camera: Single<&Transform, (With<AvatarViewportCamera>, Without<StandardAvatarLight>)>,
     light: Single<(&mut Transform, &mut GlobalTransform), With<StandardAvatarLight>>,
@@ -417,72 +406,6 @@ mod tests {
         assert_eq!(light.illuminance, 650.0);
         assert_eq!(light.color, Color::WHITE);
         assert!(!light.shadow_maps_enabled);
-    }
-
-    #[test]
-    fn look_lights_leave_the_standard_light_untouched() {
-        fn standard_light(app: &mut App) -> (f32, Color, bool, Quat) {
-            let mut query = app.world_mut().query::<(&DirectionalLight, &Transform)>();
-            let lights: Vec<_> = query
-                .iter(app.world())
-                .map(|(light, transform)| {
-                    (
-                        light.illuminance,
-                        light.color,
-                        light.shadow_maps_enabled,
-                        transform.rotation,
-                    )
-                })
-                .collect();
-            assert_eq!(lights.len(), 1, "exactly one standard directional light");
-            lights[0]
-        }
-
-        let mut app = App::new();
-        app.init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<AvatarLifecycle>()
-            .init_resource::<crate::look::AvatarLookSettings>()
-            .add_systems(Startup, setup_scene)
-            .add_systems(PostStartup, setup_avatar_display)
-            .add_systems(PostUpdate, align_standard_light_to_camera);
-        crate::look::register_look_lighting(&mut app);
-        app.update();
-
-        let head = app
-            .world_mut()
-            .spawn(GlobalTransform::from_xyz(0.0, 1.3, 0.0))
-            .id();
-        let hips = app
-            .world_mut()
-            .spawn(GlobalTransform::from_xyz(0.0, 0.9, 0.0))
-            .id();
-        let root = app
-            .world_mut()
-            .spawn((HeadBoneEntity(head), HipsBoneEntity(hips)))
-            .id();
-        app.world_mut()
-            .resource_mut::<AvatarLifecycle>()
-            .request_load(root)
-            .expect("test load request is accepted");
-
-        let before = standard_light(&mut app);
-
-        app.world_mut()
-            .resource_mut::<crate::look::AvatarLookSettings>()
-            .0 = crate::look::RichLookSettings::try_new(true, 0.5).unwrap();
-        app.update();
-        let mut spots = app.world_mut().query::<&SpotLight>();
-        assert_eq!(spots.iter(app.world()).count(), 2);
-        assert_eq!(standard_light(&mut app), before);
-
-        app.world_mut()
-            .resource_mut::<crate::look::AvatarLookSettings>()
-            .0 = crate::look::RichLookSettings::try_new(false, 1.0).unwrap();
-        app.update();
-        let mut spots = app.world_mut().query::<&SpotLight>();
-        assert_eq!(spots.iter(app.world()).count(), 0);
-        assert_eq!(standard_light(&mut app), before);
     }
 
     #[test]

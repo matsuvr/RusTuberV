@@ -109,9 +109,6 @@ fn extract_mtoon_materials(
     mut instances: ResMut<MToonMaterialInstances>,
     materials: Extract<Query<(Entity, &MeshMaterial3d<MToonMaterial>)>>,
 ) {
-    // Removed/swapped materials must not retain a native outline entry: the
-    // mesh may now use an ExtendedMaterial with an incompatible bind layout.
-    instances.clear();
     materials.iter().for_each(|(entity, material)| {
         instances.0.insert(entity.into(), material.id());
     });

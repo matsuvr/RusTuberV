@@ -1,6 +1,6 @@
 //! VRM 1.0 managed-copy adaptation for the unmodified upstream runtime.
 //!
-//! The adopted upstream (`bevy_vrm1` v0.9.3) reads only
+//! The adopted upstream (`bevy_vrm1` v0.10.0) reads only
 //! `VRMC_vrm.expressions.preset` and requires `isBinary`, `overrideBlink`,
 //! `overrideLookAt`, and `overrideMouth` on every entry without serde
 //! defaults, while the VRM 1.0 specification makes all of them optional
@@ -32,7 +32,7 @@
 //!   application's source-facts parser and the app-side material writer can
 //!   still see them.
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 /// Managed-copy marker written into `custom` entries this adaptation merged
 /// into `preset`.
@@ -125,6 +125,78 @@ pub(crate) fn adapt_vrm1_expressions(document: &mut Value) -> bool {
         expressions.insert("custom".to_string(), Value::Object(custom));
     }
 
+    true
+}
+
+/// The pinned loader requires explicit values for some optional MToon properties.
+pub(crate) fn adapt_mtoon_defaults(document: &mut Value) -> bool {
+    let Some(materials) = document.get_mut("materials").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    let mut uses_texture_transform = false;
+    for material in materials {
+        let Some(mtoon) = material
+            .pointer_mut("/extensions/VRMC_materials_mtoon")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        for (key, value) in [
+            ("matcapFactor", json!([1, 1, 1])),
+            ("shadeColorFactor", json!([1, 1, 1])),
+            ("outlineColorFactor", json!([0, 0, 0])),
+            ("parametricRimColorFactor", json!([0, 0, 0])),
+            ("outlineWidthMode", json!("none")),
+            ("outlineLightingMixFactor", json!(1)),
+            ("rimLightingMixFactor", json!(1)),
+            ("shadingToonyFactor", json!(0.9)),
+            ("giEqualizationFactor", json!(0.9)),
+            ("renderQueueOffsetNumber", json!(0)),
+            ("shadingShiftFactor", json!(0)),
+            ("parametricRimLiftFactor", json!(0)),
+            ("uvAnimationRotationSpeedFactor", json!(0)),
+            ("uvAnimationScrollXSpeedFactor", json!(0)),
+            ("uvAnimationScrollYSpeedFactor", json!(0)),
+            ("transparentWithZWrite", json!(false)),
+        ] {
+            changed |= fill_missing(mtoon, key, value);
+        }
+        if let Some(shift) = mtoon
+            .get_mut("shadingShiftTexture")
+            .and_then(Value::as_object_mut)
+        {
+            changed |= fill_missing(shift, "texCoord", json!(0));
+            changed |= fill_missing(shift, "scale", json!(1));
+        }
+        if let Some(shade) = mtoon
+            .get_mut("shadeMultiplyTexture")
+            .and_then(Value::as_object_mut)
+        {
+            let extensions = shade.entry("extensions").or_insert_with(|| json!({}));
+            if let Some(extensions) = extensions.as_object_mut()
+                && let Some(transform) = extensions
+                    .entry("KHR_texture_transform")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+            {
+                uses_texture_transform = true;
+                changed |= fill_missing(transform, "offset", json!([0, 0]));
+                changed |= fill_missing(transform, "scale", json!([1, 1]));
+            }
+        }
+    }
+    if uses_texture_transform {
+        changed |= crate::vrm::mark_extension_used(document, "KHR_texture_transform");
+    }
+    changed
+}
+
+fn fill_missing(object: &mut Map<String, Value>, key: &str, value: Value) -> bool {
+    if object.contains_key(key) {
+        return false;
+    }
+    object.insert(key.to_owned(), value);
     true
 }
 

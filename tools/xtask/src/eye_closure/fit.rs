@@ -635,36 +635,21 @@ fn compare_geometry_candidates(
     right_validation
         .events
         .event_attainment
-        .map_or(0.0, |value| value)
-        .total_cmp(
-            &left_validation
-                .events
-                .event_attainment
-                .map_or(0.0, |value| value),
-        )
+        .unwrap_or(0.0)
+        .total_cmp(&left_validation.events.event_attainment.unwrap_or(0.0))
         .then_with(|| {
             right_validation
                 .reviewed
                 .closed_recall
-                .map_or(0.0, |value| value)
-                .total_cmp(
-                    &left_validation
-                        .reviewed
-                        .closed_recall
-                        .map_or(0.0, |value| value),
-                )
+                .unwrap_or(0.0)
+                .total_cmp(&left_validation.reviewed.closed_recall.unwrap_or(0.0))
         })
         .then_with(|| {
             left_validation
                 .reviewed
                 .false_close
-                .map_or(1.0, |value| value)
-                .total_cmp(
-                    &right_validation
-                        .reviewed
-                        .false_close
-                        .map_or(1.0, |value| value),
-                )
+                .unwrap_or(1.0)
+                .total_cmp(&right_validation.reviewed.false_close.unwrap_or(1.0))
         })
         .then_with(|| left.threshold.width().total_cmp(&right.threshold.width()))
         .then_with(|| {
@@ -966,10 +951,9 @@ fn compare_candidate_rows(left: &CandidateRow, right: &CandidateRow) -> Ordering
 }
 
 fn compare_eye_metrics(left: &EyeMetrics, right: &EyeMetrics) -> Ordering {
-    let ret = |metrics: &EyeMetrics| metrics.events.event_attainment.map_or(0.0, |value| value);
-    let recall = |metrics: &EyeMetrics| metrics.reviewed.closed_recall.map_or(0.0, |value| value);
-    let false_close =
-        |metrics: &EyeMetrics| metrics.reviewed.false_close.map_or(1.0, |value| value);
+    let ret = |metrics: &EyeMetrics| metrics.events.event_attainment.unwrap_or(0.0);
+    let recall = |metrics: &EyeMetrics| metrics.reviewed.closed_recall.unwrap_or(0.0);
+    let false_close = |metrics: &EyeMetrics| metrics.reviewed.false_close.unwrap_or(1.0);
     ret(right)
         .total_cmp(&ret(left))
         .then_with(|| recall(right).total_cmp(&recall(left)))

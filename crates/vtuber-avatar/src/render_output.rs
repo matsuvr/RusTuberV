@@ -7,10 +7,12 @@ use crate::lifecycle::AvatarGeneration;
 use bevy::camera::{CameraUpdateSystems, ClearColorConfig, RenderTarget, visibility::RenderLayers};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::render::gpu_readback::ReadbackComplete;
+use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::renderer::RenderDevice;
-use vtuber_core::{FrameSeq, VideoOutputFrame, VideoOutputProfile, monotonic_now};
+use vtuber_core::{
+    FrameSeq, VideoOutputFrame, VideoOutputPixelFormat, VideoOutputProfile, monotonic_now,
+};
 
 /// The rendering layer containing avatar geometry and output lighting.
 pub const AVATAR_RENDER_LAYER: usize = 0;
@@ -37,7 +39,7 @@ impl AvatarOutputTarget {
 }
 
 /// Independent activation of local rendering and transport readback.
-#[derive(Resource, Clone, Debug, Default)]
+#[derive(Resource, Clone, Debug)]
 pub struct AvatarOutputState {
     active: bool,
     preview_visible: bool,
@@ -104,6 +106,15 @@ impl AvatarOutputState {
             readback_epoch: 0,
             profile,
         }
+    }
+}
+
+impl Default for AvatarOutputState {
+    fn default() -> Self {
+        Self::with_profile(VideoOutputProfile {
+            pixel_format: VideoOutputPixelFormat::Bgra8PremultipliedAlpha,
+            ..VideoOutputProfile::DEFAULT
+        })
     }
 }
 
@@ -225,22 +236,20 @@ pub fn setup_output_camera(
         ..default()
     };
     camera.order = -1;
-    commands
-        .spawn((
-            Camera3d::default(),
-            // preview and the NDI output share one finished image.
-            camera,
-            RenderTarget::Image(image_handle.into()),
-            Projection::Perspective(PerspectiveProjection {
-                fov: crate::framing::fixed_fov_fit::FIXED_VERTICAL_FOV,
-                aspect_ratio: profile.width as f32 / profile.height as f32,
-                ..default()
-            }),
-            camera_transform,
-            RenderLayers::layer(AVATAR_RENDER_LAYER),
-            AvatarOutputCamera,
-        ))
-        .observe(handle_output_readback);
+    commands.spawn((
+        Camera3d::default(),
+        // preview and the NDI output share one finished image.
+        camera,
+        RenderTarget::Image(image_handle.into()),
+        Projection::Perspective(PerspectiveProjection {
+            fov: crate::framing::fixed_fov_fit::FIXED_VERTICAL_FOV,
+            aspect_ratio: profile.width as f32 / profile.height as f32,
+            ..default()
+        }),
+        camera_transform,
+        RenderLayers::layer(AVATAR_RENDER_LAYER),
+        AvatarOutputCamera,
+    ));
     state.deactivate();
 }
 
@@ -311,21 +320,67 @@ fn sync_output_camera(
     }
 }
 
+/// A separate entity per output session keeps late GPU completions from a stopped
+/// sender or a previous power generation out of the new session.
+#[derive(Component)]
+struct OutputReadback {
+    epoch: u64,
+    power_generation: u64,
+}
+
+fn sync_output_readback(
+    mut commands: Commands,
+    state: Res<AvatarOutputState>,
+    target: Res<AvatarOutputTarget>,
+    mut session: Local<Option<(Entity, u64, u64)>>,
+) {
+    let power = vtuber_platform::power_state();
+    if let Some((entity, epoch, generation)) = *session {
+        if state.accepts_readback(epoch, generation, power) {
+            return;
+        }
+        commands.entity(entity).despawn();
+        *session = None;
+    }
+    if state.is_active() && !power.sleeping {
+        let epoch = state.readback_epoch();
+        let entity = commands
+            .spawn((
+                Readback::texture(target.image().clone()),
+                OutputReadback {
+                    epoch,
+                    power_generation: power.generation,
+                },
+            ))
+            .observe(handle_output_readback)
+            .id();
+        *session = Some((entity, epoch, power.generation));
+    }
+}
+
 fn handle_output_readback(
     mut event: On<ReadbackComplete>,
     state: Res<AvatarOutputState>,
     target: Res<AvatarOutputTarget>,
     mut slot: ResMut<AvatarOutputFrameSlot>,
+    requests: Query<&OutputReadback>,
 ) {
-    if !state.is_active() {
+    let Ok(request) = requests.get(event.entity) else {
+        return;
+    };
+    if !state.accepts_readback(
+        request.epoch,
+        request.power_generation,
+        vtuber_platform::power_state(),
+    ) {
         return;
     }
     let profile = target.profile();
     let packed_stride = profile.packed_stride_bytes();
     let source_stride = RenderDevice::align_copy_bytes_per_row(packed_stride);
-    // This is the sole consumer of this camera's ReadbackComplete bytes.
+    // Move the completed texture bytes into the slot. The studio uses the native format.
     let readback = std::mem::take(&mut event.data);
-    match VideoOutputFrame::from_padded_bgra8(
+    match VideoOutputFrame::from_rendered_bgra8(
         profile.width,
         profile.height,
         source_stride,
@@ -333,7 +388,10 @@ fn handle_output_readback(
         monotonic_now(),
         readback,
     ) {
-        Ok(frame) => slot.publish(frame),
+        Ok(frame) => slot.publish(match profile.pixel_format {
+            VideoOutputPixelFormat::Bgra8PremultipliedAlpha => frame,
+            VideoOutputPixelFormat::Bgra8StraightAlpha => frame.into_straight_alpha(),
+        }),
         Err(error) => {
             slot.reject();
             warn!("discarding malformed avatar output readback: {error}");
@@ -343,11 +401,11 @@ fn handle_output_readback(
 
 /// Register output resources and lifecycle systems.
 pub fn register_output_systems(app: &mut App) {
-    crate::output_readback::register(app);
     app.init_resource::<AvatarOutputState>()
         .init_resource::<AvatarOutputFrameSlot>()
         .init_resource::<AvatarViewportSnapshot>()
         .add_systems(Startup, setup_output_camera)
+        .add_systems(PostUpdate, sync_output_readback)
         .add_systems(
             PostUpdate,
             sync_output_camera
@@ -409,7 +467,10 @@ mod tests {
         let state = AvatarOutputState::default();
         assert!(!state.is_active());
         assert!(!state.is_rendering());
-        assert_eq!(state.profile(), VideoOutputProfile::DEFAULT);
+        assert_eq!(
+            state.profile().pixel_format,
+            VideoOutputPixelFormat::Bgra8PremultipliedAlpha
+        );
     }
 
     #[test]
@@ -441,17 +502,65 @@ mod tests {
     }
 
     #[test]
-    fn full_hd_readback_reuses_the_event_allocation_and_converts_alpha() {
+    fn stopping_output_discards_in_flight_readbacks_and_preview_uses_only_the_gpu() {
         let mut app = App::new();
         app.init_resource::<Assets<Image>>()
             .init_resource::<AvatarOutputState>()
             .init_resource::<AvatarOutputFrameSlot>()
-            .add_systems(Startup, setup_output_camera);
+            .add_systems(Startup, setup_output_camera)
+            .add_systems(PostUpdate, sync_output_readback);
+        app.update();
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .set_preview_visible(true);
+        app.update();
+        let mut readers = app.world_mut().query_filtered::<Entity, With<Readback>>();
+        assert_eq!(readers.iter(app.world()).count(), 0);
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .activate();
+        app.update();
+        let old = readers.single(app.world()).unwrap();
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .deactivate();
+        app.update();
+        assert_eq!(readers.iter(app.world()).count(), 0);
+        app.world_mut()
+            .resource_mut::<AvatarOutputState>()
+            .activate();
+        app.update();
+        assert_ne!(readers.single(app.world()).unwrap(), old);
+        app.world_mut().trigger(ReadbackComplete {
+            entity: old,
+            data: Vec::new(),
+        });
+        assert_eq!(
+            app.world()
+                .resource::<AvatarOutputFrameSlot>()
+                .rejected_frames(),
+            0
+        );
+    }
+
+    #[test]
+    fn full_hd_readback_publishes_bevys_bytes_in_the_original_allocation() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<AvatarOutputState>()
+            .init_resource::<AvatarOutputFrameSlot>()
+            .add_systems(Startup, setup_output_camera)
+            .add_systems(PostUpdate, sync_output_readback);
         app.update();
         app.world_mut()
             .resource_mut::<AvatarOutputState>()
             .activate();
-        let output = camera_entity(&mut app, false);
+        app.update();
+        let output = app
+            .world_mut()
+            .query_filtered::<Entity, With<OutputReadback>>()
+            .single(app.world())
+            .unwrap();
         let profile = app.world().resource::<AvatarOutputTarget>().profile();
         let stride = profile.packed_stride_bytes();
         assert_eq!(RenderDevice::align_copy_bytes_per_row(stride), stride);
@@ -464,7 +573,11 @@ mod tests {
         });
 
         let slot = app.world().resource::<AvatarOutputFrameSlot>();
-        let frame = slot.latest().expect("converted readback");
+        let frame = slot.latest().expect("rendered frame");
+        assert_eq!(
+            frame.pixel_format(),
+            VideoOutputPixelFormat::Bgra8PremultipliedAlpha
+        );
         assert_eq!(frame.data().as_ptr(), allocation);
         assert_eq!(frame.data().len(), stride * profile.height as usize);
         assert!(
@@ -473,7 +586,7 @@ mod tests {
                 .as_chunks::<12>()
                 .0
                 .iter()
-                .all(|pixels| { *pixels == [50, 100, 149, 128, 40, 50, 60, 255, 0, 0, 0, 0] })
+                .all(|pixels| { *pixels == [25, 50, 75, 128, 40, 50, 60, 255, 9, 10, 11, 0] })
         );
         assert_eq!(slot.received_frames(), 1);
         assert_eq!(slot.rejected_frames(), 0);

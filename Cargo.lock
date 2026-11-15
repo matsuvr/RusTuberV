@@ -6415,6 +6415,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "spout2-rs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e3d5a4fafc4e72ae9a57e78d8a4b84e7580a7671b9729c26894fe2434c73bb4"
+dependencies = [
+ "spout2-sys",
+]
+
+[[package]]
+name = "spout2-sys"
+version = "0.1.1"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7239,6 +7255,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "spout2-rs",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7249,6 +7266,7 @@ dependencies = [
  "vtuber-inference",
  "vtuber-ndi",
  "vtuber-platform",
+ "vtuber-spout",
  "vtuber-tracking",
 ]
 
@@ -7337,6 +7355,14 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vtuber-spout"
+version = "0.2.3"
+dependencies = [
+ "spout2-rs",
+ "vtuber-core",
 ]
 
 [[package]]

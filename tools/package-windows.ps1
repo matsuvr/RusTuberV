@@ -30,15 +30,19 @@ Copy-Item -LiteralPath $executable, 'tracking_profile.toml', 'LICENSE', 'THIRD_P
 Copy-Item -LiteralPath 'assets/models/manifest.toml', 'assets/models/LICENSE.mediapipe.txt' -Destination "$package/assets/models"
 Copy-Item -LiteralPath 'assets/models/face_landmarker.task', 'assets/models/pose_landmarker_full.task', 'assets/models/hand_landmarker.task' -Destination "$package/assets/models"
 Copy-Item -LiteralPath 'assets/fonts/LICENSE-LINESeed.txt', 'assets/fonts/LICENSE-NotoSansCJK.txt', 'vendor/mediapipe-rs/NOTICE' -Destination "$package/licenses"
-Copy-Item -LiteralPath 'crates/vtuber-avatar/src/look/LICENSE-NiloToon.txt' -Destination "$package/licenses"
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/LICENSE-MIT' -Destination "$package/licenses/bevy_vrm1-MIT.txt"
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/LICENSE-APACHE2' -Destination "$package/licenses/bevy_vrm1-Apache-2.0.txt"
 Copy-Item -LiteralPath 'vendor/bevy_vrm1/NOTICE' -Destination "$package/licenses/bevy_vrm1-NOTICE.txt"
 Copy-Item -LiteralPath 'vendor/nokhwa/LICENSE' -Destination "$package/licenses/nokhwa-Apache-2.0.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/LICENSE' -Destination "$package/licenses/spout2-sys-BSD-2-Clause.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/LICENSE.spout2-rs' -Destination "$package/licenses/spout2-rs-BSD-2-Clause.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/vendor/Spout2/LICENSE' -Destination "$package/licenses/Spout2-BSD-2-Clause.txt"
+Copy-Item -LiteralPath 'vendor/spout2-sys/NOTICE' -Destination "$package/licenses/Spout2-NOTICE.txt"
 Copy-Item -LiteralPath 'manual' -Destination $package -Recurse
 Copy-Item -LiteralPath "$NdiSdk/Bin/x64/Processing.NDI.Lib.x64.dll", "$NdiSdk/Bin/x64/Processing.NDI.Lib.Licenses.txt" -Destination $package
 Copy-Item -LiteralPath "$NdiSdk/NDI SDK License Agreement.pdf" -Destination "$package/NDI_SDK_LICENSE_AGREEMENT.pdf"
-Copy-Item -LiteralPath "$MsysRoot/clang64/bin/libunwind.dll" -Destination $package
+Copy-Item -LiteralPath "$MsysRoot/clang64/bin/libunwind.dll", "$MsysRoot/clang64/bin/libc++.dll" -Destination $package
+Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/libc++/LICENSE" -Destination "$package/licenses/LLVM-libcxx-LICENSE.txt"
 Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/libunwind/LICENSE" -Destination "$package/licenses/LLVM-libunwind-LICENSE.txt"
 Copy-Item -LiteralPath "$MsysRoot/clang64/share/licenses/crt" -Destination "$package/licenses/MinGW-w64-CRT" -Recurse
 Copy-Item -LiteralPath 'tools/windows-runtime-terms.txt' -Destination "$package/RUNTIME-TERMS.txt"
@@ -61,20 +65,24 @@ RusTuberV for Windows (x64)
 
 日本語: ZIPを「すべて展開」して、RusTuberV.exeをダブルクリックします。
 「VRMを読み込む…」でご自身のVRMを選び、「入力カメラ」を選択してください。
-モデル・推論ライブラリ・NDIランタイムは同梱済みです。初回ダウンロードは不要です。
+モデル・推論ライブラリ・NDIランタイム・Spout2送信機能を同梱しています。
 実行ファイルと同梱ファイルは同じフォルダーに置いたまま使用してください。
+OBSへ送るときは「NDI・Spout2出力」を開き、使用する方式の送信を開始します。
+同じPCのOBSへSpout2で送る手順: manual/SPOUT2.md
 利用マニュアル: manual/ja/README.md
 https://github.com/matsuvr/RusTuberV/tree/main/manual/ja
 
 English: Extract the entire ZIP and double-click RusTuberV.exe.
 Load your own VRM avatar and select your webcam. All inference models and
-runtime libraries are included; no first-run download is required.
+runtime libraries are included, together with Spout2 output.
 Keep the executable and bundled files together. Manual: manual/en/README.md
+Open NDI & Spout2 output to start your chosen transport.
+For Spout2 to OBS on this PC, see manual/SPOUT2.md (English section).
 Chinese manual: manual/zh-CN/README.md; Korean manual: manual/ko/README.md
 
 Requires Windows 10/11 x64, a compatible GPU/driver, and a webcam for tracking.
 Windows N editions require the Microsoft Media Feature Pack for webcam input.
-An avatar is not included. Looking Glass output requires Looking Glass Bridge.
+Prepare your own VRM avatar. Looking Glass output requires Looking Glass Bridge.
 
 Read RUNTIME-TERMS.txt before using the bundled proprietary runtimes.
 Application source: MIT (LICENSE). Other components: THIRD_PARTY_NOTICES.md

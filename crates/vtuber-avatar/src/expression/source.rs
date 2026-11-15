@@ -23,6 +23,8 @@ pub enum MaterialColorTarget {
     EmissionColor,
     /// `shadeColor` — the MToon shade color.
     ShadeColor,
+    /// `matcapColor` — the MToon matcap factor.
+    MatcapColor,
     /// `rimColor` — the MToon parametric rim color.
     RimColor,
     /// `outlineColor` — the MToon outline color.
@@ -38,6 +40,7 @@ impl MaterialColorTarget {
             "color" => Some(Self::Color),
             "emissionColor" => Some(Self::EmissionColor),
             "shadeColor" => Some(Self::ShadeColor),
+            "matcapColor" => Some(Self::MatcapColor),
             "rimColor" => Some(Self::RimColor),
             "outlineColor" => Some(Self::OutlineColor),
             _ => None,

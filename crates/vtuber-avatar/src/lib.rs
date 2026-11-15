@@ -37,10 +37,8 @@ pub mod idle;
 mod joint_limits;
 pub mod lifecycle;
 pub mod load;
-pub mod look;
 pub mod mirror;
 pub mod node_constraints;
-mod output_readback;
 pub mod placeholder;
 pub mod plugin;
 pub mod pose;
@@ -136,10 +134,6 @@ pub use load::{
     AssetPathError, AvatarAssetId, ImportedAvatar, LoadImportedAvatarError,
     LoadImportedAvatarRequest, LoadImportedAvatarResult, PendingAvatarLoad, UserAssetPath,
     VrmSourceExpressions,
-};
-pub use look::{
-    AvatarLookSettings, LookSettingsChanged, RichLookSettings, RichLookSettingsError,
-    apply_look_settings_changes,
 };
 pub use mirror::AvatarMotionMirror;
 pub use plugin::{StartupModelPath, VtuberAvatarPlugin};

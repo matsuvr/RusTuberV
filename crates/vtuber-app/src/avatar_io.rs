@@ -8,10 +8,7 @@ use vtuber_avatar::{AvatarAssetId, LoadImportedAvatarRequest};
 
 use crate::import::{self, ImportedModel, ModelImportError};
 use crate::license_review::{self, VrmLicenseReview, VrmLicenseReviewError};
-use crate::orchestrator::{
-    Orchestrator, OrchestratorError, PendingLoadRequest, SubmittedAvatarLoad,
-};
-use crate::settings::AppSettings;
+use crate::orchestrator::{Orchestrator, OrchestratorError, PendingLoadRequest};
 
 #[derive(Debug)]
 pub(crate) enum AvatarFileWork {
@@ -29,7 +26,7 @@ pub(crate) enum AvatarFileResult {
         path: PathBuf,
         review: VrmLicenseReview,
     },
-    Load(LoadImportedAvatarRequest, SubmittedAvatarLoad),
+    Load(LoadImportedAvatarRequest, ImportedModel),
 }
 
 #[expect(
@@ -58,7 +55,6 @@ pub struct AvatarIoRuntime {
 pub fn prepare_avatar_io_system(
     mut runtime: ResMut<AvatarIoRuntime>,
     mut orchestrator: ResMut<Orchestrator>,
-    persistent: Option<Res<AppSettings>>,
 ) {
     if let Some(running) = runtime.running.as_mut() {
         let received = running
@@ -96,12 +92,11 @@ pub fn prepare_avatar_io_system(
     };
     let reviewing = matches!(work, Work::File(AvatarFileWork::Review(_)));
     let asset_root = orchestrator.asset_root().to_path_buf();
-    let persistent = persistent.as_deref().cloned();
     let (sender, receiver) = mpsc::channel();
     match std::thread::Builder::new()
         .name("avatar-file".into())
         .spawn(move || {
-            let result = perform_work(request_id, work, &asset_root, persistent.as_ref());
+            let result = perform_work(request_id, work, &asset_root);
             let _ = sender.send(result);
         }) {
         Ok(_) => {
@@ -130,7 +125,6 @@ fn perform_work(
     request_id: u64,
     work: Work,
     asset_root: &Path,
-    persistent: Option<&AppSettings>,
 ) -> Result<AvatarFileResult, OrchestratorError> {
     let model = match work {
         Work::File(AvatarFileWork::Review(path)) => {
@@ -145,8 +139,7 @@ fn perform_work(
         }
         Work::Load(model) => model,
     };
-    let (request, submitted) =
-        prepare_avatar_load(PendingLoadRequest { request_id, model }, persistent)?;
+    let (request, submitted) = prepare_avatar_load(PendingLoadRequest { request_id, model })?;
     Ok(AvatarFileResult::Load(request, submitted))
 }
 
@@ -163,18 +156,7 @@ fn read_reviewable_bytes(path: &Path) -> Result<Vec<u8>, VrmLicenseReviewError> 
 
 pub(crate) fn prepare_avatar_load(
     pending: PendingLoadRequest,
-    persistent: Option<&AppSettings>,
-) -> Result<
-    (
-        vtuber_avatar::LoadImportedAvatarRequest,
-        SubmittedAvatarLoad,
-    ),
-    OrchestratorError,
-> {
-    let look = persistent
-        .map(|settings| settings.rich_look_for(&pending.model.id))
-        .transpose()
-        .map_err(|error| OrchestratorError::ArmPoseSettingsFailed(error.to_string()))?;
+) -> Result<(vtuber_avatar::LoadImportedAvatarRequest, ImportedModel), OrchestratorError> {
     let id = AvatarAssetId::new(&pending.model.id);
     let path = vtuber_avatar::UserAssetPath::avatar_model_path(&id)
         .map_err(|error| OrchestratorError::AvatarLoadRejected(error.to_string()))?;
@@ -197,10 +179,7 @@ pub(crate) fn prepare_avatar_load(
             request_id: pending.request_id,
             imported,
         },
-        SubmittedAvatarLoad {
-            model: pending.model,
-            look,
-        },
+        pending.model,
     ))
 }
 

@@ -505,9 +505,16 @@ fn bind_expressions(
             raw_weight.clamp(0.0, 1.0)
         };
 
-        mouth_rate += override_settings.override_mouth.rate(output_weight);
-        blink_rate += override_settings.override_blink.rate(output_weight);
-        look_at_rate += override_settings.override_look_at.rate(output_weight);
+        // VRMC_vrm ignores an override targeting the expression's own procedural group.
+        if category_tag.0 != ExpressionCategory::Mouth {
+            mouth_rate += override_settings.override_mouth.rate(output_weight);
+        }
+        if category_tag.0 != ExpressionCategory::Blink {
+            blink_rate += override_settings.override_blink.rate(output_weight);
+        }
+        if category_tag.0 != ExpressionCategory::LookAt {
+            look_at_rate += override_settings.override_look_at.rate(output_weight);
+        }
 
         let binds: Vec<(Entity, usize, f32)> = retarget
             .0
@@ -1005,6 +1012,37 @@ mod tests {
             "Expected additive 0.3 + 0.5 = 0.8, got {}",
             morph.weights()[0]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn procedural_expressions_ignore_overrides_of_their_own_group() -> TestResult {
+        for category in [ExpressionCategory::Blink, ExpressionCategory::Mouth, ExpressionCategory::LookAt] {
+            for mode in [ExpressionOverrideType::Block, ExpressionOverrideType::Blend] {
+                let mut app = test_app();
+                app.add_plugins(VrmExpressionPlugin);
+                let mut settings = default_override_settings();
+                match category {
+                    ExpressionCategory::Blink => settings.override_blink = mode,
+                    ExpressionCategory::Mouth => settings.override_mouth = mode,
+                    ExpressionCategory::LookAt => settings.override_look_at = mode,
+                    ExpressionCategory::Other => unreachable!(),
+                }
+                let mesh = app.world_mut().spawn(MorphWeights::new(vec![0.0], None)?).id();
+                app.world_mut().spawn((
+                    Transform::from_xyz(0.5, 0.0, 0.0),
+                    RetargetExpressionNodes(vec![BindExpressionNode {
+                        expression_entity: mesh,
+                        index: 0,
+                        weight: 1.0,
+                    }]),
+                    ExpressionCategoryTag(category),
+                    settings,
+                ));
+                app.update();
+                assert_eq!(app.world().get::<MorphWeights>(mesh).unwrap().weights(), &[0.5]);
+            }
+        }
         Ok(())
     }
 

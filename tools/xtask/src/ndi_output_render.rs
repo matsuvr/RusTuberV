@@ -342,16 +342,8 @@ fn wait_for_frame(app: &mut App) -> Result<VideoOutputFrame, RenderValidationErr
     ))
 }
 
-#[expect(
-    clippy::indexing_slicing,
-    reason = "`chunks_exact(4)` yields exactly four-byte groups from the validated packed frame"
-)]
 fn pixels(frame: &VideoOutputFrame) -> Vec<[u8; 4]> {
-    frame
-        .data()
-        .chunks_exact(4)
-        .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
-        .collect()
+    frame.data().as_chunks::<4>().0.to_vec()
 }
 
 #[expect(

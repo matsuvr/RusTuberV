@@ -8,9 +8,7 @@ mod privacy;
 pub mod shell;
 mod studio;
 
-pub use avatar_preview::{
-    AvatarPreviewPlugin, AvatarPreviewTexture, paint_avatar_preview, paint_avatar_preview_at,
-};
+pub use avatar_preview::AvatarPreviewTexture;
 pub use shell::{UiShellPlugin, UiState};
 
 #[cfg(test)]

@@ -125,13 +125,10 @@ fn a_model_without_constraints_is_prepared_and_submitted_once() {
 #[test]
 fn missing_managed_data_propagates_as_a_load_error() {
     let directory = tempfile::tempdir().unwrap();
-    let result = prepare_avatar_load(
-        PendingLoadRequest {
-            request_id: 1,
-            model: model(directory.path().join("missing.vrm"), "candidate"),
-        },
-        None,
-    );
+    let result = prepare_avatar_load(PendingLoadRequest {
+        request_id: 1,
+        model: model(directory.path().join("missing.vrm"), "candidate"),
+    });
     assert!(matches!(
         result,
         Err(OrchestratorError::AvatarLoadRejected(_))
@@ -147,7 +144,6 @@ fn review_file_failures_are_preserved_before_import() {
         1,
         Work::File(AvatarFileWork::Review(path)),
         directory.path(),
-        None,
     );
     assert!(matches!(
         result,

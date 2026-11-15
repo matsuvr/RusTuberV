@@ -36,9 +36,8 @@ licensed under MIT OR Apache-2.0. The source-only copy in `vendor/bevy_vrm1` use
 Bevy 0.20: WESL modules, vertex decompression and morph descriptor indexing,
 outline depth-stencil views, and lifecycle observer syntax.
 The transparency discard fix (upstream PR #68) and final expression weights
-(upstream PR #70) are already included in v0.10.0. The local correction clears
-the native outline material cache every extraction, so switching to an extended
-material cannot draw a stale native outline with incompatible bindings.
+(upstream PR #70) are already included in v0.10.0.
+A local expression patch ignores overrides of the expression's own procedural group.
 See `vendor/bevy_vrm1/NOTICE` and the bundled MIT / Apache-2.0 licenses.
 
 The VRM 0.x import-time normalization, the direct-pose / direct-gaze input
@@ -47,34 +46,6 @@ components and writers, and the expression bind-status records in
 ported from the retired `vendor/bevy_vrm1` patch so the upstream runtime's
 other behavior can stay untouched. They carry no separate upstream license beyond
 the MIT terms of this application.
-
-`crates/vtuber-avatar/src/look/mtoon_rich.wesl` imports the Native MToon
-fragment helpers from the patched dependency instead of copying that base.
-The app-side cel lighting follows the NiloToon example concepts described below.
-`crates/vtuber-avatar/src/look/mtoon_rich_vertex.wesl` adapts the MToon
-vertex path from bevy_vrm1 v0.10.0 and Bevy 0.20's mesh vertex path; it keeps
-the upstream MIT OR Apache-2.0 terms. The shared UV arithmetic in
-`mtoon_uv.wesl` is retained from the MToon implementation under those terms.
-
-`crates/vtuber-avatar/src/look/standard_rich.wesl` adapts the Bevy 0.20.0
-`bevy_pbr` Standard fragment path so the app can add a narrow Rich term to the
-unchanged PBR result. It keeps Bevy's MIT OR Apache-2.0 terms; the app-side
-additive rim is this repository's MIT code.
-
-## NiloToon public shader example (adapted lighting concepts)
-
-`crates/vtuber-avatar/src/look/mtoon_rich.wesl` adapts the soft cel boundary,
-bounded additional lighting and max(indirect, direct) composition from
-[ColinLeung-NiloCat/UnityURPToonLitShaderExample](https://github.com/ColinLeung-NiloCat/UnityURPToonLitShaderExample),
-commit `fbe276e0df1d1f9379e13581c20b6a080a1a6977`, particularly
-`SimpleURPToonLitOutlineExample_LightingEquation.hlsl`.
-Copyright (c) 2020 ColinLeung-NiloCat. Licensed under MIT; the complete notice
-is in `crates/vtuber-avatar/src/look/LICENSE-NiloToon.txt` and distributed in `licenses/`.
-The commercial NiloToonURP shader is not included.
-
-The spot direction and attenuation decoding uses Bevy 0.20 conventions
-(MIT OR Apache-2.0). MToon textures, shade settings, emission, authored rim,
-alpha behavior and outline geometry remain owned by the existing VRM path.
 
 ## NDI® runtime
 
@@ -216,3 +187,18 @@ the wrist target nor skeletal translations. Joint limits and collision checks
 remain authoritative in the existing solver. Straight arms and circles with no
 clear sampled target are left to that solver; a sampled target is not a proof
 of anatomical or path feasibility. No extra contact clearance is imposed.
+
+## Spout2 output (Windows)
+
+`spout2-rs` 0.1.1 and `spout2-sys` 0.1.1: BSD-2-Clause, copyright
+2026 Jaden Hills. The native package contains Spout 2.007.017 by Lynn Jarvis,
+also BSD-2-Clause. Source and provenance: https://docs.rs/crate/spout2-rs/0.1.1/source/
+and https://github.com/leadedge/Spout2 . The patched native source is retained in
+`vendor/spout2-sys`; see its NOTICE for CLANG64 portability changes.
+The Windows package includes all three license notices under `licenses/`.
+The SDK is statically linked; no Spout DLL or SDK installation is required by
+users. OBS's optional Spout receiver plugin is a separate application component,
+not bundled or relicensed by RusTuberV.
+
+The CLANG64 build also bundles MSYS2 libc++.dll (Apache-2.0 WITH LLVM-exception);
+its license is included as licenses/LLVM-libcxx-LICENSE.txt.

@@ -29,7 +29,7 @@ use crate::inference_runtime::{
 };
 use crate::metrics_export::export_diagnostics_system;
 use crate::ndi_output::{
-    NdiOutputRuntime, ndi_output_bridge_system, shutdown_ndi_output,
+    NdiOutputRuntime, SpoutOutputRuntime, ndi_output_bridge_system, shutdown_ndi_output,
     sync_ndi_output_view_model_system,
 };
 use crate::orchestrator::{
@@ -89,6 +89,7 @@ impl Plugin for AppRuntimePlugin {
             .init_resource::<PreviewLandmarkState>()
             .init_resource::<NdiOutputIntent>()
             .init_resource::<NdiOutputRuntime>()
+            .init_resource::<SpoutOutputRuntime>()
             .init_resource::<AvatarMotionMirror>()
             .init_resource::<DiagnosticsSnapshot>()
             .init_resource::<MetricsExportState>()
@@ -136,13 +137,9 @@ pub(crate) fn configure_pipeline(app: &mut App) {
     .add_systems(
         Update,
         (
-            // Look-change messages written by the action processing must
-            // reach the avatar side in the same frame.
-            process_ui_actions_system.before(vtuber_avatar::look::apply_look_settings_changes),
+            process_ui_actions_system,
             prepare_avatar_io_system,
-            sync_avatar_lifecycle_system
-                .after(vtuber_avatar::unload::despawn_unloading_avatar)
-                .before(vtuber_avatar::look::apply_look_settings_changes),
+            sync_avatar_lifecycle_system.after(vtuber_avatar::unload::despawn_unloading_avatar),
         )
             .chain(),
     )
@@ -260,10 +257,14 @@ fn shutdown_workers_on_exit(
     mut inference: ResMut<InferenceRuntime>,
     mut capture: ResMut<CaptureRuntime>,
     ndi: Option<ResMut<NdiOutputRuntime>>,
+    mut spout: Option<ResMut<SpoutOutputRuntime>>,
     output: Option<ResMut<AvatarOutputState>>,
 ) {
     if exits.read().next().is_some() {
         shutdown_ndi_output(ndi, output);
+        if let Some(spout) = spout.as_deref_mut() {
+            spout.stop();
+        }
         if let Err(error) = pose.stop() {
             error!("pose shutdown failed: {error}");
         }

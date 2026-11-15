@@ -27,6 +27,8 @@ impl ActionQueue {
                 | UiAction::DismissError
                 | UiAction::StartNdiOutput
                 | UiAction::StopNdiOutput
+                | UiAction::StartSpoutOutput
+                | UiAction::StopSpoutOutput
         ) && self.pending_actions.contains(&action)
         {
             return;
@@ -47,25 +49,6 @@ pub struct ModelActionTarget {
     pub model_id: String,
     /// Avatar instance generation.
     pub generation: vtuber_avatar::AvatarGeneration,
-}
-
-/// An independent edit to the look switch or strength.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RichLookChange {
-    /// Keep the configured strength while switching the effect.
-    Enabled(bool),
-    /// Keep the switch, including when the strength becomes zero.
-    Strength(f32),
-}
-
-pub(crate) fn reduce_rich_look(
-    current: vtuber_avatar::RichLookSettings,
-    change: RichLookChange,
-) -> Result<vtuber_avatar::RichLookSettings, vtuber_avatar::RichLookSettingsError> {
-    match change {
-        RichLookChange::Enabled(enabled) => Ok(current.with_enabled(enabled)),
-        RichLookChange::Strength(strength) => current.with_strength(strength),
-    }
 }
 
 /// Actions that the UI can emit.
@@ -122,6 +105,10 @@ pub enum UiAction {
     // --- NDI output actions ---
     /// Start the optional transparent avatar NDI output.
     StartNdiOutput,
+    /// Start Windows-local Spout2 output.
+    StartSpoutOutput,
+    /// Stop Windows-local Spout2 output.
+    StopSpoutOutput,
     /// Stop the optional transparent avatar NDI output.
     StopNdiOutput,
     /// Start the selected Looking Glass output.
@@ -212,20 +199,6 @@ pub enum UiAction {
     // --- Appearance ---
     /// Switch the UI language and persist the choice.
     SetLanguage(crate::settings::UiLanguage),
-
-    // --- Rich look ---
-    /// Change the live look without writing the settings file.
-    ChangeRichLook {
-        /// Model and instance the UI displayed.
-        target: ModelActionTarget,
-        /// Live edit, independent of explicit saving.
-        change: RichLookChange,
-    },
-    /// Persist the look when a checkbox or slider edit is complete.
-    SaveRichLook {
-        /// Model and instance the UI displayed.
-        target: ModelActionTarget,
-    },
 }
 
 impl UiAction {
@@ -235,9 +208,7 @@ impl UiAction {
             Self::SetArmPoseProfile { target, .. }
             | Self::ResetArmPoseProfile { target }
             | Self::AssignExpressionKey { target, .. }
-            | Self::ResetExpressionBindings { target }
-            | Self::ChangeRichLook { target, .. }
-            | Self::SaveRichLook { target } => Some(target),
+            | Self::ResetExpressionBindings { target } => Some(target),
             _ => None,
         }
     }
@@ -376,50 +347,6 @@ mod tests {
             UiAction::ToggleExpressionKey { generation, key },
             UiAction::ClearManualExpression { generation }
         );
-    }
-
-    #[test]
-    fn rich_reducer_keeps_switch_and_strength_independent() {
-        use vtuber_avatar::RichLookSettings;
-        let initial = RichLookSettings::default();
-        assert!(!initial.enabled());
-        assert_eq!(initial.strength(), 1.0);
-        for strength in [0.0, 0.5, 1.0] {
-            let tuned = reduce_rich_look(initial, RichLookChange::Strength(strength)).unwrap();
-            let on = reduce_rich_look(tuned, RichLookChange::Enabled(true)).unwrap();
-            let off = reduce_rich_look(on, RichLookChange::Enabled(false)).unwrap();
-            assert_eq!(off, RichLookSettings::try_new(false, strength).unwrap());
-            assert_eq!(
-                reduce_rich_look(off, RichLookChange::Enabled(true)).unwrap(),
-                on
-            );
-        }
-    }
-
-    #[test]
-    fn rich_look_actions_carry_their_value() {
-        let action = |change| UiAction::ChangeRichLook {
-            target: ModelActionTarget {
-                model_id: "model-a".into(),
-                generation: vtuber_avatar::AvatarGeneration(3),
-            },
-            change,
-        };
-
-        assert_eq!(
-            action(RichLookChange::Enabled(true)),
-            action(RichLookChange::Enabled(true))
-        );
-        assert_ne!(
-            action(RichLookChange::Enabled(true)),
-            action(RichLookChange::Enabled(false))
-        );
-        assert_eq!(
-            action(RichLookChange::Strength(0.25)),
-            action(RichLookChange::Strength(0.25))
-        );
-        assert!(!action(RichLookChange::Enabled(true)).is_navigation());
-        assert!(!action(RichLookChange::Strength(1.0)).requires_running_pipeline());
     }
 
     #[test]
