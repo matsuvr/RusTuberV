@@ -116,14 +116,11 @@ figcaption { font-size: .72rem; color: var(--muted); margin-top: 12px; line-heig
 /* The manuals share their Markdown source with the downloadable application. */
 .manual-shell { display: grid; grid-template-columns: 224px minmax(0, 1fr); gap: 64px; align-items: start; padding-block: 42px 64px; }
 .manual-sidebar { position: sticky; top: 114px; max-height: calc(100dvh - 140px); overflow-y: auto; padding: 2px 10px 16px 0; }
-.manual-home { display: block; text-decoration: none; font-size: .8rem; margin-bottom: 30px; color: var(--muted); }
 .manual-toc summary { cursor: pointer; font-size: .8rem; font-weight: 700; margin-bottom: 14px; }
 .manual-toc nav { display: flex; flex-direction: column; gap: 3px; padding-left: 12px; border-left: 1px solid var(--line); }
 .manual-toc nav a { padding: 7px 9px; font-size: .8rem; text-decoration: none; color: var(--muted); }
 .manual-toc nav a:hover { background: #eaf4fe; color: var(--ink); }
-.source-link { display: inline-block; font-size: .72rem; color: var(--muted); margin-top: 26px; }
-.manual-topline { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 24px; border-bottom: 1px solid var(--line); margin-bottom: 30px; }
-.manual-topline .eyebrow { margin: 0; font-size: .65rem; }
+.manual-topline { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 16px; padding-bottom: 24px; border-bottom: 1px solid var(--line); margin-bottom: 30px; }
 .manual-languages { display: flex; flex-wrap: wrap; gap: 14px; font-size: .73rem; }
 .manual-languages a { text-decoration: none; }
 .manual-languages [aria-current] { color: var(--accent); font-weight: 750; }
@@ -139,12 +136,15 @@ figcaption { font-size: .72rem; color: var(--muted); margin-top: 12px; line-heig
 .manual-content a { color: var(--accent); }
 .manual-content strong { font-weight: 750; }
 .manual-content img { border: 1px solid var(--line); margin-block: 26px; background: var(--surface); }
+.manual-content p > small { display: block; font-size: .82rem; line-height: 1.8; color: var(--muted); }
+.manual-content p:has(> img) + p:has(> small) { margin-top: -12px; }
 .manual-content code { padding: .14em .35em; border-radius: 3px; background: #eaf4fe; font-size: .86em; font-family: ui-monospace, "Cascadia Code", monospace; overflow-wrap: anywhere; }
 .manual-content pre { overflow-x: auto; padding: 20px; background: #eaf4fe; }
 .manual-content pre code { padding: 0; }
 .table-scroll { width: 100%; overflow-x: auto; margin-block: 26px; }
 .manual-content table { width: 100%; border-collapse: collapse; font-size: .84rem; line-height: 1.8; text-align: left; }
 .manual-content th { background: #eaf4fe; font-weight: 700; }
+.manual-content td:first-child, .manual-content th:first-child { white-space: nowrap; }
 .manual-content th, .manual-content td { padding: 13px 16px; vertical-align: top; border: 1px solid var(--line); min-width: 110px; }
 .manual-content tbody tr:nth-child(even) { background: #f6fbff; }
 .manual-content hr { border: 0; border-top: 1px solid var(--line); margin-block: 38px; }
@@ -196,7 +196,6 @@ figcaption { font-size: .72rem; color: var(--muted); margin-top: 12px; line-heig
   .footer-main nav { gap: 12px 20px; }
   .manual-shell { grid-template-columns: 1fr; gap: 28px; padding-top: 24px; }
   .manual-sidebar { position: static; max-height: none; padding: 0; }
-  .manual-home, .source-link { display: none; }
   .manual-toc { border: 1px solid var(--line); padding: 14px 18px; background: #eef7ff; }
   .manual-toc summary { margin-bottom: 0; }
   .manual-toc[open] summary { margin-bottom: 12px; }
@@ -210,6 +209,7 @@ figcaption { font-size: .72rem; color: var(--muted); margin-top: 12px; line-heig
   .manual-content h3 { font-size: 1.15rem; }
   .manual-content th, .manual-content td { padding: 10px 12px; }
 }
+@media (max-width: 600px) { .site-header .nav-source { display: none; } }
 @media (max-width: 420px) {
   .site-header nav { gap: 12px; font-size: .7rem; }
   .site-header nav > a:first-child:not([aria-current]) { display: none; }
