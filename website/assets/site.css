@@ -41,7 +41,7 @@ h3 { font-size: 1.2rem; }
 .eyebrow { display: flex; gap: 10px; align-items: center; margin-bottom: 24px; font-family: ui-monospace, "Cascadia Code", monospace; font-size: .72rem; font-weight: 600; letter-spacing: .12em; line-height: 1.5; }
 .accent-square { width: 8px; height: 8px; background: var(--accent); }
 .hero { display: grid; grid-template-columns: 1fr 1.18fr; gap: 48px; align-items: center; padding-block: 80px 84px; }
-.hero h1 { font-size: clamp(2rem, 3.2vw, 2.8rem); font-weight: 750; margin-bottom: 24px; line-height: 1.5; letter-spacing: -.035em; text-wrap: wrap; }
+.hero h1 { font-size: clamp(2rem, 3vw, 2.5rem); font-weight: 750; margin-bottom: 24px; line-height: 1.5; letter-spacing: -.035em; text-wrap: wrap; }
 .hero-term { white-space: nowrap; }
 .hero-description { font-size: 1rem; line-height: 2.1; color: var(--muted); margin-bottom: 30px; }
 .button-row { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; }
@@ -159,7 +159,7 @@ figcaption { font-size: .72rem; color: var(--muted); margin-top: 12px; line-heig
 @media (max-width: 1050px) {
   .section-wrap { width: calc(100% - 64px); }
   .hero { gap: 28px; }
-  .hero h1 { font-size: clamp(2rem, 3.5vw, 2.6rem); }
+  .hero h1 { font-size: 2rem; }
   .hero-description { font-size: .9rem; }
   .button-row { gap: 18px; }
   .feature-layout { gap: 36px; }
