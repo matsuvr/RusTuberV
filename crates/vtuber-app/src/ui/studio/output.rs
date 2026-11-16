@@ -115,8 +115,13 @@ pub(super) fn output_page(
             }
         },
     );
-    section(ui, "Spout2 — Windows", |ui| {
-        if !vtuber_spout::available() {
+    let backend = if cfg!(target_os = "macos") {
+        "Syphon"
+    } else {
+        "Spout2"
+    };
+    section(ui, backend, |ui| {
+        if !crate::local_output::available() {
             ui.label(lang.pick(
                 "Spout2はWindows専用です。",
                 "Spout2 is Windows only.",
@@ -127,31 +132,40 @@ pub(super) fn output_page(
         }
         let active = matches!(
             vm.spout_status,
-            vtuber_spout::Status::Starting | vtuber_spout::Status::Live
+            crate::local_output::Status::Starting | crate::local_output::Status::Live
         );
         let status = match &vm.spout_status {
-            vtuber_spout::Status::Off => lang.pick("停止", "Off", "已停止", "중지"),
-            vtuber_spout::Status::Starting => {
+            crate::local_output::Status::Off => lang.pick("停止", "Off", "已停止", "중지"),
+            crate::local_output::Status::Starting => {
                 lang.pick("開始中…", "Starting…", "正在启动…", "시작 중…")
             }
-            vtuber_spout::Status::Live => lang.pick("送信中", "Sending", "发送中", "전송 중"),
-            vtuber_spout::Status::Error(_) => lang.pick("エラー", "Error", "错误", "오류"),
+            crate::local_output::Status::Live => {
+                lang.pick("送信中", "Sending", "发送中", "전송 중")
+            }
+            crate::local_output::Status::Error(_) => lang.pick("エラー", "Error", "错误", "오류"),
         };
         ui.label(format!("RusTuberV: {status}"));
-        ui.small(lang.pick(
+        if cfg!(target_os = "macos") {
+            ui.small(lang.pick(
+                "同じMacのSyphon対応アプリへ背景透過で送信します。受信ソースはRusTuberVです。",
+                "Send a transparent avatar to Syphon apps on this Mac. Select RusTuberV as the source.",
+                "向同一台Mac上的Syphon应用发送透明背景虚拟形象。选择RusTuberV源。",
+                "같은 Mac의 Syphon 앱으로 투명 배경 아바타를 보냅니다. RusTuberV 소스를 선택하세요.",
+            ));
+        } else {
+            ui.small(lang.pick(
             "同じPCのOBSへ背景透過で送信します。Spout2 CaptureのComposite ModeはPremultiplied Alphaを選んでください。",
             "Send a transparent avatar to OBS on this PC. Add Spout2 Capture and set Composite Mode to Premultiplied Alpha.",
             "向同一台电脑上的OBS发送透明背景虚拟形象。添加Spout2 Capture并将Composite Mode设为Premultiplied Alpha。",
             "같은 PC의 OBS로 투명 배경 아바타를 보냅니다. Spout2 Capture의 Composite Mode를 Premultiplied Alpha로 설정하세요.",
         ));
+        }
         ui.horizontal_wrapped(|ui| {
             if primary_button(
                 ui,
-                lang.pick(
-                    "Spout2送信を開始",
-                    "Start Spout2",
-                    "开始Spout2发送",
-                    "Spout2 전송 시작",
+                &format!(
+                    "{backend} {}",
+                    lang.pick("送信を開始", "Start", "开始发送", "전송 시작")
                 ),
                 !active
                     && vm.avatar.is_ready
@@ -164,11 +178,9 @@ pub(super) fn output_page(
             if ui
                 .add_enabled(
                     active,
-                    egui::Button::new(lang.pick(
-                        "Spout2送信を停止",
-                        "Stop Spout2",
-                        "停止Spout2发送",
-                        "Spout2 전송 중지",
+                    egui::Button::new(format!(
+                        "{backend} {}",
+                        lang.pick("送信を停止", "Stop", "停止发送", "전송 중지")
                     )),
                 )
                 .clicked()
@@ -176,7 +188,7 @@ pub(super) fn output_page(
                 state.emit(actions, UiAction::StopSpoutOutput);
             }
         });
-        if let vtuber_spout::Status::Error(message) = &vm.spout_status {
+        if let crate::local_output::Status::Error(message) = &vm.spout_status {
             ui.label(message);
         }
     });

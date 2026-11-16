@@ -1,0 +1,36 @@
+name: Syphon macOS
+on:
+  pull_request:
+    paths:
+      - 'crates/vtuber-syphon*/**'
+      - 'crates/vtuber-app/**'
+      - 'crates/vtuber-core/src/video_output.rs'
+      - 'tools/build*macos.sh'
+      - 'Cargo.*'
+      - '.github/workflows/syphon-macos.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  syphon:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Select stable Rust
+        run: rustup update stable --no-self-update
+      - name: Build official framework and verify signature
+        run: bash tools/build-syphon-macos.sh target/debug
+      - name: Compile native Metal boundary and test sender mailbox
+        run: cargo test --locked -p vtuber-syphon --all-targets
+      - name: Fetch approved models for app compile
+        run: |
+          curl -fL -o assets/models/pose_landmarker_full.task https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
+          curl -fL -o assets/models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+          curl -fL -o assets/models/face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task
+          printf '%s\n' \
+            '4eaa5eb7a98365221087693fcc286334cf0858e2eb6e15b506aa4a7ecdcec4ad  assets/models/pose_landmarker_full.task' \
+            'fbc2a30080c3c557093b5dDFC334698132eb341044ccee322ccf8bcf3607cde1  assets/models/hand_landmarker.task' \
+            '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff  assets/models/face_landmarker.task' | shasum -a 256 -c -
+      - name: Check macOS app integration without optional NDI SDK
+        run: cargo check --locked -p vtuber-app --tests -j 2

@@ -17,6 +17,18 @@ pub use generated::{LicenseGroup, LicenseText, LicensedItem};
 
 /// Items this repository ships itself, which `Cargo.lock` does not describe.
 static BUNDLED_LICENSE_GROUPS: &[LicenseGroup] = &[
+    #[cfg(target_os = "macos")]
+    LicenseGroup {
+        expression: "BSD-3-Clause",
+        items: &[LicensedItem {
+            name: "Syphon framework",
+            version: "f476167",
+        }],
+        texts: &[LicenseText {
+            file_name: "licenses/Syphon-License.txt",
+            body: include_str!("../../../licenses/Syphon-License.txt"),
+        }],
+    },
     LicenseGroup {
         expression: "MIT OR Apache-2.0",
         items: &[LicensedItem {

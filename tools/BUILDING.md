@@ -8,7 +8,7 @@ RustとBevyを使ったRusTuberVのビルド手順です。アプリの利用方
 | --- | --- |
 | Rust | 1.99以上。`rust-toolchain.toml`はstableを指定 |
 | Windows | MSYS2 CLANG64のRust / Clang / LLD、x86_64-pc-windows-gnullvmターゲット |
-| macOS | Apple Silicon、Xcode Command Line Tools |
+| macOS | Apple Silicon、Xcode（SyphonのMetalシェーダービルドに必要） |
 | NDI出力を含むビルド | NDI Standard SDKとClang / libclang |
 | 描画 | Bevyの描画バックエンドに対応するGPUとドライバー |
 | トラッキング | WebカメラとOSのカメラ利用許可 |
@@ -120,6 +120,20 @@ open target/release/RusTuberV.app
 ```sh
 cargo build --release --locked -p vtuber-desktop --no-default-features -j 1
 ./target/release/RusTuberV
+```
+
+### macOSのSyphon出力
+
+`tools/build-macos.sh`は固定リビジョンの公式Syphon.frameworkをビルドして
+`.app/Contents/Frameworks`に同梱し、ライセンスとアドホック署名も追加します。
+XcodeのMetalコンパイラーが必要です。WindowsのSpout2とは別のバックエンドです。
+NDI SDKの有無とは独立して利用できます。
+
+`cargo run`などで単体バイナリを使う場合は、対応する出力ディレクトリに
+フレームワークを置きます（debugなら`target/debug`）。
+
+```sh
+bash tools/build-syphon-macos.sh target/debug
 ```
 
 ## 起動オプション

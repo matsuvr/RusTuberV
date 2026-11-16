@@ -30,6 +30,9 @@ cp assets/models/manifest.toml "$app/Contents/Resources/assets/models/manifest.t
 if [ ! -f "$app/Contents/Resources/tracking_profile.toml" ]; then
     cp tracking_profile.toml "$app/Contents/Resources/tracking_profile.toml"
 fi
+bash tools/build-syphon-macos.sh "$app/Contents/Frameworks"
+mkdir -p "$app/Contents/Resources/licenses"
+cp licenses/Syphon-License.txt "$app/Contents/Resources/licenses/"
 codesign --force --sign - "$app"
 # Launch Services uses the bundle's modification time to refresh its icon.
 touch "$app"

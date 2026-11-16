@@ -8,6 +8,8 @@ members = [
   "crates/vtuber-avatar",
   "crates/vtuber-ndi",
   "crates/vtuber-spout",
+  "crates/vtuber-syphon",
+  "crates/vtuber-syphon-native",
   "crates/vtuber-app",
   "apps/desktop",
   "tools/xtask",

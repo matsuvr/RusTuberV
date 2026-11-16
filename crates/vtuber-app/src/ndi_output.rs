@@ -16,7 +16,7 @@ use crate::ui_model::{NdiOutputUiState, UiViewModel};
 pub struct NdiOutputIntent {
     requested: bool,
     generation: u64,
-    /// Independent, session-local Spout2 start/stop intent.
+    /// Independent, session-local OS-local texture output intent.
     pub spout_requested: bool,
 }
 
@@ -48,10 +48,10 @@ impl NdiOutputIntent {
     }
 }
 
-/// Windows sender state; native handles never enter the UI or Bevy world.
+/// OS-local sender state (Spout2 on Windows, Syphon on macOS); native handles never enter the UI or Bevy world.
 #[derive(Resource, Default)]
 pub struct SpoutOutputRuntime {
-    controller: vtuber_spout::Controller,
+    controller: crate::local_output::Controller,
     power: Option<vtuber_platform::PowerState>,
     attempted: bool,
 }
@@ -81,13 +81,16 @@ impl SpoutOutputRuntime {
             self.controller.start();
             self.attempted = true;
         }
-        if matches!(self.controller.status(), vtuber_spout::Status::Error(_)) {
+        if matches!(
+            self.controller.status(),
+            crate::local_output::Status::Error(_)
+        ) {
             *requested = false;
             return false;
         }
         matches!(
             self.controller.status(),
-            vtuber_spout::Status::Starting | vtuber_spout::Status::Live
+            crate::local_output::Status::Starting | crate::local_output::Status::Live
         )
     }
 }

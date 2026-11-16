@@ -278,7 +278,7 @@ pub struct UiViewModel {
     /// NDI state.
     pub ndi_output: NdiOutputViewModel,
     /// Windows Spout sender status snapshot.
-    pub spout_status: vtuber_spout::Status,
+    pub spout_status: crate::local_output::Status,
     /// Frames replaced in the bounded Spout queue, not receiver delivery loss.
     pub spout_replaced_frames: u64,
     /// Looking Glass device catalog, saved selection, and status.

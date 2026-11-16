@@ -65,6 +65,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" \
     "$resources/assets/models" "$resources/licenses" release/inputs
 # 新しい配布フォルダーへ必要なファイルだけをコピーする。
 cp target/release/RusTuberV "$app/Contents/MacOS/"
+ditto target/release/RusTuberV.app/Contents/Frameworks/Syphon.framework "$app/Contents/Frameworks/Syphon.framework"
+cp licenses/Syphon-License.txt "$resources/licenses/"
 cp apps/desktop/macos/Info.plist "$app/Contents/"
 cp target/release/RusTuberV.app/Contents/Resources/rustuberv-app.icns "$resources/"
 cp tracking_profile.toml LICENSE THIRD_PARTY_NOTICES.md "$resources/"
@@ -101,6 +103,7 @@ otoolの出力で、NDIが上記のアプリ内パスを参照し、その他の
 アドホック署名する。Developer ID署名・Apple公証を意味しない。
 
 ```bash
+codesign --force --sign - "$app/Contents/Frameworks/Syphon.framework"
 codesign --force --sign - "$app/Contents/Frameworks/libndi.dylib"
 codesign --force --sign - "$app/Contents/MacOS/libmediapipe.dylib"
 codesign --force --sign - "$app"

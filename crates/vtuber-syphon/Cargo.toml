@@ -1,0 +1,18 @@
+[package]
+name = "vtuber-syphon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "macOS Syphon output with a bounded latest-frame mailbox."
+
+[dependencies]
+vtuber-core = { path = "../vtuber-core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+vtuber-syphon-native = { path = "../vtuber-syphon-native" }
+
+[lints]
+workspace = true
