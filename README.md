@@ -38,15 +38,17 @@ MacではZIPを展開し、`RusTuberV.app`をアプリケーションフォル�
 - キーボードによる表情切り替えとモデルごとのキー割り当て
 - NDI®による背景透過映像の送信
 - [Spout2による同じWindows PCのOBSへの背景透過出力](manual/SPOUT2.md)
+- Syphonによる同じMacの配信アプリへの背景透過出力
 - Looking Glass Bridgeによる機器検出と出力
 - 日本語、英語、中国語、韓国語のUI
 
 ## OBSへ映す
 
-「NDI・Spout2出力」で送信方式を選び、それぞれの開始・停止ボタンで操作します。プレビューで調整した大きさ・位置・向きが、背景透過のアバター映像に反映されます。声はOBSでマイクを設定します。
+「映像出力」で送信方式を選び、それぞれの開始・停止ボタンで操作します。プレビューで調整した大きさ・位置・向きが、背景透過のアバター映像に反映されます。声はOBSでマイクを設定します。
 
 | 方式 | 送信先 | OBSの準備と手順 |
 | --- | --- | --- |
+| Syphon | 同じMacのSyphon対応アプリ | 「Syphon 送信を開始」を押し、受信アプリで`RusTuberV`を選択。[Syphonの手順](manual/ja/README.md#syphonで送るmac) |
 | Spout2 | 同じWindows PCのOBS | OBS Spout2 pluginを導入し、Spout2 CaptureのComposite ModeをPremultiplied Alphaに設定。[Spout2の手順](manual/SPOUT2.md) |
 | NDI | Windows・Macの同じPC、または同じネットワーク上のOBS | DistroAVと対応するNDI Runtimeを導入。[NDIの手順](manual/ja/README.md#ndiで送るwindowsmac) |
 
@@ -67,9 +69,3 @@ Looking Glassへの出力にはLooking Glass Bridgeを使用します。機器�
 アバターや配信素材は、各権利者が定める利用条件に沿ってご利用ください。
 
 NDI® is a registered trademark of Vizrt NDI AB.
-
-### Macのローカル映像出力
-
-「映像出力」のSyphonから送信を開始すると、同じMacのSyphon対応アプリで
-`RusTuberV`ソースを選べます。背景透過に対応します。WindowsではSpout2を使います。
-NDI出力と同時に使用できます。Syphon.frameworkはMacの.appに同梱します。

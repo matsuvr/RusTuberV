@@ -2,7 +2,7 @@
 
 [日本語](../ja/README.md) · **English** · [简体中文](../zh-CN/README.md) · [한국어](../ko/README.md)
 
-Animate a VRM avatar with your webcam and send it to OBS through NDI or Spout2. This guide covers face and hand tracking, expressions, and framing.
+Animate a VRM avatar with your webcam and send it to OBS through NDI, Spout2, or Syphon. This guide covers face and hand tracking, expressions, and framing.
 
 ![Choose an avatar → Select a camera → Adjust the view → Send to OBS](images/00-flow.png)
 
@@ -119,7 +119,7 @@ Hair, skin colors, and surface appearance use the materials stored in the VRM. B
 
 ## Show your avatar in OBS
 
-Open **NDI & Spout2 output** to send transparent avatar video. The size, position, and angle set in the preview apply to the output. NDI and Spout2 have separate start and stop controls and can run together.
+Open **Video output** to send transparent avatar video. The size, position, and angle set in the preview apply to the output. NDI and the local output (Spout2 on Windows or Syphon on Mac) have separate start and stop controls and can run together.
 
 | Use | Transport | OBS setup |
 | --- | --- | --- |
@@ -129,13 +129,21 @@ Open **NDI & Spout2 output** to send transparent avatar video. The size, positio
 ### Send with Spout2 (Windows)
 
 1. Close OBS, install OBS Spout2 plugin for your OBS version from the [official releases](https://github.com/Off-World-Live/obs-spout2-plugin/releases), and reopen OBS.
-2. Load an avatar in RusTuberV and open **NDI & Spout2 output**.
-3. Click **Start Spout2** and check that the status reads **RusTuberV: Sending**.
+2. Load an avatar in RusTuberV and open **Video output**.
+3. Click **Spout2 Start** and check that the status reads **RusTuberV: Sending**.
 4. In OBS, add **Sources → + → Spout2 Capture** and select `RusTuberV` as the sender.
 5. Set Spout2 Capture's **Composite Mode** to **Premultiplied Alpha**.
 6. Place the avatar source above background images or game capture in OBS.
 
 Run OBS and RusTuberV on the same GPU. Video is 1920×1080. The [Spout2 guide](../SPOUT2.md#english) covers GPU selection and resuming transmission.
+
+### Send with Syphon (Mac)
+
+1. Load an avatar and open **Video output**.
+2. Click **Syphon Start** and wait for **RusTuberV: Sending**.
+3. Select `RusTuberV` in a Syphon-compatible application on the same Mac.
+
+Syphon sends transparent video at 1920×1080 and can run alongside NDI. Click **Syphon Stop** to stop sending.
 
 ### Send with NDI (Windows and Mac)
 
@@ -143,7 +151,7 @@ Install [DistroAV](https://distroav.org/download) and its required NDI Runtime i
 
 #### 1. Send video from RusTuberV
 
-Open **NDI & Spout2 output** and click **Start NDI**. Once the status reads **Sending**, receive the video in OBS.
+Open **Video output** and click **Start NDI**. Once the status reads **Sending**, receive the video in OBS.
 
 NDI® sends transparent avatar video. Set up your microphone in OBS for your voice.
 
@@ -176,7 +184,7 @@ Once your streaming destination is configured, click **Start Streaming** in OBS.
 ### When you finish
 
 1. Stop streaming or recording in OBS.
-2. Open **NDI & Spout2 output** in RusTuberV and click **Stop Spout2** and **Stop NDI** for the active transports.
+2. Open **Video output** in RusTuberV and click **Syphon Stop**, **Spout2 Stop**, and **Stop NDI** for the active transports.
 3. Close RusTuberV.
 
 NDI® is a registered trademark of Vizrt NDI AB.

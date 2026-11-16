@@ -119,7 +119,7 @@ Mac에서는 ZIP을 압축 해제하고 RusTuberV.app을 응용 프로그램 폴
 
 ## OBS에 표시
 
-**NDI 및 Spout2 출력**을 열어 투명 배경 아바타 영상을 전송합니다. 미리 보기에서 조정한 크기, 위치와 방향은 출력에도 반영됩니다. NDI와 Spout2는 각각 시작·중지할 수 있고 동시에 사용할 수도 있습니다.
+**영상 출력**을 열어 투명 배경 아바타 영상을 전송합니다. 미리 보기에서 조정한 크기, 위치와 방향은 출력에도 반영됩니다. NDI와 로컬 출력(Windows의 Spout2 또는 Mac의 Syphon)은 각각 시작·중지할 수 있고 동시에 사용할 수도 있습니다.
 
 | 사용 상황 | 방식 | OBS 준비 |
 | --- | --- | --- |
@@ -129,7 +129,7 @@ Mac에서는 ZIP을 압축 해제하고 RusTuberV.app을 응용 프로그램 폴
 ### Spout2로 전송（Windows）
 
 1. OBS를 닫고 [공식 배포 페이지](https://github.com/Off-World-Live/obs-spout2-plugin/releases)에서 OBS 버전에 맞는 OBS Spout2 plugin을 설치한 뒤 OBS를 다시 엽니다.
-2. RusTuberV에서 아바타를 불러오고 **NDI 및 Spout2 출력**을 엽니다.
+2. RusTuberV에서 아바타를 불러오고 **영상 출력**을 엽니다.
 3. **Spout2 전송 시작**을 누르고 **RusTuberV: 전송 중**을 확인합니다.
 4. OBS에서 **소스 목록 → ＋ → Spout2 Capture**를 추가하고 송신자로 `RusTuberV`를 선택합니다.
 5. Spout2 Capture의 **Composite Mode**를 **Premultiplied Alpha**로 설정합니다.
@@ -137,13 +137,21 @@ Mac에서는 ZIP을 압축 해제하고 RusTuberV.app을 응용 프로그램 폴
 
 OBS와 RusTuberV는 같은 GPU로 실행합니다. 영상 해상도는 1920×1080입니다. GPU 선택과 전송 재개 방법은 [Spout2 설명서](../SPOUT2.md#한국어)를 참조하세요.
 
+### Syphon으로 전송（Mac）
+
+1. 아바타를 불러오고 **영상 출력**을 엽니다.
+2. **Syphon 전송 시작**을 누르고 **RusTuberV: 전송 중**을 확인합니다.
+3. 같은 Mac의 Syphon 지원 앱에서 `RusTuberV` 소스를 선택합니다.
+
+Syphon은 1920×1080 투명 배경 영상을 보내며 NDI와 동시에 사용할 수 있습니다. **Syphon 전송 중지**를 누르면 전송을 마칩니다.
+
 ### NDI로 전송（Windows・Mac）
 
 OBS용 [DistroAV](https://distroav.org/download)와 해당 NDI Runtime을 설치합니다. [공식 설치 안내](https://github.com/DistroAV/DistroAV/wiki/1.-Installation)에서 운영체제와 OBS 버전에 맞는 설치 파일을 확인하고 설치 후 OBS를 다시 여세요. **NDI 소스**가 이미 있다면 영상 전송으로 진행합니다.
 
 #### 1. RusTuberV에서 영상 보내기
 
-**NDI 및 Spout2 출력**을 열고 **NDI 전송 시작**을 누릅니다. 상태가 **전송 중**이 되면 OBS에서 받습니다.
+**영상 출력**을 열고 **NDI 전송 시작**을 누릅니다. 상태가 **전송 중**이 되면 OBS에서 받습니다.
 
 NDI®로 투명 배경 아바타 영상을 보냅니다. 목소리는 OBS에서 마이크를 설정합니다.
 
@@ -176,7 +184,7 @@ OBS의 **소스 목록**에서 **＋**를 누릅니다.
 ### 끝낼 때
 
 1. OBS에서 방송·녹화를 중지합니다.
-2. RusTuberV의 **NDI 및 Spout2 출력**에서 사용 중인 **Spout2 전송 중지**, **NDI 전송 중지**를 누릅니다.
+2. RusTuberV의 **영상 출력**에서 사용 중인 **Syphon 전송 중지**, **Spout2 전송 중지**, **NDI 전송 중지**를 누릅니다.
 3. RusTuberV를 닫습니다.
 
 NDI® is a registered trademark of Vizrt NDI AB.

@@ -2,7 +2,7 @@
 
 **日本語** · [English](../en/README.md) · [简体中文](../zh-CN/README.md) · [한국어](../ko/README.md)
 
-Webカメラで顔や手の動きをVRMアバターに反映し、NDI・Spout2でOBSへ映像を送れます。表情や画角を調整して使います。
+Webカメラで顔や手の動きをVRMアバターに反映し、NDI・Spout2・Syphonで配信アプリへ映像を送れます。表情や画角を調整して使います。
 
 ![アバターを選ぶ → カメラを選ぶ → 映り方を整える → OBSへ渡す](images/00-flow.png)
 
@@ -119,23 +119,32 @@ MacではZIPを展開し、RusTuberV.appをアプリケーションフォルダ�
 
 ## OBSに映す
 
-左の「NDI・Spout2出力」で、背景透過のアバター映像を送信します。プレビューで調整した大きさ・位置・向きが出力にも反映されます。NDIとSpout2はそれぞれ開始・停止でき、同時に使えます。
+左の「映像出力」で、背景透過のアバター映像を送信します。プレビューで調整した大きさ・位置・向きが出力にも反映されます。NDIと、WindowsのSpout2またはMacのSyphonは、それぞれ開始・停止でき、同時に使えます。
 
 | 使う場面 | 方式 | OBSに用意するもの |
 | --- | --- | --- |
+| 同じMacの配信アプリへ送る | [Syphon](#syphonで送るmac) | Syphon対応アプリ |
 | 同じWindows PCのOBSへ送る | [Spout2](#spout2で送るwindows) | OBS Spout2 plugin |
 | Windows・Macで、同じPCや同じネットワーク上のOBSへ送る | [NDI](#ndiで送るwindowsmac) | DistroAVと対応するNDI Runtime |
 
 ### Spout2で送る（Windows）
 
 1. OBSを閉じ、[公式配布ページ](https://github.com/Off-World-Live/obs-spout2-plugin/releases)からOBSのバージョンに対応したOBS Spout2 pluginをインストールして、OBSを開き直します。
-2. RusTuberVでアバターを読み込み、左の「NDI・Spout2出力」を開きます。
-3. 「Spout2送信を開始」を押し、「RusTuberV: 送信中」と表示されることを確認します。
+2. RusTuberVでアバターを読み込み、左の「映像出力」を開きます。
+3. 「Spout2 送信を開始」を押し、「RusTuberV: 送信中」と表示されることを確認します。
 4. OBSの「ソース」で「＋」→「Spout2 Capture」を追加し、送信元に`RusTuberV`を選びます。
 5. Spout2 Captureの「Composite Mode」を「Premultiplied Alpha」に設定します。
 6. OBSでアバターのソースを背景画像やゲーム画面より上に並べます。
 
 OBSとRusTuberVは同じGPUで実行します。映像は1920×1080です。送信の再開やGPUの選択については、[Spout2の詳しい手順](../SPOUT2.md)を参照してください。
+
+### Syphonで送る（Mac）
+
+1. RusTuberVでアバターを読み込み、左の「映像出力」を開きます。
+2. 「Syphon 送信を開始」を押し、「RusTuberV: 送信中」と表示されることを確認します。
+3. 同じMacのSyphon対応アプリで、受信ソースに`RusTuberV`を選びます。
+
+背景透過の映像を1920×1080で送信します。終了するときは「Syphon 送信を停止」を押します。NDIと同時に使えます。
 
 ### NDIで送る（Windows・Mac）
 
@@ -143,7 +152,7 @@ OBSに[DistroAV](https://distroav.org/download)と対応するNDI Runtimeをイ�
 
 #### 1. RusTuberVから映像を送る
 
-左の「NDI・Spout2出力」を開き、「NDI送信を開始」を押します。「状態：送信中」になったらOBSで受け取ります。
+左の「映像出力」を開き、「NDI送信を開始」を押します。「状態：送信中」になったらOBSで受け取ります。
 
 NDI®で背景透過のアバター映像を送信します。声はOBSでマイクを設定します。
 
@@ -176,7 +185,7 @@ OBSの「ソース」にある「＋」を押します。
 ### 終わるとき
 
 1. OBSで配信・録画を停止します。
-2. RusTuberVの「NDI・Spout2出力」で、使用中の「Spout2送信を停止」「NDI送信を停止」を押します。
+2. RusTuberVの「映像出力」で、使用中の「Syphon 送信を停止」「Spout2 送信を停止」「NDI送信を停止」を押します。
 3. RusTuberVを閉じます。
 
 NDI® is a registered trademark of Vizrt NDI AB.

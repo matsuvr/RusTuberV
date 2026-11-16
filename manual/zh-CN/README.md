@@ -119,7 +119,7 @@
 
 ## 在OBS中显示
 
-打开“NDI与Spout2输出”，发送透明背景的虚拟形象视频。预览中调整的大小、位置和角度会反映到输出中。NDI与Spout2各有开始和停止按钮，也可以同时使用。
+打开“视频输出”，发送透明背景的虚拟形象视频。预览中调整的大小、位置和角度会反映到输出中。NDI与本地输出（Windows上的Spout2或Mac上的Syphon）各有开始和停止按钮，也可以同时使用。
 
 | 使用场景 | 方式 | OBS准备 |
 | --- | --- | --- |
@@ -129,13 +129,21 @@
 ### 通过Spout2发送（Windows）
 
 1. 关闭OBS，从[官方发行页面](https://github.com/Off-World-Live/obs-spout2-plugin/releases)安装与OBS版本对应的OBS Spout2 plugin，再打开OBS。
-2. 在RusTuberV中加载虚拟形象，打开“NDI与Spout2输出”。
-3. 点击“开始Spout2发送”，确认显示“RusTuberV: 发送中”。
+2. 在RusTuberV中加载虚拟形象，打开“视频输出”。
+3. 点击“Spout2 开始发送”，确认显示“RusTuberV: 发送中”。
 4. 在OBS中选择“源”→“＋”→“Spout2 Capture”，将发送源设为`RusTuberV`。
 5. 将Spout2 Capture的“Composite Mode”设为“Premultiplied Alpha”。
 6. 在OBS源列表中，将虚拟形象放在背景图片或游戏画面上方。
 
 OBS和RusTuberV应使用同一块GPU运行。视频分辨率为1920×1080。[Spout2手册](../SPOUT2.md#简体中文)介绍了GPU选择和恢复发送的操作。
+
+### 使用Syphon发送（Mac）
+
+1. 加载虚拟形象，打开“视频输出”。
+2. 点击“Syphon 开始发送”，确认显示“RusTuberV: 发送中”。
+3. 在同一台Mac的Syphon兼容应用中选择`RusTuberV`源。
+
+Syphon以1920×1080发送透明背景视频，可与NDI同时使用。点击“Syphon 停止发送”结束。
 
 ### 通过NDI发送（Windows・Mac）
 
@@ -143,7 +151,7 @@ OBS和RusTuberV应使用同一块GPU运行。视频分辨率为1920×1080。[Spo
 
 #### 1. 从RusTuberV发送视频
 
-打开“NDI与Spout2输出”，点击“开始NDI发送”。状态显示“发送中”后，在OBS中接收。
+打开“视频输出”，点击“开始NDI发送”。状态显示“发送中”后，在OBS中接收。
 
 NDI®发送透明背景的虚拟形象视频。声音通过OBS的麦克风设置输入。
 
@@ -176,7 +184,7 @@ NDI®发送透明背景的虚拟形象视频。声音通过OBS的麦克风设置
 ### 结束时
 
 1. 在OBS中停止直播或录制。
-2. 打开RusTuberV的“NDI与Spout2输出”，对正在使用的方式点击“停止Spout2发送”或“停止NDI发送”。
+2. 打开RusTuberV的“视频输出”，对正在使用的方式点击“Syphon 停止发送”、“Spout2 停止发送”或“停止NDI发送”。
 3. 关闭RusTuberV。
 
 NDI® is a registered trademark of Vizrt NDI AB.
