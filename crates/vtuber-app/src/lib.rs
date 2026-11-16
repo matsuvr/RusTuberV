@@ -109,3 +109,9 @@ pub mod tracking_runtime;
 
 /// File boundary for the user-tunable tracking profile document.
 pub mod tracking_file;
+
+// The OS-local texture sender shares the existing explicit start/stop lifecycle.
+#[cfg(not(target_os = "macos"))]
+use vtuber_spout as local_output;
+#[cfg(target_os = "macos")]
+use vtuber_syphon as local_output;

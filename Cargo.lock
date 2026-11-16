@@ -7267,6 +7267,7 @@ dependencies = [
  "vtuber-ndi",
  "vtuber-platform",
  "vtuber-spout",
+ "vtuber-syphon",
  "vtuber-tracking",
 ]
 
@@ -7363,6 +7364,21 @@ version = "0.2.4"
 dependencies = [
  "spout2-rs",
  "vtuber-core",
+]
+
+[[package]]
+name = "vtuber-syphon"
+version = "0.2.4"
+dependencies = [
+ "vtuber-core",
+ "vtuber-syphon-native",
+]
+
+[[package]]
+name = "vtuber-syphon-native"
+version = "0.2.4"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

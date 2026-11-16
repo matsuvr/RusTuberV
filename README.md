@@ -67,3 +67,9 @@ Looking Glassへの出力にはLooking Glass Bridgeを使用します。機器�
 アバターや配信素材は、各権利者が定める利用条件に沿ってご利用ください。
 
 NDI® is a registered trademark of Vizrt NDI AB.
+
+### Macのローカル映像出力
+
+「映像出力」のSyphonから送信を開始すると、同じMacのSyphon対応アプリで
+`RusTuberV`ソースを選べます。背景透過に対応します。WindowsではSpout2を使います。
+NDI出力と同時に使用できます。Syphon.frameworkはMacの.appに同梱します。

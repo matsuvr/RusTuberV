@@ -1,0 +1,21 @@
+[package]
+name = "vtuber-syphon-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Isolated Objective-C/Metal boundary for the Syphon sender."
+
+[build-dependencies]
+cc = "1"
+
+# The FFI boundary deliberately does not inherit unsafe_code = forbid.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
