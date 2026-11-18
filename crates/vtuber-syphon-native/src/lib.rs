@@ -33,8 +33,8 @@ impl Sender {
             _not_send_sync: PhantomData,
         })
     }
-    /// Submit tightly packed premultiplied BGRA8 pixels, in top-to-bottom row order.
-    pub fn send(&mut self, bytes: &[u8], width: u32, height: u32) -> Result<(), String> {
+    /// Submit BGRA8 pixels; returns false when no client is connected.
+    pub fn send(&mut self, bytes: &[u8], width: u32, height: u32) -> Result<bool, String> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(4));
@@ -44,10 +44,10 @@ impl Sender {
         // SAFETY: owned live handle, validated buffer size; no pointer is retained.
         let status =
             unsafe { rtv_syphon_send(self.handle.as_ptr(), bytes.as_ptr(), width, height) };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err("Syphon Metal texture upload/publication failed".into())
+        match status {
+            0 => Ok(true),
+            2 => Ok(false),
+            _ => Err("Syphon Metal texture upload/publication failed".into()),
         }
     }
 }
