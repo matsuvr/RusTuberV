@@ -13,7 +13,7 @@ pub enum Status {
     /// No sender requested.
     #[default]
     Off,
-    /// Device initialization or waiting for the first frame.
+    /// Device initialization, waiting for a frame or for a receiver.
     Starting,
     /// Frames are being submitted to the SDK.
     Live,
@@ -172,7 +172,7 @@ fn send_native(_: &Arc<(Mutex<Mailbox>, Condvar)>) -> Result<(), String> {
 #[cfg(any(target_os = "macos", test))]
 fn send_loop(
     shared: &Arc<(Mutex<Mailbox>, Condvar)>,
-    mut send: impl FnMut(&VideoOutputFrame) -> Result<(), String>,
+    mut send: impl FnMut(&VideoOutputFrame) -> Result<bool, String>,
 ) -> Result<(), String> {
     loop {
         let frame = {
@@ -190,13 +190,17 @@ fn send_loop(
             state.frame.take()
         };
         if let Some(frame) = frame {
-            send(&frame)?;
+            let published = send(&frame)?;
             let mut state = shared
                 .0
                 .lock()
                 .map_err(|_| "Syphon worker state poisoned")?;
             if !state.stop {
-                state.status = Status::Live;
+                state.status = if published {
+                    Status::Live
+                } else {
+                    Status::Starting
+                };
             }
         }
     }
@@ -274,7 +278,7 @@ mod tests {
                 ]
             );
             c.shared.0.lock().unwrap().stop = true;
-            Ok(())
+            Ok(true)
         })
         .unwrap();
     }
@@ -292,10 +296,43 @@ mod tests {
             } else {
                 shared.0.lock().unwrap().stop = true;
             }
-            Ok(())
+            Ok(true)
         })
         .unwrap();
         assert_eq!(widths, [2, 3]);
+    }
+    #[test]
+    fn skips_without_client_and_resumes_after_reconnection() {
+        let c = active();
+        c.submit(frame(1, 2));
+        let shared = Arc::clone(&c.shared);
+        let mut calls = 0;
+        send_loop(&shared, |_| {
+            calls += 1;
+            match calls {
+                1 => {
+                    c.submit(frame(2, 2));
+                    Ok(false)
+                }
+                2 => {
+                    assert_eq!(c.status(), Status::Starting);
+                    c.submit(frame(3, 2));
+                    Ok(true)
+                }
+                3 => {
+                    assert_eq!(c.status(), Status::Live);
+                    c.submit(frame(4, 2));
+                    Ok(false)
+                }
+                _ => {
+                    assert_eq!(c.status(), Status::Starting);
+                    shared.0.lock().unwrap().stop = true;
+                    Ok(true)
+                }
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 4);
     }
     #[test]
     fn failure_is_returned_and_no_queued_frame_is_retried() {
@@ -311,7 +348,7 @@ mod tests {
     fn stop_wakes_idle_worker() {
         let mut c = active();
         let shared = Arc::clone(&c.shared);
-        let worker = std::thread::spawn(move || send_loop(&shared, |_| Ok(())));
+        let worker = std::thread::spawn(move || send_loop(&shared, |_| Ok(true)));
         c.stop();
         assert!(worker.join().unwrap().is_ok());
     }
