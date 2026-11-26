@@ -8,6 +8,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+mod quint_tests;
+
 /// Pure observed-arm adapter for the existing two-bone IK.
 pub mod tracked_arm;
 

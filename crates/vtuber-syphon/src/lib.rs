@@ -29,6 +29,7 @@ pub const fn available() -> bool {
 #[derive(Default)]
 struct Mailbox {
     stop: bool,
+    has_clients: bool,
     frame: Option<VideoOutputFrame>,
     status: Status,
     replaced: u64,
@@ -54,6 +55,11 @@ impl Controller {
     /// Number of frames replaced before submission (not a delivery counter).
     pub fn replaced_frames(&self) -> u64 {
         self.shared.0.lock().map_or(0, |s| s.replaced)
+    }
+
+    /// Whether the running server has a receiver that needs readback.
+    pub fn has_clients(&self) -> bool {
+        self.shared.0.lock().is_ok_and(|s| s.has_clients)
     }
 
     /// Reap only a completed worker. Never wait for a native call on the UI thread.
@@ -95,6 +101,7 @@ impl Controller {
             .spawn(move || {
                 let result = send_native(&shared);
                 if let Ok(mut state) = shared.0.lock() {
+                    state.has_clients = false;
                     state.frame = None;
                     state.status = if state.stop {
                         Status::Off
@@ -113,6 +120,8 @@ impl Controller {
 
     fn set_error(&self, message: &str) {
         if let Ok(mut state) = self.shared.0.lock() {
+            state.has_clients = false;
+            state.frame = None;
             state.status = Status::Error(message.into());
         }
     }
@@ -121,6 +130,7 @@ impl Controller {
     pub fn stop(&mut self) {
         if let Ok(mut state) = self.shared.0.lock() {
             state.stop = true;
+            state.has_clients = false;
             state.frame = None;
             if !matches!(state.status, Status::Error(_)) {
                 state.status = Status::Off;
@@ -139,7 +149,7 @@ impl Controller {
     /// Publish the latest validated BGRA frame, sharing its Arc allocation with NDI.
     pub fn submit(&self, frame: VideoOutputFrame) {
         if let Ok(mut state) = self.shared.0.lock() {
-            if state.stop || !matches!(state.status, Status::Starting | Status::Live) {
+            if !state.has_clients {
                 return;
             }
             if state.frame.replace(frame).is_some() {
@@ -159,8 +169,9 @@ impl Drop for Controller {
 #[cfg(target_os = "macos")]
 fn send_native(shared: &Arc<(Mutex<Mailbox>, Condvar)>) -> Result<(), String> {
     let mut sender = vtuber_syphon_native::Sender::new()?;
-    send_loop(shared, |frame| {
-        sender.send(frame.data(), frame.width(), frame.height())
+    send_loop(shared, |frame| match frame {
+        Some(frame) => sender.send(frame.data(), frame.width(), frame.height()),
+        None => Ok(sender.has_clients()),
     })
 }
 
@@ -172,39 +183,48 @@ fn send_native(_: &Arc<(Mutex<Mailbox>, Condvar)>) -> Result<(), String> {
 #[cfg(any(target_os = "macos", test))]
 fn send_loop(
     shared: &Arc<(Mutex<Mailbox>, Condvar)>,
-    mut send: impl FnMut(&VideoOutputFrame) -> Result<bool, String>,
+    mut poll_or_send: impl FnMut(Option<&VideoOutputFrame>) -> Result<bool, String>,
 ) -> Result<(), String> {
+    const CLIENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
     loop {
         let frame = {
             let state = shared
                 .0
                 .lock()
                 .map_err(|_| "Syphon worker state poisoned")?;
-            let mut state = shared
+            // Even with readback paused, keep the discoverable server and check
+            // for a receiver independently of frame arrivals.
+            let (mut state, _) = shared
                 .1
-                .wait_while(state, |s| !s.stop && s.frame.is_none())
+                .wait_timeout_while(state, CLIENT_POLL_INTERVAL, |s| {
+                    s.frame.is_none() && !s.stop
+                })
                 .map_err(|_| "Syphon worker state poisoned")?;
             if state.stop {
                 return Ok(());
             }
             state.frame.take()
         };
-        if let Some(frame) = frame {
-            let published = send(&frame)?;
-            let mut state = shared
-                .0
-                .lock()
-                .map_err(|_| "Syphon worker state poisoned")?;
-            if !state.stop {
-                state.status = if published {
-                    Status::Live
-                } else {
-                    Status::Starting
-                };
+        let has_clients = poll_or_send(frame.as_ref())?;
+        let mut state = shared
+            .0
+            .lock()
+            .map_err(|_| "Syphon worker state poisoned")?;
+        if !state.stop {
+            state.has_clients = has_clients;
+            if !has_clients {
+                state.frame = None;
+                state.status = Status::Starting;
+            } else if frame.is_some() {
+                state.status = Status::Live;
             }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
 
 #[cfg(test)]
 mod tests {
@@ -220,9 +240,78 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_syphon() {
+        use crate::quint_replay::{number, traces};
+        traces("syphon", |states| {
+            let mut c = Controller::default();
+            c.shared.0.lock().unwrap().status = Status::Starting;
+            let shared = Arc::clone(&c.shared);
+            let mut rows = states.iter();
+            let mut previous = rows.next().unwrap();
+            let check = |c: &Controller, row: &serde_json::Value| {
+                assert_eq!(c.has_clients(), row["clients"]);
+                assert_eq!(format!("{:?}", c.status()), row["status"]);
+            };
+            let producer = |c: &mut Controller, row: &serde_json::Value| match row["event"]
+                .as_str()
+                .unwrap()
+            {
+                "none" => {}
+                "submit" => c.submit(frame(1, 1)),
+                "replace" => {
+                    c.submit(frame(1, 1));
+                    c.submit(frame(2, 2));
+                }
+                "discard" => {
+                    c.submit(frame(1, 1));
+                    c.discard_pending();
+                }
+                "stop" => {
+                    c.submit(frame(1, 1));
+                    c.stop();
+                }
+                other => panic!("{other}"),
+            };
+            // The callback is the point where the native call has taken the old frame
+            // and new submissions can arrive, before the worker learns the client count.
+            send_loop(&shared, |offered| {
+                check(&c, previous);
+                let seq = offered.map_or(0, |f| f.frame_seq().0 as i64);
+                assert_eq!(seq, number(&previous["pending"]));
+                let Some(row) = rows.next() else {
+                    c.stop();
+                    return Ok(false);
+                };
+                assert_eq!(seq, number(&row["offered"]));
+                producer(&mut c, row);
+                previous = row;
+                Ok(row["connected"].as_bool().unwrap())
+            })
+            .unwrap();
+            if previous["status"] == "Off" {
+                check(&c, previous);
+                assert!(shared.0.lock().unwrap().frame.is_none());
+                // A stopped worker cannot consume another frame, even if producers publish.
+                for row in rows {
+                    producer(&mut c, row);
+                    check(&c, row);
+                    assert_eq!(number(&row["offered"]), 0);
+                    assert_eq!(number(&row["pending"]), 0);
+                    assert!(shared.0.lock().unwrap().frame.is_none());
+                }
+            }
+        });
+    }
+
     fn active() -> Controller {
         let c = Controller::default();
-        c.shared.0.lock().unwrap().status = Status::Starting;
+        {
+            let mut state = c.shared.0.lock().unwrap();
+            state.status = Status::Starting;
+            state.has_clients = true;
+        }
         c
     }
     #[test]
@@ -270,6 +359,7 @@ mod tests {
             ]
         );
         send_loop(&c.shared, |frame| {
+            let frame = frame.unwrap();
             assert_eq!(frame.data().as_ptr(), allocation);
             assert_eq!(
                 frame.data(),
@@ -289,6 +379,7 @@ mod tests {
         let shared = Arc::clone(&c.shared);
         let mut widths = Vec::new();
         send_loop(&shared, |f| {
+            let f = f.unwrap();
             widths.push(f.width());
             assert_eq!(f.data().len(), f.width() as usize * 4);
             if f.width() == 2 {
@@ -304,35 +395,44 @@ mod tests {
     #[test]
     fn skips_without_client_and_resumes_after_reconnection() {
         let c = active();
-        c.submit(frame(1, 2));
+        c.shared.0.lock().unwrap().has_clients = false;
+        let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let shared = Arc::clone(&c.shared);
-        let mut calls = 0;
-        send_loop(&shared, |_| {
-            calls += 1;
-            match calls {
-                1 => {
-                    c.submit(frame(2, 2));
-                    Ok(false)
-                }
-                2 => {
-                    assert_eq!(c.status(), Status::Starting);
-                    c.submit(frame(3, 2));
-                    Ok(true)
-                }
-                3 => {
-                    assert_eq!(c.status(), Status::Live);
-                    c.submit(frame(4, 2));
-                    Ok(false)
-                }
-                _ => {
-                    assert_eq!(c.status(), Status::Starting);
-                    shared.0.lock().unwrap().stop = true;
-                    Ok(true)
-                }
+        let (published, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn({
+            let connected = Arc::clone(&connected);
+            move || {
+                send_loop(&shared, |frame| {
+                    let connected = connected.load(std::sync::atomic::Ordering::Relaxed);
+                    if connected && let Some(frame) = frame {
+                        published.send(frame.width()).unwrap();
+                    }
+                    Ok(connected)
+                })
             }
-        })
-        .unwrap();
-        assert_eq!(calls, 4);
+        });
+        let timeout = std::time::Duration::from_secs(2);
+        let change_connection = |expected| {
+            connected.store(expected, std::sync::atomic::Ordering::Relaxed);
+            let deadline = std::time::Instant::now() + timeout;
+            while c.has_clients() != expected {
+                assert!(std::time::Instant::now() < deadline, "client state stalled");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+
+        for width in [2, 4] {
+            c.submit(frame(1, width - 1));
+            assert!(c.shared.0.lock().unwrap().frame.is_none());
+            change_connection(true);
+            assert_eq!(c.status(), Status::Starting);
+            c.submit(frame(2, width));
+            assert_eq!(received.recv_timeout(timeout).unwrap(), width);
+            change_connection(false);
+            assert_eq!(c.status(), Status::Starting);
+        }
+        drop(c);
+        assert!(worker.join().unwrap().is_ok());
     }
     #[test]
     fn failure_is_returned_and_no_queued_frame_is_retried() {

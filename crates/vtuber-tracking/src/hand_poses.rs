@@ -9,8 +9,11 @@ use crate::filter::exponential::time_constant_alpha;
 
 mod catalog;
 
-/// Four consecutive *new observations*, never four draws of a retained frame.
+/// Confirmation counts new camera observations, never draws of a retained frame.
 const CONFIRM_FRAMES: u8 = 4;
+const CONFIDENT_FRAMES: u8 = 2;
+const CONFIDENT_SCORE_GAP: f32 = 0.12;
+const CATALOG_SPREAD_LIMIT: f32 = 0.35;
 /// First-order interpolation cannot overshoot the bounded authored poses.
 const TRANSITION_TIME_CONSTANT_SEC: f32 = 0.06;
 
@@ -19,6 +22,7 @@ pub(crate) struct HandPoseSelector {
     selected: Option<usize>,
     candidate: Option<usize>,
     frames: u8,
+    confident_frames: u8,
 }
 
 impl HandPoseSelector {
@@ -27,6 +31,7 @@ impl HandPoseSelector {
             selected: None,
             candidate: None,
             frames: 0,
+            confident_frames: 0,
         }
     }
 
@@ -35,6 +40,7 @@ impl HandPoseSelector {
     pub(crate) fn interrupt(&mut self) {
         self.candidate = None;
         self.frames = 0;
+        self.confident_frames = 0;
     }
 
     pub(crate) fn observe(
@@ -46,23 +52,23 @@ impl HandPoseSelector {
             self.interrupt();
             return None;
         };
-        let canonical = with_flexion_sign(observed, flexion_sign);
-        let closest = catalog::POSES
-            .iter()
-            .enumerate()
-            .min_by(|(_, (name_a, a)), (_, (name_b, b))| {
-                score(canonical, name_a, *a).total_cmp(&score(canonical, name_b, *b))
-            })
-            .map(|(index, _)| index);
+        let [(best, best_score), (_, second_score)] =
+            rank_poses(with_flexion_sign(observed, flexion_sign));
+        let closest = Some(best);
         if closest == self.selected {
             self.interrupt();
         } else {
             if closest != self.candidate {
+                self.interrupt();
                 self.candidate = closest;
-                self.frames = 0;
             }
             self.frames += 1;
-            if self.frames >= CONFIRM_FRAMES {
+            if second_score - best_score >= CONFIDENT_SCORE_GAP {
+                self.confident_frames += 1;
+            } else {
+                self.confident_frames = 0;
+            }
+            if self.confident_frames >= CONFIDENT_FRAMES || self.frames >= CONFIRM_FRAMES {
                 self.selected = closest;
                 self.interrupt();
             }
@@ -70,6 +76,26 @@ impl HandPoseSelector {
         let (_, pose) = catalog::POSES.get(self.selected?)?;
         Some(with_flexion_sign(*pose, flexion_sign))
     }
+}
+
+fn rank_poses(mut observed: HandFingerPose) -> [(usize, f32); 2] {
+    // Palm-plane estimates can spread straight fingers beyond any catalog
+    // pose. Keep those estimates from outweighing the measured flexion.
+    observed.spread = observed
+        .spread
+        .map(|angle| angle.clamp(-CATALOG_SPREAD_LIMIT, CATALOG_SPREAD_LIMIT));
+    let mut best = (0, f32::INFINITY);
+    let mut second = best;
+    for (i, &(name, pose)) in catalog::POSES.iter().enumerate() {
+        let candidate = (i, score(observed, name, pose));
+        if candidate.1 < best.1 {
+            second = best;
+            best = candidate;
+        } else if candidate.1 < second.1 {
+            second = candidate;
+        }
+    }
+    [best, second]
 }
 
 fn with_flexion_sign(mut pose: HandFingerPose, sign: f32) -> HandFingerPose {
@@ -112,7 +138,7 @@ fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
     // the noisier MCP estimate to decide between them.
     let curls_a = a.fingers.map(|joints| curl(joints, 3.0));
     let curls_b = b.fingers.map(|joints| curl(joints, 3.0));
-    let mut result = priority_penalty(name);
+    let mut distance = 0.0f32;
     for ((a, b), (curl_a, curl_b)) in a
         .fingers
         .into_iter()
@@ -124,7 +150,7 @@ fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
         // The MCP keeps a hooked/claw hand distinct from a fist, but is a
         // secondary cue. The palm-plane estimate changes how the same total
         // bend divides between MCP and PIP, including between mirrored inputs.
-        result += (curl_a - curl_b).powi(2) + 0.1 * (knuckle_a - knuckle_b).powi(2);
+        distance += (curl_a - curl_b).powi(2) + 0.1 * (knuckle_a - knuckle_b).powi(2);
     }
     // Every candidate with extended neighbours must explain their observed
     // opening, even when a noisy bend estimate calls one finger folded.
@@ -139,14 +165,19 @@ fn score(a: HandFingerPose, name: &str, b: HandFingerPose) -> f32 {
         .zip(extended.clone().zip(extended.skip(1)))
     {
         if let ([a0, a1], [b0, b1], (true, true)) = (a, b, pair) {
-            result += 2.0 * ((a0 - a1) - (b0 - b1)).powi(2);
+            distance += 2.0 * ((a0 - a1) - (b0 - b1)).powi(2);
         }
     }
-    // Thumb flexion distinguishes thumbs-up/shaka from other folded hands.
-    // Its in-plane opening is less stable when occluded, so it stays weaker.
-    result
-        + 0.5 * (curl(a.thumb, 2.1) - curl(b.thumb, 2.1)).powi(2)
-        + 0.25 * (a.thumb_spread - b.thumb_spread).powi(2)
+    // With four folded fingers, thumb opening distinguishes a thumbs-up from
+    // a fist even when the thumb bend is underestimated. Its influence falls
+    // as the fingers extend.
+    let least_curled = curls_a.into_iter().fold(1.0, f32::min);
+    let thumb_spread_weight = 0.25 + 0.75 * least_curled.powi(2);
+    distance += 0.5 * (curl(a.thumb, 2.1) - curl(b.thumb, 2.1)).powi(2)
+        + thumb_spread_weight * (a.thumb_spread - b.thumb_spread).powi(2);
+    // Keep the existing preference for noisy matches. Its influence goes to
+    // zero for a close match, so every authored pose can win on its own shape.
+    distance + priority_penalty(name).min(2.0 * distance)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -197,6 +228,41 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_hand_pose() {
+        use crate::quint_replay::{number, traces};
+        let fist = pose("fist");
+        let ambiguous = HandFingerPose {
+            thumb: [0.32, 0.38],
+            ..fist
+        };
+        traces("hand_pose", |states| {
+            for sign in [-1.0, 1.0] {
+                let mut selector = HandPoseSelector::new();
+                for row in states {
+                    let input = match row["event"].as_str().unwrap() {
+                        "open" => Some(pose("open")),
+                        "fist" => Some(fist),
+                        "ambiguous" => Some(ambiguous),
+                        "missing" => None,
+                        other => panic!("{other}"),
+                    };
+                    let output = selector.observe(input.map(|p| with_flexion_sign(p, sign)), sign);
+                    let name = |i: Option<usize>| i.map_or("", |idx| catalog::POSES[idx].0);
+                    assert_eq!(name(selector.selected), row["selected"].as_str().unwrap());
+                    assert_eq!(name(selector.candidate), row["candidate"].as_str().unwrap());
+                    assert_eq!(i64::from(selector.frames), number(&row["frames"]));
+                    assert_eq!(i64::from(selector.confident_frames), number(&row["strong"]));
+                    let chosen = row["selected"].as_str().unwrap();
+                    let expected = (input.is_some() && !chosen.is_empty())
+                        .then(|| with_flexion_sign(pose(chosen), sign));
+                    assert_eq!(output, expected);
+                }
+            }
+        });
+    }
+
     fn pose(name: &str) -> HandFingerPose {
         catalog::POSES
             .iter()
@@ -220,24 +286,33 @@ mod tests {
             );
             assert!((0.0..=1.309).contains(&target.thumb[1]), "{name}");
             assert!(
-                target.spread.into_iter().all(|angle| angle.abs() <= 0.35),
+                target
+                    .spread
+                    .into_iter()
+                    .all(|angle| angle.abs() <= CATALOG_SPREAD_LIMIT),
                 "{name}"
             );
             assert!((0.0..=1.31).contains(&target.thumb_spread), "{name}");
             assert!((-0.78..=0.7).contains(&target.thumb_cmc[0]), "{name}");
             assert!((-0.5..=0.78).contains(&target.thumb_cmc[1]), "{name}");
-            let mut canonical_result = None;
+            let [(first, first_score), (second, second_score)] = rank_poses(target);
+            assert_eq!(catalog::POSES[first].0, name);
+            assert_eq!(first_score, 0.0, "{name}");
+            assert!(second_score > first_score, "{name}");
+            println!(
+                "{name}: {} {first_score:.4}, {} {second_score:.4}, gap {:.4}",
+                catalog::POSES[first].0,
+                catalog::POSES[second].0,
+                second_score - first_score,
+            );
             for sign in [-1.0, 1.0] {
                 let input = with_flexion_sign(target, sign);
                 let mut selector = HandPoseSelector::new();
-                for _ in 1..CONFIRM_FRAMES {
-                    assert_eq!(selector.observe(Some(input), sign), None);
+                let mut selected = None;
+                for _ in 0..CONFIRM_FRAMES {
+                    selected = selector.observe(Some(input), sign);
                 }
-                let result = with_flexion_sign(selector.observe(Some(input), sign).unwrap(), sign);
-                if let Some(previous) = canonical_result {
-                    assert_eq!(result, previous, "{name}");
-                }
-                canonical_result = Some(result);
+                assert_eq!(selected, Some(input), "{name}, hand sign {sign}");
             }
             assert_eq!(
                 catalog::POSES
@@ -312,12 +387,50 @@ mod tests {
     #[test]
     fn native_left_and_right_observations_recognize_the_same_sign() {
         // Features from MediaPipe 0.10.35, the bundled hand_landmarker.task,
-        // and Google's thumb_up.jpg / victory.jpg test images and reflections.
+        // and Google's hand test images and reflections.
         // https://storage.googleapis.com/mediapipe-assets/thumb_up.jpg
         // https://storage.googleapis.com/mediapipe-assets/victory.jpg
+        // https://storage.googleapis.com/mediapipe-assets/fist.jpg
+        // https://storage.googleapis.com/mediapipe-assets/left_hands.jpg
         // These are independent model predictions, not a sign-flipped copy of
         // one prediction: the estimated MCP and distal bends differ by hand.
         for (name, fingers, spread, thumb, thumb_spread) in [
+            (
+                "open",
+                [
+                    [0.341302, 0.472445, 0.204666],
+                    [0.349875, 0.288400, 0.376413],
+                    [0.488831, 0.106997, 0.370489],
+                    [0.351115, 0.083496, 0.416705],
+                ],
+                [0.242254, -0.391097, -0.646998, -1.246786],
+                [0.320708, -0.251223],
+                0.707597,
+            ),
+            (
+                "fist",
+                [
+                    [1.04448, 1.61488, 1.05],
+                    [1.143254, 1.57658, 1.05],
+                    [1.203998, 1.755347, 1.05],
+                    [0.853412, 1.085405, 1.05],
+                ],
+                [0.041159, 0.425530, 0.443225, 0.645296],
+                [0.078473, -0.178378],
+                -0.107488,
+            ),
+            (
+                "fist",
+                [
+                    [1.073815, 1.513764, 1.05],
+                    [1.127352, 1.527888, 1.05],
+                    [1.157118, 1.513687, 1.05],
+                    [0.840315, 1.495065, 1.05],
+                ],
+                [-0.020362, -0.094857, 0.354554, 0.034334],
+                [0.183021, -0.165203],
+                0.230982,
+            ),
             (
                 "thumbs_up",
                 [
@@ -412,11 +525,12 @@ mod tests {
                     for sign in [-1.0, 1.0] {
                         let mut selector = HandPoseSelector::new();
                         let input = with_flexion_sign(observed, sign);
-                        for _ in 1..CONFIRM_FRAMES {
-                            assert_eq!(selector.observe(Some(input), sign), None);
+                        let mut selected = None;
+                        for _ in 0..CONFIRM_FRAMES {
+                            selected = selector.observe(Some(input), sign);
                         }
                         assert_eq!(
-                            selector.observe(Some(input), sign),
+                            selected,
                             Some(with_flexion_sign(pose(name), sign)),
                             "{name}, hand sign {sign}, finger {finger}, delta {delta}, features {canonical:?}"
                         );
@@ -427,23 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_prefers_common_signs_without_hiding_distinct_emoji_or_other_shapes() {
-        for name in [
-            "fist",
-            "peace",
-            "open",
-            "thumbs_up",
-            "point",
-            "ok",
-            "crossed_fingers",
-            "vulcan",
-            "shaka",
-            "claw",
-            "ring_only",
-            "little_only",
-        ] {
-            assert_eq!(selected_name(pose(name)), name);
-        }
+    fn a_loosely_closed_fist_still_matches_fist() {
         let mut relaxed_fist = pose("fist");
         relaxed_fist.fingers = [[1.2, 1.3, 0.5]; 4];
         assert_eq!(selected_name(relaxed_fist), "fist");
@@ -461,19 +559,84 @@ mod tests {
             assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
             assert_eq!(selector.observe(Some(open), 1.0), Some(open));
         }
-        for _ in 1..CONFIRM_FRAMES {
-            assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
-        }
+        assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
         assert_eq!(selector.observe(None, 1.0), None);
-        for _ in 1..CONFIRM_FRAMES {
-            assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
-        }
+        assert_eq!(selector.observe(Some(fist), 1.0), Some(open));
         assert_eq!(selector.observe(Some(fist), 1.0), Some(fist));
         let mut noisy = fist;
         noisy.fingers[0][0] += 0.03;
         noisy.spread[2] -= 0.02;
         for _ in 0..10 {
             assert_eq!(selector.observe(Some(noisy), 1.0), Some(fist));
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_match_needs_four_observations() {
+        let open = pose("open");
+        let fist = pose("fist");
+        let ambiguous = HandFingerPose {
+            thumb: [0.32, 0.38],
+            ..fist
+        };
+        let [(best, score), (_, runner_up)] = rank_poses(ambiguous);
+        assert_eq!(catalog::POSES[best].0, "fist");
+        assert!(runner_up - score < CONFIDENT_SCORE_GAP);
+
+        let mut selector = HandPoseSelector::new();
+        for _ in 0..CONFIRM_FRAMES {
+            selector.observe(Some(open), 1.0);
+        }
+        // A single confident observation must not use the fast path after
+        // an ambiguous one or count toward the next confident run.
+        for observation in [ambiguous, fist, ambiguous] {
+            assert_eq!(selector.observe(Some(observation), 1.0), Some(open));
+        }
+        assert_eq!(selector.observe(Some(ambiguous), 1.0), Some(fist));
+    }
+
+    #[test]
+    fn four_gestures_replay_at_camera_rates_with_one_frame_outliers() {
+        let gestures = [pose("open"), pose("fist"), pose("peace"), pose("thumbs_up")];
+        for hz in [15, 30] {
+            let samples_per_gesture = hz * 2 / 5; // 400 ms of each gesture.
+            let mut selector = HandPoseSelector::new();
+            let mut previous = None;
+            for _ in 0..CONFIRM_FRAMES {
+                previous = selector.observe(Some(gestures[3]), 1.0);
+            }
+            let mut correct = 0;
+            let mut false_switches = 0;
+            let mut delays = Vec::new();
+            for (index, target) in gestures.into_iter().enumerate() {
+                let mut first_match = None;
+                for sample in 0..samples_per_gesture {
+                    let observed = if sample == samples_per_gesture - 2 {
+                        gestures[(index + 1) % gestures.len()]
+                    } else {
+                        let mut observed = target;
+                        observed.fingers[0][0] += 0.03;
+                        observed.spread[1] -= 0.02;
+                        observed
+                    };
+                    let selected = selector.observe(Some(observed), 1.0);
+                    if selected == Some(target) {
+                        first_match.get_or_insert(sample);
+                        correct += 1;
+                    } else if selected != previous {
+                        false_switches += 1;
+                    }
+                    previous = selected;
+                }
+                delays.push(first_match.unwrap() * 1000 / hz);
+            }
+            let total = 4 * samples_per_gesture;
+            println!(
+                "{hz} Hz: {correct}/{total} correct, delay {delays:?} ms, {false_switches} false switches"
+            );
+            assert_eq!(correct, total - 4);
+            assert_eq!(delays, vec![1000 / hz; 4]);
+            assert_eq!(false_switches, 0);
         }
     }
 

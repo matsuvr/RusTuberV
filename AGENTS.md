@@ -9,3 +9,4 @@
 - サブエージェントの利用禁止。
 - Windowsの標準ビルドはMSYS2 CLANG64（LLVM）とし、build・check・test・runは `tools/cargo-windows.ps1` 経由で実行する。配布ZIPは `tools/package-windows.ps1` を使う。MSVCは明示的な切り戻し時のみ使用し、手順は `tools/WINDOWS-LLVM.md` に従う。
 - 追跡フィルター・関節への動きの伝播・腕IKを変更するたびに、`.\tools\cargo-windows.ps1 -CargoArguments @('test', '--locked', '-p', 'vtuber-tracking', '-p', 'vtuber-avatar', '--lib', '-j', '1')` を実行する。減衰・複数ノイズの増幅・最終骨出力の回帰テストを省略しない。
+- 状態遷移、非同期処理の順序、関節やフレームの採用条件を追加・変更するときは、対応するQuintモデルとRustの照合テストを同じ変更に含め、`.\tools\verify-quint.ps1` を実行する。対象とモデル化の手順は `verification/CONTRACTS.md` に記載する。

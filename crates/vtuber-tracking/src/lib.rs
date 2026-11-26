@@ -6,6 +6,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
+
 /// Pure observed-arm retargeting and render-clock filtering.
 pub mod arm_tracking;
 

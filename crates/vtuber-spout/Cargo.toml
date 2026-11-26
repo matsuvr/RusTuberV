@@ -14,5 +14,8 @@ vtuber-core = { path = "../vtuber-core" }
 [target.'cfg(windows)'.dependencies]
 spout2-rs = { version = "=0.1.1", default-features = false, features = ["dx"] }
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true

@@ -293,6 +293,44 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_preview_consent() {
+        crate::quint_replay::traces("preview_consent", |states| {
+            let mut state = UiState::default();
+            let mut actions = ActionQueue::default();
+            state.sync_pane(Pane::PoseCamera);
+            for row in states {
+                match row["event"].as_str().unwrap() {
+                    "init" => {}
+                    "request" => state.preview_event(CameraPreviewEvent::Request),
+                    "confirm" => state.preview_event(CameraPreviewEvent::Confirm),
+                    "hide" => state.preview_event(CameraPreviewEvent::Hide),
+                    "camera" => state.sync_pane(Pane::PoseCamera),
+                    "other" => state.sync_pane(Pane::VrmCamera),
+                    "open" => state.set_controls_open(true),
+                    "close" => state.set_controls_open(false),
+                    "navigate" => state.emit(&mut actions, UiAction::SwitchPane(Pane::VrmCamera)),
+                    "select" => state.emit(&mut actions, UiAction::SelectCamera { index: 1 }),
+                    "unload" => state.emit(&mut actions, UiAction::UnloadAvatar),
+                    "import" => state.emit(
+                        &mut actions,
+                        UiAction::RequestAvatarImportReview {
+                            path: "A.vrm".into(),
+                        },
+                    ),
+                    other => panic!("{other}"),
+                }
+                assert_eq!(state.controls_open, row["controls"]);
+                assert_eq!(
+                    state.last_pane == Some(Pane::PoseCamera),
+                    row["pane"] == "camera"
+                );
+                assert_eq!(format!("{:?}", state.camera_consent), row["phase"]);
+            }
+        });
+    }
+
+    #[test]
     fn navigation_is_deduplicated_and_always_revokes_camera_consent() {
         let mut actions = ActionQueue::default();
         let mut state = UiState {

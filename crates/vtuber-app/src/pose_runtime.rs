@@ -544,7 +544,7 @@ pub fn pose_source_selection_system(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -553,6 +553,44 @@ mod tests {
     )] // tests may panic (AGENTS.md)
     use super::*;
     use vtuber_camera::device::{CameraDescriptor, CameraRequest};
+
+    pub(crate) fn replay_observation_age(states: &[serde_json::Value]) {
+        use crate::quint_replay::number;
+        let mut pose = PoseRuntime::default();
+        #[cfg(debug_assertions)]
+        {
+            pose.debug_log = Some(tempfile::tempfile().unwrap());
+        }
+        let mut base = 0_i64;
+        let mut generation = 0;
+        for row in states {
+            if row["event"] == "init" || row["event"] == "reset" {
+                base += 1_000_000_000;
+                generation += 1;
+            }
+            let now = MonoTimeNs((base + number(&row["nowNs"])) as u64);
+            if row["event"] == "publish" {
+                let frame = PoseArmFrame {
+                    source_seq: vtuber_core::FrameSeq(number(&row["slotSeq"]) as u64),
+                    captured_at: MonoTimeNs((base + number(&row["slotTime"])) as u64),
+                    inference_finished_at: now,
+                    trace: None,
+                    observation: None,
+                };
+                assert!(pose.output_slot.publish(frame).unwrap());
+            }
+            let _ = pose.read_latest(AvatarGeneration(generation), now);
+            let held = pose.tracking_sample().1;
+            let seq = number(&row["heldSeq"]);
+            assert_eq!(
+                held.map(|f| f.source_seq.0 as i64),
+                (seq != 0).then_some(seq)
+            );
+            if let Some(held) = held {
+                assert_eq!(held.captured_at.0 as i64 - base, number(&row["heldTime"]));
+            }
+        }
+    }
 
     /// A Pose runtime holding a recorded spawn failure, as if the OS had
     /// refused the thread. No OS thread is created.

@@ -7296,6 +7296,7 @@ version = "0.2.5"
 dependencies = [
  "nokhwa",
  "nokhwa-bindings-macos",
+ "serde_json",
  "thiserror 2.0.21",
  "vtuber-core",
  "vtuber-platform",
@@ -7329,6 +7330,7 @@ dependencies = [
  "anyhow",
  "hex",
  "mediapipe",
+ "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
@@ -7343,6 +7345,7 @@ name = "vtuber-ndi"
 version = "0.2.5"
 dependencies = [
  "grafton-ndi",
+ "serde_json",
  "vtuber-core",
  "vtuber-platform",
 ]
@@ -7355,6 +7358,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "serde_json",
  "windows-sys 0.61.2",
 ]
 
@@ -7362,6 +7366,7 @@ dependencies = [
 name = "vtuber-spout"
 version = "0.2.5"
 dependencies = [
+ "serde_json",
  "spout2-rs",
  "vtuber-core",
 ]
@@ -7370,6 +7375,7 @@ dependencies = [
 name = "vtuber-syphon"
 version = "0.2.5"
 dependencies = [
+ "serde_json",
  "vtuber-core",
  "vtuber-syphon-native",
 ]
@@ -7388,6 +7394,7 @@ dependencies = [
  "approx",
  "nalgebra",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "vtuber-core",
 ]

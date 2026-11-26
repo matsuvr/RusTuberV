@@ -445,6 +445,62 @@ mod tests {
         FaceBlendshapeSet, FaceLandmark, FaceTrackingQuality, MEDIAPIPE_FACE_LANDMARK_COUNT,
     };
 
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_observation_age() {
+        use crate::quint_replay::{number, traces};
+        traces("observation_age", |states| {
+            crate::pose_runtime::tests::replay_observation_age(states);
+            for face_id in [1, 2] {
+                let mut gate = ObservationGate::default();
+                let mut latest = None;
+                let mut base = 0_i64;
+                for row in states {
+                    if row["event"] == "init" || row["event"] == "reset" {
+                        base += 1_000_000_000;
+                        gate.reset(MonoTimeNs(base as u64));
+                        latest = None;
+                    }
+                    let now = MonoTimeNs((base + number(&row["nowNs"])) as u64);
+                    if row["event"] == "publish" {
+                        let seq = number(&row["slotSeq"]) as u64;
+                        let capture = (base + number(&row["slotTime"])) as u64;
+                        latest = Some(if seq == face_id {
+                            let mut face = sample(seq, now.0);
+                            face.captured_at = MonoTimeNs(capture);
+                            FaceTrackingOutcome::Face(face)
+                        } else {
+                            let mut outcome = no_face(seq, capture);
+                            if let FaceTrackingOutcome::NoFace {
+                                inference_finished_at,
+                                ..
+                            } = &mut outcome
+                            {
+                                *inference_finished_at = now;
+                            }
+                            outcome
+                        });
+                    }
+                    let outcome = match gate.dispatch(latest.as_ref(), now) {
+                        ObservationDispatch::Unavailable => "missing",
+                        ObservationDispatch::NoUpdate => "held",
+                        ObservationDispatch::Outcome(value) => {
+                            assert_eq!(Some(value), latest.as_ref());
+                            "new"
+                        }
+                    };
+                    assert_eq!(outcome, row["dispatch"].as_str().unwrap());
+                    let last = number(&row["lastFace"]);
+                    assert_eq!(
+                        gate.last_source_seq.map(|s| s.0 as i64),
+                        (last != 0).then_some(last)
+                    );
+                }
+            }
+        });
+    }
+
     fn sample(seq: u64, finished_at: u64) -> FaceTrackingSample {
         FaceTrackingSample {
             source_seq: FrameSeq(seq),

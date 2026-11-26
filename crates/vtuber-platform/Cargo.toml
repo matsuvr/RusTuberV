@@ -17,6 +17,9 @@ block2 = "=0.6.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints.rust]
 missing_docs = "warn"
 

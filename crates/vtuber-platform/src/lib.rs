@@ -59,8 +59,39 @@ pub fn power_state() -> PowerState {
 }
 
 #[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    #[allow(clippy::panic, clippy::indexing_slicing)]
+    fn quint_power() {
+        use crate::quint_replay::{number, traces};
+        let initial_epoch = (u64::MAX >> 1) - 1;
+        let epoch = |cycles: i64| (initial_epoch + cycles as u64) & (u64::MAX >> 1);
+        traces("power", |states| {
+            let power = PowerAtomic(AtomicU64::new(initial_epoch << 1));
+            let mut observed = power.snapshot();
+            for row in states {
+                match row["event"].as_str() {
+                    Some("init") => {}
+                    Some("resume") => power.resume(),
+                    Some("suspend") => power.suspend(),
+                    Some("observe") => observed = power.snapshot(),
+                    other => panic!("unexpected power event {other:?}"),
+                }
+                let actual = power.snapshot();
+                assert_eq!(actual.generation, epoch(number(&row["cycles"])));
+                assert_eq!(actual.sleeping, row["sleeping"]);
+                assert_eq!(observed.generation, epoch(number(&row["observed"])));
+                assert_eq!(observed.sleeping, row["observedSleep"]);
+            }
+        });
+    }
 
     #[test]
     fn missed_cycles_and_duplicate_windows_resume_notifications() {

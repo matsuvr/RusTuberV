@@ -1083,6 +1083,69 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_face_worker() {
+        use crate::quint_replay::{number, traces};
+        use vtuber_core::FaceTrackingOutcome;
+        struct Backend(bool);
+        impl crate::runtime::FaceTrackingInference for Backend {
+            fn infer_face_tracking(
+                &mut self,
+                frame: &VideoFrame,
+            ) -> crate::error::Result<FaceTrackingOutcome> {
+                if self.0 {
+                    return Err(InferenceError::MediaPipeFrameConversion("scripted".into()));
+                }
+                Ok(FaceTrackingOutcome::NoFace {
+                    source_seq: frame.seq,
+                    captured_at: frame.captured_at,
+                    inference_started_at: frame.captured_at,
+                    inference_finished_at: frame.captured_at,
+                })
+            }
+        }
+        traces("face_worker", |states| {
+            let status = SharedStatus::default();
+            status
+                .lock()
+                .unwrap()
+                .transition_to(InferenceWorkerState::Running);
+            let slot = LatestSlot::new();
+            for (i, row) in states.iter().enumerate() {
+                let generation = slot.generation().unwrap();
+                let rejected = status.lock().unwrap().publish_rejected_frames;
+                match row["event"].as_str().unwrap() {
+                    "init" => {}
+                    "close" => slot.close().unwrap(),
+                    event @ ("error" | "noFace") => {
+                        let failed = super::process_mediapipe_frame(
+                            &mut Backend(event == "error"),
+                            &dummy_video_frame(i as u64),
+                            Duration::ZERO,
+                            &status,
+                            &slot,
+                        )
+                        .unwrap();
+                        assert_eq!(row["failed"], failed);
+                    }
+                    other => panic!("unknown worker event {other}"),
+                }
+                let snapshot = status.lock().unwrap();
+                assert_eq!(row["published"], slot.generation().unwrap() > generation);
+                assert_eq!(row["rejected"], snapshot.publish_rejected_frames > rejected);
+                assert_eq!(
+                    number(&row["streak"]),
+                    i64::from(snapshot.consecutive_errors)
+                );
+                assert_eq!(
+                    row["failed"],
+                    snapshot.state == InferenceWorkerState::Failed
+                );
+            }
+        });
+    }
+
     fn test_descriptor(
         path: PathBuf,
         sha256: &str,

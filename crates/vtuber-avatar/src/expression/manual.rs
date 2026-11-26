@@ -180,6 +180,96 @@ mod tests {
     use super::*;
     use crate::expression_catalog::ExpressionCatalogInput;
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_manual_expression() {
+        crate::quint_tests::replay::traces("manual_expression", |states| {
+            let mut app = App::new();
+            app.init_resource::<ManualExpressionSelection>()
+                .init_resource::<AvatarLifecycle>()
+                .add_message::<ManualExpressionRequest>()
+                .add_systems(Update, apply_manual_expression_requests);
+            let root = app.world_mut().spawn_empty().id();
+            for row in states {
+                let op = row["event"].as_str().unwrap();
+                if op == "init" || op == "replace" {
+                    if op == "replace" {
+                        app.world_mut()
+                            .resource_mut::<AvatarLifecycle>()
+                            .request_unload()
+                            .unwrap();
+                        app.update();
+                        assert!(
+                            app.world()
+                                .resource::<ManualExpressionSelection>()
+                                .selected
+                                .is_none()
+                        );
+                        app.world_mut()
+                            .resource_mut::<AvatarLifecycle>()
+                            .finish_unload();
+                    }
+                    let mut lifecycle = app.world_mut().resource_mut::<AvatarLifecycle>();
+                    lifecycle.request_load(root).unwrap();
+                    lifecycle.start_binding(root);
+                    lifecycle.finish_ready();
+                    lifecycle.set_expression_catalog(Some(catalog()));
+                } else if op == "restore" || op == "dropCatalog" {
+                    app.world_mut()
+                        .resource_mut::<AvatarLifecycle>()
+                        .set_expression_catalog((op == "restore").then(catalog));
+                } else {
+                    let current = app
+                        .world()
+                        .resource::<AvatarLifecycle>()
+                        .current_generation();
+                    let stale = AvatarGeneration(current.0 - 1);
+                    let toggle = |generation, id: &str| ManualExpressionRequest::Toggle {
+                        generation,
+                        expression: id.into(),
+                    };
+                    let mut requests = app
+                        .world_mut()
+                        .resource_mut::<Messages<ManualExpressionRequest>>();
+                    match op {
+                        "pair" => {
+                            requests.write(toggle(current, "happy"));
+                            requests.write(toggle(current, "JawOpen"));
+                        }
+                        "clear" => {
+                            requests.write(ManualExpressionRequest::Clear {
+                                generation: current,
+                            });
+                        }
+                        "staleClear" => {
+                            requests.write(ManualExpressionRequest::Clear { generation: stale });
+                        }
+                        "staleToggle" => {
+                            requests.write(toggle(stale, "happy"));
+                        }
+                        "happy" | "JawOpen" | "unknown" => {
+                            requests.write(toggle(current, op));
+                        }
+                        other => panic!("{other}"),
+                    }
+                }
+                app.update();
+                let lifecycle = app.world().resource::<AvatarLifecycle>();
+                let selection = app.world().resource::<ManualExpressionSelection>();
+                assert_eq!(
+                    selection.selected.as_deref().unwrap_or_default(),
+                    row["selected"].as_str().unwrap()
+                );
+                assert_eq!(lifecycle.expression_catalog().is_some(), row["hasCatalog"]);
+                let applied = selection.selected_in(
+                    lifecycle.current_generation(),
+                    lifecycle.expression_catalog(),
+                );
+                assert_eq!(applied.unwrap_or_default(), row["writer"].as_str().unwrap());
+            }
+        });
+    }
+
     fn generation(value: u64) -> AvatarGeneration {
         AvatarGeneration(value)
     }

@@ -542,6 +542,50 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_arm_path() {
+        use crate::quint_tests::replay::{number, traces};
+        let problem = Problem {
+            chains: [None, None],
+            goals: [None, None],
+            geometry: &Default::default(),
+            body: &Default::default(),
+            body_curve: None,
+            tolerance: 0.0,
+        };
+        traces("arm_path", |states| {
+            // One eighth of a radian per model angle unit, within the joint range.
+            let pose = |angle| [Some(state(angle as f32 / 8.0, 1.0, 0.0, 1.0)), None];
+            let first = &states[0];
+            let from = pose(number(&first["startAngle"]));
+            let to = pose(number(&first["endAngle"]));
+            let mut path = JointPath {
+                current: from,
+                segment: Some(Segment {
+                    from,
+                    to,
+                    elapsed: 0.0,
+                    duration: 1.0,
+                    eased: first["eased"].as_bool().unwrap(),
+                    body: None,
+                }),
+                ..Default::default()
+            };
+            for row in states {
+                if path.busy() {
+                    path.advance(&problem, to, number(&row["delta"]) as f32 / 8.0)
+                        .unwrap();
+                }
+                assert_eq!(
+                    path.current[0].unwrap().angles[0],
+                    number(&row["angle"]) as f32 / (8.0 * 32768.0)
+                );
+                assert_eq!(path.busy(), number(&row["tick"]) < 8);
+            }
+        });
+    }
+
+    #[test]
     fn subdivision_stops_at_collision_and_never_accepts_an_exhausted_budget() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = AtomicUsize::new(0);

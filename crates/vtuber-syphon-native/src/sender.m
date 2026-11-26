@@ -47,10 +47,17 @@ int32_t rtv_syphon_create(void **out) {
     }
 }
 
+int32_t rtv_syphon_has_clients(void *handle) {
+    @autoreleasepool {
+        RTVSyphonSender *sender = (__bridge RTVSyphonSender *)handle;
+        return [sender.server hasClients] ? 1 : 0;
+    }
+}
+
 int32_t rtv_syphon_send(void *handle, const uint8_t *bytes, uint32_t width, uint32_t height) {
     @autoreleasepool {
         RTVSyphonSender *sender = (__bridge RTVSyphonSender *)handle;
-        // Keep the server discoverable; retry on each new frame after a client connects.
+        // A client may have disconnected since the worker last checked.
         if (![sender.server hasClients]) return 2;
         if (!sender.texture || sender.texture.width != width || sender.texture.height != height) {
             MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
