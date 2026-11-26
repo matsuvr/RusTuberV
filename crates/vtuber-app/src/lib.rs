@@ -24,6 +24,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
+
 mod avatar_io;
 mod file_io;
 mod runtime;

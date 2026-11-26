@@ -497,6 +497,45 @@ mod tests {
     use super::*;
     use vtuber_avatar::ExpressionCatalogInput;
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_expression_keys() {
+        use crate::quint_replay::{number, traces};
+        let catalog = catalog_with(&["a", "b"]);
+        traces("expression_keys", |states| {
+            let mut bindings = ExpressionBindings::default();
+            for row in states {
+                let key = if number(&row["key"]) == 1 {
+                    ExpressionKey::Digit1
+                } else {
+                    ExpressionKey::Digit2
+                };
+                let id = row["expression"].as_str().unwrap();
+                match row["event"].as_str().unwrap() {
+                    "assign" => bindings.assign(key, id),
+                    "unassign" => bindings.unassign(key),
+                    "remove" => bindings.unassign_expression(id),
+                    "clear" => bindings.clear(),
+                    "defaults" => bindings.reset_to_defaults(&catalog),
+                    other => panic!("{other}"),
+                }
+                let mut count = 0;
+                for (key, field) in [
+                    (ExpressionKey::Digit1, "first"),
+                    (ExpressionKey::Digit2, "second"),
+                ] {
+                    let id = row[field].as_str().unwrap();
+                    assert_eq!(bindings.expression_for(key).unwrap_or_default(), id);
+                    if !id.is_empty() {
+                        assert_eq!(bindings.key_for(id), Some(key));
+                        count += 1;
+                    }
+                }
+                assert_eq!(bindings.len(), count);
+            }
+        });
+    }
+
     fn catalog_with(ids: &[&str]) -> AvatarExpressionCatalog {
         AvatarExpressionCatalog::build(
             "model".into(),

@@ -14,5 +14,8 @@ vtuber-core = { path = "../vtuber-core" }
 [target.'cfg(target_os = "macos")'.dependencies]
 vtuber-syphon-native = { path = "../vtuber-syphon-native" }
 
+[dev-dependencies]
+serde_json = "1"
+
 [lints]
 workspace = true

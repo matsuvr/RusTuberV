@@ -197,6 +197,45 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "generated Quint ITF traces"]
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    fn quint_roi() {
+        use crate::quint_replay::{number, traces};
+        traces("inference", |states| {
+            let mut pipeline = Pipeline::new(&settings(3));
+            for row in states {
+                if row["event"] != "init" {
+                    let seq = FrameSeq(number(&row["seq"]) as u64);
+                    let detect = pipeline.should_run_detector(seq);
+                    assert_eq!(row["ran"], detect);
+                    let confidence = if row["event"] == "low" { 0.49 } else { 0.5 };
+                    if detect {
+                        let mut roi = centered_roi(confidence);
+                        if row["event"] == "outside" {
+                            roi.center_x = -100.0;
+                        }
+                        pipeline.record_detector_result(seq, 640, 480, Some(roi));
+                    } else {
+                        let x = if row["event"] == "outside" { 2.0 } else { 0.4 };
+                        let result = pipeline.update_from_observation(
+                            &observation(confidence, x, 0.3, 0.2, 0.2),
+                            640,
+                            480,
+                        );
+                        assert_eq!(result.is_ok(), row["roi"] == "Tracking");
+                    }
+                }
+                let actual = match pipeline.roi_state() {
+                    RoiState::Empty => "Empty",
+                    RoiState::Lost => "Lost",
+                    RoiState::Tracking(_) => "Tracking",
+                };
+                assert_eq!(row["roi"], actual);
+            }
+        });
+    }
+
+    #[test]
     fn detector_cadence_low_confidence_triggers_detector() {
         let mut pipeline = Pipeline::new(&settings(5));
         pipeline.record_detector_result(FrameSeq(1), 640, 480, Some(centered_roi(1.0)));

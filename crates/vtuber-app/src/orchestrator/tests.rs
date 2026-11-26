@@ -20,6 +20,75 @@ use vtuber_avatar::{
     AvatarLifecycle, AvatarMotionMirror,
 };
 
+#[test]
+#[ignore = "generated Quint ITF traces"]
+fn quint_camera_selection() {
+    let descriptors = |order: &str| {
+        order
+            .chars()
+            .map(|id| CameraDescriptor {
+                id: id.to_string(),
+                label: format!("Camera {id}"),
+            })
+            .collect()
+    };
+    crate::quint_replay::traces("camera_selection", |states| {
+        let mut orch = Orchestrator {
+            imported_model: Some(stub_imported_model()),
+            lifecycle_state: AvatarLifecycleState::Ready,
+            ..Default::default()
+        };
+        orch.set_camera_list(descriptors("AB"));
+        for row in states {
+            match row["event"].as_str().unwrap() {
+                "init" => {}
+                op @ ("AB" | "BA" | "B") => orch.set_camera_list(descriptors(op)),
+                "empty" => orch.set_camera_list(Vec::new()),
+                "first" => orch.process_action(&UiAction::SelectCamera { index: 0 }),
+                "second" => orch.process_action(&UiAction::SelectCamera { index: 1 }),
+                "invalid" => orch.process_action(&UiAction::SelectCamera { index: 2 }),
+                "cameraError" => orch.fail_camera("offline".into()),
+                "inferenceError" => orch.fail_inference("lost worker".into()),
+                "auto" => orch.maybe_auto_start_tracking(),
+                "autoWithoutAvatar" => {
+                    orch.set_lifecycle_state(AvatarLifecycleState::NoAvatar);
+                    orch.maybe_auto_start_tracking();
+                    orch.set_lifecycle_state(AvatarLifecycleState::Ready);
+                    let model = orch.imported_model.take();
+                    orch.maybe_auto_start_tracking();
+                    orch.imported_model = model;
+                }
+                "started" => {
+                    orch.set_pipeline_state(PipelineState::Running);
+                    orch.set_capture_ack(true);
+                }
+                "stopped" => {
+                    orch.complete_capture_stop();
+                    orch.set_capture_ack(true);
+                }
+                "retry" => orch.process_action(&UiAction::RetryAfterError),
+                other => panic!("{other}"),
+            }
+            assert_eq!(
+                orch.selected_camera_descriptor()
+                    .map(|d| d.id)
+                    .unwrap_or_default(),
+                row["selected"]
+            );
+            assert_eq!(format!("{:?}", orch.pipeline_state()), row["phase"]);
+            assert_eq!(orch.capture_desired(), row["desired"]);
+            assert_eq!(orch.capture_ack(), row["ack"]);
+            let error = match orch.last_error() {
+                None => "",
+                Some(OrchestratorError::CameraFailed(_)) => "camera",
+                Some(OrchestratorError::InferenceFailed(_)) => "inference",
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(error, row["errorKind"].as_str().unwrap());
+        }
+    });
+}
+
 fn lifecycle_app() -> App {
     let mut app = App::new();
     app.init_resource::<Orchestrator>()
@@ -1322,6 +1391,85 @@ fn complete_review_value(orch: &mut Orchestrator, request_id: u64) {
             .unwrap();
     let review = crate::license_review::extract_vrm_license_review(&path, &bytes).unwrap();
     orch.complete_avatar_work(request_id, Ok(AvatarFileResult::Review { path, review }));
+}
+
+#[test]
+#[ignore = "generated Quint ITF traces"]
+fn quint_review() {
+    use crate::quint_replay::{number, traces};
+    traces("review", |states| {
+        let mut orch = Orchestrator::default();
+        let mut stale_id = 0;
+        for row in states {
+            let event = row["event"].as_str().unwrap();
+            if matches!(event, "chooseA" | "chooseB" | "cancel" | "unload") {
+                stale_id = orch.active_request_id.unwrap_or(stale_id);
+            }
+            match event {
+                "chooseA" | "chooseB" => {
+                    let path = PathBuf::from(if event == "chooseA" { "A.vrm" } else { "B.vrm" });
+                    orch.process_action(&UiAction::RequestAvatarImportReview { path });
+                }
+                "complete" | "error"
+                    if matches!(orch.pending_file_work, Some((_, AvatarFileWork::Review(_)))) =>
+                {
+                    if event == "complete" {
+                        complete_review(&mut orch);
+                    } else {
+                        let (id, _) = orch.pending_file_work.take().unwrap();
+                        orch.complete_avatar_work(
+                            id,
+                            Err(OrchestratorError::LicenseReviewFailed("unreadable".into())),
+                        );
+                    }
+                }
+                "stale" => complete_review_value(&mut orch, stale_id),
+                "check" | "uncheck" => {
+                    orch.process_action(&UiAction::SetAvatarImportReviewAccepted {
+                        accepted: event == "check",
+                    })
+                }
+                "confirm" => orch.process_action(&UiAction::AcceptAvatarImportReview),
+                "cancel" => orch.process_action(&UiAction::CancelAvatarImportReview),
+                "unload" => orch.process_action(&UiAction::UnloadAvatar),
+                "init" | "complete" | "error" => {}
+                other => panic!("unknown review event {other}"),
+            }
+            let (phase, path) = match (
+                &orch.pending_file_work,
+                &orch.pending_avatar_import,
+                orch.import_state(),
+            ) {
+                (Some((_, AvatarFileWork::Review(path))), None, ImportState::InProgress) => {
+                    ("Reading", Some(path))
+                }
+                (Some((_, AvatarFileWork::Import(path))), None, ImportState::InProgress) => {
+                    ("Importing", Some(path))
+                }
+                (None, Some(pending), ImportState::Idle) => ("Review", Some(&pending.path)),
+                (None, None, ImportState::Failed(_)) => ("Failed", None),
+                (None, None, ImportState::Idle) => ("Idle", None),
+                other => panic!("inconsistent review state {other:?}"),
+            };
+            assert_eq!(row["phase"], phase);
+            assert_eq!(
+                row["checked"],
+                orch.pending_avatar_import
+                    .as_ref()
+                    .is_some_and(|p| p.accepted)
+            );
+            if let Some(path) = path {
+                assert_eq!(
+                    path,
+                    Path::new(if number(&row["file"]) == 1 {
+                        "A.vrm"
+                    } else {
+                        "B.vrm"
+                    })
+                );
+            }
+        }
+    });
 }
 
 #[test]

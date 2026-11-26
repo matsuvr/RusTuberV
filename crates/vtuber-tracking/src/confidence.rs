@@ -465,6 +465,61 @@ mod tests {
     )] // tests may panic (AGENTS.md)
     use super::*;
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_confidence() {
+        use crate::quint_replay::{number, traces};
+        traces("confidence", |states| {
+            let mut gate = ConfidenceGate::new(ConfidenceGateParams {
+                enter_threshold: 0.75,
+                exit_threshold: 0.5,
+                required_consecutive_good: 2,
+                required_consecutive_bad: 3,
+                max_count: 3,
+            })
+            .unwrap();
+            for row in states {
+                let scores: &[f32] = match row["score"].as_str().unwrap() {
+                    "belowExit" => &[0.5_f32.next_down()],
+                    "exit" => &[0.5],
+                    "aboveExit" => &[0.5_f32.next_up()],
+                    "belowEnter" => &[0.75_f32.next_down()],
+                    "enter" => &[0.75],
+                    "aboveEnter" => &[0.75_f32.next_up()],
+                    "invalid" => &[f32::NAN, f32::INFINITY, -0.1, 1.1],
+                    other => panic!("{other}"),
+                };
+                // Exercise every invalid representation from the same pre-event state.
+                let before = gate.clone();
+                for &score in scores {
+                    gate = before.clone();
+                    let assessment = match row["event"].as_str().unwrap() {
+                        "reset" => {
+                            gate.reset();
+                            gate.assess(score)
+                        }
+                        "new" => gate.update(score),
+                        "held" => gate.assess(score),
+                        other => panic!("{other}"),
+                    };
+                    assert_eq!(assessment.valid, row["score"] != "invalid");
+                    assert_eq!(
+                        assessment.frame_confidence,
+                        if row["score"] == "invalid" {
+                            0.0
+                        } else {
+                            score
+                        }
+                    );
+                    assert_eq!(i64::from(assessment.consecutive_good), number(&row["good"]));
+                    assert_eq!(i64::from(assessment.consecutive_bad), number(&row["bad"]));
+                    assert_eq!(assessment.is_confident, row["confident"]);
+                    assert_eq!(format!("{:?}", assessment.signal), row["signal"]);
+                }
+            }
+        });
+    }
+
     fn test_params() -> ConfidenceGateParams {
         ConfidenceGateParams {
             enter_threshold: 0.8,

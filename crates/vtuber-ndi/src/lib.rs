@@ -11,6 +11,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
+
 mod controller;
 mod frame;
 pub mod runtime_identity;

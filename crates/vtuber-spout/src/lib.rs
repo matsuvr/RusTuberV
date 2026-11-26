@@ -179,27 +179,39 @@ fn send_loop(
     shared: &Arc<(Mutex<Mailbox>, Condvar)>,
     mut send: impl FnMut(&VideoOutputFrame) -> Result<(), String>,
 ) -> Result<(), String> {
-    loop {
-        let frame = {
-            let state = shared.0.lock().map_err(|_| "Spout worker state poisoned")?;
-            let mut state = shared
-                .1
-                .wait_while(state, |s| !s.stop && s.frame.is_none())
-                .map_err(|_| "Spout worker state poisoned")?;
-            if state.stop {
-                return Ok(());
-            }
-            state.frame.take()
-        };
-        if let Some(frame) = frame {
-            send(&frame)?;
-            let mut state = shared.0.lock().map_err(|_| "Spout worker state poisoned")?;
-            if !state.stop {
-                state.status = Status::Live;
-            }
+    while send_pending(shared, &mut send)? {}
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn send_pending(
+    shared: &Arc<(Mutex<Mailbox>, Condvar)>,
+    send: &mut impl FnMut(&VideoOutputFrame) -> Result<(), String>,
+) -> Result<bool, String> {
+    let frame = {
+        let state = shared.0.lock().map_err(|_| "Spout worker state poisoned")?;
+        let mut state = shared
+            .1
+            .wait_while(state, |s| !s.stop && s.frame.is_none())
+            .map_err(|_| "Spout worker state poisoned")?;
+        if state.stop {
+            return Ok(false);
+        }
+        state.frame.take()
+    };
+    if let Some(frame) = frame {
+        send(&frame)?;
+        let mut state = shared.0.lock().map_err(|_| "Spout worker state poisoned")?;
+        if !state.stop {
+            state.status = Status::Live;
         }
     }
+    Ok(true)
 }
+
+#[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
 
 #[cfg(test)]
 mod tests {
@@ -215,6 +227,55 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_spout() {
+        use crate::quint_replay::{number, traces};
+        traces("spout", |states| {
+            let mut c = active();
+            let shared = Arc::clone(&c.shared);
+            let mut sent = 0;
+            for row in states {
+                let before = c.replaced_frames();
+                match row["event"].as_str().unwrap() {
+                    "init" => {}
+                    "A" => c.submit(frame(1, 1)),
+                    "B" => c.submit(frame(2, 2)),
+                    "discard" => c.discard_pending(),
+                    "stop" => c.stop(),
+                    op @ ("send" | "stopInFlight") => {
+                        assert!(shared.0.lock().unwrap().frame.is_some());
+                        assert!(
+                            send_pending(&shared, &mut |frame| {
+                                sent = frame.frame_seq().0 as i64;
+                                if op == "stopInFlight" {
+                                    c.stop();
+                                }
+                                Ok(())
+                            })
+                            .unwrap()
+                        );
+                    }
+                    other => panic!("{other}"),
+                }
+                assert_eq!(format!("{:?}", c.status()), row["phase"]);
+                assert_eq!(
+                    c.replaced_frames() - before,
+                    u64::from(row["overwritten"].as_bool().unwrap())
+                );
+                let held = shared
+                    .0
+                    .lock()
+                    .unwrap()
+                    .frame
+                    .as_ref()
+                    .map_or(0, |f| f.frame_seq().0 as i64);
+                assert_eq!(held, number(&row["pending"]));
+                assert_eq!(sent, number(&row["sent"]));
+            }
+        });
+    }
+
     fn active() -> Controller {
         let c = Controller::default();
         c.shared.0.lock().unwrap().status = Status::Starting;

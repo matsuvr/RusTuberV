@@ -449,6 +449,66 @@ mod tests {
         FaceBlendshapeSet, FaceLandmark, FaceTrackingQuality, FrameSeq, MediaPipeBlendshape,
     };
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_auto_neutral() {
+        use crate::quint_replay::{number, traces};
+        traces("auto_neutral", |states| {
+            let mut collector = AutoNeutralCollector::default();
+            let mut sequence = 0;
+            let mut origin = 0;
+            for row in states {
+                match row["event"].as_str().unwrap() {
+                    "reset" => {
+                        origin += 2_000_000_000;
+                        collector.reset();
+                    }
+                    "invalid" | "invalidRecenter" => {
+                        let previous = collector.clone();
+                        let bad = sample(sequence, origin + 1_300_000_000, f32::NAN);
+                        let result = if row["event"] == "invalid" {
+                            collector.observe(&bad)
+                        } else {
+                            collector.recenter(&bad)
+                        };
+                        assert_eq!(result, Err(AutoNeutralError::InvalidTransform));
+                        assert_eq!(collector, previous);
+                    }
+                    "recenter" => {
+                        origin += 2_000_000_000;
+                        sequence += 1;
+                        assert!(
+                            collector
+                                .recenter(&sample(sequence, origin, 1.0))
+                                .unwrap()
+                                .pose_reference_changed
+                        );
+                    }
+                    "seed" | "later" => {
+                        let gap = number(&row["gapNs"]) as u64;
+                        for _ in 0..number(&row["batch"]) {
+                            sequence += 1;
+                            collector
+                                .observe(&sample(sequence, origin + gap, 1.0))
+                                .unwrap();
+                        }
+                    }
+                    other => panic!("{other}"),
+                }
+                assert_eq!(
+                    collector.state() == AutoNeutralState::Ready,
+                    row["phase"] != "empty"
+                );
+                assert_eq!(collector.reference().is_some(), row["phase"] != "empty");
+                assert_eq!(
+                    collector.recent_sample_count() as i64,
+                    number(&row["recent"])
+                );
+                assert_eq!(collector.robust_window_active, row["robust"]);
+            }
+        });
+    }
+
     fn sample(seq: u64, time_ns: u64, translation_x: f32) -> FaceTrackingSample {
         FaceTrackingSample {
             source_seq: FrameSeq(seq),

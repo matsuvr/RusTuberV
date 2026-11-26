@@ -20,6 +20,10 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
+
 /// Production capture service.
 pub mod capture;
 /// Camera device and format domain types.

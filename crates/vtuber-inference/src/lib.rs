@@ -8,6 +8,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(test)]
+#[path = "../../../verification/replay.rs"]
+mod quint_replay;
+
 /// Pure extraction of arm observations from Pose world landmarks.
 pub mod pose_decode;
 

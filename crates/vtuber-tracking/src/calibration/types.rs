@@ -235,6 +235,43 @@ mod calibration_types {
     use super::*;
     use vtuber_core::control::CalibrationSettings;
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_calibration_session() {
+        crate::quint_replay::traces("calibration_session", |states| {
+            let mut session = CalibrationSession::default();
+            for row in states {
+                let op = row["event"].as_str().unwrap();
+                let attempt = match op {
+                    "reset" => session.reset(),
+                    "start" => session.start(MonoTimeNs(42)),
+                    "reject" => session.reject(CalibrationError::InsufficientSamples(2)),
+                    "A" | "B" => {
+                        let mut profile = dummy_profile();
+                        profile.model_hash = Some(op.into());
+                        session.ready(profile)
+                    }
+                    "complete" => session.complete(),
+                    other => panic!("{other}"),
+                };
+                assert_eq!(attempt.is_ok(), row["accepted"]);
+                match attempt {
+                    Ok(next) => session = next,
+                    Err(CalibrationError::InvalidStateTransition { from, .. }) => {
+                        assert_eq!(from, session.kind())
+                    }
+                    Err(other) => panic!("{other}"),
+                }
+                assert_eq!(session.kind(), row["phase"].as_str().unwrap());
+                let id = session
+                    .profile()
+                    .and_then(|p| p.model_hash.as_deref())
+                    .unwrap_or_default();
+                assert_eq!(id, row["profile"].as_str().unwrap());
+            }
+        });
+    }
+
     fn dummy_profile() -> NeutralProfile {
         NeutralProfile {
             version: 2,

@@ -81,17 +81,19 @@ impl SpoutOutputRuntime {
             self.controller.start();
             self.attempted = true;
         }
-        if matches!(
-            self.controller.status(),
-            crate::local_output::Status::Error(_)
-        ) {
-            *requested = false;
-            return false;
+        match self.controller.status() {
+            crate::local_output::Status::Error(_) => {
+                *requested = false;
+                false
+            }
+            crate::local_output::Status::Off => false,
+            #[cfg(target_os = "macos")]
+            crate::local_output::Status::Starting | crate::local_output::Status::Live => {
+                self.controller.has_clients()
+            }
+            #[cfg(not(target_os = "macos"))]
+            crate::local_output::Status::Starting | crate::local_output::Status::Live => true,
         }
-        matches!(
-            self.controller.status(),
-            crate::local_output::Status::Starting | crate::local_output::Status::Live
-        )
     }
 }
 

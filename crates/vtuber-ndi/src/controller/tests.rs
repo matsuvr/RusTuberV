@@ -12,6 +12,83 @@ use std::time::Instant;
 use vtuber_core::{MonoTimeNs, VideoOutputPixelFormat};
 
 #[test]
+#[ignore = "generated Quint ITF traces"]
+fn quint_sender() {
+    use crate::quint_replay::{number, traces};
+    traces("sender", |states| {
+        let backend = NdiScriptedBackend::successful();
+        let mut controller = NdiOutputController::with_scripted_backend(backend.clone());
+        for row in states {
+            let before = controller.status();
+            let sent_before = controller.metrics().sent_frames;
+            let mut wait_for_delivery = false;
+            let reply = match row["event"].as_str().unwrap() {
+                "init" => "none".into(),
+                "start" => {
+                    if before == NdiOutputStatus::Off {
+                        backend.hold_startup().unwrap();
+                    }
+                    match controller.start(test_config()) {
+                        Ok(()) => "started".into(),
+                        Err(error) if error.code == NdiErrorCode::AlreadyRunning => "busy".into(),
+                        Err(error) => panic!("start failed: {error}"),
+                    }
+                }
+                "ready" => {
+                    if before == NdiOutputStatus::Starting {
+                        wait_for_delivery = controller.metrics().submitted_frames > 0;
+                        backend.release_startup().unwrap();
+                    }
+                    "none".into()
+                }
+                "stop" => {
+                    controller.stop().unwrap();
+                    "none".into()
+                }
+                op @ ("submitA" | "submitB") => {
+                    wait_for_delivery = matches!(before, NdiOutputStatus::Live { .. });
+                    format!(
+                        "{:?}",
+                        controller
+                            .submit_frame(frame(if op == "submitA" { 1 } else { 2 }))
+                            .unwrap()
+                    )
+                }
+                other => panic!("unknown sender event {other}"),
+            };
+            assert_eq!(row["reply"], reply);
+            if row["phase"] == "Live" {
+                let deadline = Instant::now() + std::time::Duration::from_secs(5);
+                while !matches!(controller.status(), NdiOutputStatus::Live { .. })
+                    || (wait_for_delivery && controller.metrics().sent_frames == sent_before)
+                    || controller.metrics().last_frame_seq.map_or(0, |s| s.0)
+                        != number(&row["lastSent"]) as u64
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "sender did not deliver the expected frame"
+                    );
+                    std::thread::yield_now();
+                }
+            }
+            let phase = match controller.status() {
+                NdiOutputStatus::Off => "Off",
+                NdiOutputStatus::Starting => "Starting",
+                NdiOutputStatus::Live { .. } => "Live",
+                status => panic!("unexpected sender status {status:?}"),
+            };
+            assert_eq!(row["phase"], phase);
+            assert_eq!(backend.live_senders(), u64::from(phase == "Live"));
+            assert_eq!(
+                number(&row["lastSent"]) as u64,
+                controller.metrics().last_frame_seq.map_or(0, |s| s.0)
+            );
+        }
+        controller.stop().unwrap();
+    });
+}
+
+#[test]
 fn request_stop_and_drop_do_not_wait_for_a_stuck_sdk() {
     let (release, blocked) = std::sync::mpsc::channel();
     let mut controller = NdiOutputController::new();

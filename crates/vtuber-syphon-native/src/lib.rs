@@ -4,6 +4,7 @@ use std::{ffi::c_void, marker::PhantomData, ptr::NonNull, rc::Rc};
 
 unsafe extern "C" {
     fn rtv_syphon_create(out: *mut *mut c_void) -> i32;
+    fn rtv_syphon_has_clients(sender: *mut c_void) -> i32;
     fn rtv_syphon_send(sender: *mut c_void, bytes: *const u8, width: u32, height: u32) -> i32;
     fn rtv_syphon_destroy(sender: *mut c_void);
 }
@@ -33,6 +34,12 @@ impl Sender {
             _not_send_sync: PhantomData,
         })
     }
+    /// Read the framework's client state independently of sending frames.
+    pub fn has_clients(&self) -> bool {
+        // SAFETY: the live handle is owned by this worker.
+        unsafe { rtv_syphon_has_clients(self.handle.as_ptr()) != 0 }
+    }
+
     /// Submit BGRA8 pixels; returns false when no client is connected.
     pub fn send(&mut self, bytes: &[u8], width: u32, height: u32) -> Result<bool, String> {
         let expected = (width as usize)

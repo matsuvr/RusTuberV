@@ -168,6 +168,10 @@ bash tools/build-syphon-macos.sh target/debug
 
 アプリケーションのRustコードは`#![forbid(unsafe_code)]`を使用し、必要なネイティブ処理はバインディング境界に隔離しています。開発時の制約は[AGENTS.md](../AGENTS.md)を参照してください。
 
+## 形式検証
+
+開発時の状態遷移と境界条件は、[Quintによる形式検証](../verification/CONTRACTS.md)の手順で確認できます。
+
 ## 配布物の作成
 
 配布ZIPの作成と確認は[配布手順](RELEASING.md)を参照してください。Windowsのビルドと梱包、Macのランタイム同梱・署名・ZIP化の手順を記載しています。

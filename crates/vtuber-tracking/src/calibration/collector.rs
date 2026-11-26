@@ -390,6 +390,63 @@ mod tests {
     use super::*;
     use vtuber_core::types::{Landmark3, RawExpressionObservation};
 
+    #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_calibration_samples() {
+        use crate::quint_replay::{number, traces};
+        traces("calibration_samples", |states| {
+            let mut collector = CalibrationCollector::new(settings());
+            let mut highest = 0_u64;
+            for row in states {
+                if row["event"] == "reset" || row["event"] == "init" {
+                    collector.reset();
+                    highest = 0;
+                } else {
+                    let seq = match row["seqKind"].as_str().unwrap() {
+                        "fresh" => {
+                            highest += 1;
+                            highest
+                        }
+                        "same" => highest,
+                        "older" => highest.saturating_sub(1),
+                        other => panic!("{other}"),
+                    };
+                    let confidence = match row["quality"].as_str().unwrap() {
+                        "invalid" => f32::NAN,
+                        "below" => 0.5_f32.next_down(),
+                        "threshold" => 0.5,
+                        other => panic!("{other}"),
+                    };
+                    let mut frame = input(seq, confidence);
+                    frame.captured_at = MonoTimeNs(number(&row["stamp"]) as u64);
+                    let verdict = match collector.offer(frame) {
+                        SampleDecision::Accepted => "accepted",
+                        SampleDecision::Rejected(reason) => match reason {
+                            RejectionReason::SessionFull { .. } => "full",
+                            RejectionReason::DuplicateOrOldSeq { .. } => "duplicate",
+                            RejectionReason::TimestampRegression { .. } => "regressed",
+                            RejectionReason::InvalidValues => "invalid",
+                            RejectionReason::LowConfidence { .. } => "low",
+                            other => panic!("{other:?}"),
+                        },
+                    };
+                    assert_eq!(verdict, row["decision"].as_str().unwrap());
+                }
+                assert_eq!(collector.max_seq_seen, FrameSeq(highest));
+                let count = number(&row["count"]);
+                assert_eq!(collector.samples().len() as i64, count);
+                assert_eq!(collector.is_ready(), count == 5);
+                assert_eq!(
+                    collector
+                        .samples()
+                        .last()
+                        .map_or(-1, |f| f.captured_at.0 as i64),
+                    number(&row["lastStamp"])
+                );
+            }
+        });
+    }
+
     fn settings() -> CalibrationSettings {
         CalibrationSettings::try_new(5, 5.0, 0.5, 5.0f32.to_radians(), 0.15).unwrap()
     }

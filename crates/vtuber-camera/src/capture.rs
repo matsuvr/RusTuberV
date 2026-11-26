@@ -1476,6 +1476,43 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "generated Quint ITF traces"]
+    fn quint_reconnect() {
+        use crate::quint_replay::{number, traces};
+        let deadline = Instant::now();
+        traces("capture", |states| {
+            for pair in states.windows(2) {
+                let [before, after] = pair else {
+                    unreachable!()
+                };
+                let op = after["event"].as_str().unwrap();
+                if before["phase"] != "Reconnecting"
+                    || !matches!(op, "wait" | "retryErr" | "retryOk")
+                {
+                    continue;
+                }
+                let plan = ReconnectPlan {
+                    attempts: number(&before["attempts"]) as u32,
+                    next_attempt_at: deadline,
+                };
+                let now = if op == "wait" {
+                    deadline - Duration::from_millis(1)
+                } else {
+                    deadline
+                };
+                let expected = if after["phase"] == "BackOff" {
+                    ReconnectDecision::Exhausted
+                } else if before["attempts"] == after["attempts"] {
+                    ReconnectDecision::Wait
+                } else {
+                    ReconnectDecision::Attempt
+                };
+                assert_eq!(reconnect_decision(&plan, now), expected);
+            }
+        });
+    }
+
+    #[test]
     fn reconnect_retries_two_failures_then_returns_to_running() {
         let (controller, opened) =
             scripted_controller(vec![Ok(true), Err("first"), Err("second"), Ok(false)]);

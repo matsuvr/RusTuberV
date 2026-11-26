@@ -50,6 +50,106 @@ fn output_selection_round_trips_without_overwriting_other_settings() {
     assert!(LookingGlassControl::default().pending.is_none());
 }
 
+#[test]
+#[ignore = "generated Quint ITF traces"]
+fn quint_bridge_discovery() {
+    let hld = device_presets()
+        .unwrap()
+        .into_iter()
+        .find(|preset| preset.format == DisplayFormat::Hld)
+        .unwrap();
+    crate::quint_replay::traces("bridge_discovery", |states| {
+        let (sender, receiver) = mpsc::channel();
+        let mut sender = Some(sender);
+        let mut app = App::new();
+        app.insert_resource(LookingGlassControl {
+            task: Some(BridgeTask {
+                receiver: Mutex::new(receiver),
+                start: Some(OutputPreferences {
+                    device_id: "A".into(),
+                }),
+            }),
+            ..default()
+        })
+        .init_resource::<PluginControl>()
+        .insert_resource(crate::ui_model::UiViewModel {
+            looking_glass: LookingGlassViewModel {
+                devices: vec![hld.clone()],
+                loading: true,
+                discovered: true,
+                ..default()
+            },
+            ..default()
+        })
+        .add_systems(Update, apply_request);
+        for row in states {
+            let op = row["event"].as_str().unwrap();
+            let result = match op {
+                "A" | "cancelReady" | "hldReady" => {
+                    Some(Ok(vec![bridge_display("A", 1536, 2048, 0)]))
+                }
+                "B" => Some(Ok(vec![bridge_display("B", 1536, 2048, 0)])),
+                "empty" => Some(Ok(vec![])),
+                "error" => Some(Err(bridge::Error::Unavailable)),
+                "malformed" => {
+                    let mut display = bridge_display("A", 1536, 2048, 0);
+                    display.quilt = None;
+                    Some(Ok(vec![display]))
+                }
+                "disconnected" => {
+                    sender.take();
+                    None
+                }
+                "wait" | "init" | "hld" | "stop" => None,
+                other => panic!("{other}"),
+            };
+            if let (Some(tx), Some(result)) = (&sender, result) {
+                // An already-cancelled task has dropped its receiver.
+                let _ = tx.send(result);
+            }
+            let mut control = app.world_mut().resource_mut::<LookingGlassControl>();
+            match op {
+                "cancelReady" | "stop" => control.stop(),
+                "hld" | "hldReady" => control.start(OutputPreferences {
+                    device_id: hld.id.clone(),
+                }),
+                _ => {}
+            }
+            app.update();
+            let control = app.world().resource::<LookingGlassControl>();
+            let vm = &app
+                .world()
+                .resource::<crate::ui_model::UiViewModel>()
+                .looking_glass;
+            assert_eq!(control.task.is_some(), row["loading"]);
+            assert_eq!(vm.loading, row["loading"]);
+            assert_eq!(control.error.is_some(), row["failed"]);
+            let saving = control.saving.as_ref().map_or("", |p| {
+                if p.device_id == hld.id {
+                    "HLD"
+                } else {
+                    &p.device_id
+                }
+            });
+            assert_eq!(saving, row["saving"].as_str().unwrap());
+            let device = row["device"].as_str().unwrap();
+            assert_eq!(
+                control
+                    .connected
+                    .first()
+                    .map_or("", |d| d.preset.id.as_str()),
+                device
+            );
+            let listed: Vec<_> = vm.devices.iter().map(|d| d.id.as_str()).collect();
+            let expected: Vec<_> = [device, hld.id.as_str()]
+                .into_iter()
+                .filter(|id| !id.is_empty())
+                .collect();
+            assert_eq!(listed, expected);
+        }
+    });
+}
+
 fn bridge_display(serial: &str, width: u32, height: u32, mode: u32) -> Display {
     let raw = serde_json::json!({
         "serial": serial,

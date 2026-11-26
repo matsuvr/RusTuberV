@@ -1,0 +1,63 @@
+name: Quint contracts
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-rust
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+      - name: Fetch the model bundles embedded by vtuber-inference
+        shell: python
+        run: |
+          import hashlib
+          import pathlib
+          import tomllib
+          import urllib.request
+
+          root = pathlib.Path("assets/models")
+          manifest = tomllib.loads((root / "manifest.toml").read_text(encoding="utf-8"))
+          for artifact in manifest["artifacts"]:
+              if "mediapipe_task" in artifact:
+                  with urllib.request.urlopen(artifact["source"], timeout=90) as response:
+                      data = response.read()
+                  if hashlib.sha256(data).hexdigest() != artifact["sha256"].lower():
+                      raise ValueError(f"Model hash mismatch: {artifact['file']}")
+                  (root / artifact["file"]).write_bytes(data)
+      - name: Model check contracts and replay against Rust
+        shell: pwsh
+        run: |
+          $env:JAVA_HOME = $env:JAVA_HOME_21_X64
+          $env:PATH = "$env:JAVA_HOME/bin;$env:PATH"
+          ./tools/verify-quint.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}'
+      - name: Exercise camera workers and final tracking and bone output
+        shell: pwsh
+        run: |
+          ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('test', '--locked', '-p', 'vtuber-camera', '--lib', '-j', '1')
+          ./tools/cargo-windows.ps1 -MsysRoot '${{ steps.msys2.outputs.msys2-location }}' -CargoArguments @('test', '--locked', '-p', 'vtuber-tracking', '-p', 'vtuber-avatar', '--lib', '-j', '1')
+      - name: Keep replay traces on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quint-traces
+          path: target/quint/*/*/*.json
+          if-no-files-found: ignore
+          retention-days: 7
